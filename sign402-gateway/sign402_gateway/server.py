@@ -1,11 +1,14 @@
 import argparse
+import hashlib
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import threading
 import time
+from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -22,6 +25,33 @@ DEFAULT_AGENT_STATE_PATH = ROOT_DIR / "demo-dashboard" / "agent-state.json"
 DEFAULT_CDP_X402_SERVICE_DIR = ROOT_DIR / "cdp-x402-service"
 BASE_USDC_MAINNET = "0x833589fCD6eDb6E08f4c7C32D4f71b54bDa02913"
 DEFAULT_BASE_REPORT_URL = "http://127.0.0.1:4021/paid/sign402-report"
+LOCAL_BANKR_CLI = ROOT_DIR / ".tools" / "bankr-cli" / "node_modules" / ".bin" / "bankr"
+DEFAULT_BANKR_CLI = str(LOCAL_BANKR_CLI) if LOCAL_BANKR_CLI.exists() else "bankr"
+DEFAULT_SINGIT_RISK_CHECK_URL = os.getenv(
+    "SIGN402_SINGIT_RISK_CHECK_URL",
+    "https://x402.bankr.bot/0x3b3e349e6cfee692b69d2c63ce86f7d444667d98/paid-risk-check",
+)
+DEFAULT_SINGIT_TOKEN_ADDRESS = os.getenv(
+    "SIGN402_SINGIT_TOKEN_ADDRESS",
+    "0xc2c1e0b7C401e6217193732272444D928646eba3",
+)
+SINGIT_RISK_CHECK_REQUEST_BODY = {
+    "paymentRequirements": {
+        "scheme": "upto",
+        "network": "eip155:8453",
+        "asset": DEFAULT_SINGIT_TOKEN_ADDRESS,
+        "maxAmountRequired": "10000000000000000000",
+        "payTo": "0x1111111111111111111111111111111111111111",
+        "resource": "https://merchant.example/protected",
+        "extra": {
+            "nonce": "sign402-singit-risk-check",
+            "assetTransferMethod": "permit2",
+        },
+    }
+}
+BANKR_LLM_CREDITS_PURPOSE = "bankr_llm_credits_topup"
+BANKR_LLM_CREDITS_RESOURCE = "bankr://llm-credits/top-up"
+BANKR_LLM_CREDITS_RECEIVER = "bankr.llm"
 
 for package_dir in (SIGN402_BRIDGE_DIR, PAYMENT_EXECUTOR_DIR, LIVE_DEMO_DIR, DEMO_RESOURCE_SERVER_DIR):
     package_path = str(package_dir)
@@ -66,6 +96,26 @@ PAID_TOOLS: dict[str, dict[str, Any]] = {
         "resourceUrl": os.getenv("SIGN402_BASE_REPORT_URL", DEFAULT_BASE_REPORT_URL),
         "command": "buy base sign402 report",
         "mcpStyleName": "get_sign402_report",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    "bankr.singit.risk_check": {
+        "id": "bankr.singit.risk_check",
+        "name": "SINGIT Risk Check",
+        "kind": "external_x402_resource",
+        "source": "bankr-x402-cloud",
+        "description": "Sign402 risk analysis endpoint paid with SINGIT on Base through Bankr x402 Cloud.",
+        "resourceUrl": DEFAULT_SINGIT_RISK_CHECK_URL,
+        "requestBody": SINGIT_RISK_CHECK_REQUEST_BODY,
+        "paymentContext": {
+            "title": "SINGIT RISK",
+            "subject": "Risk Check",
+        },
+        "command": "buy singit risk check",
+        "mcpStyleName": "get_singit_risk_check",
         "inputSchema": {
             "type": "object",
             "properties": {},
@@ -270,6 +320,13 @@ PAID_TOOL_ALIASES = {
     "sign402-report": "base.sign402.report",
     "sign402_report": "base.sign402.report",
     "get_sign402_report": "base.sign402.report",
+    "singit-risk": "bankr.singit.risk_check",
+    "singit_risk": "bankr.singit.risk_check",
+    "singit-risk-check": "bankr.singit.risk_check",
+    "singit_risk_check": "bankr.singit.risk_check",
+    "risk-check": "bankr.singit.risk_check",
+    "risk_check": "bankr.singit.risk_check",
+    "get_singit_risk_check": "bankr.singit.risk_check",
     "x-profile": "x402.twitter.profile",
     "x_profile": "x402.twitter.profile",
     "twitter-profile": "x402.twitter.profile",
@@ -320,6 +377,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                         "/agent/buy-tool",
                         "/agent/inspect-x402",
                         "/agent/buy-x402",
+                        "/agent/inspect-llm-credits-topup",
+                        "/agent/top-up-llm-credits",
                     ],
                 }
             )
@@ -360,6 +419,12 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if path == "/agent/buy-x402":
             self._handle_agent_buy_x402()
+            return
+        if path == "/agent/inspect-llm-credits-topup":
+            self._handle_agent_inspect_llm_credits_topup()
+            return
+        if path == "/agent/top-up-llm-credits":
+            self._handle_agent_top_up_llm_credits()
             return
         self._send_json({"error": "not_found"}, status=404)
 
@@ -503,7 +568,11 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             tool = _resolve_paid_tool(payload)
             resource_url = _paid_tool_resource_url(tool, payload)
             policy_hash = self._policy_hash_from_payload_or_state(payload)
-            inspection = self.server.x402_inspector(resource_url, policy_hash)
+            request_body = tool.get("requestBody") if isinstance(tool.get("requestBody"), dict) else None
+            if request_body is not None:
+                inspection = self.server.x402_inspector(resource_url, policy_hash, request_body=request_body)
+            else:
+                inspection = self.server.x402_inspector(resource_url, policy_hash)
             result = _tool_result(tool, inspection, resource_url)
             result["nextStep"] = "If acceptable, POST /agent/buy-tool with the same tool id. Firefly approval is required before payment."
             self._send_json(result)
@@ -530,10 +599,17 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
 
         try:
             payment_context = _tool_payment_context(tool, payload)
+            request_body = tool.get("requestBody") if isinstance(tool.get("requestBody"), dict) else None
             if payment_context:
-                result = self.server.x402_buyer(resource_url, payment_context=payment_context)
+                kwargs: dict[str, Any] = {"payment_context": payment_context}
+                if request_body is not None:
+                    kwargs["request_body"] = request_body
+                result = self.server.x402_buyer(resource_url, **kwargs)
             else:
-                result = self.server.x402_buyer(resource_url)
+                if request_body is not None:
+                    result = self.server.x402_buyer(resource_url, request_body=request_body)
+                else:
+                    result = self.server.x402_buyer(resource_url)
             enriched = _tool_result(tool, result, resource_url)
             enriched["decision"] = result.get("decision", "approved_and_executed")
             enriched["ok"] = bool(result.get("ok", False))
@@ -582,6 +658,31 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 if telegram_text:
                     result["telegramText"] = telegram_text
                     self.server.event_store.write(result)
+            self._send_json(result)
+        except Exception as exc:
+            self._send_json({"decision": "rejected", "ok": False, "error": str(exc)}, status=400)
+        finally:
+            self._release_firefly()
+
+    def _handle_agent_inspect_llm_credits_topup(self) -> None:
+        try:
+            payload = self._read_json()
+            policy_hash = self._policy_hash_from_payload_or_state(payload)
+            result = self.server.bankr_llm_topup_inspector(payload, policy_hash)
+            self._send_json(result)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_top_up_llm_credits(self) -> None:
+        if not self._acquire_firefly():
+            self._send_json(_busy_payload(), status=409)
+            return
+
+        try:
+            payload = self._read_json()
+            result = self.server.bankr_llm_topup(payload)
+            if result.get("ok"):
+                self.server.event_store.write(result)
             self._send_json(result)
         except Exception as exc:
             self._send_json({"decision": "rejected", "ok": False, "error": str(exc)}, status=400)
@@ -692,6 +793,8 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         agent_buy_probe: Callable[[str], dict[str, Any]],
         x402_inspector: Callable[[str, str], dict[str, Any]],
         x402_buyer: Callable[[str], dict[str, Any]],
+        bankr_llm_topup_inspector: Callable[[dict[str, Any], str], dict[str, Any]],
+        bankr_llm_topup: Callable[[dict[str, Any]], dict[str, Any]],
     ):
         super().__init__(server_address, handler_class)
         self.firefly = firefly
@@ -701,6 +804,8 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         self.agent_buy_probe = agent_buy_probe
         self.x402_inspector = x402_inspector
         self.x402_buyer = x402_buyer
+        self.bankr_llm_topup_inspector = bankr_llm_topup_inspector
+        self.bankr_llm_topup = bankr_llm_topup
         self.firefly_lock = threading.Lock()
         self.buy_tool_response_cache: dict[str, dict[str, Any]] = {}
 
@@ -720,13 +825,22 @@ def build_server(
     payment_executor = build_payment_executor(payment_executor_dir)
     x402_payment_signature_builder = build_x402_payment_signature_builder(payment_executor_dir)
     base_payment_client = CdpBaseX402PaymentClient(cdp_x402_service_dir)
+    bankr_x402_payment_client = BankrCliX402PaymentClient()
     event_store = LatestEventStore(event_store_path)
     agent_state_store = AgentStateStore(agent_state_path)
     x402_inspector = ExternalX402Inspector()
+    bankr_llm_topup_inspector = BankrLlmCreditsTopUpInspector()
+    bankr_llm_topup = BankrLlmCreditsTopUpRunner(
+        firefly=firefly,
+        bankr_topup_executor=BankrLlmCreditsTopUpClient(),
+        event_store=event_store,
+        agent_state_store=agent_state_store,
+    )
     x402_buyer = ExternalX402Buyer(
         firefly=firefly,
         payment_signature_builder=x402_payment_signature_builder,
         base_payment_client=base_payment_client,
+        bankr_x402_payment_client=bankr_x402_payment_client,
         event_store=event_store,
         agent_state_store=agent_state_store,
     )
@@ -747,6 +861,8 @@ def build_server(
         agent_buy_probe=agent_buy_probe,
         x402_inspector=x402_inspector,
         x402_buyer=x402_buyer,
+        bankr_llm_topup_inspector=bankr_llm_topup_inspector,
+        bankr_llm_topup=bankr_llm_topup,
     )
 
 
@@ -857,21 +973,18 @@ class AgentBuyProbeRunner:
         self.resource_client = X402ResourceClient(resource_base_url)
 
     def __call__(self, target: str) -> dict[str, Any]:
-        policy_state = self.agent_state_store.read_policy()
-        if policy_state is None:
-            raise ValueError("No Firefly-approved policy stored. Call /approve-policy first.")
+        first_response = self.resource_client.get_probe_without_payment(target)
+        if first_response.get("status") != 402:
+            raise ValueError("Expected x402 resource server to return 402 Payment Required.")
 
+        requirement = first_response["paymentRequirements"]
+        policy_state = self.agent_state_store.read_policy_for_requirement(requirement)
         policy = policy_state["policy"]
         policy_hash = str(policy_state["policyHash"]).lower()
         approved_hash = str(policy_state["firefly"]["approvedHash"]).lower()
         if policy_hash != approved_hash:
             raise ValueError("Stored policy hash does not match Firefly approval.")
 
-        first_response = self.resource_client.get_probe_without_payment(target)
-        if first_response.get("status") != 402:
-            raise ValueError("Expected x402 resource server to return 402 Payment Required.")
-
-        requirement = first_response["paymentRequirements"]
         self.agent_state_store.validate_policy_allows(policy, policy_hash, requirement)
 
         payment_commitment = build_payment_commitment(requirement, policy_hash)
@@ -957,8 +1070,14 @@ class AgentBuyProbeRunner:
 
 
 class ExternalX402Inspector:
-    def __call__(self, resource_url: str, policy_hash: str) -> dict[str, Any]:
-        payload = fetch_x402_payment_required(resource_url)
+    def __call__(
+        self,
+        resource_url: str,
+        policy_hash: str,
+        *,
+        request_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = fetch_x402_payment_required(resource_url, request_body=request_body)
         requirement = normalize_x402_payment_required(payload, resource_url=resource_url)
         payment_commitment = build_payment_commitment(requirement, policy_hash)
         return {
@@ -980,12 +1099,14 @@ class ExternalX402Buyer:
         firefly: FireflyClient,
         payment_signature_builder: Callable[[dict[str, Any]], dict[str, Any]],
         base_payment_client: Callable[[str], dict[str, Any]] | None = None,
+        bankr_x402_payment_client: Callable[..., dict[str, Any]] | None = None,
         event_store: "LatestEventStore",
         agent_state_store: "AgentStateStore",
     ):
         self.firefly = firefly
         self.payment_signature_builder = payment_signature_builder
         self.base_payment_client = base_payment_client
+        self.bankr_x402_payment_client = bankr_x402_payment_client
         self.event_store = event_store
         self.agent_state_store = agent_state_store
 
@@ -995,21 +1116,19 @@ class ExternalX402Buyer:
         *,
         requirement_validator: Callable[[dict[str, Any]], None] | None = None,
         payment_context: dict[str, str] | None = None,
+        request_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        policy_state = self.agent_state_store.read_policy()
-        if policy_state is None:
-            raise ValueError("No Firefly-approved policy stored. Call /approve-policy first.")
-
+        raw_payment_required = fetch_x402_payment_required(resource_url, request_body=request_body)
+        requirement = normalize_x402_payment_required(raw_payment_required, resource_url=resource_url)
+        if requirement_validator is not None:
+            requirement_validator(requirement)
+        policy_state = self.agent_state_store.read_policy_for_requirement(requirement)
         policy = policy_state["policy"]
         policy_hash = str(policy_state["policyHash"]).lower()
         approved_hash = str(policy_state["firefly"]["approvedHash"]).lower()
         if policy_hash != approved_hash:
             raise ValueError("Stored policy hash does not match Firefly approval.")
 
-        raw_payment_required = fetch_x402_payment_required(resource_url)
-        requirement = normalize_x402_payment_required(raw_payment_required, resource_url=resource_url)
-        if requirement_validator is not None:
-            requirement_validator(requirement)
         self.agent_state_store.validate_policy_allows(policy, policy_hash, requirement)
 
         payment_commitment = build_payment_commitment(requirement, policy_hash)
@@ -1034,7 +1153,12 @@ class ExternalX402Buyer:
         if str(approval.get("approvedHash", "")).lower() != payment_hash:
             raise ValueError("Firefly approved hash does not match payment commitment hash.")
 
-        if requirement["network"] == "base-mainnet":
+        if _is_singit_x402_requirement(requirement):
+            if self.bankr_x402_payment_client is None:
+                raise ValueError("SINGIT x402 payments require the Bankr CLI payment client.")
+            resource_result = self.bankr_x402_payment_client(resource_url, request_body=request_body)
+            mode = "official_x402_base_bankr_cli"
+        elif requirement["network"] == "base-mainnet":
             if self.base_payment_client is None:
                 raise ValueError("Base Mainnet x402 payments require the CDP payment client.")
             resource_result = self.base_payment_client(resource_url)
@@ -1088,6 +1212,188 @@ class ExternalX402Buyer:
         }
         self.event_store.write(event)
         return event
+
+
+class BankrLlmCreditsTopUpInspector:
+    def __call__(self, payload: dict[str, Any], policy_hash: str) -> dict[str, Any]:
+        top_up_intent = _build_bankr_llm_topup_intent(payload)
+        requirement = _bankr_llm_topup_requirement(top_up_intent)
+        payment_commitment = build_payment_commitment(requirement, policy_hash)
+        return {
+            "ok": True,
+            "mode": "inspect_llm_credits_topup",
+            "topUpIntent": top_up_intent,
+            "paymentRequirements": requirement,
+            "paymentCommitment": payment_commitment,
+            "quoteText": _bankr_llm_topup_quote_text(top_up_intent),
+            "nextStep": "If acceptable, POST /agent/top-up-llm-credits with the same top-up payload. Firefly approval is required before Bankr is invoked.",
+        }
+
+
+class BankrLlmCreditsTopUpRunner:
+    def __init__(
+        self,
+        *,
+        firefly: FireflyClient,
+        bankr_topup_executor: Callable[..., dict[str, Any]],
+        event_store: "LatestEventStore",
+        agent_state_store: "AgentStateStore",
+    ):
+        self.firefly = firefly
+        self.bankr_topup_executor = bankr_topup_executor
+        self.event_store = event_store
+        self.agent_state_store = agent_state_store
+
+    def __call__(self, payload: dict[str, Any]) -> dict[str, Any]:
+        top_up_intent = _build_bankr_llm_topup_intent(payload)
+        requirement = _bankr_llm_topup_requirement(top_up_intent)
+        policy_state = self.agent_state_store.read_policy_for_requirement(requirement)
+        policy = policy_state["policy"]
+        policy_hash = str(policy_state["policyHash"]).lower()
+        approved_hash = str(policy_state["firefly"]["approvedHash"]).lower()
+        if policy_hash != approved_hash:
+            raise ValueError("Stored policy hash does not match Firefly approval.")
+
+        self.agent_state_store.validate_policy_allows(policy, policy_hash, requirement)
+
+        payment_commitment = build_payment_commitment(requirement, policy_hash)
+        payment_hash = payment_commitment["paymentHash"]
+        approval = self.firefly.approve_payment_hash(
+            payment_hash,
+            context_lines=_bankr_llm_topup_context_lines(top_up_intent),
+        )
+        if not approval.get("approved"):
+            event = {
+                "decision": "rejected_by_firefly",
+                "ok": False,
+                "mode": "bankr_llm_credits_topup",
+                "topUpIntent": top_up_intent,
+                "policyHash": policy_hash,
+                "paymentApprovalHash": payment_hash,
+                "paymentRequirements": requirement,
+                "firefly": approval,
+            }
+            self.event_store.write(event)
+            return event
+
+        if str(approval.get("approvedHash", "")).lower() != payment_hash:
+            raise ValueError("Firefly approved hash does not match LLM credits top-up hash.")
+
+        bankr_result = self.bankr_topup_executor(
+            credit_amount_usd=top_up_intent["creditAmountUsd"],
+            funding_token_address=top_up_intent["fundingTokenAddress"],
+        )
+        self.agent_state_store.record_payment(
+            policy_hash,
+            requirement["paymentIntent"],
+            int(str(requirement["amountAtomic"])),
+        )
+
+        event = {
+            "decision": "approved_and_executed",
+            "ok": bool(bankr_result.get("ok", False)),
+            "mode": "bankr_llm_credits_topup",
+            "creditAmountUsd": top_up_intent["creditAmountUsd"],
+            "fundingTokenAddress": top_up_intent["fundingTokenAddress"],
+            "fundingTokenSymbol": top_up_intent["fundingTokenSymbol"],
+            "maxFundingTokenAmountAtomic": top_up_intent["maxFundingTokenAmountAtomic"],
+            "topUpIntent": top_up_intent,
+            "policyHash": policy_hash,
+            "paymentApprovalHash": payment_hash,
+            "paymentIntent": requirement["paymentIntent"],
+            "amountAtomic": requirement["amountAtomic"],
+            "asset": requirement["asset"],
+            "network": requirement["network"],
+            "receiver": requirement["receiver"],
+            "deviceModel": approval.get("deviceModel"),
+            "deviceSerial": approval.get("deviceSerial"),
+            "remainingBudgetAtomic": str(self.agent_state_store.remaining_budget(policy_hash)),
+            "paymentRequirements": requirement,
+            "paymentCommitment": payment_commitment["commitment"],
+            "bankr": bankr_result,
+            "telegramText": _bankr_llm_topup_telegram_text(top_up_intent, bankr_result),
+        }
+        self.event_store.write(event)
+        return event
+
+
+class BankrLlmCreditsTopUpClient:
+    def __init__(self, bankr_cli: str | None = None):
+        self.bankr_cli = bankr_cli or os.getenv("SIGN402_BANKR_CLI", "bankr")
+
+    def __call__(self, *, credit_amount_usd: str, funding_token_address: str) -> dict[str, Any]:
+        command = [
+            self.bankr_cli,
+            "llm",
+            "credits",
+            "add",
+            credit_amount_usd,
+            "--token",
+            funding_token_address,
+            "--yes",
+        ]
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        payload = {
+            "ok": result.returncode == 0,
+            "command": command,
+            "returncode": result.returncode,
+            "stdout": result.stdout.strip(),
+            "stderr": result.stderr.strip(),
+        }
+        if result.returncode != 0:
+            message = payload["stderr"] or payload["stdout"] or "Bankr LLM credits top-up failed"
+            raise ValueError(message)
+        return payload
+
+
+class BankrCliX402PaymentClient:
+    def __init__(self, bankr_cli: str | None = None):
+        configured = bankr_cli or os.getenv("SIGN402_BANKR_CLI")
+        self.bankr_cli = configured or DEFAULT_BANKR_CLI
+
+    def __call__(
+        self,
+        resource_url: str,
+        *,
+        request_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        command = [self.bankr_cli, "x402", "call", resource_url, "--max-payment", "10", "-y", "--raw"]
+        if request_body is not None:
+            command.extend(["-X", "POST", "-d", json.dumps(request_body, separators=(",", ":"))])
+
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        raw_payload = _bankr_cli_raw_payload(result.stdout)
+        status = _bankr_cli_raw_status(raw_payload) or _bankr_cli_status(result.stdout)
+        body = _bankr_cli_raw_response_body(raw_payload) or _bankr_cli_response_body(result.stdout)
+        transaction_hash = _bankr_cli_raw_transaction_hash(raw_payload) or _bankr_cli_transaction_hash(result.stdout)
+        payload = {
+            "ok": result.returncode == 0,
+            "status": status,
+            "resourceUrl": resource_url,
+            "command": command,
+            "stdout": result.stdout.strip(),
+            "stderr": result.stderr.strip(),
+            "body": body,
+            "transactionHash": transaction_hash,
+        }
+        if payload["transactionHash"]:
+            payload["paymentResponse"] = {"transaction": payload["transactionHash"]}
+        if result.returncode != 0:
+            message = payload["stderr"] or payload["stdout"] or "Bankr x402 call failed"
+            raise ValueError(message)
+        return payload
 
 
 class CdpBaseX402PaymentClient:
@@ -1155,15 +1461,58 @@ class AgentStateStore:
         policy_state = state.get("policyApproval")
         if isinstance(policy_state, dict):
             return policy_state
+        policies = state.get("policyApprovals")
+        if isinstance(policies, dict):
+            for policy_state in reversed(list(policies.values())):
+                if isinstance(policy_state, dict):
+                    return policy_state
         return None
+
+    def read_policy_for_requirement(self, requirement: dict[str, Any]) -> dict[str, Any]:
+        state = self._read_state()
+        for policy_state in self._policy_approvals_from_state(state):
+            policy = policy_state.get("policy")
+            if not isinstance(policy, dict):
+                continue
+            if not _asset_matches(str(requirement.get("asset", "")), str(policy.get("asset", ""))):
+                continue
+            if str(requirement.get("purpose")) != str(policy.get("allowedPurpose")):
+                continue
+            return policy_state
+        raise ValueError("No Firefly-approved policy matches payment requirement. Call /approve-policy for this asset.")
 
     def write_policy(self, policy_approval: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
-            state = {
-                "policyApproval": policy_approval,
-                "spentAtomic": "0",
-                "usedPaymentIntents": [],
-            }
+            state = self._read_state_unlocked()
+            policy_hash = str(policy_approval.get("policyHash", "")).lower()
+            if not HEX_32_RE.fullmatch(policy_hash):
+                raise ValueError("policyApproval.policyHash must be 64 hex characters")
+
+            policies = state.get("policyApprovals")
+            if not isinstance(policies, dict):
+                policies = {}
+                existing = state.get("policyApproval")
+                if isinstance(existing, dict):
+                    existing_hash = str(existing.get("policyHash", "")).lower()
+                    if HEX_32_RE.fullmatch(existing_hash):
+                        policies[existing_hash] = existing
+
+            policy_spend = state.get("policySpend")
+            if not isinstance(policy_spend, dict):
+                policy_spend = {}
+                existing = state.get("policyApproval")
+                existing_hash = str(existing.get("policyHash", "")).lower() if isinstance(existing, dict) else ""
+                if HEX_32_RE.fullmatch(existing_hash):
+                    policy_spend[existing_hash] = {
+                        "spentAtomic": str(state.get("spentAtomic", "0")),
+                        "usedPaymentIntents": list(state.get("usedPaymentIntents", [])),
+                    }
+
+            policies[policy_hash] = policy_approval
+            policy_spend.setdefault(policy_hash, {"spentAtomic": "0", "usedPaymentIntents": []})
+            state["policyApproval"] = policy_approval
+            state["policyApprovals"] = policies
+            state["policySpend"] = policy_spend
             self._write_state_unlocked(state)
             return policy_approval
 
@@ -1174,14 +1523,15 @@ class AgentStateStore:
         requirement: dict[str, Any],
     ) -> None:
         state = self._read_state()
-        if policy_hash != str(state.get("policyApproval", {}).get("policyHash", "")).lower():
+        if policy_hash not in self._policy_approvals_by_hash(state):
             raise ValueError("Policy hash does not match stored policy.")
 
         amount = int(str(requirement["amountAtomic"]))
         max_per_payment = int(str(policy["maxPerPaymentAtomic"]))
         max_budget = int(str(policy["maxBudgetAtomic"]))
-        spent = int(str(state.get("spentAtomic", "0")))
-        used_intents = set(state.get("usedPaymentIntents", []))
+        spend_state = self._policy_spend_state(state, policy_hash)
+        spent = int(str(spend_state.get("spentAtomic", "0")))
+        used_intents = set(spend_state.get("usedPaymentIntents", []))
         payment_intent = str(requirement["paymentIntent"])
 
         if payment_intent in used_intents:
@@ -1198,26 +1548,64 @@ class AgentStateStore:
     def record_payment(self, policy_hash: str, payment_intent: str, amount_atomic: int) -> None:
         with self.lock:
             state = self._read_state_unlocked()
-            if policy_hash != str(state.get("policyApproval", {}).get("policyHash", "")).lower():
+            if policy_hash not in self._policy_approvals_by_hash(state):
                 raise ValueError("Policy hash does not match stored policy.")
 
-            used_intents = list(state.get("usedPaymentIntents", []))
+            policy_spend = state.get("policySpend")
+            if not isinstance(policy_spend, dict):
+                policy_spend = {}
+            spend_state = dict(self._policy_spend_state(state, policy_hash))
+            used_intents = list(spend_state.get("usedPaymentIntents", []))
             if payment_intent not in used_intents:
                 used_intents.append(payment_intent)
-            spent = int(str(state.get("spentAtomic", "0"))) + amount_atomic
-            state["usedPaymentIntents"] = used_intents
-            state["spentAtomic"] = str(spent)
+            spent = int(str(spend_state.get("spentAtomic", "0"))) + amount_atomic
+            spend_state["usedPaymentIntents"] = used_intents
+            spend_state["spentAtomic"] = str(spent)
+            policy_spend[policy_hash] = spend_state
+            state["policySpend"] = policy_spend
+            if policy_hash == str(state.get("policyApproval", {}).get("policyHash", "")).lower():
+                state["usedPaymentIntents"] = used_intents
+                state["spentAtomic"] = str(spent)
             self._write_state_unlocked(state)
 
     def remaining_budget(self, policy_hash: str) -> int:
         state = self._read_state()
-        policy_approval = state.get("policyApproval", {})
-        if policy_hash != str(policy_approval.get("policyHash", "")).lower():
+        policy_approval = self._policy_approvals_by_hash(state).get(policy_hash)
+        if not isinstance(policy_approval, dict):
             return 0
         policy = policy_approval.get("policy", {})
         max_budget = int(str(policy.get("maxBudgetAtomic", "0")))
-        spent = int(str(state.get("spentAtomic", "0")))
+        spent = int(str(self._policy_spend_state(state, policy_hash).get("spentAtomic", "0")))
         return max(0, max_budget - spent)
+
+    def _policy_approvals_from_state(self, state: dict[str, Any]) -> list[dict[str, Any]]:
+        policies = state.get("policyApprovals")
+        if isinstance(policies, dict):
+            return [policy for policy in policies.values() if isinstance(policy, dict)]
+        policy = state.get("policyApproval")
+        return [policy] if isinstance(policy, dict) else []
+
+    def _policy_approvals_by_hash(self, state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        approvals: dict[str, dict[str, Any]] = {}
+        for policy in self._policy_approvals_from_state(state):
+            policy_hash = str(policy.get("policyHash", "")).lower()
+            if HEX_32_RE.fullmatch(policy_hash):
+                approvals[policy_hash] = policy
+        return approvals
+
+    def _policy_spend_state(self, state: dict[str, Any], policy_hash: str) -> dict[str, Any]:
+        policy_spend = state.get("policySpend")
+        if isinstance(policy_spend, dict) and isinstance(policy_spend.get(policy_hash), dict):
+            return dict(policy_spend[policy_hash])
+
+        current_hash = str(state.get("policyApproval", {}).get("policyHash", "")).lower()
+        if policy_hash == current_hash:
+            return {
+                "spentAtomic": str(state.get("spentAtomic", "0")),
+                "usedPaymentIntents": list(state.get("usedPaymentIntents", [])),
+            }
+
+        return {"spentAtomic": "0", "usedPaymentIntents": []}
 
     def _read_state(self) -> dict[str, Any]:
         with self.lock:
@@ -1310,6 +1698,9 @@ def _format_display_amount(requirement: dict[str, Any]) -> str:
     elif asset.lower() == BASE_USDC_MAINNET.lower():
         asset_name = "USDC"
         decimals = 6
+    elif asset.lower() == DEFAULT_SINGIT_TOKEN_ADDRESS.lower():
+        asset_name = asset_name or "SINGIT"
+        decimals = decimals or 18
     elif asset == "ALGO_TEST":
         asset_name = "ALGO"
         decimals = 6
@@ -1348,6 +1739,126 @@ def _validate_payment_requirements(requirement: Any) -> None:
     amount = int(str(requirement.get("amountAtomic", "0")))
     if amount <= 0:
         raise ValueError("paymentRequirements.amountAtomic must be positive")
+
+
+def _build_bankr_llm_topup_intent(payload: dict[str, Any]) -> dict[str, Any]:
+    credit_amount_usd = _read_positive_decimal_text(payload, "creditAmountUsd")
+    funding_token_address = str(
+        payload.get("fundingTokenAddress")
+        or payload.get("tokenAddress")
+        or payload.get("asset")
+        or DEFAULT_SINGIT_TOKEN_ADDRESS
+    ).strip()
+    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", funding_token_address):
+        raise ValueError("fundingTokenAddress must be an EVM token contract address")
+
+    max_amount_atomic = str(
+        payload.get("maxFundingTokenAmountAtomic")
+        or payload.get("fundingTokenAmountAtomic")
+        or payload.get("amountAtomic")
+        or ""
+    ).strip()
+    if not max_amount_atomic.isdigit() or int(max_amount_atomic) <= 0:
+        raise ValueError("maxFundingTokenAmountAtomic must be a positive integer string")
+
+    funding_token_symbol = str(payload.get("fundingTokenSymbol") or "SINGIT").strip() or "SINGIT"
+    network = str(payload.get("network") or "base-mainnet").strip()
+    if network not in {"base-mainnet", "eip155:8453"}:
+        raise ValueError("Bankr LLM credits top-up currently supports Base token funding")
+
+    top_up_intent = str(payload.get("topUpIntent") or payload.get("paymentIntent") or "").strip()
+    if not top_up_intent:
+        top_up_intent = _default_bankr_llm_topup_intent(
+            credit_amount_usd=credit_amount_usd,
+            funding_token_address=funding_token_address,
+            max_amount_atomic=max_amount_atomic,
+        )
+
+    return {
+        "creditAmountUsd": credit_amount_usd,
+        "fundingTokenAddress": funding_token_address,
+        "fundingTokenSymbol": funding_token_symbol,
+        "maxFundingTokenAmountAtomic": max_amount_atomic,
+        "network": "base-mainnet",
+        "purpose": BANKR_LLM_CREDITS_PURPOSE,
+        "topUpIntent": top_up_intent,
+    }
+
+
+def _bankr_llm_topup_requirement(top_up_intent: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "network": "base-mainnet",
+        "asset": str(top_up_intent["fundingTokenAddress"]),
+        "amountAtomic": str(top_up_intent["maxFundingTokenAmountAtomic"]),
+        "receiver": BANKR_LLM_CREDITS_RECEIVER,
+        "resource": BANKR_LLM_CREDITS_RESOURCE,
+        "paymentIntent": str(top_up_intent["topUpIntent"]),
+        "purpose": BANKR_LLM_CREDITS_PURPOSE,
+        "extra": {
+            "name": str(top_up_intent["fundingTokenSymbol"]),
+            "creditAmountUsd": str(top_up_intent["creditAmountUsd"]),
+        },
+    }
+
+
+def _read_positive_decimal_text(payload: dict[str, Any], key: str) -> str:
+    value = str(payload.get(key) or "").strip()
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as exc:
+        raise ValueError(f"{key} must be a positive decimal string") from exc
+    if not parsed.is_finite() or parsed <= 0:
+        raise ValueError(f"{key} must be positive")
+    normalized = format(parsed.normalize(), "f")
+    if "." in normalized:
+        normalized = normalized.rstrip("0").rstrip(".")
+    return normalized
+
+
+def _default_bankr_llm_topup_intent(
+    *,
+    credit_amount_usd: str,
+    funding_token_address: str,
+    max_amount_atomic: str,
+) -> str:
+    canonical = json.dumps(
+        {
+            "creditAmountUsd": credit_amount_usd,
+            "fundingTokenAddress": funding_token_address.lower(),
+            "maxFundingTokenAmountAtomic": max_amount_atomic,
+            "nonce": secrets.token_hex(8),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "bankr-llm-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def _bankr_llm_topup_context_lines(top_up_intent: dict[str, Any]) -> list[str]:
+    return [
+        "LLM CREDITS",
+        f"${top_up_intent['creditAmountUsd']}",
+        str(top_up_intent["fundingTokenSymbol"])[:20],
+    ]
+
+
+def _bankr_llm_topup_quote_text(top_up_intent: dict[str, Any]) -> str:
+    return (
+        f"Bankr LLM credits top-up: ${top_up_intent['creditAmountUsd']} "
+        f"funded with {top_up_intent['fundingTokenSymbol']}."
+    )
+
+
+def _bankr_llm_topup_telegram_text(
+    top_up_intent: dict[str, Any],
+    bankr_result: dict[str, Any],
+) -> str:
+    if not bankr_result.get("ok"):
+        return ""
+    return (
+        f"✅ Bankr LLM credits topped up by ${top_up_intent['creditAmountUsd']} "
+        f"using {top_up_intent['fundingTokenSymbol']}."
+    )
 
 
 def _resolve_paid_tool(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1487,7 +1998,14 @@ def _tool_result(
 
 
 def _tool_telegram_text(tool: dict[str, Any], result: dict[str, Any]) -> str:
-    if not result.get("ok") or not result.get("txId") or result.get("amountAtomic") is None:
+    if not result.get("ok") or result.get("amountAtomic") is None:
+        return ""
+
+    tool_id = str(tool.get("id") or "")
+    if tool_id == "bankr.singit.risk_check":
+        return _singit_risk_check_telegram_text(tool, result)
+
+    if not result.get("txId"):
         return ""
 
     network = str(result.get("network") or result.get("x402Network") or "")
@@ -1517,6 +2035,35 @@ def _tool_telegram_text(tool: dict[str, Any], result: dict[str, Any]) -> str:
         return text
 
     return f"✅ {tool['name']} unlocked. Paid {amount}. Tx {tx_url}. Budget left {remaining}."
+
+
+def _singit_risk_check_telegram_text(tool: dict[str, Any], result: dict[str, Any]) -> str:
+    body = _resource_body(result)
+    risk_level = str(body.get("riskLevel") or "unknown").strip()
+    recommendation = str(body.get("recommendation") or "").strip()
+    amount = _format_display_amount(
+        {
+            "amountAtomic": result.get("amountAtomic"),
+            "asset": result.get("asset"),
+            "extra": _asset_extra_for_result(result),
+        }
+    )
+    remaining = _format_display_amount(
+        {
+            "amountAtomic": result.get("remainingBudgetAtomic", "0"),
+            "asset": result.get("asset"),
+            "extra": _asset_extra_for_result(result),
+        }
+    )
+    text = f"✅ {tool['name']} unlocked. Risk: {risk_level}. Paid {amount}. Budget left {remaining}."
+    if recommendation:
+        text += f" {recommendation}"
+
+    network = str(result.get("network") or result.get("x402Network") or "")
+    tx_url = _evm_transaction_url(str(result.get("txId") or ""), network)
+    if tx_url:
+        text += f" Tx {tx_url}."
+    return text
 
 
 def _tool_value_summary(tool: dict[str, Any], result: dict[str, Any]) -> tuple[str, str]:
@@ -1628,6 +2175,71 @@ def _validate_base_usdc_x402_requirement(requirement: Any) -> None:
     asset = str(requirement.get("asset") or "")
     if asset.lower() != BASE_USDC_MAINNET.lower():
         raise ValueError("Only Base USDC x402 endpoints are supported for raw URL purchases.")
+
+
+def _is_singit_x402_requirement(requirement: dict[str, Any]) -> bool:
+    network = str(requirement.get("network") or requirement.get("x402Network") or "")
+    asset = str(requirement.get("asset") or "")
+    return network in {"base-mainnet", "eip155:8453"} and asset.lower() == DEFAULT_SINGIT_TOKEN_ADDRESS.lower()
+
+
+def _bankr_cli_status(stdout: str) -> int:
+    match = re.search(r"^\s*Status\s+(\d+)\s*$", stdout, flags=re.MULTILINE)
+    return int(match.group(1)) if match else 200
+
+
+def _bankr_cli_raw_payload(stdout: str) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(stdout.strip())
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _bankr_cli_raw_status(payload: dict[str, Any] | None) -> int | None:
+    if not payload:
+        return None
+    status = payload.get("status")
+    return int(status) if isinstance(status, int) else None
+
+
+def _bankr_cli_raw_response_body(payload: dict[str, Any] | None) -> Any:
+    if not payload:
+        return None
+    return payload.get("response")
+
+
+def _bankr_cli_raw_transaction_hash(payload: dict[str, Any] | None) -> str | None:
+    if not payload:
+        return None
+    payment = payload.get("paymentMade")
+    if not isinstance(payment, dict):
+        return None
+    for key in ("transactionHash", "txHash", "transaction"):
+        value = payment.get(key)
+        if isinstance(value, str) and value.startswith("0x"):
+            return value
+    return None
+
+
+def _bankr_cli_transaction_hash(stdout: str) -> str | None:
+    match = re.search(r"https://basescan\.org/tx/(0x[a-fA-F0-9]+)", stdout)
+    return match.group(1) if match else None
+
+
+def _bankr_cli_response_body(stdout: str) -> Any:
+    marker = re.search(r"^\s*Response\s*$", stdout, flags=re.MULTILINE)
+    search_start = marker.end() if marker else 0
+    brace_index = stdout.find("{", search_start)
+    if brace_index < 0:
+        return None
+
+    decoder = json.JSONDecoder()
+    try:
+        body, _end = decoder.raw_decode(stdout[brace_index:])
+    except json.JSONDecodeError:
+        return None
+    return body
 
 
 def _asset_extra_for_result(result: dict[str, Any]) -> dict[str, Any]:

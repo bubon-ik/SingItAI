@@ -25,15 +25,24 @@ NETWORK_ALIASES = {
 def fetch_x402_payment_required(
     resource_url: str,
     *,
+    request_body: dict[str, Any] | None = None,
     opener: Callable[..., Any] = urllib.request.urlopen,
     timeout: int = 20,
 ) -> dict[str, Any]:
+    body_bytes = None
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Hermes-Sign402/0.1 (+https://github.com/bubon-ik/-402)",
+    }
+    if request_body is not None:
+        body_bytes = json.dumps(request_body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
     request = urllib.request.Request(
         resource_url,
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "Hermes-Sign402/0.1 (+https://github.com/bubon-ik/-402)",
-        },
+        data=body_bytes,
+        headers=headers,
+        method="POST" if request_body is not None else "GET",
     )
     try:
         with opener(request, timeout=timeout) as response:

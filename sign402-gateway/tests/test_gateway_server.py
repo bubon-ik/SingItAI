@@ -1,5 +1,6 @@
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,11 +8,20 @@ from unittest.mock import ANY, Mock, patch
 
 from sign402_gateway.server import (
     AgentStateStore,
+    BankrCliX402PaymentClient,
+    BankrLlmCreditsTopUpRunner,
+    DEFAULT_SINGIT_RISK_CHECK_URL,
+    DEFAULT_SINGIT_TOKEN_ADDRESS,
     ExternalX402Buyer,
     Sign402GatewayHandler,
+    _build_bankr_llm_topup_intent,
     _resolve_paid_tool,
     _tool_result,
 )
+
+
+def subprocess_completed(stdout: str = "", stderr: str = "", returncode: int = 0):
+    return subprocess.CompletedProcess(args=["bankr"], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 class DummyServer:
@@ -23,6 +33,8 @@ class DummyServer:
     agent_buy_probe = Mock()
     x402_inspector = Mock()
     x402_buyer = Mock()
+    bankr_llm_topup_inspector = Mock()
+    bankr_llm_topup = Mock()
 
 
 class FakeSocket:
@@ -249,6 +261,79 @@ class GatewayServerTests(unittest.TestCase):
         self.assertIn('"decision": "approved_and_executed"', response)
         DummyServer.agent_buy_probe.assert_called_once_with("algorand.co")
 
+    def test_agent_inspect_llm_credits_topup_returns_singit_commitment(self):
+        DummyServer.bankr_llm_topup_inspector.reset_mock()
+        DummyServer.bankr_llm_topup_inspector.return_value = {
+            "ok": True,
+            "mode": "inspect_llm_credits_topup",
+            "topUpIntent": {
+                "creditAmountUsd": "5",
+                "fundingTokenAddress": "0x2222222222222222222222222222222222222222",
+                "fundingTokenSymbol": "SINGIT",
+                "maxFundingTokenAmountAtomic": "5000000000000000000000",
+                "purpose": "bankr_llm_credits_topup",
+            },
+            "paymentCommitment": {
+                "paymentHash": "d" * 64,
+                "commitment": {"type": "sign402-payment"},
+            },
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/inspect-llm-credits-topup",
+                {
+                    "creditAmountUsd": "5",
+                    "fundingTokenAddress": "0x2222222222222222222222222222222222222222",
+                    "fundingTokenSymbol": "SINGIT",
+                    "maxFundingTokenAmountAtomic": "5000000000000000000000",
+                    "policyHash": "c" * 64,
+                },
+            )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertIn('"mode": "inspect_llm_credits_topup"', response)
+        self.assertIn('"fundingTokenSymbol": "SINGIT"', response)
+        DummyServer.bankr_llm_topup_inspector.assert_called_once()
+
+    def test_agent_topup_llm_credits_delegates_to_topup_runner(self):
+        DummyServer.bankr_llm_topup.reset_mock()
+        DummyServer.bankr_llm_topup.return_value = {
+            "decision": "approved_and_executed",
+            "ok": True,
+            "mode": "bankr_llm_credits_topup",
+            "creditAmountUsd": "5",
+            "fundingTokenSymbol": "SINGIT",
+        }
+
+        payload = {
+            "creditAmountUsd": "5",
+            "fundingTokenAddress": "0x2222222222222222222222222222222222222222",
+            "fundingTokenSymbol": "SINGIT",
+            "maxFundingTokenAmountAtomic": "5000000000000000000000",
+        }
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler("/agent/top-up-llm-credits", payload)
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertIn('"mode": "bankr_llm_credits_topup"', response)
+        DummyServer.bankr_llm_topup.assert_called_once_with(payload)
+
+    def test_llm_credits_topup_defaults_to_singit_token_contract(self):
+        intent = _build_bankr_llm_topup_intent(
+            {
+                "creditAmountUsd": "5",
+                "maxFundingTokenAmountAtomic": "5000000000000000000000",
+            }
+        )
+
+        self.assertEqual(intent["fundingTokenAddress"], DEFAULT_SINGIT_TOKEN_ADDRESS)
+        self.assertEqual(intent["fundingTokenSymbol"], "SINGIT")
+
     def test_agent_inspect_x402_accepts_base_usdc_requirements(self):
         policy_hash = "c" * 64
         DummyServer.x402_inspector.reset_mock()
@@ -400,6 +485,7 @@ class GatewayServerTests(unittest.TestCase):
         }
         agent_state_store = Mock()
         agent_state_store.read_policy.return_value = policy_state
+        agent_state_store.read_policy_for_requirement.return_value = policy_state
         agent_state_store.remaining_budget.return_value = 20000
         event_store = Mock()
         cdp_buyer = Mock(
@@ -423,7 +509,7 @@ class GatewayServerTests(unittest.TestCase):
             patch(
                 "sign402_gateway.server.fetch_x402_payment_required",
                 return_value=raw_payment_required,
-            ),
+            ) as fetch_required,
             patch(
                 "sign402_gateway.server.build_payment_commitment",
                 return_value={"paymentHash": payment_hash, "commitment": {"type": "sign402-payment"}},
@@ -446,6 +532,296 @@ class GatewayServerTests(unittest.TestCase):
             "base-intent-1",
             10000,
         )
+
+    def test_external_x402_buyer_uses_bankr_cli_for_singit_bankr_endpoint(self):
+        policy_hash = "a" * 64
+        payment_hash = "b" * 64
+        token = DEFAULT_SINGIT_TOKEN_ADDRESS
+        policy = {
+            "asset": token,
+            "allowedPurpose": "x402_api_access",
+            "maxPerPaymentAtomic": "10000000000000000000",
+            "maxBudgetAtomic": "100000000000000000000",
+        }
+        policy_state = {
+            "policy": policy,
+            "policyHash": policy_hash,
+            "firefly": {"approvedHash": policy_hash},
+        }
+        raw_payment_required = {
+            "x402Version": 2,
+            "accepts": [
+                {
+                    "scheme": "upto",
+                    "network": "eip155:8453",
+                    "amount": "10000000000000000000",
+                    "asset": token,
+                    "payTo": "0x8AEE621035D93Deb3C0C1177fac252dC2dd501a0",
+                    "resource": "https://x402.bankr.bot/0xabc/paid-risk-check",
+                    "extra": {
+                        "name": "SINGIT",
+                        "version": "1",
+                        "paymentIntent": "singit-risk-check-1",
+                    },
+                }
+            ],
+        }
+
+        firefly = Mock()
+        firefly.approve_payment_hash.return_value = {
+            "approved": True,
+            "approvedHash": payment_hash,
+            "deviceModel": 262,
+            "deviceSerial": 1056,
+        }
+        agent_state_store = Mock()
+        agent_state_store.read_policy_for_requirement.return_value = policy_state
+        agent_state_store.remaining_budget.return_value = 90000000000000000000
+        event_store = Mock()
+        bankr_buyer = Mock(
+            return_value={
+                "status": 200,
+                "body": {"ok": True, "riskLevel": "low"},
+                "transactionHash": "0xSINGITTX",
+                "paymentResponse": {"transaction": "0xSINGITTX"},
+            }
+        )
+        cdp_buyer = Mock()
+        algorand_builder = Mock()
+
+        buyer = ExternalX402Buyer(
+            firefly=firefly,
+            payment_signature_builder=algorand_builder,
+            base_payment_client=cdp_buyer,
+            bankr_x402_payment_client=bankr_buyer,
+            event_store=event_store,
+            agent_state_store=agent_state_store,
+        )
+
+        with (
+            patch(
+                "sign402_gateway.server.fetch_x402_payment_required",
+                return_value=raw_payment_required,
+            ) as fetch_required,
+            patch(
+                "sign402_gateway.server.build_payment_commitment",
+                return_value={"paymentHash": payment_hash, "commitment": {"type": "sign402-payment"}},
+            ),
+        ):
+            result = buyer(
+                "https://x402.bankr.bot/0xabc/paid-risk-check",
+                payment_context={"title": "SINGIT RISK", "subject": "Risk Check"},
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["mode"], "official_x402_base_bankr_cli")
+        self.assertEqual(result["txId"], "0xSINGITTX")
+        self.assertEqual(result["asset"], token)
+        bankr_buyer.assert_called_once_with(
+            "https://x402.bankr.bot/0xabc/paid-risk-check",
+            request_body=None,
+        )
+        fetch_required.assert_called_once_with(
+            "https://x402.bankr.bot/0xabc/paid-risk-check",
+            request_body=None,
+        )
+        cdp_buyer.assert_not_called()
+        algorand_builder.assert_not_called()
+        self.assertEqual(
+            firefly.approve_payment_hash.call_args.kwargs["context_lines"],
+            ["SINGIT RISK", "Risk Check", "10 SINGIT"],
+        )
+        agent_state_store.validate_policy_allows.assert_called_once()
+        validated_requirement = agent_state_store.validate_policy_allows.call_args.args[2]
+        self.assertEqual(validated_requirement["network"], "base-mainnet")
+        self.assertEqual(validated_requirement["x402Network"], "eip155:8453")
+        self.assertEqual(validated_requirement["asset"], token)
+        self.assertEqual(validated_requirement["amountAtomic"], "10000000000000000000")
+        self.assertEqual(validated_requirement["paymentIntent"], "singit-risk-check-1")
+        self.assertEqual(validated_requirement["purpose"], "x402_api_access")
+        agent_state_store.record_payment.assert_called_once_with(
+            policy_hash,
+            "singit-risk-check-1",
+            10000000000000000000,
+        )
+
+    def test_bankr_cli_x402_payment_client_parses_response_and_tx(self):
+        completed = subprocess_completed(
+            stdout="""
+{
+  "success": true,
+  "status": 200,
+  "paymentMade": {
+    "network": "eip155:8453",
+    "transactionHash": "0xABC123"
+  },
+  "response": {
+    "ok": true,
+    "riskLevel": "low"
+  }
+}
+""",
+        )
+        with patch("subprocess.run", return_value=completed) as run:
+            client = BankrCliX402PaymentClient(bankr_cli="/tmp/bankr")
+            result = client("https://x402.bankr.bot/0xabc/paid-risk-check")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], 200)
+        self.assertEqual(result["transactionHash"], "0xABC123")
+        self.assertEqual(result["body"], {"ok": True, "riskLevel": "low"})
+        self.assertEqual(run.call_args.args[0][:3], ["/tmp/bankr", "x402", "call"])
+        self.assertIn("--raw", run.call_args.args[0])
+
+    def test_singit_risk_check_tool_passes_request_body_for_402_probe_and_payment(self):
+        DummyServer.x402_buyer.reset_mock()
+        DummyServer.x402_buyer.return_value = {
+            "ok": True,
+            "mode": "official_x402_base_bankr_cli",
+            "txId": "0xTX",
+            "amountAtomic": "10000000000000000000",
+            "asset": DEFAULT_SINGIT_TOKEN_ADDRESS,
+            "network": "base-mainnet",
+            "remainingBudgetAtomic": "90000000000000000000",
+            "paymentRequirements": {
+                "asset": DEFAULT_SINGIT_TOKEN_ADDRESS,
+                "extra": {"name": "SINGIT"},
+            },
+            "resourceResult": {"body": {"ok": True, "riskLevel": "low"}},
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler("/agent/buy-tool", {"tool": "singit-risk-check"})
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertIn('"toolId": "bankr.singit.risk_check"', response)
+        DummyServer.x402_buyer.assert_called_once()
+        self.assertEqual(DummyServer.x402_buyer.call_args.args[0], DEFAULT_SINGIT_RISK_CHECK_URL)
+        self.assertEqual(
+            DummyServer.x402_buyer.call_args.kwargs["payment_context"],
+            {"title": "SINGIT RISK", "subject": "Risk Check"},
+        )
+        self.assertIn("request_body", DummyServer.x402_buyer.call_args.kwargs)
+
+    def test_singit_risk_check_tool_passes_request_body_for_inspection(self):
+        policy_hash = "c" * 64
+        DummyServer.x402_inspector.reset_mock()
+        DummyServer.x402_inspector.return_value = {
+            "ok": True,
+            "mode": "inspect_only",
+            "resourceUrl": DEFAULT_SINGIT_RISK_CHECK_URL,
+            "paymentRequirements": {
+                "network": "eip155:8453",
+                "amountAtomic": "10000000000000000000",
+                "asset": DEFAULT_SINGIT_TOKEN_ADDRESS,
+                "extra": {"name": "SINGIT"},
+            },
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/inspect-tool",
+                {"tool": "singit-risk-check", "policyHash": policy_hash},
+            )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertIn('"toolId": "bankr.singit.risk_check"', response)
+        DummyServer.x402_inspector.assert_called_once()
+        self.assertEqual(DummyServer.x402_inspector.call_args.args, (DEFAULT_SINGIT_RISK_CHECK_URL, policy_hash))
+        self.assertIn("request_body", DummyServer.x402_inspector.call_args.kwargs)
+
+    def test_bankr_llm_credits_topup_runner_approves_and_executes_singit_topup(self):
+        policy_hash = "a" * 64
+        payment_hash = "b" * 64
+        token = "0x2222222222222222222222222222222222222222"
+        policy = {
+            "asset": token,
+            "allowedPurpose": "bankr_llm_credits_topup",
+            "maxPerPaymentAtomic": "5000000000000000000000",
+            "maxBudgetAtomic": "10000000000000000000000",
+        }
+        requirement = {
+            "network": "base-mainnet",
+            "asset": token,
+            "amountAtomic": "5000000000000000000000",
+            "receiver": "bankr.llm",
+            "resource": "bankr://llm-credits/top-up",
+            "paymentIntent": "llm-topup-1",
+            "purpose": "bankr_llm_credits_topup",
+            "extra": {"name": "SINGIT", "creditAmountUsd": "5"},
+        }
+
+        firefly = Mock()
+        firefly.approve_payment_hash.return_value = {
+            "approved": True,
+            "approvedHash": payment_hash,
+            "deviceModel": 262,
+            "deviceSerial": 1056,
+        }
+        agent_state_store = Mock()
+        agent_state_store.read_policy_for_requirement.return_value = {
+            "policy": policy,
+            "policyHash": policy_hash,
+            "firefly": {"approvedHash": policy_hash},
+        }
+        agent_state_store.remaining_budget.return_value = 5000000000000000000000
+        event_store = Mock()
+        bankr_topup_executor = Mock(
+            return_value={
+                "ok": True,
+                "command": ["bankr", "llm", "credits", "add", "5", "--token", token, "--yes"],
+                "stdout": "Added $5 LLM credits",
+            }
+        )
+
+        runner = BankrLlmCreditsTopUpRunner(
+            firefly=firefly,
+            bankr_topup_executor=bankr_topup_executor,
+            event_store=event_store,
+            agent_state_store=agent_state_store,
+        )
+
+        with patch(
+            "sign402_gateway.server.build_payment_commitment",
+            return_value={"paymentHash": payment_hash, "commitment": {"type": "sign402-payment"}},
+        ):
+            result = runner(
+                {
+                    "creditAmountUsd": "5",
+                    "fundingTokenAddress": token,
+                    "fundingTokenSymbol": "SINGIT",
+                    "maxFundingTokenAmountAtomic": "5000000000000000000000",
+                    "topUpIntent": "llm-topup-1",
+                }
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["decision"], "approved_and_executed")
+        self.assertEqual(result["mode"], "bankr_llm_credits_topup")
+        bankr_topup_executor.assert_called_once_with(
+            credit_amount_usd="5",
+            funding_token_address=token,
+        )
+        firefly.approve_payment_hash.assert_called_once()
+        self.assertEqual(
+            firefly.approve_payment_hash.call_args.kwargs["context_lines"],
+            ["LLM CREDITS", "$5", "SINGIT"],
+        )
+        agent_state_store.validate_policy_allows.assert_called_once_with(
+            policy,
+            policy_hash,
+            requirement,
+        )
+        agent_state_store.record_payment.assert_called_once_with(
+            policy_hash,
+            "llm-topup-1",
+            5000000000000000000000,
+        )
+        event_store.write.assert_called_once()
 
     def test_agent_tools_lists_paid_tool_catalog(self):
         with patch("sys.stderr", io.StringIO()):
@@ -832,6 +1208,37 @@ class GatewayServerTests(unittest.TestCase):
                 self.assertIn("Paid 0.001 USDC", result["telegramText"])
                 self.assertIn("https://basescan.org/tx/0xTX", result["telegramText"])
 
+    def test_singit_risk_check_telegram_text_does_not_require_tx_hash(self):
+        result = _tool_result(
+            _resolve_paid_tool({"tool": "singit-risk-check"}),
+            {
+                "decision": "approved_and_executed",
+                "ok": True,
+                "txId": None,
+                "amountAtomic": "10000000000000000000",
+                "asset": DEFAULT_SINGIT_TOKEN_ADDRESS,
+                "network": "base-mainnet",
+                "remainingBudgetAtomic": "90000000000000000000",
+                "resourceResult": {
+                    "body": {
+                        "ok": True,
+                        "riskLevel": "low",
+                        "recommendation": "Payment looks acceptable for a bounded Sign402 policy.",
+                    }
+                },
+                "paymentRequirements": {
+                    "extra": {
+                        "name": "SINGIT",
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(
+            result["telegramText"],
+            "✅ SINGIT Risk Check unlocked. Risk: low. Paid 10 SINGIT. Budget left 90 SINGIT. Payment looks acceptable for a bounded Sign402 policy.",
+        )
+
     def test_agent_inspect_tool_resolves_alias_and_returns_offer(self):
         policy_hash = "c" * 64
         DummyServer.x402_inspector.reset_mock()
@@ -914,6 +1321,11 @@ class GatewayServerTests(unittest.TestCase):
             "policyHash": policy_hash,
             "firefly": {"approvedHash": policy_hash},
         }
+        agent_state_store.read_policy_for_requirement.return_value = {
+            "policy": policy,
+            "policyHash": policy_hash,
+            "firefly": {"approvedHash": policy_hash},
+        }
         agent_state_store.remaining_budget.return_value = 90000
         payment_signature_builder = Mock(return_value={"headerValue": "PAYMENT-SIGNATURE token"})
 
@@ -986,6 +1398,11 @@ class GatewayServerTests(unittest.TestCase):
             "policyHash": policy_hash,
             "firefly": {"approvedHash": policy_hash},
         }
+        agent_state_store.read_policy_for_requirement.return_value = {
+            "policy": policy,
+            "policyHash": policy_hash,
+            "firefly": {"approvedHash": policy_hash},
+        }
         agent_state_store.remaining_budget.return_value = 25000
         cdp_buyer = Mock(
             return_value={
@@ -1019,6 +1436,86 @@ class GatewayServerTests(unittest.TestCase):
             firefly.approve_payment_hash.call_args.kwargs["context_lines"],
             ["X PROFILE", "@jessepollak", "0.005 USDC"],
         )
+
+    def test_external_x402_buyer_selects_policy_matching_requirement_asset(self):
+        algo_hash = "a" * 64
+        base_hash = "b" * 64
+        requirement = {
+            "network": "algorand-testnet",
+            "x402Network": "algorand:testnet",
+            "asset": "10458941",
+            "amountAtomic": "10000",
+            "receiver": "PAYEE",
+            "resource": "https://x402.goplausible.xyz/examples/weather",
+            "paymentIntent": "intent-001",
+            "purpose": "x402_api_access",
+            "extra": {"name": "USDC", "decimals": 6},
+        }
+        algo_policy_state = {
+            "policy": {
+                "asset": "10458941",
+                "allowedPurpose": "x402_api_access",
+                "maxBudgetAtomic": "100000",
+                "maxPerPaymentAtomic": "10000",
+            },
+            "policyHash": algo_hash,
+            "firefly": {"approvedHash": algo_hash},
+        }
+        base_policy_state = {
+            "policy": {
+                "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bDa02913",
+                "allowedPurpose": "x402_api_access",
+                "maxBudgetAtomic": "1000000",
+                "maxPerPaymentAtomic": "10000",
+            },
+            "policyHash": base_hash,
+            "firefly": {"approvedHash": base_hash},
+        }
+        firefly = Mock()
+        firefly.approve_payment_hash.return_value = {
+            "approved": True,
+            "approvedHash": "c" * 64,
+        }
+        event_store = Mock()
+        agent_state_store = Mock()
+        agent_state_store.read_policy.return_value = base_policy_state
+        agent_state_store.read_policy_for_requirement.return_value = algo_policy_state
+        agent_state_store.remaining_budget.return_value = 90000
+        payment_signature_builder = Mock(return_value={"headerValue": "PAYMENT-SIGNATURE token"})
+
+        buyer = ExternalX402Buyer(
+            firefly=firefly,
+            payment_signature_builder=payment_signature_builder,
+            event_store=event_store,
+            agent_state_store=agent_state_store,
+        )
+
+        with (
+            patch("sign402_gateway.server.fetch_x402_payment_required", return_value={"accepts": []}),
+            patch("sign402_gateway.server.normalize_x402_payment_required", return_value=requirement),
+            patch(
+                "sign402_gateway.server.build_payment_commitment",
+                return_value={"paymentHash": "c" * 64, "commitment": {"type": "sign402-payment"}},
+            ),
+            patch(
+                "sign402_gateway.server.fetch_x402_paid_resource",
+                return_value={
+                    "status": 200,
+                    "paymentResponse": {"transaction": "TXID"},
+                },
+            ),
+        ):
+            result = buyer("https://x402.goplausible.xyz/examples/weather")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["policyHash"], algo_hash)
+        agent_state_store.read_policy_for_requirement.assert_called_once_with(requirement)
+        agent_state_store.validate_policy_allows.assert_called_once_with(
+            algo_policy_state["policy"],
+            algo_hash,
+            requirement,
+        )
+        agent_state_store.record_payment.assert_called_once_with(algo_hash, "intent-001", 10000)
 
 
 class AgentStateStoreTests(unittest.TestCase):
@@ -1081,6 +1578,59 @@ class AgentStateStoreTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "paymentIntent already used"):
             store.validate_policy_allows(policy, policy_hash, requirement)
+
+    def test_store_keeps_base_and_algorand_policies_and_resolves_by_requirement(self):
+        store = self.make_store()
+        algo_policy = {
+            "asset": "10458941",
+            "allowedPurpose": "x402_api_access",
+            "maxBudgetAtomic": "100000",
+            "maxPerPaymentAtomic": "10000",
+        }
+        base_policy = {
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bDa02913",
+            "allowedPurpose": "x402_api_access",
+            "maxBudgetAtomic": "1000000",
+            "maxPerPaymentAtomic": "10000",
+        }
+        algo_hash = "a" * 64
+        base_hash = "b" * 64
+        store.write_policy(
+            {
+                "policy": algo_policy,
+                "policyHash": algo_hash,
+                "firefly": {"approvedHash": algo_hash},
+            }
+        )
+        store.write_policy(
+            {
+                "policy": base_policy,
+                "policyHash": base_hash,
+                "firefly": {"approvedHash": base_hash},
+            }
+        )
+
+        algo_state = store.read_policy_for_requirement(
+            {
+                "asset": "10458941",
+                "purpose": "x402_api_access",
+            }
+        )
+        base_state = store.read_policy_for_requirement(
+            {
+                "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "purpose": "x402_api_access",
+            }
+        )
+
+        self.assertEqual(algo_state["policyHash"], algo_hash)
+        self.assertEqual(base_state["policyHash"], base_hash)
+
+        store.record_payment(algo_hash, "algo-intent", 10000)
+        store.record_payment(base_hash, "base-intent", 1000)
+
+        self.assertEqual(store.remaining_budget(algo_hash), 90000)
+        self.assertEqual(store.remaining_budget(base_hash), 999000)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,81 @@
+{
+  "network": "base",
+  "currency": "SINGIT",
+  "tokenAddress": "0xc2c1e0b7C401e6217193732272444D928646eba3",
+  "services": {
+    "paid-risk-check": {
+      "description": "Sign402 risk analysis for an x402 payment requirement, paid in SINGIT",
+      "price": "10",
+      "currency": "SINGIT",
+      "tokenAddress": "0xc2c1e0b7C401e6217193732272444D928646eba3",
+      "methods": ["POST"],
+      "category": "security",
+      "tags": ["x402", "sign402", "agent-payments", "risk", "base", "singit"],
+      "schema": {
+        "input": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string",
+              "description": "Optional resource URL label to include inside paymentRequirements.resource"
+            },
+            "paymentRequirements": {
+              "type": "object",
+              "description": "Raw x402 payment requirements object or response body to analyze directly"
+            }
+          }
+          ,
+          "required": ["paymentRequirements"]
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "description": "Whether risk analysis completed"
+            },
+            "product": {
+              "type": "string",
+              "description": "Product identifier"
+            },
+            "riskLevel": {
+              "type": "string",
+              "description": "Overall risk level",
+              "enum": ["low", "medium", "high"]
+            },
+            "summary": {
+              "type": "object",
+              "description": "Normalized payment summary"
+            },
+            "checks": {
+              "type": "array",
+              "description": "Individual risk checks with pass, warning, or fail status",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Stable check identifier"
+                  },
+                  "status": {
+                    "type": "string",
+                    "description": "Check result",
+                    "enum": ["pass", "warning", "fail"]
+                  },
+                  "message": {
+                    "type": "string",
+                    "description": "Human-readable check result"
+                  }
+                }
+              }
+            },
+            "recommendation": {
+              "type": "string",
+              "description": "Sign402-style approval recommendation"
+            }
+          }
+        }
+      }
+    }
+  }
+}

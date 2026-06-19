@@ -37,12 +37,68 @@ POST /agent/inspect-tool
 POST /agent/buy-tool
 POST /agent/inspect-x402
 POST /agent/buy-x402
+POST /agent/inspect-llm-credits-topup
+POST /agent/top-up-llm-credits
 ```
 
 `/agent/inspect-x402` and `/agent/buy-x402` now support two official x402 lanes:
 
 - Algorand TestNet through the existing `x402-avm` payment signature builder.
 - Base Mainnet through `../cdp-x402-service`, CDP API key wallets, and CDP facilitator.
+
+## Bankr LLM Credits Funded by SINGIT
+
+The gateway can also let Hermes fund Bankr LLM Gateway credits with a project token such as SINGIT. This is not an x402 Cloud payment. It is a separate top-up flow:
+
+```text
+SINGIT spending policy -> Firefly top-up approval -> bankr llm credits add <usd> --token <SINGIT> --yes
+```
+
+Approve a SINGIT budget policy first:
+
+```json
+{
+  "policy": {
+    "version": "1",
+    "agentId": "hermes-demo",
+    "policyId": "policy-singit-llm-001",
+    "allowedPurpose": "bankr_llm_credits_topup",
+    "asset": "0xc2c1e0b7C401e6217193732272444D928646eba3",
+    "maxBudgetAtomic": "10000000000000000000000",
+    "maxPerPaymentAtomic": "5000000000000000000000",
+    "nonce": "singit-llm-credits-001"
+  }
+}
+```
+
+Inspect a top-up before executing:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8099/agent/inspect-llm-credits-topup \
+  -H "Content-Type: application/json" \
+  -d '{
+    "creditAmountUsd": "5",
+    "fundingTokenAddress": "0xc2c1e0b7C401e6217193732272444D928646eba3",
+    "fundingTokenSymbol": "SINGIT",
+    "maxFundingTokenAmountAtomic": "5000000000000000000000"
+  }'
+```
+
+Then execute the top-up with the returned `topUpIntent`:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8099/agent/top-up-llm-credits \
+  -H "Content-Type: application/json" \
+  -d '{
+    "creditAmountUsd": "5",
+    "fundingTokenAddress": "0xc2c1e0b7C401e6217193732272444D928646eba3",
+    "fundingTokenSymbol": "SINGIT",
+    "maxFundingTokenAmountAtomic": "5000000000000000000000",
+    "topUpIntent": "bankr-llm-..."
+  }'
+```
+
+The gateway checks the stored policy against the SINGIT token address and `bankr_llm_credits_topup` purpose, asks Firefly to approve the exact top-up commitment, then invokes the Bankr CLI. Set `SIGN402_BANKR_CLI` if `bankr` is not on `PATH`. The default SINGIT token address is `0xc2c1e0b7C401e6217193732272444D928646eba3`; override it with `SIGN402_SINGIT_TOKEN_ADDRESS` if needed.
 
 ## Main Demo Flow
 

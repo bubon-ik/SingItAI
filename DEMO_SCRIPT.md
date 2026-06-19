@@ -52,8 +52,10 @@ When I say "buy hyperliquid <asset>", use {"tool":"otto.hyperliquid_market","ass
 When I say "buy funding <symbol>", use {"tool":"otto.funding_rates","symbol":"<symbol>"}.
 When I say "buy ens <name>", use {"tool":"onesource.ens","input":"<name>"}.
 When I say "buy token price <symbol>", use {"tool":"anchor.token_price","symbol":"<symbol>"}.
+When I say "buy singit risk check", "buy singit risk", or "buy risk check", call POST /agent/buy-tool with {"tool":"singit-risk-check"}.
 When I say "buy x402 <url>", first call POST /agent/inspect-x402 with {"url":"<url>"}.
 If the quote is acceptable and it is Base Mainnet USDC, call POST /agent/buy-x402 with {"url":"<url>"}.
+After buying SINGIT Risk Check, reply using only telegramText if present.
 After buying a raw x402 URL, reply using only telegramText if present.
 For one Telegram user command, call the matching buy endpoint only once. If a response contains duplicateSuppressed=true, reply with its telegramText and do not retry.
 Do not build the x402 payment yourself. Do not ask for private keys. Only call the Sign402 Gateway.
