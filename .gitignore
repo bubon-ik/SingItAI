@@ -30,6 +30,18 @@ demo-dashboard/agent-state.json
 
 # Generated presentation scratch workspace
 outputs/
+output/
+tmp/
+SingIt-backgrounds.zip
+SingIt-presentation-assets/
+
+# Local tooling and duplicated/scratch workspaces
+.tools/
+tools/
+x402HackBerlin/
+
+# Draft writing artifacts
+Sign402 X Longform Post.md
 
 # Local editor files
 .vscode/
