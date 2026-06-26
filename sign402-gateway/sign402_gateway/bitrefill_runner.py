@@ -349,10 +349,12 @@ class BitrefillFulfillmentRunner:
         *,
         store: BitrefillCommerceStore,
         bitrefill_client: BitrefillClient,
+        funding_runner: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         now_provider: Callable[[], int] = now_epoch,
     ):
         self.store = store
         self.bitrefill_client = bitrefill_client
+        self.funding_runner = funding_runner
         self.now_provider = now_provider
 
     def __call__(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -378,6 +380,22 @@ class BitrefillFulfillmentRunner:
             raise ValueError("invalid fulfillment token")
         if not self.store.try_mark_fulfilling(quote_id):
             raise ValueError("quote is already fulfilled or being fulfilled")
+
+        if self.funding_runner is not None:
+            try:
+                funding_result = self.funding_runner(record["quote"])
+                self.store.advance_state(
+                    quote_id,
+                    "FULFILLING",
+                    {"bankrSwap": funding_result},
+                )
+            except Exception as exc:
+                self.store.advance_state(
+                    quote_id,
+                    "RECONCILIATION_REQUIRED",
+                    {"fundingError": str(exc)},
+                )
+                raise
 
         try:
             result = self.bitrefill_client.buy_product(

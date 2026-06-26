@@ -65,6 +65,22 @@ class FixedRealRatePricer:
         }
 
 
+class FakeFundingRunner:
+    def __init__(self, *, fail=False):
+        self.fail = fail
+        self.calls = []
+
+    def __call__(self, quote):
+        self.calls.append(quote)
+        if self.fail:
+            raise RuntimeError("swap route failed")
+        return {
+            "ok": True,
+            "txId": "0xSWAP",
+            "expectedUsdc": quote.get("expectedUsdc", "0.11"),
+        }
+
+
 class BitrefillRunnerTests(unittest.TestCase):
     def test_catalog_services_search_and_return_product_details(self):
         client = TestBitrefillClient()
@@ -548,6 +564,93 @@ class BitrefillRunnerTests(unittest.TestCase):
                 recipient={"email": "approved@example.com"},
                 checkpoint_callback=ANY,
             )
+
+    def test_fulfillment_swaps_singit_before_bitrefill_purchase(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store.save_quote(
+                {
+                    "quoteId": "quote_1",
+                    "productId": "test-gift-card-code",
+                    "productName": "Test Gift Card Code",
+                    "productType": "gift_card",
+                    "packageId": "1",
+                    "packageValue": "1",
+                    "priceUsd": "1.00",
+                    "pricingMode": "bankr_real_rate",
+                    "expectedUsdc": "1.10",
+                    "maxSingitAtomic": "25000000000000000000000",
+                    "singitAmount": "25000",
+                    "expiresAtEpoch": 1_719_000_120,
+                }
+            )
+            store.advance_state(
+                "quote_1",
+                "FIREFLY_APPROVED",
+                {"fulfillmentTokenHash": hashlib.sha256(b"valid_token").hexdigest()},
+            )
+            funding = FakeFundingRunner()
+            bitrefill = Mock(
+                **{
+                    "buy_product.return_value": {
+                        "ok": True,
+                        "orderId": "order_1",
+                        "status": "delivered",
+                    }
+                }
+            )
+            runner = BitrefillFulfillmentRunner(
+                store=store,
+                bitrefill_client=bitrefill,
+                funding_runner=funding,
+                now_provider=lambda: 1_719_000_001,
+            )
+
+            runner.fulfill({"quoteId": "quote_1", "fulfillmentToken": "valid_token"})
+
+            self.assertEqual(funding.calls[0]["quoteId"], "quote_1")
+            bitrefill.buy_product.assert_called_once()
+            self.assertEqual(store.get_quote("quote_1")["metadata"]["bankrSwap"]["txId"], "0xSWAP")
+
+    def test_fulfillment_does_not_buy_bitrefill_when_swap_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store.save_quote(
+                {
+                    "quoteId": "quote_1",
+                    "productId": "test-gift-card-code",
+                    "productName": "Test Gift Card Code",
+                    "productType": "gift_card",
+                    "packageId": "1",
+                    "packageValue": "1",
+                    "priceUsd": "1.00",
+                    "pricingMode": "bankr_real_rate",
+                    "expectedUsdc": "1.10",
+                    "maxSingitAtomic": "25000000000000000000000",
+                    "singitAmount": "25000",
+                    "expiresAtEpoch": 1_719_000_120,
+                }
+            )
+            store.advance_state(
+                "quote_1",
+                "FIREFLY_APPROVED",
+                {"fulfillmentTokenHash": hashlib.sha256(b"valid_token").hexdigest()},
+            )
+            bitrefill = Mock()
+            runner = BitrefillFulfillmentRunner(
+                store=store,
+                bitrefill_client=bitrefill,
+                funding_runner=FakeFundingRunner(fail=True),
+                now_provider=lambda: 1_719_000_001,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "swap route failed"):
+                runner.fulfill({"quoteId": "quote_1", "fulfillmentToken": "valid_token"})
+
+            bitrefill.buy_product.assert_not_called()
+            record = store.get_quote("quote_1")
+            self.assertEqual(record["state"], "RECONCILIATION_REQUIRED")
+            self.assertEqual(record["metadata"]["fundingError"], "swap route failed")
 
     def test_order_lookup_redacts_private_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
