@@ -76,6 +76,57 @@
           }
         }
       }
+    },
+    "buy-bitrefill": {
+      "description": "Collect real-rate SINGIT settlement for a Sign402 Bitrefill purchase",
+      "price": "1000000",
+      "paymentScheme": "upto",
+      "currency": "SINGIT",
+      "tokenAddress": "0xc2c1e0b7C401e6217193732272444D928646eba3",
+      "methods": ["POST"],
+      "category": "commerce",
+      "tags": ["x402", "sign402", "bitrefill", "base", "singit"],
+      "schema": {
+        "input": {
+          "type": "object",
+          "properties": {
+            "quoteId": {
+              "type": "string",
+              "description": "Gateway quote id returned by /agent/quote-bitrefill"
+            },
+            "fulfillmentToken": {
+              "type": "string",
+              "description": "Opaque gateway-created authorization for the quote"
+            }
+          },
+          "required": ["quoteId", "fulfillmentToken"]
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "type": "boolean",
+              "description": "Whether the order was fulfilled"
+            },
+            "quoteId": {
+              "type": "string",
+              "description": "Original gateway quote id"
+            },
+            "status": {
+              "type": "string",
+              "description": "Settlement preparation status"
+            },
+            "pricingMode": {
+              "type": "string",
+              "description": "Pricing mode used by the gateway quote"
+            },
+            "settleAmountAtomic": {
+              "type": "string",
+              "description": "Exact SINGIT atomic amount requested for x402 settlement"
+            }
+          }
+        }
+      }
     }
   }
 }

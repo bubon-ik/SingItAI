@@ -16,12 +16,22 @@ from .bitrefill_quote import (
 from .commerce_store import BitrefillCommerceStore
 
 
+def _fulfillment_token_matches(metadata: dict[str, Any], fulfillment_token: str | None) -> bool:
+    expected_hash = str(metadata.get("fulfillmentTokenHash", "")) if isinstance(metadata, dict) else ""
+    token = str(fulfillment_token or "")
+    if not expected_hash or not token:
+        return False
+    supplied_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return hmac.compare_digest(supplied_hash, expected_hash)
+
+
 def lookup_bitrefill_order(
     store: BitrefillCommerceStore,
     quote_id: str,
     *,
     include_redemption: bool = False,
     recipient: dict[str, Any] | None = None,
+    fulfillment_token: str | None = None,
     bitrefill_client: BitrefillClient | None = None,
 ) -> dict[str, Any]:
     record = store.get_quote(quote_id)
@@ -52,9 +62,14 @@ def lookup_bitrefill_order(
     }
     if include_redemption:
         stored_recipient = metadata.get("recipient") if isinstance(metadata, dict) else {}
-        if isinstance(stored_recipient, dict) and stored_recipient:
-            if recipient != stored_recipient:
+        if not isinstance(stored_recipient, dict):
+            stored_recipient = {}
+        recipient_ok = bool(stored_recipient) and recipient == stored_recipient
+        token_ok = _fulfillment_token_matches(metadata, fulfillment_token)
+        if not (recipient_ok or token_ok):
+            if stored_recipient:
                 raise ValueError("recipient does not match order")
+            raise ValueError("valid fulfillmentToken is required to reveal redemption")
         redemption = provider_result.get("redemption")
         if redemption is not None:
             result["redemption"] = deepcopy(redemption)
@@ -102,6 +117,7 @@ class BitrefillQuoteService:
         real_rate_pricer: Any | None = None,
         quote_id_provider: Callable[[], str] = new_quote_id,
         now_provider: Callable[[], int] = now_epoch,
+        ttl_seconds: int = 120,
     ):
         self.bitrefill_client = bitrefill_client
         self.store = store
@@ -109,6 +125,7 @@ class BitrefillQuoteService:
         self.real_rate_pricer = real_rate_pricer
         self.quote_id_provider = quote_id_provider
         self.now_provider = now_provider
+        self.ttl_seconds = int(ttl_seconds)
 
     def __call__(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.quote(payload)
@@ -141,6 +158,7 @@ class BitrefillQuoteService:
                 pricing=pricing,
                 quote_id=self.quote_id_provider(),
                 now_epoch=self.now_provider(),
+                ttl_seconds=self.ttl_seconds,
             )
         else:
             quote = build_quote(
@@ -149,6 +167,7 @@ class BitrefillQuoteService:
                 singit_usd_price=self.singit_usd_price_provider(),
                 quote_id=self.quote_id_provider(),
                 now_epoch=self.now_provider(),
+                ttl_seconds=self.ttl_seconds,
             )
         self.store.save_quote(quote)
         return quote
@@ -164,6 +183,7 @@ class BitrefillPurchaseRunner:
         bankr_resource_url: str,
         now_provider: Callable[[], int] = now_epoch,
         fulfillment_token_provider: Callable[[], str] = lambda: secrets.token_urlsafe(32),
+        pre_payment_guard: Callable[[dict[str, Any]], None] | None = None,
         settlement_verifier: Callable[..., dict[str, Any]] | None = None,
         fulfillment_runner: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ):
@@ -173,6 +193,7 @@ class BitrefillPurchaseRunner:
         self.bankr_resource_url = bankr_resource_url
         self.now_provider = now_provider
         self.fulfillment_token_provider = fulfillment_token_provider
+        self.pre_payment_guard = pre_payment_guard
         self.settlement_verifier = settlement_verifier
         self.fulfillment_runner = fulfillment_runner
 
@@ -194,6 +215,8 @@ class BitrefillPurchaseRunner:
         if self.now_provider() >= int(quote["expiresAtEpoch"]):
             self.store.advance_state(quote_id, "QUOTE_EXPIRED")
             raise ValueError("quote expired")
+        if self.pre_payment_guard is not None:
+            self.pre_payment_guard(quote)
         commitment = build_purchase_commitment(quote, recipient=recipient)
         payment_hash = hash_purchase_commitment(commitment)
         approval = self.firefly.approve_payment_hash(
@@ -277,6 +300,7 @@ class BitrefillPurchaseRunner:
                 "quoteId": quote_id,
                 "paymentApprovalHash": payment_hash,
                 "paymentCommitment": commitment,
+                "fulfillmentToken": fulfillment_token,
                 "bankr": bankr_result,
                 "singitSettlement": settlement_proof,
                 "bitrefill": bitrefill_result,
@@ -293,7 +317,122 @@ class BitrefillPurchaseRunner:
             "quoteId": quote_id,
             "paymentApprovalHash": payment_hash,
             "paymentCommitment": commitment,
+            "fulfillmentToken": fulfillment_token,
             "bankr": bankr_result,
+            "telegramText": _bitrefill_purchase_telegram_text(quote),
+        }
+
+
+class WalletBitrefillPurchaseRunner:
+    def __init__(
+        self,
+        *,
+        store: BitrefillCommerceStore,
+        approval_client: Callable[..., dict[str, Any]],
+        fulfillment_runner: Callable[[dict[str, Any]], dict[str, Any]],
+        now_provider: Callable[[], int] = now_epoch,
+        fulfillment_token_provider: Callable[[], str] = lambda: secrets.token_urlsafe(32),
+    ):
+        self.store = store
+        self.approval_client = approval_client
+        self.fulfillment_runner = fulfillment_runner
+        self.now_provider = now_provider
+        self.fulfillment_token_provider = fulfillment_token_provider
+
+    def __call__(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.buy(payload)
+
+    def payment_hash_for_quote(self, quote: dict[str, Any], *, recipient: dict[str, Any]) -> str:
+        return hash_purchase_commitment(build_purchase_commitment(quote, recipient=recipient))
+
+    def buy(self, payload: dict[str, Any]) -> dict[str, Any]:
+        quote_id = str(payload.get("quoteId", "")).strip()
+        if not quote_id:
+            raise ValueError("quoteId is required")
+        recipient = payload.get("recipient") if isinstance(payload.get("recipient"), dict) else {}
+        record = self.store.get_quote(quote_id)
+        quote = record["quote"]
+        if record["state"] != "QUOTED":
+            raise ValueError(f"quote is not purchasable (state: {record['state']})")
+        if self.now_provider() >= int(quote["expiresAtEpoch"]):
+            self.store.advance_state(quote_id, "QUOTE_EXPIRED")
+            raise ValueError("quote expired")
+
+        commitment = build_purchase_commitment(quote, recipient=recipient)
+        payment_hash = hash_purchase_commitment(commitment)
+        approval = self.approval_client(
+            payment_hash,
+            context_lines=[
+                "BUY BITREFILL",
+                str(quote.get("productName", quote.get("productId", "")))[:20],
+                f"MAX {quote['singitAmount']} SINGIT"[:20],
+            ],
+        )
+        if not approval.get("approved"):
+            self.store.advance_state(
+                quote_id,
+                "USER_REJECTED",
+                {
+                    "paymentHash": payment_hash,
+                    "walletCheckout": {
+                        "paymentApprovalHash": payment_hash,
+                        "approval": approval,
+                    },
+                },
+            )
+            return {
+                "ok": False,
+                "decision": "rejected_by_user",
+                "quoteId": quote_id,
+                "paymentApprovalHash": payment_hash,
+                "walletCheckout": {
+                    "paymentApprovalHash": payment_hash,
+                    "approval": approval,
+                },
+            }
+        approved_hash = str(approval.get("approvedHash", "")).lower()
+        if approved_hash and approved_hash != payment_hash:
+            raise ValueError("approved hash does not match Bitrefill purchase hash")
+
+        fulfillment_token = self.fulfillment_token_provider()
+        token_hash = hashlib.sha256(fulfillment_token.encode("utf-8")).hexdigest()
+        wallet_checkout = {
+            "paymentApprovalHash": payment_hash,
+            "approval": approval,
+            "mode": "wallet_native",
+        }
+        self.store.advance_state(
+            quote_id,
+            "USER_APPROVED",
+            {
+                "paymentHash": payment_hash,
+                "paymentCommitment": commitment,
+                "walletCheckout": wallet_checkout,
+                "fulfillmentTokenHash": token_hash,
+                "recipient": recipient,
+            },
+        )
+        try:
+            bitrefill_result = self.fulfillment_runner(
+                {"quoteId": quote_id, "fulfillmentToken": fulfillment_token}
+            )
+        except Exception as exc:
+            self.store.advance_state(
+                quote_id,
+                "RECONCILIATION_REQUIRED",
+                {"walletCheckout": {**wallet_checkout, "fulfillmentError": str(exc)}},
+            )
+            raise
+
+        return {
+            "ok": bool(bitrefill_result.get("ok", False)),
+            "decision": "approved_and_fulfilled",
+            "quoteId": quote_id,
+            "paymentApprovalHash": payment_hash,
+            "paymentCommitment": commitment,
+            "fulfillmentToken": fulfillment_token,
+            "walletCheckout": wallet_checkout,
+            "bitrefill": bitrefill_result,
             "telegramText": _bitrefill_purchase_telegram_text(quote),
         }
 
@@ -338,6 +477,7 @@ class BitrefillSettlementPreparationRunner:
             "ok": True,
             "quoteId": quote_id,
             "status": "ready_for_singit_settlement",
+            "pricingMode": quote.get("pricingMode", "fixed"),
             "settleAmountAtomic": quote["maxSingitAtomic"],
             "maxSingitAtomic": quote["maxSingitAtomic"],
         }

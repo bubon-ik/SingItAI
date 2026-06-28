@@ -3,20 +3,23 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Hermes Sign402 Live Trace</title>
+  <title>Sign402 Firefly Audit</title>
   <style>
     :root {
-      --bg: #f7f7f4;
-      --panel: #ffffff;
-      --ink: #18201d;
-      --muted: #66706b;
-      --line: #d9ded8;
-      --good: #14805e;
-      --good-soft: #e4f4ed;
-      --warn: #9a5b12;
-      --accent: #275a53;
-      --accent-soft: #ddebe8;
-      --code: #101614;
+      --bg: #eef1ed;
+      --panel: #fbfcfa;
+      --panel-2: #f5f7f3;
+      --ink: #111916;
+      --muted: #69736d;
+      --line: #d3dbd4;
+      --line-strong: #aebbb2;
+      --good: #13735a;
+      --good-soft: #dff1e8;
+      --accent: #244f48;
+      --dark: #0d1714;
+      --dark-2: #13231f;
+      --dark-line: #29423b;
+      --code: #0e1513;
     }
 
     * {
@@ -27,49 +30,78 @@
       margin: 0;
       background: var(--bg);
       color: var(--ink);
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       letter-spacing: 0;
     }
 
     main {
-      min-height: 100vh;
-      padding: 28px;
+      min-height: 100dvh;
+      padding: 22px;
     }
 
     .shell {
-      max-width: 1360px;
+      max-width: 1440px;
       margin: 0 auto;
     }
 
     .topbar {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 20px;
-      align-items: end;
-      padding-bottom: 20px;
-      border-bottom: 1px solid var(--line);
+      grid-template-columns: minmax(0, 1fr) minmax(230px, 300px);
+      gap: 24px;
+      align-items: stretch;
+      padding: 26px;
+      border: 1px solid var(--dark-line);
+      border-radius: 8px;
+      background:
+        linear-gradient(135deg, rgba(31, 75, 66, .34), rgba(13, 23, 20, 0) 44%),
+        var(--dark);
+      color: #edf7f2;
     }
 
     h1 {
-      margin: 0 0 8px;
-      font-size: 30px;
-      line-height: 1.08;
-      font-weight: 720;
+      max-width: 720px;
+      margin: 7px 0 9px;
+      font-size: clamp(31px, 4vw, 54px);
+      line-height: .98;
+      font-weight: 780;
     }
 
     .subtitle {
+      max-width: 680px;
       margin: 0;
-      color: var(--muted);
+      color: #adc4ba;
       font-size: 15px;
-      line-height: 1.45;
+      line-height: 1.55;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: #92b5a9;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #65d6a4;
     }
 
     .status {
-      min-width: 260px;
-      padding: 14px 16px;
-      background: var(--good-soft);
-      border: 1px solid #b9ddcf;
+      display: grid;
+      align-content: space-between;
+      min-width: 0;
+      padding: 18px;
+      background: rgba(255, 255, 255, .055);
+      border: 1px solid rgba(209, 238, 225, .17);
       border-radius: 8px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08);
     }
 
     .status-label,
@@ -77,7 +109,7 @@
       display: block;
       color: var(--muted);
       font-size: 11px;
-      font-weight: 700;
+      font-weight: 760;
       letter-spacing: .08em;
       text-transform: uppercase;
     }
@@ -85,16 +117,21 @@
     .status-value {
       display: block;
       margin-top: 6px;
-      color: var(--good);
-      font-size: 18px;
-      font-weight: 760;
+      color: #d7f1e6;
+      font-size: 21px;
+      line-height: 1.1;
+      font-weight: 820;
+    }
+
+    .status .status-label {
+      color: #98b5aa;
     }
 
     .grid {
       display: grid;
-      grid-template-columns: minmax(0, 1.2fr) minmax(340px, .8fr);
-      gap: 24px;
-      margin-top: 24px;
+      grid-template-columns: minmax(0, 1.08fr) minmax(360px, .92fr);
+      gap: 18px;
+      margin-top: 18px;
       align-items: start;
     }
 
@@ -102,6 +139,7 @@
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
+      box-shadow: 0 18px 44px -36px rgba(16, 28, 23, .45);
     }
 
     .section-head {
@@ -110,7 +148,7 @@
       justify-content: space-between;
       gap: 16px;
       min-height: 58px;
-      padding: 16px 18px;
+      padding: 15px 17px;
       border-bottom: 1px solid var(--line);
     }
 
@@ -144,16 +182,16 @@
     }
 
     .trace {
-      padding: 8px 18px 18px;
+      padding: 4px 17px 14px;
     }
 
     .step {
       display: grid;
-      grid-template-columns: 34px minmax(0, 1fr) auto;
-      gap: 14px;
+      grid-template-columns: 36px minmax(0, 1fr) auto;
+      gap: 13px;
       position: relative;
-      min-height: 72px;
-      padding: 14px 0;
+      min-height: 68px;
+      padding: 13px 0;
       border-bottom: 1px solid #eef0ed;
     }
 
@@ -164,7 +202,7 @@
     .step::before {
       content: "";
       position: absolute;
-      left: 16px;
+      left: 17px;
       top: 48px;
       bottom: -20px;
       width: 2px;
@@ -178,10 +216,10 @@
     .num {
       display: grid;
       place-items: center;
-      width: 34px;
-      height: 34px;
+      width: 36px;
+      height: 36px;
       border-radius: 50%;
-      background: var(--accent);
+      background: #17352f;
       color: white;
       font-size: 13px;
       font-weight: 760;
@@ -215,16 +253,24 @@
     .facts {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-      padding: 18px;
+      gap: 0;
+      padding: 0;
     }
 
     .fact {
-      min-height: 82px;
-      padding: 13px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #fbfbfa;
+      min-height: 88px;
+      padding: 15px;
+      border-right: 1px solid #edf0ec;
+      border-bottom: 1px solid #edf0ec;
+      background: var(--panel);
+    }
+
+    .fact:nth-child(2n) {
+      border-right: 0;
+    }
+
+    .fact:nth-last-child(-n + 2) {
+      border-bottom: 0;
     }
 
     .value {
@@ -244,7 +290,7 @@
 
     .side {
       display: grid;
-      gap: 18px;
+      gap: 14px;
     }
 
     .checks {
@@ -269,7 +315,7 @@
       place-items: center;
       width: 22px;
       height: 22px;
-      border-radius: 50%;
+      border-radius: 6px;
       background: var(--good-soft);
       color: var(--good);
       font-size: 13px;
@@ -292,7 +338,7 @@
 
     pre {
       margin: 0;
-      padding: 18px;
+      padding: 16px 18px 18px;
       overflow: auto;
       background: var(--code);
       color: #dbe7df;
@@ -303,18 +349,208 @@
     }
 
     .hash-band {
-      margin-top: 24px;
-      padding: 16px 18px;
-      background: var(--accent-soft);
-      border: 1px solid #bdd2cd;
+      margin-top: 14px;
+      padding: 0;
+      background: var(--panel);
+      border: 1px solid var(--line);
       border-radius: 8px;
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 14px;
+      gap: 0;
+      overflow: hidden;
     }
 
     .hash-band div {
       min-width: 0;
+      padding: 15px 17px;
+      border-right: 1px solid #edf0ec;
+    }
+
+    .hash-band div:last-child {
+      border-right: 0;
+    }
+
+    .proof-grid {
+      display: grid;
+      grid-template-columns: minmax(300px, .92fr) minmax(340px, 1.18fr) minmax(280px, .9fr);
+      gap: 14px;
+      margin-top: 14px;
+      align-items: stretch;
+    }
+
+    .proof-panel {
+      padding: 17px;
+      min-height: 188px;
+      background: #ffffff;
+    }
+
+    .verifier-panel {
+      display: grid;
+      align-content: space-between;
+    }
+
+    .panel-title {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.35;
+      font-weight: 760;
+    }
+
+    .panel-copy {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .firefly-state {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      margin-top: 13px;
+      color: var(--good);
+      font-size: 12px;
+      font-weight: 760;
+    }
+
+    .state-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--good);
+      box-shadow: 0 0 0 4px rgba(20, 128, 94, .12);
+    }
+
+    .approval-screen {
+      display: grid;
+      grid-template-columns: minmax(0, .92fr) minmax(176px, 1fr) 104px;
+      gap: 16px;
+      background: #10201c;
+      color: #eff7f2;
+      border-color: #223d37;
+      box-shadow: 0 24px 56px -36px rgba(8, 17, 14, .9);
+    }
+
+    .approval-screen .label,
+    .approval-screen .panel-copy {
+      color: #9fb8af;
+    }
+
+    .device-lines {
+      display: grid;
+      gap: 8px;
+      align-content: center;
+      padding: 14px;
+      border: 1px solid #31534b;
+      border-radius: 8px;
+      background: #162a25;
+      min-width: 0;
+    }
+
+    .device-line {
+      overflow-wrap: anywhere;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 13px;
+      line-height: 1.25;
+      font-weight: 720;
+    }
+
+    .proof-list {
+      display: grid;
+      gap: 0;
+      margin-top: 16px;
+      border-top: 1px solid #edf0ec;
+    }
+
+    .proof-row {
+      display: grid;
+      grid-template-columns: 92px minmax(0, 1fr);
+      gap: 12px;
+      padding: 10px 0;
+      border-bottom: 1px solid #edf0ec;
+      min-width: 0;
+    }
+
+    .proof-row:last-child {
+      border-bottom: 0;
+    }
+
+    .proof-row .label {
+      padding-top: 2px;
+    }
+
+    .proof-row .value {
+      margin-top: 0;
+      font-size: 12px;
+    }
+
+    .device-actions {
+      display: grid;
+      gap: 8px;
+      align-content: center;
+    }
+
+    .device-button {
+      display: grid;
+      place-items: center;
+      min-height: 38px;
+      border: 1px solid #416a60;
+      border-radius: 7px;
+      color: #d8eee5;
+      font-size: 11px;
+      font-weight: 820;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+
+    .device-button.approve {
+      background: #1d654f;
+      border-color: #2c8067;
+    }
+
+    .gateway-panel {
+      display: grid;
+      align-content: space-between;
+    }
+
+    .mini-kv {
+      display: grid;
+      gap: 9px;
+      margin-top: 14px;
+    }
+
+    .mini-kv div {
+      min-width: 0;
+      padding-top: 9px;
+      border-top: 1px solid #edf0ec;
+    }
+
+    .mini-kv .value {
+      margin-top: 5px;
+      font-size: 12px;
+    }
+
+    .forecast-line {
+      padding: 0 18px 14px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .receipt-strip {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      border-top: 1px solid #edf0ec;
+    }
+
+    .receipt-cell {
+      min-width: 0;
+      padding: 13px 15px;
+      border-right: 1px solid #edf0ec;
+    }
+
+    .receipt-cell:last-child {
+      border-right: 0;
     }
 
     @media (max-width: 980px) {
@@ -322,20 +558,48 @@
         padding: 18px;
       }
 
-      .topbar,
       .grid,
-      .hash-band {
+      .hash-band,
+      .proof-grid,
+      .receipt-strip {
         grid-template-columns: 1fr;
       }
 
       .status {
         min-width: 0;
       }
+
+      .hash-band div,
+      .receipt-cell {
+        border-right: 0;
+        border-bottom: 1px solid #edf0ec;
+      }
+
+      .hash-band div:last-child,
+      .receipt-cell:last-child {
+        border-bottom: 0;
+      }
+    }
+
+    @media (max-width: 720px) {
+      .topbar {
+        grid-template-columns: minmax(0, 1fr) minmax(190px, 230px);
+        gap: 14px;
+        padding: 22px;
+      }
+
+      .status {
+        padding: 14px;
+      }
+
+      .status-value {
+        font-size: 16px;
+      }
     }
 
     @media (max-width: 640px) {
       h1 {
-        font-size: 24px;
+        font-size: 28px;
       }
 
       .facts {
@@ -350,6 +614,16 @@
         grid-column: 2;
         justify-self: start;
       }
+
+      .approval-screen {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 560px) {
+      .topbar {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -358,8 +632,9 @@
     <div class="shell">
       <div class="topbar">
         <div>
-          <h1>Hermes Sign402 Live Trace</h1>
-          <p class="subtitle">Telegram agent payment over x402 on Algorand, gated by Firefly policy and payment approval.</p>
+          <span class="eyebrow">Sign402 live audit</span>
+          <h1>Sign402 Firefly Audit</h1>
+          <p class="subtitle">Telegram agent commerce over official x402 on Algorand, gated by a physical Firefly approval device.</p>
         </div>
         <div class="status">
           <span class="status-label">Decision</span>
@@ -370,16 +645,77 @@
       <div class="hash-band">
         <div>
           <span class="label">Policy Hash</span>
-          <span class="value mono" data-field="policyHash">ae33d87d9ac440117de46766714fff110be50e880e22ecf2056aaafb7df147ac</span>
+          <span class="value mono" data-field="policyHash">77dc5b0ce9dc95c2d7a0bc6804208e291a2145d383b4358d9b246b13b72fa62c</span>
         </div>
         <div>
           <span class="label">Payment Approval Hash</span>
-          <span class="value mono" data-field="paymentApprovalHash">fb44b917f859229622903d48baa7cb398207c1b6ab8a973f7b8048806a7deec9</span>
+          <span class="value mono" data-field="paymentApprovalHash">4c896bf82aa08563d1ecf646093151687060d7045eb8652d525b2fcb6f17fc0b</span>
         </div>
         <div>
           <span class="label">Algorand TestNet Tx</span>
-          <span class="value mono" data-field="txId">6L4YPSZOCK74CPZ3H5GRD4JDMYL2BFVOVTUVIE2HJ34HEYKLEYKQ</span>
+          <span class="value mono" data-field="txId">2MWPRJDQH2UCWUF37AMU6S56UQCQZ5C4VYRP5CKORHIOGGPRMKGQ</span>
         </div>
+      </div>
+
+      <div class="proof-grid">
+        <section class="proof-panel verifier-panel">
+          <div>
+            <span class="label">Hardware Gate</span>
+            <p class="panel-title">Firefly is the human approval boundary</p>
+            <p class="panel-copy">Hermes can request a payment, but the gateway continues only after Firefly returns the same approval hash.</p>
+            <span class="firefly-state"><span class="state-dot"></span><span data-field="fireflyState">connected over USB</span></span>
+          </div>
+          <div class="proof-list">
+            <div class="proof-row">
+              <span class="label">Device</span>
+              <span class="value" data-field="device">Model 262 / Serial 1056</span>
+            </div>
+            <div class="proof-row">
+              <span class="label">Approved</span>
+              <span class="value mono" data-field="deviceHash">hash ...fc0b</span>
+            </div>
+            <div class="proof-row">
+              <span class="label">Mode</span>
+              <span class="value">physical approval required</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="proof-panel approval-screen">
+          <div>
+            <span class="label">On-device Screen</span>
+            <p class="panel-title">What the user confirms</p>
+            <p class="panel-copy">The payment commitment is reduced to readable context plus the short hash suffix shown on Firefly.</p>
+          </div>
+          <div class="device-lines">
+            <span class="device-line" data-field="deviceLine1">x402 WEATHER</span>
+            <span class="device-line" data-field="deviceLine2">0.01 USDC</span>
+            <span class="device-line" data-field="deviceLine3">GoPlausible API</span>
+            <span class="device-line" data-field="deviceLine4">hash ...fc0b</span>
+          </div>
+          <div class="device-actions">
+            <span class="device-button approve">Approve</span>
+            <span class="device-button">Cancel</span>
+          </div>
+        </section>
+
+        <section class="proof-panel gateway-panel">
+          <div>
+            <span class="label">Gateway Role</span>
+            <p class="panel-title">Private key and signing stay local</p>
+            <p class="panel-copy">The Telegram agent receives decisions and receipts; the Mac gateway owns the Algorand payment execution path.</p>
+          </div>
+          <div class="mini-kv">
+            <div>
+              <span class="label">Receiver</span>
+              <span class="value mono" data-field="receiver">ZMFK2OI7ZBD2U27ISERZC4S6LKM6WMFJPZQ4MYNJDZ2VNBNMBA67RA22AA</span>
+            </div>
+            <div>
+              <span class="label">x402 Network</span>
+              <span class="value mono" data-field="x402Network">algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=</span>
+            </div>
+          </div>
+        </section>
       </div>
 
       <div class="grid">
@@ -393,15 +729,15 @@
               <div class="num">1</div>
               <div>
                 <p class="step-title">Telegram command</p>
-                <p class="step-copy" data-field="commandText">Hermes receives: buy x402 probe for algorand.co</p>
+                <p class="step-copy" data-field="commandText">Hermes receives: buy goplausible weather</p>
               </div>
               <div class="step-state">received</div>
             </div>
             <div class="step">
               <div class="num">2</div>
               <div>
-                <p class="step-title">Protected resource requested</p>
-                <p class="step-copy">Resource server returns HTTP 402 with Algorand TestNet payment requirements.</p>
+                <p class="step-title">Official x402 resource requested</p>
+                <p class="step-copy">GoPlausible returns HTTP 402 with x402 v2 accepts data for Algorand TestNet USDC.</p>
               </div>
               <div class="step-state">402</div>
             </div>
@@ -417,23 +753,23 @@
               <div class="num">4</div>
               <div>
                 <p class="step-title">Firefly payment approval</p>
-                <p class="step-copy">Gateway sends PAYMENT hash to Firefly. User approves on-device.</p>
+                <p class="step-copy">Gateway sends payment context and approval hash to Firefly. User approves on-device.</p>
               </div>
               <div class="step-state">approved</div>
             </div>
             <div class="step">
               <div class="num">5</div>
               <div>
-                <p class="step-title">Gateway executes payment</p>
-                <p class="step-copy">The Mac gateway sends the Algorand payment. Hermes never receives the private key.</p>
+                <p class="step-title">Gateway executes official x402 payment</p>
+                <p class="step-copy">The gateway builds the x402-avm payment group and sends the Algorand TestNet transaction.</p>
               </div>
               <div class="step-state">sent</div>
             </div>
             <div class="step">
               <div class="num">6</div>
               <div>
-                <p class="step-title">x402 retry</p>
-                <p class="step-copy">Hermes retries the resource with X-Payment proof and Sign402 trace data.</p>
+                <p class="step-title">x402 verification</p>
+                <p class="step-copy">GoPlausible verifies the payment response and unlocks the protected weather resource.</p>
               </div>
               <div class="step-state">verified</div>
             </div>
@@ -441,7 +777,7 @@
               <div class="num">7</div>
               <div>
                 <p class="step-title">Access granted</p>
-                <p class="step-copy" data-field="accessText">Probe result is returned: algorand.co reachable from Berlin with 42 ms latency.</p>
+                <p class="step-copy" data-field="accessText">Weather result is returned by the paid GoPlausible x402 API.</p>
               </div>
               <div class="step-state">200</div>
             </div>
@@ -456,28 +792,28 @@
             </div>
             <div class="facts">
               <div class="fact">
-                <span class="label">Resource</span>
-                <span class="value mono" data-field="resource">/probe?target=algorand.co</span>
-              </div>
-              <div class="fact">
                 <span class="label">Amount</span>
-                <span class="value" data-field="amount">50,000 microALGO</span>
+                <span class="value" data-field="amount">0.01 USDC</span>
               </div>
               <div class="fact">
                 <span class="label">Asset</span>
-                <span class="value" data-field="asset">ALGO_TEST</span>
+                <span class="value" data-field="asset">USDC (ASA 10458941)</span>
               </div>
               <div class="fact">
                 <span class="label">Network</span>
                 <span class="value" data-field="network">algorand-testnet</span>
               </div>
               <div class="fact">
-                <span class="label">Device</span>
-                <span class="value" data-field="device">Model 262 / Serial 1056</span>
+                <span class="label">Intent</span>
+                <span class="value mono" data-field="intentShort">x402-local-4036b825-62c76ea79ab51fa8</span>
               </div>
               <div class="fact">
                 <span class="label">Remaining Budget</span>
-                <span class="value" data-field="remainingBudget">950,000 microALGO</span>
+                <span class="value" data-field="remainingBudget">0.06 USDC</span>
+              </div>
+              <div class="fact">
+                <span class="label">Resource</span>
+                <span class="value mono" data-field="resource">https://x402.goplausible.xyz/examples/weather</span>
               </div>
             </div>
           </section>
@@ -499,21 +835,21 @@
                 <div class="mark">✓</div>
                 <div>
                   <strong>Payment hash approved on Firefly</strong>
-                  <span>Gateway continued only after the returned approval hash matched.</span>
+                  <span>Gateway continued only after the returned approval hash matched the payment commitment.</span>
                 </div>
               </div>
               <div class="check">
                 <div class="mark">✓</div>
                 <div>
                   <strong>Replay protection passed</strong>
-                  <span data-field="replayText">paymentIntent intent-cb77dc094504 was fresh for this run.</span>
+                  <span data-field="replayText">paymentIntent x402-local-4036b825-62c76ea79ab51fa8 was fresh for this run.</span>
                 </div>
               </div>
               <div class="check">
                 <div class="mark">✓</div>
                 <div>
                   <strong>Private key stayed local</strong>
-                  <span>Only the Mac gateway executed the Algorand transaction.</span>
+                  <span>Hermes never receives the Algorand private key or mnemonic.</span>
                 </div>
               </div>
             </div>
@@ -523,14 +859,29 @@
             <div class="section-head">
               <h2>Resource Response</h2>
             </div>
+            <div class="forecast-line" data-field="forecastSummary">New York: 45F, Partly Cloudy | London: 48F, Overcast | Tokyo: 55F, Clear | Sydney: 77F, Sunny | Dubai: 86F, Sunny</div>
+            <div class="receipt-strip">
+              <div class="receipt-cell">
+                <span class="label">Paid Tool</span>
+                <span class="value" data-field="toolName">GoPlausible Weather</span>
+              </div>
+              <div class="receipt-cell">
+                <span class="label">Status</span>
+                <span class="value">HTTP 200</span>
+              </div>
+              <div class="receipt-cell">
+                <span class="label">Result</span>
+                <span class="value">resource unlocked</span>
+              </div>
+            </div>
             <pre data-field="resourceJson">{
-  "target": "algorand.co",
-  "location": "Berlin",
-  "httpStatus": 200,
-  "latencyMs": 42,
-  "paymentTx": "6L4YPSZOCK74CPZ3H5GRD4JDMYL2BFVOVTUVIE2HJ34HEYKLEYKQ",
-  "paymentIntent": "intent-cb77dc094504",
-  "result": "reachable"
+  "forecast": {
+    "New York": {
+      "temperature": 45,
+      "condition": "Partly Cloudy"
+    }
+  },
+  "status": 200
 }</pre>
           </section>
         </div>
@@ -539,27 +890,71 @@
   </main>
   <script>
     const fallbackEvent = {
-      decision: "APPROVED & EXECUTED",
-      command: "buy x402 probe for algorand.co",
-      policyHash: "ae33d87d9ac440117de46766714fff110be50e880e22ecf2056aaafb7df147ac",
-      paymentApprovalHash: "fb44b917f859229622903d48baa7cb398207c1b6ab8a973f7b8048806a7deec9",
-      txId: "6L4YPSZOCK74CPZ3H5GRD4JDMYL2BFVOVTUVIE2HJ34HEYKLEYKQ",
-      resource: "/probe?target=algorand.co",
-      paymentIntent: "intent-cb77dc094504",
-      amountAtomic: "50000",
-      asset: "ALGO_TEST",
+      decision: "approved_and_executed",
+      ok: true,
+      mode: "official_x402_avm",
+      command: "buy goplausible weather",
+      toolName: "GoPlausible Weather",
+      resourceUrl: "https://x402.goplausible.xyz/examples/weather",
+      policyHash: "77dc5b0ce9dc95c2d7a0bc6804208e291a2145d383b4358d9b246b13b72fa62c",
+      paymentApprovalHash: "4c896bf82aa08563d1ecf646093151687060d7045eb8652d525b2fcb6f17fc0b",
+      txId: "2MWPRJDQH2UCWUF37AMU6S56UQCQZ5C4VYRP5CKORHIOGGPRMKGQ",
+      resource: "https://x402.goplausible.xyz/examples/weather",
+      paymentIntent: "x402-local-4036b825-62c76ea79ab51fa8",
+      amountAtomic: "10000",
+      asset: "10458941",
       network: "algorand-testnet",
+      x402Network: "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=",
+      receiver: "ZMFK2OI7ZBD2U27ISERZC4S6LKM6WMFJPZQ4MYNJDZ2VNBNMBA67RA22AA",
       deviceModel: 262,
       deviceSerial: 1056,
-      remainingBudgetAtomic: "950000",
+      remainingBudgetAtomic: "60000",
+      paymentRequirements: {
+        extra: {
+          name: "USDC",
+          decimals: 6
+        }
+      },
       resourceResult: {
-        target: "algorand.co",
-        location: "Berlin",
-        httpStatus: 200,
-        latencyMs: 42,
-        paymentTx: "6L4YPSZOCK74CPZ3H5GRD4JDMYL2BFVOVTUVIE2HJ34HEYKLEYKQ",
-        paymentIntent: "intent-cb77dc094504",
-        result: "reachable"
+        forecast: {
+          "New York": {
+            temperature: 45,
+            condition: "Partly Cloudy",
+            humidity: 62,
+            wind: "12 mph NW"
+          },
+          London: {
+            temperature: 48,
+            condition: "Overcast",
+            humidity: 78,
+            wind: "8 mph SW"
+          },
+          Tokyo: {
+            temperature: 55,
+            condition: "Clear",
+            humidity: 45,
+            wind: "5 mph E"
+          },
+          Sydney: {
+            temperature: 77,
+            condition: "Sunny",
+            humidity: 55,
+            wind: "10 mph SE"
+          },
+          Dubai: {
+            temperature: 86,
+            condition: "Sunny",
+            humidity: 40,
+            wind: "7 mph N"
+          }
+        },
+        status: 200,
+        paymentResponse: {
+          success: true,
+          transaction: "2MWPRJDQH2UCWUF37AMU6S56UQCQZ5C4VYRP5CKORHIOGGPRMKGQ",
+          network: "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI=",
+          payer: "U2V76A5UFTXMJFQNEB3N5ALPOUYFUVWZMNKM2QAX4BPLLBRD5DLPXTGDAU"
+        }
       }
     };
 
@@ -585,42 +980,94 @@
       return Number.isFinite(number) ? number.toLocaleString("en-US") : String(value || "");
     }
 
+    function assetMeta(asset, event) {
+      const name = pick(event, ["paymentRequirements.extra.name", "paymentRequirements.originalPaymentRequirements.extra.name"], "");
+      const decimals = Number(pick(event, ["paymentRequirements.extra.decimals", "paymentRequirements.originalPaymentRequirements.extra.decimals"], 6));
+      if (asset === "10458941") {
+        return { label: "USDC (ASA 10458941)", ticker: "USDC", decimals: Number.isFinite(decimals) ? decimals : 6 };
+      }
+      if (asset === "ALGO_TEST") {
+        return { label: "ALGO_TEST", ticker: "ALGO", decimals: 6 };
+      }
+      return { label: name ? `${name} (${asset})` : String(asset || ""), ticker: name || String(asset || ""), decimals: Number.isFinite(decimals) ? decimals : 0 };
+    }
+
+    function formatAssetAmount(value, meta) {
+      const atomic = Number(value || 0);
+      if (!Number.isFinite(atomic) || !meta.decimals) {
+        return `${formatAtomic(value)} atomic ${meta.ticker}`.trim();
+      }
+      const units = atomic / (10 ** meta.decimals);
+      const pretty = units.toLocaleString("en-US", {
+        minimumFractionDigits: units < 1 ? 2 : 0,
+        maximumFractionDigits: 6
+      });
+      return `${pretty} ${meta.ticker}`;
+    }
+
+    function formatDecision(value) {
+      return String(value || fallbackEvent.decision)
+        .replace(/_/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toUpperCase();
+    }
+
+    function shortHash(hash) {
+      const value = String(hash || "");
+      return value.length > 8 ? `...${value.slice(-4)}` : value;
+    }
+
+    function compactValue(value, front = 10, back = 8) {
+      const text = String(value || "");
+      return text.length > front + back + 3 ? `${text.slice(0, front)}...${text.slice(-back)}` : text;
+    }
+
+    function summarizeForecast(result) {
+      const forecast = result && result.forecast;
+      if (!forecast || typeof forecast !== "object") {
+        return "Paid resource returned HTTP 200.";
+      }
+      return Object.entries(forecast)
+        .map(([city, weather]) => `${city}: ${weather.temperature}F, ${weather.condition}`)
+        .join(" | ");
+    }
+
     function normalizeEvent(event) {
       const txId = pick(event, ["txId", "payment.txId", "paymentProof.txId", "resourceResult.paymentTx"], fallbackEvent.txId);
       const paymentIntent = pick(event, ["paymentIntent", "payment.paymentIntent", "paymentRequirements.paymentIntent", "resourceResult.paymentIntent"], fallbackEvent.paymentIntent);
-      const target = pick(event, ["target", "resourceResult.target"], "algorand.co");
-      const result = pick(event, ["result", "resourceResult.result"], "reachable");
+      const target = pick(event, ["target", "resourceResult.target"], "GoPlausible weather");
+      const result = pick(event, ["result", "resourceResult.result"], "official_x402_resource_access_granted");
       const latencyMs = pick(event, ["latencyMs", "resourceResult.latencyMs"], 42);
       const deviceModel = pick(event, ["deviceModel", "firefly.deviceModel", "fireflyApproval.deviceModel"], fallbackEvent.deviceModel);
       const deviceSerial = pick(event, ["deviceSerial", "firefly.deviceSerial", "fireflyApproval.deviceSerial"], fallbackEvent.deviceSerial);
       const amountAtomic = pick(event, ["amountAtomic", "amount", "payment.amountAtomic", "paymentRequirements.amountAtomic"], fallbackEvent.amountAtomic);
+      const asset = pick(event, ["asset", "payment.asset", "paymentRequirements.asset"], fallbackEvent.asset);
+      const resourceResult = event && typeof event.resourceResult === "object" ? event.resourceResult : fallbackEvent.resourceResult;
+      const resource = pick(event, ["resourceUrl", "resource", "paymentRequirements.resource", "paymentProof.resource"], fallbackEvent.resource);
 
       return {
         decision: pick(event, ["decision", "status"], fallbackEvent.decision),
         command: pick(event, ["command"], fallbackEvent.command),
+        toolName: pick(event, ["toolName", "tool.name"], fallbackEvent.toolName),
         policyHash: pick(event, ["policyHash", "payment.policyHash"], fallbackEvent.policyHash),
         paymentApprovalHash: pick(event, ["paymentApprovalHash"], fallbackEvent.paymentApprovalHash),
         txId,
-        resource: pick(event, ["resource", "paymentRequirements.resource", "paymentProof.resource"], fallbackEvent.resource),
+        resource,
         paymentIntent,
         amountAtomic,
-        asset: pick(event, ["asset", "payment.asset", "paymentRequirements.asset"], fallbackEvent.asset),
+        asset,
         network: pick(event, ["network", "payment.network", "paymentRequirements.network"], fallbackEvent.network),
+        x402Network: pick(event, ["x402Network", "paymentResponse.network", "paymentRequirements.x402Network"], fallbackEvent.x402Network),
+        receiver: pick(event, ["receiver", "payment.receiver", "paymentRequirements.receiver"], fallbackEvent.receiver),
         deviceModel,
         deviceSerial,
         remainingBudgetAtomic: pick(event, ["remainingBudgetAtomic"], fallbackEvent.remainingBudgetAtomic),
         target,
         result,
         latencyMs,
-        resourceResult: {
-          target,
-          location: pick(event, ["location", "resourceResult.location"], "Berlin"),
-          httpStatus: pick(event, ["httpStatus", "resourceResult.httpStatus"], 200),
-          latencyMs,
-          paymentTx: txId,
-          paymentIntent,
-          result
-        }
+        resourceResult,
+        assetMeta: assetMeta(asset, event || fallbackEvent)
       };
     }
 
@@ -632,19 +1079,33 @@
 
     function render(event, source) {
       const view = normalizeEvent(event || fallbackEvent);
-      setField("decision", view.decision);
+      const amount = formatAssetAmount(view.amountAtomic, view.assetMeta);
+      const remainingBudget = formatAssetAmount(view.remainingBudgetAtomic, view.assetMeta);
+
+      setField("decision", formatDecision(view.decision));
       setField("policyHash", view.policyHash);
       setField("paymentApprovalHash", view.paymentApprovalHash);
       setField("txId", view.txId);
       setField("commandText", `Hermes receives: ${view.command}`);
-      setField("accessText", `Probe result is returned: ${view.target} ${view.result} from Berlin with ${view.latencyMs} ms latency.`);
+      setField("toolName", view.toolName);
+      setField("accessText", `Paid resource returned: ${view.result}.`);
       setField("resource", view.resource);
-      setField("amount", `${formatAtomic(view.amountAtomic)} microALGO`);
-      setField("asset", view.asset);
+      setField("amount", amount);
+      setField("asset", view.assetMeta.label);
       setField("network", view.network);
+      setField("receiver", view.receiver);
+      setField("x402Network", view.x402Network);
       setField("device", `Model ${view.deviceModel} / Serial ${view.deviceSerial}`);
-      setField("remainingBudget", `${formatAtomic(view.remainingBudgetAtomic)} microALGO`);
+      setField("remainingBudget", remainingBudget);
       setField("replayText", `paymentIntent ${view.paymentIntent} was fresh for this run.`);
+      setField("intentShort", compactValue(view.paymentIntent, 14, 8));
+      setField("fireflyState", `device ${view.deviceModel}/${view.deviceSerial} connected over USB`);
+      setField("deviceHash", `hash ${shortHash(view.paymentApprovalHash)}`);
+      setField("deviceLine1", view.assetMeta.ticker === "USDC" ? "x402 WEATHER" : "x402 PAYMENT");
+      setField("deviceLine2", amount);
+      setField("deviceLine3", view.resource.includes("goplausible") ? "GoPlausible API" : "Algorand resource");
+      setField("deviceLine4", `hash ${shortHash(view.paymentApprovalHash)}`);
+      setField("forecastSummary", summarizeForecast(view.resourceResult));
       setField("resourceJson", JSON.stringify(view.resourceResult, null, 2));
       setField("syncStatus", source === "live" ? "live from gateway" : "fallback trace");
     }

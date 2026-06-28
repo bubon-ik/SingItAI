@@ -235,6 +235,72 @@ Default URL:
 http://127.0.0.1:8099
 ```
 
+## Wallet-native Bitrefill checkout
+
+This is the production checkout direction for Telegram/consumer purchases:
+
+```text
+user/embedded wallet SINGIT -> CDP wallet swap to USDC -> Bitrefill USDC/Base invoice
+```
+
+Create the local live env file:
+
+```bash
+cd "/Users/mp/Documents/Berlin Hack/sign402-gateway"
+cp .env.wallet-bitrefill.example .env.wallet-bitrefill
+```
+
+Fill:
+
+```text
+BITREFILL_API_KEY=...
+SIGN402_BITREFILL_REFUND_ADDRESS=0x...
+FIREFLY_PORT=/dev/cu.usbmodem11301
+```
+
+If `SIGN402_BITREFILL_REFUND_ADDRESS` is omitted, the run script uses `CDP_EVM_ACCOUNT_ADDRESS` from `../cdp-x402-service/.env`.
+
+Start the gateway in wallet-native mode:
+
+```bash
+cd "/Users/mp/Documents/Berlin Hack/sign402-gateway"
+./scripts/run-wallet-bitrefill.sh
+```
+
+If your Bitrefill key already lives in another local env file, reuse it instead of copying secrets:
+
+```bash
+SIGN402_ENV_FILE="/path/to/your/existing.env" ./scripts/run-wallet-bitrefill.sh
+```
+
+The script sets the important checkout mode:
+
+```text
+SIGN402_BITREFILL_MODE=live
+SIGN402_BITREFILL_PAYMENT_METHOD=usdc_base
+SIGN402_BITREFILL_USDC_TREASURY_MODE=cdp_wallet
+SIGN402_BITREFILL_PRICING_SOURCE=cdp_wallet
+SIGN402_BITREFILL_FUNDING_MODE=cdp_wallet_swap
+```
+
+Quote a Bitrefill product:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8099/agent/quote-bitrefill \
+  -H "Content-Type: application/json" \
+  -d '{"productId":"bitrefill-giftcard-usd","packageId":"0.1","country":"US"}'
+```
+
+After explicit user confirmation, execute the wallet-native checkout:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8099/agent/buy-wallet-bitrefill \
+  -H "Content-Type: application/json" \
+  -d '{"quoteId":"<quote_id_from_quote>","recipient":{}}'
+```
+
+The legacy `/agent/buy-bitrefill` route remains available for Bankr x402 experiments, but the Telegram checkout should use `/agent/buy-wallet-bitrefill`.
+
 Expose one tunnel:
 
 ```bash

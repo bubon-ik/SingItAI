@@ -3,5 +3,8 @@
   "version": "0.1.0",
   "type": "module",
   "private": true,
-  "description": "SINGIT-paid Sign402 x402 risk-check endpoint for Bankr x402 Cloud"
+  "description": "SINGIT-paid Sign402 x402 risk-check endpoint for Bankr x402 Cloud",
+  "scripts": {
+    "test": "node --test"
+  }
 }

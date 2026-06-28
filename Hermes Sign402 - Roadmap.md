@@ -140,11 +140,28 @@ The project now has a separate compatibility lane for GoPlausible/x402-v2 resour
 - It normalizes them into the Sign402 payment commitment shape.
 - It returns the `paymentApprovalHash` that Firefly would approve.
 - `POST /agent/buy-x402` performs the official GoPlausible purchase path after Firefly approval.
+- `GET /agent/tools` exposes a small paid-tool catalog for Hermes.
+- `POST /agent/inspect-tool` lets Hermes inspect a paid tool offer before spending.
+- `POST /agent/buy-tool` executes the approved paid tool through the same official x402 path.
 
 This proves the project can understand and pay a live official GoPlausible/x402-v2 resource. The implemented official path is:
 
 ```text
 official 402 -> Firefly approval hash -> x402-avm paymentGroup -> PAYMENT-SIGNATURE -> facilitator settlement -> 200 OK
+```
+
+The first paid tool is:
+
+```text
+tool: goplausible.weather
+MCP-style name: get_weather
+resource: https://x402.goplausible.xyz/examples/weather
+```
+
+This makes the main agent experience tool-oriented:
+
+```text
+agent lists/inspects paid tool -> sees price/asset/receiver -> Firefly approval -> x402 payment -> tool result
 ```
 
 Hermes Telegram proof returned weather JSON from GoPlausible with transaction:

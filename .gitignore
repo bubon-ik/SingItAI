@@ -22,11 +22,15 @@ payment-executor/.venv/
 *.env
 !*.env.example
 payment-executor/.env
+sign402-gateway/.bitrefill-api-key
+.env.wallet-*
+!.env.wallet-*.example
 
 # Demo runtime artifacts
 .demo-logs/
 demo-dashboard/latest-run.json
 demo-dashboard/agent-state.json
+demo-dashboard/bitrefill-orders.sqlite3
 
 # Generated presentation scratch workspace
 outputs/

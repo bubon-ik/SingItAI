@@ -602,6 +602,9 @@ POST /execute-payment
 GET  /events/latest
 POST /events/latest
 POST /agent/buy-probe
+GET  /agent/tools
+POST /agent/inspect-tool
+POST /agent/buy-tool
 POST /agent/inspect-x402
 POST /agent/buy-x402
 ```
@@ -621,6 +624,33 @@ request x402 resource -> receive 402 -> enforce stored Firefly-approved policy -
 ```
 
 This removes the need for long per-run Hermes instructions.
+
+`GET /agent/tools`, `POST /agent/inspect-tool`, and `POST /agent/buy-tool` are the agent-facing paid-tool layer. They make the demo tool-oriented instead of URL-oriented:
+
+```text
+agent lists/inspects paid tool -> reads price, asset, receiver, and payment hash -> Firefly approval -> official x402 payment -> paid tool result
+```
+
+The first built-in paid tool is:
+
+```json
+{
+  "id": "goplausible.weather",
+  "name": "GoPlausible Weather",
+  "mcpStyleName": "get_weather",
+  "resourceUrl": "https://x402.goplausible.xyz/examples/weather"
+}
+```
+
+Hermes can inspect it with:
+
+```json
+{
+  "tool": "goplausible.weather"
+}
+```
+
+Then execute it with the same body at `POST /agent/buy-tool`. Internally this uses the same official GoPlausible/x402-v2 purchase path as `/agent/buy-x402`, but it presents the experience as a paid tool call rather than a hardcoded URL purchase. This is the bridge toward MCP/Bazaar-style discovery.
 
 `POST /agent/inspect-x402` is the GoPlausible/x402-v2 compatibility checkpoint. Hermes or a developer can send:
 
@@ -1367,3 +1397,33 @@ It answers:
 Answer:
 
 > With Firefly-approved policy and payment commitments today, Firefly-signed policies or transactions next, x402 payment flows, and Algorand settlement.
+
+## Bitrefill Catalog Paid With SINGIT
+
+The Gateway defaults to `SIGN402_BITREFILL_MODE=test`. This mode exposes Bitrefill-compatible free test products and cannot spend Bitrefill balance. Live mode is intentionally unavailable until `BITREFILL_API_KEY` exists and the official API contract has been tested.
+
+Search the catalog:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8099/agent/search-bitrefill \
+  -H "Content-Type: application/json" \
+  -d '{"query":"phone","country":"US","includeTestProducts":true}'
+```
+
+Inspect packages and recipient requirements:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8099/agent/get-bitrefill-product \
+  -H "Content-Type: application/json" \
+  -d '{"productId":"test-phone-refill","country":"US"}'
+```
+
+Create an explicit quote:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8099/agent/quote-bitrefill \
+  -H "Content-Type: application/json" \
+  -d '{"productId":"test-phone-refill","packageId":"1","country":"US","recipient":{"phone":"+12025550123"}}'
+```
+
+Use the returned `quoteId` with `/agent/buy-bitrefill`. Firefly approves the exact product type, package, price, recipient commitment, expiration, and maximum SINGIT amount before Bankr is called.

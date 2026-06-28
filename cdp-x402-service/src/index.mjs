@@ -10,6 +10,8 @@ import {
   decodePaymentResponseHeader,
   wrapFetchWithPaymentFromConfig,
 } from "@x402/fetch";
+import { parseUnits } from "viem";
+import { assertSwapMeetsMinUsdc } from "./swap-floor.mjs";
 
 dotenv.config();
 
@@ -29,6 +31,24 @@ async function main() {
   if (command === "buy") {
     const url = requiredOption(options, "url");
     const result = await buyPaidResource(url);
+    writeJson(result);
+    return;
+  }
+
+  if (command === "swap-price") {
+    const result = await getSwapPrice(options);
+    writeJson(result);
+    return;
+  }
+
+  if (command === "swap") {
+    const result = await swapTokens(options);
+    writeJson(result);
+    return;
+  }
+
+  if (command === "transfer-usdc") {
+    const result = await transferUsdc(options);
     writeJson(result);
     return;
   }
@@ -90,6 +110,89 @@ async function buyPaidResource(url) {
       paymentResponse?.transactionHash ||
       paymentResponse?.txHash ||
       null,
+  };
+}
+
+async function getSwapPrice(options) {
+  const cdp = new CdpClient();
+  const account = await getCdpAccount();
+  const fromToken = requiredOption(options, "from-token");
+  const toToken = requiredOption(options, "to-token");
+  const fromAmount = singitAmountToAtomic(requiredOption(options, "amount"));
+  const network = networkName(options.chain || "base");
+  const price = await cdp.evm.getSwapPrice({
+    network,
+    fromToken,
+    toToken,
+    fromAmount,
+    taker: account.address,
+  });
+  return normalizeSwapResult({ ok: true, ...price });
+}
+
+async function swapTokens(options) {
+  const cdp = new CdpClient();
+  const account = await getCdpAccount();
+  const fromToken = requiredOption(options, "from-token");
+  const toToken = requiredOption(options, "to-token");
+  const fromAmount = singitAmountToAtomic(requiredOption(options, "amount"));
+  const network = networkName(options.chain || "base");
+  const slippageBps = Number(options["slippage-bps"] || "100");
+  const minUsdc = options["min-usdc"] || "";
+
+  // Enforce the caller's absolute USDC floor before moving funds. account.swap
+  // only honors slippageBps relative to its own execution price, so without
+  // this check a swap that underfills versus the original quote would still
+  // settle and silently short the treasury.
+  if (minUsdc) {
+    const price = await cdp.evm.getSwapPrice({
+      network,
+      fromToken,
+      toToken,
+      fromAmount,
+      taker: account.address,
+    });
+    assertSwapMeetsMinUsdc(price, minUsdc);
+  }
+
+  const result = await account.swap({
+    network,
+    fromToken,
+    toToken,
+    fromAmount,
+    slippageBps,
+  });
+  const transactionHash = result.transactionHash || result.hash;
+  return {
+    ok: true,
+    transactionHash,
+    fromToken,
+    toToken,
+    fromAmount: fromAmount.toString(),
+    minUsdc,
+    network,
+  };
+}
+
+async function transferUsdc(options) {
+  const account = await getCdpAccount();
+  const to = requiredOption(options, "to");
+  const amount = parseUnits(requiredOption(options, "amount"), 6);
+  const network = networkName(options.chain || "base");
+  const result = await account.transfer({
+    to,
+    amount,
+    token: "usdc",
+    network,
+  });
+  const transactionHash = result.transactionHash || result.hash;
+  return {
+    ok: true,
+    transactionHash,
+    to,
+    amount: amount.toString(),
+    token: "usdc",
+    network,
   };
 }
 
@@ -171,6 +274,32 @@ function parseMaybeJson(text) {
 
 function accountName() {
   return process.env.CDP_EVM_ACCOUNT_NAME || DEFAULT_ACCOUNT_NAME;
+}
+
+function networkName(chain) {
+  if (chain === "base") return "base";
+  if (chain === "base-mainnet") return "base";
+  throw new Error(`Unsupported CDP chain: ${chain}`);
+}
+
+function singitAmountToAtomic(amount) {
+  // Callers always pass a human SINGIT amount (e.g. "25000" or "25000.5");
+  // convert to 18-decimal atomic units. Do not treat all-digit strings as
+  // already-atomic — that would silently scale the amount by 1e18.
+  return parseUnits(String(amount), 18);
+}
+
+function normalizeSwapResult(payload) {
+  if (typeof payload === "bigint") return payload.toString();
+  if (Array.isArray(payload)) return payload.map((item) => normalizeSwapResult(item));
+  if (payload && typeof payload === "object") {
+    const result = {};
+    for (const [key, value] of Object.entries(payload)) {
+      result[key] = normalizeSwapResult(value);
+    }
+    return result;
+  }
+  return payload;
 }
 
 function parseArgs(args) {

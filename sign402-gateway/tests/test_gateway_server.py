@@ -1,19 +1,37 @@
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import ANY, Mock, patch
 
+from sign402_gateway.bitrefill import LiveBitrefillClient, TestBitrefillClient
 from sign402_gateway.server import (
     AgentStateStore,
     BankrCliX402PaymentClient,
+    BankrLlmCreditsTopUpClient,
     BankrLlmCreditsTopUpRunner,
+    BankrSingitToUsdcFundingRunner,
+    BankrTreasuryClient,
+    BankrTransferToCdpSwapFundingRunner,
+    BankrUsdcReserveGuard,
+    CdpWalletClient,
+    CdpWalletSwapFundingRunner,
+    BankrWalletApiClient,
     DEFAULT_SINGIT_RISK_CHECK_URL,
     DEFAULT_SINGIT_TOKEN_ADDRESS,
     ExternalX402Buyer,
     Sign402GatewayHandler,
+    SingitSettlementVerifier,
+    build_bitrefill_funding_runner_from_env,
+    build_bitrefill_client_from_env,
+    build_real_rate_pricer_from_env,
+    build_singit_settlement_verifier_from_env,
+    build_usdc_reserve_guard_from_env,
+    _bankr_cli_transaction_hash,
     _build_bankr_llm_topup_intent,
     _resolve_paid_tool,
     _tool_result,
@@ -22,6 +40,37 @@ from sign402_gateway.server import (
 
 def subprocess_completed(stdout: str = "", stderr: str = "", returncode: int = 0):
     return subprocess.CompletedProcess(args=["bankr"], returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+
+def _topic_address(address: str) -> str:
+    return "0x" + address.lower().removeprefix("0x").rjust(64, "0")
+
+
+def erc20_receipt(
+    *,
+    token: str = DEFAULT_SINGIT_TOKEN_ADDRESS,
+    sender: str,
+    recipient: str,
+    amount: int,
+    status: str = "0x1",
+) -> dict[str, object]:
+    return {
+        "status": status,
+        "logs": [
+            {
+                "address": token,
+                "topics": [
+                    ERC20_TRANSFER_TOPIC,
+                    _topic_address(sender),
+                    _topic_address(recipient),
+                ],
+                "data": hex(amount),
+            }
+        ],
+    }
 
 
 class DummyServer:
@@ -52,6 +101,440 @@ class FakeSocket:
 
 
 class GatewayServerTests(unittest.TestCase):
+    def test_bitrefill_client_factory_defaults_to_safe_test_mode(self):
+        client = build_bitrefill_client_from_env({})
+
+        self.assertIsInstance(client, TestBitrefillClient)
+
+    def test_bitrefill_client_factory_rejects_live_mode_without_api_key(self):
+        with self.assertRaisesRegex(ValueError, "BITREFILL_API_KEY is required"):
+            build_bitrefill_client_from_env({"SIGN402_BITREFILL_MODE": "live"})
+
+    def test_bitrefill_client_factory_builds_live_client_with_api_key(self):
+        client = build_bitrefill_client_from_env(
+            {
+                "SIGN402_BITREFILL_MODE": "live",
+                "BITREFILL_API_KEY": "test_key",
+                "SIGN402_BITREFILL_BASE_URL": "https://bitrefill.example/v2",
+                "SIGN402_BITREFILL_LIVE_MAX_USD": "3.50",
+            }
+        )
+
+        self.assertIsInstance(client, LiveBitrefillClient)
+        self.assertEqual(client.base_url, "https://bitrefill.example/v2")
+        self.assertEqual(str(client.max_purchase_usd), "3.50")
+
+    def test_bitrefill_client_factory_builds_usdc_base_live_client_with_treasury(self):
+        client = build_bitrefill_client_from_env(
+            {
+                "SIGN402_BITREFILL_MODE": "live",
+                "BITREFILL_API_KEY": "test_key",
+                "SIGN402_BITREFILL_PAYMENT_METHOD": "usdc_base",
+                "SIGN402_TREASURY_REFUND_ADDRESS": "0xTreasuryRefund",
+            }
+        )
+
+        self.assertIsInstance(client, LiveBitrefillClient)
+        self.assertEqual(client.payment_method, "usdc_base")
+        self.assertEqual(client.refund_address, "0xTreasuryRefund")
+        self.assertIsInstance(client.treasury_client, BankrTreasuryClient)
+
+    def test_bitrefill_client_factory_accepts_bitrefill_refund_address_alias(self):
+        client = build_bitrefill_client_from_env(
+            {
+                "SIGN402_BITREFILL_MODE": "live",
+                "BITREFILL_API_KEY": "test_key",
+                "SIGN402_BITREFILL_PAYMENT_METHOD": "usdc_base",
+                "SIGN402_BITREFILL_REFUND_ADDRESS": "0xUserRefund",
+            }
+        )
+
+        self.assertEqual(client.refund_address, "0xUserRefund")
+
+    def test_bitrefill_client_factory_requires_refund_address_for_usdc_base(self):
+        with self.assertRaisesRegex(ValueError, "SIGN402_BITREFILL_REFUND_ADDRESS"):
+            build_bitrefill_client_from_env(
+                {
+                    "SIGN402_BITREFILL_MODE": "live",
+                    "BITREFILL_API_KEY": "test_key",
+                    "SIGN402_BITREFILL_PAYMENT_METHOD": "usdc_base",
+                }
+            )
+
+    def test_bitrefill_client_factory_rejects_unknown_mode(self):
+        with self.assertRaisesRegex(ValueError, "unsupported SIGN402_BITREFILL_MODE"):
+            build_bitrefill_client_from_env({"SIGN402_BITREFILL_MODE": "automatic"})
+
+    def test_live_settlement_requires_bankr_wallet(self):
+        with self.assertRaisesRegex(ValueError, "SIGN402_BANKR_WALLET_ADDRESS"):
+            build_singit_settlement_verifier_from_env(
+                {
+                    "SIGN402_BITREFILL_MODE": "live",
+                }
+            )
+
+    def test_live_settlement_can_be_disabled_for_wallet_native_bitrefill(self):
+        verifier = build_singit_settlement_verifier_from_env(
+            {
+                "SIGN402_BITREFILL_MODE": "live",
+                "SIGN402_DISABLE_BANKR_BITREFILL_SETTLEMENT": "1",
+            }
+        )
+
+        self.assertIsNone(verifier)
+
+    def test_live_settlement_accepts_base_bankr_wallet(self):
+        verifier = build_singit_settlement_verifier_from_env(
+            {
+                "SIGN402_BITREFILL_MODE": "live",
+                "SIGN402_BANKR_WALLET_ADDRESS": "0x3b3e349e6cfee692b69d2c63ce86f7d444667d98",
+            }
+        )
+
+        self.assertIsInstance(verifier, SingitSettlementVerifier)
+        self.assertEqual(
+            verifier.payer_address,
+            "0x3b3e349e6cfee692b69d2c63ce86f7d444667d98",
+        )
+
+    def test_bankr_singit_to_usdc_funding_runner_swaps_quote_singit(self):
+        swap_client = Mock(
+            **{
+                "swap.return_value": {
+                    "ok": True,
+                    "txId": "0xSWAP",
+                    "stdout": "Swap successful",
+                }
+            }
+        )
+        runner = BankrSingitToUsdcFundingRunner(
+            swap_client=swap_client,
+            from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+            to_token="USDC",
+            chain="base",
+        )
+
+        result = runner(
+            {
+                "quoteId": "quote_1",
+                "pricingMode": "bankr_real_rate",
+                "singitAmount": "25000",
+                "expectedUsdc": "0.11",
+            }
+        )
+
+        self.assertEqual(result["txId"], "0xSWAP")
+        swap_client.swap.assert_called_once_with(
+            from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+            to_token="USDC",
+            amount="25000",
+            chain="base",
+        )
+
+    def test_bankr_singit_to_usdc_funding_runner_rejects_underfilled_swap(self):
+        swap_client = Mock(
+            **{
+                "quote.return_value": {"ok": True, "minToAmount": "0.12", "toAmount": "0.13"},
+                "swap.return_value": {
+                    "ok": True,
+                    "txId": "0xSWAP",
+                    "amountReceived": "0.05",
+                },
+            }
+        )
+        runner = BankrSingitToUsdcFundingRunner(
+            swap_client=swap_client,
+            from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+            to_token="USDC",
+            chain="base",
+        )
+
+        with self.assertRaisesRegex(ValueError, "USDC"):
+            runner(
+                {
+                    "quoteId": "quote_1",
+                    "pricingMode": "bankr_real_rate",
+                    "singitAmount": "25000",
+                    "requiredUsdc": "0.10",
+                    "expectedUsdc": "0.11",
+                }
+            )
+
+    def test_bankr_singit_to_usdc_funding_runner_rejects_when_quote_floor_below_required(self):
+        swap_client = Mock(
+            **{
+                "quote.return_value": {"ok": True, "minToAmount": "0.05", "toAmount": "0.06"},
+                "swap.return_value": {"ok": True, "txId": "0xSWAP", "amountReceived": "0.12"},
+            }
+        )
+        runner = BankrSingitToUsdcFundingRunner(
+            swap_client=swap_client,
+            from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+            to_token="USDC",
+            chain="base",
+        )
+
+        with self.assertRaisesRegex(ValueError, "USDC"):
+            runner(
+                {
+                    "quoteId": "quote_1",
+                    "pricingMode": "bankr_real_rate",
+                    "singitAmount": "25000",
+                    "requiredUsdc": "0.10",
+                    "expectedUsdc": "0.11",
+                }
+            )
+
+        swap_client.swap.assert_not_called()
+
+    def test_bankr_singit_to_usdc_funding_runner_accepts_sufficient_swap(self):
+        swap_client = Mock(
+            **{
+                "quote.return_value": {"ok": True, "minToAmount": "0.12", "toAmount": "0.13"},
+                "swap.return_value": {
+                    "ok": True,
+                    "txId": "0xSWAP",
+                    "amountReceived": "0.12",
+                },
+            }
+        )
+        runner = BankrSingitToUsdcFundingRunner(
+            swap_client=swap_client,
+            from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+            to_token="USDC",
+            chain="base",
+        )
+
+        result = runner(
+            {
+                "quoteId": "quote_1",
+                "pricingMode": "bankr_real_rate",
+                "singitAmount": "25000",
+                "requiredUsdc": "0.10",
+                "expectedUsdc": "0.11",
+            }
+        )
+
+        self.assertEqual(result["txId"], "0xSWAP")
+
+    def test_bankr_singit_to_usdc_funding_runner_rejects_fixed_price_quote(self):
+        runner = BankrSingitToUsdcFundingRunner(
+            swap_client=Mock(),
+            from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+            to_token="USDC",
+            chain="base",
+        )
+
+        with self.assertRaisesRegex(ValueError, "bankr_real_rate"):
+            runner({"quoteId": "quote_1", "singitAmount": "11"})
+
+    def test_cdp_wallet_swap_funding_runner_swaps_quote_singit_without_bankr_transfer(self):
+        cdp_client = Mock(
+            **{"swap_singit_to_usdc.return_value": {"ok": True, "txId": "0xCDPSWAP"}}
+        )
+        runner = CdpWalletSwapFundingRunner(
+            cdp_client=cdp_client,
+            from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+            chain="base",
+        )
+
+        result = runner(
+            {
+                "quoteId": "quote_1",
+                "pricingMode": "bankr_real_rate",
+                "singitAmount": "130000",
+                "expectedUsdc": "0.111",
+                "priceUsd": "0.10",
+            }
+        )
+
+        self.assertEqual(result["mode"], "cdp_wallet_swap")
+        self.assertEqual(result["txId"], "0xCDPSWAP")
+        cdp_client.swap_singit_to_usdc.assert_called_once_with(
+            amount="130000",
+            from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+            min_usdc="0.10",
+            chain="base",
+        )
+
+    def test_bankr_transfer_to_cdp_swap_runner_transfers_then_swaps(self):
+        transfer_client = Mock(
+            **{"transfer_singit.return_value": {"ok": True, "txId": "0xTRANSFER"}}
+        )
+        cdp_client = Mock(
+            **{"swap_singit_to_usdc.return_value": {"ok": True, "txId": "0xSWAP", "amountReceived": "0.12"}}
+        )
+        runner = BankrTransferToCdpSwapFundingRunner(
+            bankr_transfer_client=transfer_client,
+            cdp_client=cdp_client,
+            cdp_wallet_address="0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+            from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+        )
+
+        result = runner(
+            {
+                "quoteId": "quote_1",
+                "pricingMode": "bankr_real_rate",
+                "singitAmount": "150000",
+                "requiredUsdc": "0.10",
+            }
+        )
+
+        self.assertEqual(result["transfer"]["txId"], "0xTRANSFER")
+        self.assertEqual(result["swap"]["txId"], "0xSWAP")
+        transfer_client.transfer_singit.assert_called_once_with(
+            to_address="0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+            amount="150000",
+            token_address=DEFAULT_SINGIT_TOKEN_ADDRESS,
+            chain="base",
+        )
+        cdp_client.swap_singit_to_usdc.assert_called_once_with(
+            amount="150000",
+            from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+            min_usdc="0.10",
+            chain="base",
+        )
+
+    def test_cdp_wallet_client_runs_swap_and_transfer_commands(self):
+        price_completed = subprocess_completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "fromAmount": "150000000000000000000000",
+                    "toAmount": "134576",
+                    "minToAmount": "133237",
+                    "liquidityAvailable": True,
+                }
+            )
+        )
+        swap_completed = subprocess_completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "transactionHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "amountReceived": "0.134",
+                }
+            )
+        )
+        transfer_completed = subprocess_completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "transactionHash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                }
+            )
+        )
+        with patch("subprocess.run", side_effect=[price_completed, swap_completed, transfer_completed]) as run:
+            client = CdpWalletClient(service_dir=Path("/tmp/cdp"))
+            quote = client.quote(
+                from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+                to_token="USDC",
+                amount="150000",
+                chain="base",
+            )
+            swap = client.swap_singit_to_usdc(
+                amount="150000",
+                from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+                min_usdc="0.10",
+            )
+            transfer = client.transfer_usdc(to_address="0xInvoice", amount="0.10")
+
+        self.assertEqual(quote["toAmount"], "0.134576")
+        self.assertEqual(quote["minToAmount"], "0.133237")
+        self.assertEqual(swap["txId"], "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        self.assertEqual(transfer["txId"], "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        self.assertEqual(run.call_args_list[0].args[0][2], "swap-price")
+        self.assertEqual(run.call_args_list[1].args[0][2], "swap")
+        self.assertIn("--amount", run.call_args_list[1].args[0])
+        self.assertEqual(run.call_args_list[2].args[0][2], "transfer-usdc")
+        self.assertIn("--to", run.call_args_list[2].args[0])
+
+    def test_real_rate_pricer_env_builder_requires_max_singit(self):
+        with self.assertRaisesRegex(ValueError, "SIGN402_MAX_SINGIT_PER_BITREFILL_ORDER"):
+            build_real_rate_pricer_from_env(
+                {
+                    "SIGN402_BITREFILL_PRICING_MODE": "bankr_real_rate",
+                }
+            )
+
+    def test_real_rate_pricer_env_builder_uses_bankr_wallet_api_when_key_is_set(self):
+        pricer = build_real_rate_pricer_from_env(
+            {
+                "SIGN402_BITREFILL_PRICING_MODE": "bankr_real_rate",
+                "SIGN402_MAX_SINGIT_PER_BITREFILL_ORDER": "1000000",
+                "BANKR_API_KEY": "test_key",
+            }
+        )
+
+        self.assertIsInstance(pricer.quote_client, BankrWalletApiClient)
+
+    def test_bitrefill_funding_runner_env_builder_uses_bankr_wallet_api_swap(self):
+        runner = build_bitrefill_funding_runner_from_env(
+            {
+                "SIGN402_BITREFILL_FUNDING_MODE": "bankr_wallet_api_swap",
+                "BANKR_API_KEY": "test_key",
+            }
+        )
+
+        self.assertIsInstance(runner, BankrSingitToUsdcFundingRunner)
+        self.assertIsInstance(runner.swap_client, BankrWalletApiClient)
+
+    def test_bitrefill_funding_runner_env_builder_requires_bankr_api_key(self):
+        with patch("sign402_gateway.server.load_bankr_api_key", return_value=None):
+            with self.assertRaisesRegex(ValueError, "BANKR_API_KEY"):
+                build_bitrefill_funding_runner_from_env(
+                    {"SIGN402_BITREFILL_FUNDING_MODE": "bankr_wallet_api_swap"}
+                )
+
+    def test_bitrefill_funding_runner_env_builder_uses_bankr_transfer_to_cdp_swap(self):
+        runner = build_bitrefill_funding_runner_from_env(
+            {
+                "SIGN402_BITREFILL_FUNDING_MODE": "bankr_transfer_to_cdp_swap",
+                "SIGN402_CDP_WALLET_ADDRESS": "0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+                "SIGN402_CDP_X402_SERVICE_DIR": "/tmp/cdp",
+            }
+        )
+
+        self.assertIsInstance(runner, BankrTransferToCdpSwapFundingRunner)
+        self.assertIsInstance(runner.cdp_client, CdpWalletClient)
+
+    def test_bitrefill_funding_runner_env_builder_uses_cdp_wallet_swap(self):
+        runner = build_bitrefill_funding_runner_from_env(
+            {
+                "SIGN402_BITREFILL_FUNDING_MODE": "cdp_wallet_swap",
+                "SIGN402_CDP_X402_SERVICE_DIR": "/tmp/cdp",
+            }
+        )
+
+        self.assertIsInstance(runner, CdpWalletSwapFundingRunner)
+        self.assertIsInstance(runner.cdp_client, CdpWalletClient)
+
+    def test_real_rate_pricer_env_builder_uses_cdp_wallet_when_configured(self):
+        pricer = build_real_rate_pricer_from_env(
+            {
+                "SIGN402_BITREFILL_PRICING_MODE": "bankr_real_rate",
+                "SIGN402_BITREFILL_PRICING_SOURCE": "cdp_wallet",
+                "SIGN402_MAX_SINGIT_PER_BITREFILL_ORDER": "1000000",
+                "SIGN402_CDP_X402_SERVICE_DIR": "/tmp/cdp",
+            }
+        )
+
+        self.assertIsInstance(pricer.quote_client, CdpWalletClient)
+
+    def test_bitrefill_client_factory_uses_cdp_treasury_for_usdc_base(self):
+        client = build_bitrefill_client_from_env(
+            {
+                "SIGN402_BITREFILL_MODE": "live",
+                "BITREFILL_API_KEY": "test_key",
+                "SIGN402_BITREFILL_PAYMENT_METHOD": "usdc_base",
+                "SIGN402_BITREFILL_USDC_TREASURY_MODE": "cdp_wallet",
+                "SIGN402_TREASURY_REFUND_ADDRESS": "0xTreasuryRefund",
+                "SIGN402_CDP_X402_SERVICE_DIR": "/tmp/cdp",
+            }
+        )
+
+        self.assertIsInstance(client.treasury_client, CdpWalletClient)
+
     def make_handler(
         self,
         path: str,
@@ -663,7 +1146,10 @@ class GatewayServerTests(unittest.TestCase):
 """,
         )
         with patch("subprocess.run", return_value=completed) as run:
-            client = BankrCliX402PaymentClient(bankr_cli="/tmp/bankr")
+            client = BankrCliX402PaymentClient(
+                bankr_cli="/tmp/bankr",
+                block_number_fetcher=Mock(return_value=47_751_000),
+            )
             result = client("https://x402.bankr.bot/0xabc/paid-risk-check")
 
         self.assertTrue(result["ok"])
@@ -672,6 +1158,327 @@ class GatewayServerTests(unittest.TestCase):
         self.assertEqual(result["body"], {"ok": True, "riskLevel": "low"})
         self.assertEqual(run.call_args.args[0][:3], ["/tmp/bankr", "x402", "call"])
         self.assertIn("--raw", run.call_args.args[0])
+
+    def test_bankr_transaction_hash_parser_accepts_tx_hash_line(self):
+        self.assertEqual(
+            _bankr_cli_transaction_hash(
+                "Tx Hash:  "
+                "0x453cff05c73f8fc70a9418520bec12ec538cb2cee7a7fbcac8751d177f94483d"
+            ),
+            "0x453cff05c73f8fc70a9418520bec12ec538cb2cee7a7fbcac8751d177f94483d",
+        )
+
+    def test_bankr_x402_client_preserves_payment_made_and_start_block(self):
+        completed = subprocess_completed(
+            stdout="""
+{
+  "success": true,
+  "status": 200,
+  "paymentMade": {
+    "amountUsd": 0.0057,
+    "network": "eip155:8453",
+    "payTo": "0x8AEE621035D93Deb3C0C1177fac252dC2dd501a0"
+  },
+  "response": {"ok": true}
+}
+""",
+        )
+        with patch("subprocess.run", return_value=completed):
+            client = BankrCliX402PaymentClient(
+                bankr_cli="/tmp/bankr",
+                block_number_fetcher=Mock(return_value=47_751_000),
+            )
+            result = client("https://x402.bankr.bot/wallet/buy-bitrefill")
+
+        self.assertEqual(result["startBlock"], 47_751_000)
+        self.assertEqual(
+            result["paymentMade"]["payTo"],
+            "0x8AEE621035D93Deb3C0C1177fac252dC2dd501a0",
+        )
+
+    def test_singit_verifier_discovers_exact_transfer_when_hash_is_missing(self):
+        payer = "0x3b3e349e6cfee692b69d2c63ce86f7d444667d98"
+        pay_to = "0x8aee621035d93deb3c0c1177fac252dc2dd501a0"
+        tx_hash = "0x" + "ab" * 32
+        resolver = Mock(return_value=tx_hash)
+        receipt = erc20_receipt(
+            sender=payer,
+            recipient=pay_to,
+            amount=11_000_000_000_000_000_000,
+        )
+        verifier = SingitSettlementVerifier(
+            receipt_fetcher=Mock(return_value=receipt),
+            transaction_resolver=resolver,
+            payer_address=payer,
+        )
+
+        result = verifier(
+            bankr_result={
+                "transactionHash": None,
+                "startBlock": 47_751_000,
+                "paymentMade": {"payTo": pay_to},
+            },
+            quote={"maxSingitAtomic": "11000000000000000000"},
+        )
+
+        self.assertEqual(result["transactionHash"], tx_hash)
+        self.assertEqual(result["from"], payer)
+        self.assertEqual(result["payTo"], pay_to)
+        self.assertEqual(result["amountAtomic"], "11000000000000000000")
+        self.assertTrue(result["discovered"])
+        resolver.assert_called_once_with(
+            token_address=DEFAULT_SINGIT_TOKEN_ADDRESS,
+            sender=payer,
+            recipient=pay_to,
+            amount_atomic="11000000000000000000",
+            from_block=47_751_000,
+        )
+
+    def test_singit_verifier_rejects_wrong_sender(self):
+        payer = "0x3b3e349e6cfee692b69d2c63ce86f7d444667d98"
+        pay_to = "0x8aee621035d93deb3c0c1177fac252dc2dd501a0"
+        receipt = erc20_receipt(
+            sender="0x1111111111111111111111111111111111111111",
+            recipient=pay_to,
+            amount=11_000_000_000_000_000_000,
+        )
+        verifier = SingitSettlementVerifier(
+            receipt_fetcher=Mock(return_value=receipt),
+            payer_address=payer,
+        )
+
+        with self.assertRaisesRegex(ValueError, "sender"):
+            verifier(
+                bankr_result={"transactionHash": "0x" + "ab" * 32, "paymentMade": {"payTo": pay_to}},
+                quote={"maxSingitAtomic": "11000000000000000000"},
+            )
+
+    def test_singit_verifier_rejects_wrong_recipient(self):
+        payer = "0x3b3e349e6cfee692b69d2c63ce86f7d444667d98"
+        pay_to = "0x8aee621035d93deb3c0c1177fac252dc2dd501a0"
+        receipt = erc20_receipt(
+            sender=payer,
+            recipient="0x1111111111111111111111111111111111111111",
+            amount=11_000_000_000_000_000_000,
+        )
+        verifier = SingitSettlementVerifier(
+            receipt_fetcher=Mock(return_value=receipt),
+            payer_address=payer,
+        )
+
+        with self.assertRaisesRegex(ValueError, "recipient"):
+            verifier(
+                bankr_result={"transactionHash": "0x" + "ab" * 32, "paymentMade": {"payTo": pay_to}},
+                quote={"maxSingitAtomic": "11000000000000000000"},
+            )
+
+    def test_singit_verifier_rejects_wrong_amount(self):
+        payer = "0x3b3e349e6cfee692b69d2c63ce86f7d444667d98"
+        pay_to = "0x8aee621035d93deb3c0c1177fac252dc2dd501a0"
+        receipt = erc20_receipt(
+            sender=payer,
+            recipient=pay_to,
+            amount=10_999_999_999_999_999_999,
+        )
+        verifier = SingitSettlementVerifier(
+            receipt_fetcher=Mock(return_value=receipt),
+            payer_address=payer,
+        )
+
+        with self.assertRaisesRegex(ValueError, "amount"):
+            verifier(
+                bankr_result={"transactionHash": "0x" + "ab" * 32, "paymentMade": {"payTo": pay_to}},
+                quote={"maxSingitAtomic": "11000000000000000000"},
+            )
+
+    def test_singit_verifier_rejects_wrong_token(self):
+        payer = "0x3b3e349e6cfee692b69d2c63ce86f7d444667d98"
+        pay_to = "0x8aee621035d93deb3c0c1177fac252dc2dd501a0"
+        receipt = erc20_receipt(
+            token="0x1111111111111111111111111111111111111111",
+            sender=payer,
+            recipient=pay_to,
+            amount=11_000_000_000_000_000_000,
+        )
+        verifier = SingitSettlementVerifier(
+            receipt_fetcher=Mock(return_value=receipt),
+            payer_address=payer,
+        )
+
+        with self.assertRaisesRegex(ValueError, "token"):
+            verifier(
+                bankr_result={"transactionHash": "0x" + "ab" * 32, "paymentMade": {"payTo": pay_to}},
+                quote={"maxSingitAtomic": "11000000000000000000"},
+            )
+
+    def test_singit_verifier_rejects_failed_receipt(self):
+        payer = "0x3b3e349e6cfee692b69d2c63ce86f7d444667d98"
+        pay_to = "0x8aee621035d93deb3c0c1177fac252dc2dd501a0"
+        receipt = erc20_receipt(
+            sender=payer,
+            recipient=pay_to,
+            amount=11_000_000_000_000_000_000,
+            status="0x0",
+        )
+        verifier = SingitSettlementVerifier(
+            receipt_fetcher=Mock(return_value=receipt),
+            payer_address=payer,
+        )
+
+        with self.assertRaisesRegex(ValueError, "failed"):
+            verifier(
+                bankr_result={"transactionHash": "0x" + "ab" * 32, "paymentMade": {"payTo": pay_to}},
+                quote={"maxSingitAtomic": "11000000000000000000"},
+            )
+
+    def test_bankr_cli_x402_payment_client_redacts_request_body_from_result(self):
+        completed = subprocess_completed(
+            stdout='{"success":true,"status":200,"response":{"ok":true}}',
+        )
+        with patch("subprocess.run", return_value=completed) as run:
+            client = BankrCliX402PaymentClient(
+                bankr_cli="/tmp/bankr",
+                block_number_fetcher=Mock(return_value=47_751_000),
+            )
+            result = client(
+                "https://x402.bankr.bot/0xabc/buy-bitrefill",
+                request_body={"quoteId": "quote_1", "fulfillmentToken": "secret_token"},
+            )
+
+        self.assertIn("secret_token", str(run.call_args.args[0]))
+        self.assertNotIn("secret_token", str(result))
+        self.assertIn("<redacted>", str(result["command"]))
+
+    def test_bankr_treasury_client_transfers_usdc_with_bankr_wallet(self):
+        completed = subprocess_completed(
+            stdout=(
+                "Transfer submitted\n"
+                "Transaction: https://basescan.org/tx/"
+                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            )
+        )
+        with patch("subprocess.run", return_value=completed) as run:
+            client = BankrTreasuryClient(bankr_cli="/tmp/bankr")
+            result = client.transfer_usdc(
+                to_address="0xBitrefillInvoice",
+                amount="5.01",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["txId"],
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "/tmp/bankr",
+                "--ni",
+                "wallet",
+                "transfer",
+                "--to",
+                "0xBitrefillInvoice",
+                "--amount",
+                "5.01",
+                "--token",
+                "USDC",
+                "--chain",
+                "base",
+            ],
+        )
+
+    def test_bankr_treasury_client_reads_usdc_balance_from_portfolio_json(self):
+        stdout = """
+- Fetching portfolio...
+✔ Portfolio loaded
+{
+  "success": true,
+  "balances": {
+    "base": {
+      "tokenBalances": [
+        {
+          "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          "token": {
+            "balance": "15.868754",
+            "baseToken": {"symbol": "USDC"}
+          }
+        }
+      ]
+    }
+  }
+}
+"""
+        completed = subprocess_completed(stdout=stdout)
+        with patch("subprocess.run", return_value=completed) as run:
+            client = BankrTreasuryClient(bankr_cli="/tmp/bankr")
+            balance = client.usdc_balance(chain="base")
+
+        self.assertEqual(balance, Decimal("15.868754"))
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "/tmp/bankr",
+                "wallet",
+                "portfolio",
+                "--chain",
+                "base",
+                "--json",
+                "--low-value",
+            ],
+        )
+
+    def test_usdc_reserve_guard_rejects_quote_before_singit_payment_when_reserve_is_low(self):
+        treasury = Mock(**{"usdc_balance.return_value": Decimal("0.10")})
+        guard = BankrUsdcReserveGuard(treasury_client=treasury, buffer_bps=1000)
+
+        with self.assertRaisesRegex(ValueError, "insufficient USDC reserve"):
+            guard({"quoteId": "quote_1", "priceUsd": "0.10"})
+
+        treasury.usdc_balance.assert_called_once_with(chain="base")
+
+    def test_usdc_reserve_guard_accepts_quote_when_reserve_covers_buffer(self):
+        treasury = Mock(**{"usdc_balance.return_value": Decimal("0.12")})
+        guard = BankrUsdcReserveGuard(treasury_client=treasury, buffer_bps=1000)
+
+        guard({"quoteId": "quote_1", "priceUsd": "0.10"})
+
+    def test_usdc_reserve_guard_env_builder_only_enables_live_usdc_base(self):
+        self.assertIsNone(build_usdc_reserve_guard_from_env({}))
+        self.assertIsNone(
+            build_usdc_reserve_guard_from_env(
+                {
+                    "SIGN402_BITREFILL_MODE": "live",
+                    "SIGN402_BITREFILL_PAYMENT_METHOD": "balance",
+                }
+            )
+        )
+
+        guard = build_usdc_reserve_guard_from_env(
+            {
+                "SIGN402_BITREFILL_MODE": "live",
+                "SIGN402_BITREFILL_PAYMENT_METHOD": "usdc_base",
+                "SIGN402_TREASURY_USDC_BUFFER_BPS": "500",
+                "SIGN402_BANKR_CLI": "/tmp/bankr",
+            }
+        )
+
+        self.assertIsInstance(guard, BankrUsdcReserveGuard)
+        self.assertEqual(guard.buffer_bps, 500)
+        self.assertEqual(guard.treasury_client.bankr_cli, "/tmp/bankr")
+
+    def test_bankr_treasury_client_raises_on_failed_transfer(self):
+        completed = subprocess_completed(
+            stdout="",
+            stderr="insufficient USDC",
+            returncode=1,
+        )
+        with patch("subprocess.run", return_value=completed):
+            client = BankrTreasuryClient(bankr_cli="/tmp/bankr")
+            with self.assertRaisesRegex(ValueError, "insufficient USDC"):
+                client.transfer_usdc(
+                    to_address="0xBitrefillInvoice",
+                    amount="5.01",
+                )
 
     def test_singit_risk_check_tool_passes_request_body_for_402_probe_and_payment(self):
         DummyServer.x402_buyer.reset_mock()
@@ -823,6 +1630,74 @@ class GatewayServerTests(unittest.TestCase):
         )
         event_store.write.assert_called_once()
 
+    def test_bankr_llm_topup_client_accepts_stablecoin_settlement_when_singit_was_requested(self):
+        singit = DEFAULT_SINGIT_TOKEN_ADDRESS
+        usdc = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        receipt_fetcher = Mock(
+            return_value={
+                "logs": [
+                    {
+                        "address": usdc,
+                        "topics": [transfer_topic],
+                    }
+                ]
+            }
+        )
+        client = BankrLlmCreditsTopUpClient(
+            bankr_cli="bankr",
+            receipt_fetcher=receipt_fetcher,
+        )
+
+        stdout = (
+            "Add Credits:  $1.00\n"
+            "  Pay with:           SINGIT on Base\n"
+            "\n"
+            "✓ Added $1.00 credits\n"
+            "New Balance:  $1.00\n"
+            "  Transaction:        https://basescan.org/tx/0x251c9fbdd6b1ca6affa2e353442bf4e74687a952a43f0c67dfd93b8ee0ab683f"
+        )
+        with patch(
+            "sign402_gateway.server.subprocess.run",
+            return_value=subprocess_completed(stdout=stdout),
+        ):
+            result = client(credit_amount_usd="1", funding_token_address=singit)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["transactionHash"],
+            "0x251c9fbdd6b1ca6affa2e353442bf4e74687a952a43f0c67dfd93b8ee0ab683f",
+        )
+        self.assertNotIn("receiptVerified", result)
+        receipt_fetcher.assert_not_called()
+
+    def test_bankr_llm_topup_client_preserves_transaction_hash_without_receipt_verification(self):
+        singit = DEFAULT_SINGIT_TOKEN_ADDRESS
+        receipt_fetcher = Mock(return_value={"logs": []})
+        client = BankrLlmCreditsTopUpClient(
+            bankr_cli="bankr",
+            receipt_fetcher=receipt_fetcher,
+        )
+
+        stdout = (
+            "✓ Added $1.00 credits\n"
+            "New Balance:  $1.00\n"
+            "  Transaction:        https://basescan.org/tx/0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        with patch(
+            "sign402_gateway.server.subprocess.run",
+            return_value=subprocess_completed(stdout=stdout),
+        ):
+            result = client(credit_amount_usd="1", funding_token_address=singit)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["transactionHash"],
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        self.assertNotIn("receiptVerified", result)
+        receipt_fetcher.assert_not_called()
+
     def test_agent_tools_lists_paid_tool_catalog(self):
         with patch("sys.stderr", io.StringIO()):
             handler = self.make_handler("/agent/tools", method="GET")
@@ -842,6 +1717,225 @@ class GatewayServerTests(unittest.TestCase):
         self.assertIn('"id": "otto.funding_rates"', response)
         self.assertIn('"id": "onesource.ens"', response)
         self.assertIn('"id": "anchor.token_price"', response)
+
+    def test_agent_quote_bitrefill_uses_quote_service(self):
+        server = DummyServer()
+        server.bitrefill_quote_service = Mock(return_value={"ok": True, "quoteId": "quote_1"})
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/quote-bitrefill",
+                {"productId": "test-gift-card-code", "packageId": "1", "country": "US"},
+                server=server,
+            )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertIn('"quoteId": "quote_1"', response)
+        server.bitrefill_quote_service.assert_called_once_with(
+            {"productId": "test-gift-card-code", "packageId": "1", "country": "US"}
+        )
+
+    def test_agent_search_bitrefill_uses_catalog_service(self):
+        server = DummyServer()
+        server.bitrefill_search_service = Mock(
+            return_value={"ok": True, "products": [{"productId": "test-phone-refill"}]}
+        )
+        payload = {"query": "phone", "country": "US", "includeTestProducts": True}
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler("/agent/search-bitrefill", payload, server=server)
+
+        response = self.response_text(handler)
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertIn('"productId": "test-phone-refill"', response)
+        server.bitrefill_search_service.assert_called_once_with(payload)
+
+    def test_agent_get_bitrefill_product_uses_details_service(self):
+        server = DummyServer()
+        server.bitrefill_product_details_service = Mock(
+            return_value={"ok": True, "productId": "test-phone-refill"}
+        )
+        payload = {"productId": "test-phone-refill", "country": "US"}
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler("/agent/get-bitrefill-product", payload, server=server)
+
+        response = self.response_text(handler)
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertIn('"productId": "test-phone-refill"', response)
+        server.bitrefill_product_details_service.assert_called_once_with(payload)
+
+    def test_agent_buy_bitrefill_acquires_firefly_and_uses_runner(self):
+        server = DummyServer()
+        server.firefly_busy = False
+        server.bitrefill_purchase_runner = Mock(return_value={"ok": True, "quoteId": "quote_1"})
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/buy-bitrefill",
+                {"quoteId": "quote_1", "recipient": {"email": "buyer@example.com"}},
+                server=server,
+            )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertIn('"ok": true', response)
+        server.bitrefill_purchase_runner.assert_called_once_with(
+            {"quoteId": "quote_1", "recipient": {"email": "buyer@example.com"}}
+        )
+        self.assertFalse(server.firefly_busy)
+
+    def test_agent_buy_bitrefill_redacts_fulfillment_token_from_event_store(self):
+        server = DummyServer()
+        server.firefly_busy = False
+        DummyServer.event_store.reset_mock()
+        server.bitrefill_purchase_runner = Mock(
+            return_value={
+                "ok": True,
+                "quoteId": "quote_1",
+                "fulfillmentToken": "reveal_secret_1",
+            }
+        )
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/buy-bitrefill",
+                {"quoteId": "quote_1"},
+                server=server,
+            )
+
+        response = self.response_text(handler)
+
+        # Caller still receives the token (needed to reveal the redemption code).
+        self.assertIn("reveal_secret_1", response)
+        # But the dashboard event store must not persist the plaintext token.
+        DummyServer.event_store.write.assert_called_once()
+        saved_event = DummyServer.event_store.write.call_args.args[0]
+        self.assertNotIn("fulfillmentToken", saved_event)
+        self.assertNotIn("reveal_secret_1", json.dumps(saved_event))
+
+    def test_agent_buy_wallet_bitrefill_uses_wallet_runner(self):
+        server = DummyServer()
+        server.firefly_busy = False
+        server.bitrefill_wallet_purchase_runner = Mock(
+            return_value={"ok": True, "quoteId": "quote_wallet_1"}
+        )
+        server.bitrefill_purchase_runner = Mock()
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/buy-wallet-bitrefill",
+                {"quoteId": "quote_wallet_1", "recipient": {"email": "buyer@example.com"}},
+                server=server,
+            )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertIn('"ok": true', response)
+        server.bitrefill_wallet_purchase_runner.assert_called_once_with(
+            {"quoteId": "quote_wallet_1", "recipient": {"email": "buyer@example.com"}}
+        )
+        server.bitrefill_purchase_runner.assert_not_called()
+        self.assertFalse(server.firefly_busy)
+
+    def test_internal_fulfill_bitrefill_requires_service_secret(self):
+        server = DummyServer()
+        server.bitrefill_fulfillment_runner = Mock()
+
+        with patch.dict(os.environ, {"SIGN402_BANKR_FULFILLMENT_SECRET": "secret_123"}):
+            with patch("sys.stderr", io.StringIO()):
+                handler = self.make_handler(
+                    "/internal/fulfill-bitrefill",
+                    {"quoteId": "quote_1", "fulfillmentToken": "fulfill_1"},
+                    server=server,
+                )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 401 Unauthorized", response)
+        server.bitrefill_fulfillment_runner.assert_not_called()
+
+    def test_internal_fulfill_bitrefill_disables_legacy_bankr_flow_by_default(self):
+        server = DummyServer()
+        server.bitrefill_fulfillment_runner = Mock(
+            return_value={
+                "ok": True,
+                "quoteId": "quote_1",
+                "orderId": "order_1",
+                "status": "delivered",
+                "settleAmountAtomic": "2625000000000000000000",
+            }
+        )
+
+        encoded = json.dumps({"quoteId": "quote_1", "fulfillmentToken": "fulfill_1"}).encode(
+            "utf-8"
+        )
+        request = (
+            b"POST /internal/fulfill-bitrefill HTTP/1.1\r\n"
+            + f"Content-Length: {len(encoded)}\r\n".encode("ascii")
+            + b"Content-Type: application/json\r\n"
+            + b"Authorization: Bearer secret_123\r\n"
+            + b"\r\n"
+            + encoded
+        )
+        socket = FakeSocket(request)
+
+        with patch.dict(os.environ, {"SIGN402_BANKR_FULFILLMENT_SECRET": "secret_123"}):
+            with patch("sys.stderr", io.StringIO()):
+                handler = Sign402GatewayHandler(socket, ("127.0.0.1", 12345), server)
+                handler.response = socket.wfile
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 410 Gone", response)
+        self.assertIn("legacy fulfillment disabled", response)
+        server.bitrefill_fulfillment_runner.assert_not_called()
+
+    def test_internal_prepare_bitrefill_settlement_calls_runner_with_service_secret(self):
+        server = DummyServer()
+        server.bitrefill_settlement_preparation_runner = Mock(
+            return_value={
+                "ok": True,
+                "quoteId": "quote_1",
+                "status": "ready_for_singit_settlement",
+                "pricingMode": "bankr_real_rate",
+                "settleAmountAtomic": "2625000000000000000000",
+                "maxSingitAtomic": "2625000000000000000000",
+            }
+        )
+
+        encoded = json.dumps({"quoteId": "quote_1", "fulfillmentToken": "fulfill_1"}).encode(
+            "utf-8"
+        )
+        request = (
+            b"POST /internal/prepare-bitrefill-settlement HTTP/1.1\r\n"
+            + f"Content-Length: {len(encoded)}\r\n".encode("ascii")
+            + b"Content-Type: application/json\r\n"
+            + b"Authorization: Bearer secret_123\r\n"
+            + b"\r\n"
+            + encoded
+        )
+        socket = FakeSocket(request)
+
+        with patch.dict(os.environ, {"SIGN402_BANKR_FULFILLMENT_SECRET": "secret_123"}):
+            with patch("sys.stderr", io.StringIO()):
+                handler = Sign402GatewayHandler(socket, ("127.0.0.1", 12345), server)
+                handler.response = socket.wfile
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertIn('"status": "ready_for_singit_settlement"', response)
+        self.assertIn('"pricingMode": "bankr_real_rate"', response)
+        self.assertIn('"settleAmountAtomic": "2625000000000000000000"', response)
+        self.assertNotIn("redemption", response)
+        server.bitrefill_settlement_preparation_runner.assert_called_once_with(
+            {"quoteId": "quote_1", "fulfillmentToken": "fulfill_1"}
+        )
 
     def test_agent_inspect_base_tool_resolves_alias_and_returns_offer(self):
         policy_hash = "c" * 64

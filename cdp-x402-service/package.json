@@ -7,7 +7,8 @@
   "scripts": {
     "account": "node src/index.mjs account",
     "buy": "node src/index.mjs buy",
-    "serve": "node src/index.mjs serve-seller"
+    "serve": "node src/index.mjs serve-seller",
+    "test": "node --test"
   },
   "dependencies": {
     "@coinbase/cdp-sdk": "^1.51.0",

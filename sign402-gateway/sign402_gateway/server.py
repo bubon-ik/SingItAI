@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import argparse
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -8,11 +11,12 @@ import subprocess
 import sys
 import threading
 import time
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote
+import urllib.request
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -22,8 +26,8 @@ LIVE_DEMO_DIR = ROOT_DIR / "live-demo"
 DEMO_RESOURCE_SERVER_DIR = ROOT_DIR / "demo-resource-server"
 DEFAULT_EVENT_STORE_PATH = ROOT_DIR / "demo-dashboard" / "latest-run.json"
 DEFAULT_AGENT_STATE_PATH = ROOT_DIR / "demo-dashboard" / "agent-state.json"
+DEFAULT_BITREFILL_COMMERCE_STORE_PATH = ROOT_DIR / "demo-dashboard" / "bitrefill-orders.sqlite3"
 DEFAULT_CDP_X402_SERVICE_DIR = ROOT_DIR / "cdp-x402-service"
-BASE_USDC_MAINNET = "0x833589fCD6eDb6E08f4c7C32D4f71b54bDa02913"
 DEFAULT_BASE_REPORT_URL = "http://127.0.0.1:4021/paid/sign402-report"
 LOCAL_BANKR_CLI = ROOT_DIR / ".tools" / "bankr-cli" / "node_modules" / ".bin" / "bankr"
 DEFAULT_BANKR_CLI = str(LOCAL_BANKR_CLI) if LOCAL_BANKR_CLI.exists() else "bankr"
@@ -35,6 +39,12 @@ DEFAULT_SINGIT_TOKEN_ADDRESS = os.getenv(
     "SIGN402_SINGIT_TOKEN_ADDRESS",
     "0xc2c1e0b7C401e6217193732272444D928646eba3",
 )
+DEFAULT_BANKR_BITREFILL_URL = os.getenv(
+    "SIGN402_BANKR_BITREFILL_URL",
+    "https://x402.bankr.bot/YOUR_WALLET/buy-bitrefill",
+)
+BASE_MAINNET_RPC_URL = os.getenv("SIGN402_BASE_RPC_URL", "https://mainnet.base.org")
+ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 SINGIT_RISK_CHECK_REQUEST_BODY = {
     "paymentRequirements": {
         "scheme": "upto",
@@ -65,7 +75,16 @@ from sign402_bridge.policy import canonicalize_policy, hash_policy
 from sign402_executor.executor import build_x402_avm_payment_signature_header, execute_payment
 from x402_demo.core import encode_payment_proof
 
+from .bankr_swap import (
+    BASE_USDC_MAINNET,
+    BankrSwapClient,
+    BankrWalletApiClient,
+    load_bankr_api_key,
+    usdc_balance_from_portfolio,
+)
+from .numeric import format_decimal
 from .goplausible import fetch_x402_paid_resource, fetch_x402_payment_required, normalize_x402_payment_required
+from .real_rate_pricing import RealRateSingitPricer
 
 HEX_32_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 BUY_TOOL_DUPLICATE_SUPPRESSION_SECONDS = 120
@@ -379,6 +398,12 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                         "/agent/buy-x402",
                         "/agent/inspect-llm-credits-topup",
                         "/agent/top-up-llm-credits",
+                        "/agent/search-bitrefill",
+                        "/agent/get-bitrefill-product",
+                        "/agent/quote-bitrefill",
+                        "/agent/buy-bitrefill",
+                        "/agent/buy-wallet-bitrefill",
+                        "/agent/get-bitrefill-order",
                     ],
                 }
             )
@@ -425,6 +450,30 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if path == "/agent/top-up-llm-credits":
             self._handle_agent_top_up_llm_credits()
+            return
+        if path == "/agent/search-bitrefill":
+            self._handle_agent_search_bitrefill()
+            return
+        if path == "/agent/get-bitrefill-product":
+            self._handle_agent_get_bitrefill_product()
+            return
+        if path == "/agent/quote-bitrefill":
+            self._handle_agent_quote_bitrefill()
+            return
+        if path == "/agent/buy-bitrefill":
+            self._handle_agent_buy_bitrefill()
+            return
+        if path == "/agent/buy-wallet-bitrefill":
+            self._handle_agent_buy_wallet_bitrefill()
+            return
+        if path == "/agent/get-bitrefill-order":
+            self._handle_agent_get_bitrefill_order()
+            return
+        if path == "/internal/fulfill-bitrefill":
+            self._handle_internal_fulfill_bitrefill()
+            return
+        if path == "/internal/prepare-bitrefill-settlement":
+            self._handle_internal_prepare_bitrefill_settlement()
             return
         self._send_json({"error": "not_found"}, status=404)
 
@@ -689,6 +738,127 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         finally:
             self._release_firefly()
 
+    def _handle_agent_quote_bitrefill(self) -> None:
+        try:
+            payload = self._read_json()
+            result = self.server.bitrefill_quote_service(payload)
+            self._send_json(result)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_search_bitrefill(self) -> None:
+        try:
+            payload = self._read_json()
+            result = self.server.bitrefill_search_service(payload)
+            self._send_json(result)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_get_bitrefill_product(self) -> None:
+        try:
+            payload = self._read_json()
+            result = self.server.bitrefill_product_details_service(payload)
+            self._send_json(result)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_buy_bitrefill(self) -> None:
+        if not self._acquire_firefly():
+            self._send_json(_busy_payload(), status=409)
+            return
+
+        try:
+            payload = self._read_json()
+            result = self.server.bitrefill_purchase_runner(payload)
+            if result.get("ok"):
+                self.server.event_store.write(_without_fulfillment_token(result))
+            self._send_json(result)
+        except Exception as exc:
+            self._send_json({"decision": "rejected", "ok": False, "error": str(exc)}, status=400)
+        finally:
+            self._release_firefly()
+
+    def _handle_agent_buy_wallet_bitrefill(self) -> None:
+        if not self._acquire_firefly():
+            self._send_json(_busy_payload(), status=409)
+            return
+
+        try:
+            payload = self._read_json()
+            result = self.server.bitrefill_wallet_purchase_runner(payload)
+            if result.get("ok"):
+                self.server.event_store.write(_without_fulfillment_token(result))
+            self._send_json(result)
+        except Exception as exc:
+            self._send_json({"decision": "rejected", "ok": False, "error": str(exc)}, status=400)
+        finally:
+            self._release_firefly()
+
+    def _handle_agent_get_bitrefill_order(self) -> None:
+        try:
+            payload = self._read_json()
+            quote_id = str(payload.get("quoteId") or payload.get("orderId") or "").strip()
+            if not quote_id:
+                raise ValueError("quoteId is required")
+            result = self.server.bitrefill_order_lookup(
+                quote_id,
+                include_redemption=bool(payload.get("includeRedemption", False)),
+                recipient=payload.get("recipient") if isinstance(payload.get("recipient"), dict) else {},
+                fulfillment_token=str(payload.get("fulfillmentToken", "")),
+            )
+            self._send_json(result)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_internal_fulfill_bitrefill(self) -> None:
+        if not self._service_secret_authorized():
+            self._send_json({"ok": False, "error": "unauthorized"}, status=401)
+            return
+        if os.getenv("SIGN402_ALLOW_LEGACY_BANKR_FULFILLMENT", "").strip() != "1":
+            self._send_json(
+                {
+                    "ok": False,
+                    "error": "legacy fulfillment disabled; use /internal/prepare-bitrefill-settlement",
+                },
+                status=410,
+            )
+            return
+
+        try:
+            payload = self._read_json()
+            result = self.server.bitrefill_fulfillment_runner(payload)
+            redacted = {
+                "ok": bool(result.get("ok", False)),
+                "quoteId": result.get("quoteId"),
+                "orderId": result.get("orderId"),
+                "status": result.get("status"),
+                "settleAmountAtomic": result.get("settleAmountAtomic"),
+                "maxSingitAtomic": result.get("maxSingitAtomic"),
+            }
+            self._send_json(redacted, status=200 if redacted["ok"] else 400)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_internal_prepare_bitrefill_settlement(self) -> None:
+        if not self._service_secret_authorized():
+            self._send_json({"ok": False, "error": "unauthorized"}, status=401)
+            return
+
+        try:
+            payload = self._read_json()
+            result = self.server.bitrefill_settlement_preparation_runner(payload)
+            redacted = {
+                "ok": bool(result.get("ok", False)),
+                "quoteId": result.get("quoteId"),
+                "status": result.get("status"),
+                "pricingMode": result.get("pricingMode"),
+                "settleAmountAtomic": result.get("settleAmountAtomic"),
+                "maxSingitAtomic": result.get("maxSingitAtomic"),
+            }
+            self._send_json(redacted, status=200 if redacted["ok"] else 400)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
     def _policy_hash_from_payload_or_state(self, payload: dict[str, Any]) -> str:
         if payload.get("policyHash"):
             return _read_hash(payload, "policyHash")
@@ -727,6 +897,13 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         return
+
+    def _service_secret_authorized(self) -> bool:
+        expected_secret = os.getenv("SIGN402_BANKR_FULFILLMENT_SECRET", "")
+        if not expected_secret:
+            return False
+        authorization = str(self.headers.get("Authorization", ""))
+        return hmac.compare_digest(authorization, f"Bearer {expected_secret}")
 
     def _acquire_firefly(self) -> bool:
         lock = getattr(self.server, "firefly_lock", None)
@@ -795,6 +972,14 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         x402_buyer: Callable[[str], dict[str, Any]],
         bankr_llm_topup_inspector: Callable[[dict[str, Any], str], dict[str, Any]],
         bankr_llm_topup: Callable[[dict[str, Any]], dict[str, Any]],
+        bitrefill_search_service: Callable[[dict[str, Any]], dict[str, Any]],
+        bitrefill_product_details_service: Callable[[dict[str, Any]], dict[str, Any]],
+        bitrefill_quote_service: Callable[[dict[str, Any]], dict[str, Any]],
+        bitrefill_purchase_runner: Callable[[dict[str, Any]], dict[str, Any]],
+        bitrefill_wallet_purchase_runner: Callable[[dict[str, Any]], dict[str, Any]],
+        bitrefill_order_lookup: Callable[..., dict[str, Any]],
+        bitrefill_fulfillment_runner: Callable[[dict[str, Any]], dict[str, Any]],
+        bitrefill_settlement_preparation_runner: Callable[[dict[str, Any]], dict[str, Any]],
     ):
         super().__init__(server_address, handler_class)
         self.firefly = firefly
@@ -806,8 +991,191 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         self.x402_buyer = x402_buyer
         self.bankr_llm_topup_inspector = bankr_llm_topup_inspector
         self.bankr_llm_topup = bankr_llm_topup
+        self.bitrefill_search_service = bitrefill_search_service
+        self.bitrefill_product_details_service = bitrefill_product_details_service
+        self.bitrefill_quote_service = bitrefill_quote_service
+        self.bitrefill_purchase_runner = bitrefill_purchase_runner
+        self.bitrefill_wallet_purchase_runner = bitrefill_wallet_purchase_runner
+        self.bitrefill_order_lookup = bitrefill_order_lookup
+        self.bitrefill_fulfillment_runner = bitrefill_fulfillment_runner
+        self.bitrefill_settlement_preparation_runner = bitrefill_settlement_preparation_runner
         self.firefly_lock = threading.Lock()
         self.buy_tool_response_cache: dict[str, dict[str, Any]] = {}
+
+
+def build_bitrefill_client_from_env(env: dict[str, str] | None = None):
+    from .bitrefill import LiveBitrefillClient, TestBitrefillClient
+
+    values = os.environ if env is None else env
+    mode = values.get("SIGN402_BITREFILL_MODE", "test").strip().lower()
+    if mode == "test":
+        return TestBitrefillClient()
+    if mode == "live":
+        if not values.get("BITREFILL_API_KEY", "").strip():
+            raise ValueError("BITREFILL_API_KEY is required in live Bitrefill mode")
+        payment_method = values.get("SIGN402_BITREFILL_PAYMENT_METHOD", "balance").strip().lower()
+        refund_address = (
+            values.get("SIGN402_BITREFILL_REFUND_ADDRESS", "").strip()
+            or values.get("SIGN402_TREASURY_REFUND_ADDRESS", "").strip()
+        )
+        treasury_client = None
+        if payment_method == "usdc_base":
+            if not refund_address:
+                raise ValueError("SIGN402_BITREFILL_REFUND_ADDRESS is required for usdc_base")
+            treasury_mode = values.get("SIGN402_BITREFILL_USDC_TREASURY_MODE", "bankr_wallet").strip().lower()
+            if treasury_mode == "cdp_wallet":
+                treasury_client = CdpWalletClient(
+                    service_dir=Path(
+                        values.get("SIGN402_CDP_X402_SERVICE_DIR", str(DEFAULT_CDP_X402_SERVICE_DIR))
+                    )
+                )
+            elif treasury_mode == "bankr_wallet":
+                treasury_client = BankrTreasuryClient()
+            else:
+                raise ValueError(f"unsupported SIGN402_BITREFILL_USDC_TREASURY_MODE: {treasury_mode}")
+        return LiveBitrefillClient(
+            api_key=values["BITREFILL_API_KEY"],
+            base_url=values.get(
+                "SIGN402_BITREFILL_BASE_URL",
+                "https://api.bitrefill.com/v2",
+            ),
+            max_purchase_usd=values.get("SIGN402_BITREFILL_LIVE_MAX_USD", "5.00"),
+            max_invoice_overage_bps=int(
+                values.get("SIGN402_BITREFILL_LIVE_MAX_INVOICE_OVERAGE_BPS", "500")
+            ),
+            payment_method=payment_method,
+            refund_address=refund_address,
+            treasury_client=treasury_client,
+        )
+    raise ValueError(f"unsupported SIGN402_BITREFILL_MODE: {mode}")
+
+
+def build_singit_settlement_verifier_from_env(
+    env: dict[str, str] | None = None,
+) -> SingitSettlementVerifier | None:
+    values = os.environ if env is None else env
+    if values.get("SIGN402_DISABLE_BANKR_BITREFILL_SETTLEMENT", "").strip() == "1":
+        return None
+    mode = values.get("SIGN402_BITREFILL_MODE", "test").strip().lower()
+    if mode != "live":
+        return SingitSettlementVerifier()
+    payer_address = values.get("SIGN402_BANKR_WALLET_ADDRESS", "").strip()
+    if not re.fullmatch(r"0x[a-fA-F0-9]{40}", payer_address):
+        raise ValueError("SIGN402_BANKR_WALLET_ADDRESS is required in live Bitrefill mode")
+    token_address = values.get("SIGN402_SINGIT_TOKEN_ADDRESS", DEFAULT_SINGIT_TOKEN_ADDRESS).strip()
+    if not re.fullmatch(r"0x[a-fA-F0-9]{40}", token_address):
+        raise ValueError("SIGN402_SINGIT_TOKEN_ADDRESS must be an EVM address")
+    return SingitSettlementVerifier(
+        transaction_resolver=BaseErc20TransactionResolver(),
+        payer_address=payer_address,
+        singit_token_address=token_address,
+    )
+
+
+def build_real_rate_pricer_from_env(env: dict[str, str] | None = None):
+    values = os.environ if env is None else env
+    mode = values.get("SIGN402_BITREFILL_PRICING_MODE", "fixed").strip().lower()
+    if mode != "bankr_real_rate":
+        return None
+    max_singit = values.get("SIGN402_MAX_SINGIT_PER_BITREFILL_ORDER", "").strip()
+    if not max_singit:
+        raise ValueError(
+            "SIGN402_MAX_SINGIT_PER_BITREFILL_ORDER is required for bankr_real_rate"
+        )
+    pricing_source = values.get("SIGN402_BITREFILL_PRICING_SOURCE", "").strip().lower()
+    if pricing_source == "cdp_wallet":
+        swap_client = CdpWalletClient(
+            service_dir=Path(
+                values.get("SIGN402_CDP_X402_SERVICE_DIR", str(DEFAULT_CDP_X402_SERVICE_DIR))
+            )
+        )
+    else:
+        bankr_api_key = load_bankr_api_key(values)
+        if bankr_api_key:
+            swap_client = BankrWalletApiClient(
+                api_key=bankr_api_key,
+                base_url=values.get("SIGN402_BANKR_API_BASE_URL", "https://api.bankr.bot"),
+            )
+        else:
+            bankr_cli = values.get("SIGN402_BANKR_CLI", DEFAULT_BANKR_CLI)
+            swap_client = BankrSwapClient(bankr_cli=bankr_cli)
+    return RealRateSingitPricer(
+        quote_client=swap_client,
+        from_token=values.get("SIGN402_BANKR_SWAP_FROM_TOKEN", DEFAULT_SINGIT_TOKEN_ADDRESS),
+        to_token=values.get("SIGN402_BANKR_SWAP_TO_TOKEN", "USDC"),
+        chain=values.get("SIGN402_BANKR_SWAP_CHAIN", "base"),
+        buffer_bps=int(values.get("SIGN402_BITREFILL_USDC_BUFFER_BPS", "1000")),
+        max_singit=max_singit,
+    )
+
+
+def build_bitrefill_funding_runner_from_env(env: dict[str, str] | None = None):
+    values = os.environ if env is None else env
+    mode = values.get("SIGN402_BITREFILL_FUNDING_MODE", "none").strip().lower()
+    if mode in {"", "none", "disabled"}:
+        return None
+    if mode == "bankr_wallet_api_swap":
+        bankr_api_key = load_bankr_api_key(values)
+        if not bankr_api_key:
+            raise ValueError("BANKR_API_KEY is required for bankr_wallet_api_swap funding")
+        swap_client = BankrWalletApiClient(
+            api_key=bankr_api_key,
+            base_url=values.get("SIGN402_BANKR_API_BASE_URL", "https://api.bankr.bot"),
+        )
+    elif mode == "bankr_cli_swap":
+        swap_client = BankrSwapClient(bankr_cli=values.get("SIGN402_BANKR_CLI", DEFAULT_BANKR_CLI))
+    elif mode == "bankr_transfer_to_cdp_swap":
+        cdp_wallet_address = values.get("SIGN402_CDP_WALLET_ADDRESS", "").strip()
+        if not re.fullmatch(r"0x[a-fA-F0-9]{40}", cdp_wallet_address):
+            raise ValueError("SIGN402_CDP_WALLET_ADDRESS is required for bankr_transfer_to_cdp_swap")
+        return BankrTransferToCdpSwapFundingRunner(
+            bankr_transfer_client=BankrTreasuryClient(
+                bankr_cli=values.get("SIGN402_BANKR_CLI", DEFAULT_BANKR_CLI)
+            ),
+            cdp_client=CdpWalletClient(
+                service_dir=Path(
+                    values.get("SIGN402_CDP_X402_SERVICE_DIR", str(DEFAULT_CDP_X402_SERVICE_DIR))
+                )
+            ),
+            cdp_wallet_address=cdp_wallet_address,
+            from_token=values.get("SIGN402_BANKR_SWAP_FROM_TOKEN", DEFAULT_SINGIT_TOKEN_ADDRESS),
+            chain=values.get("SIGN402_BANKR_SWAP_CHAIN", "base"),
+        )
+    elif mode == "cdp_wallet_swap":
+        return CdpWalletSwapFundingRunner(
+            cdp_client=CdpWalletClient(
+                service_dir=Path(
+                    values.get("SIGN402_CDP_X402_SERVICE_DIR", str(DEFAULT_CDP_X402_SERVICE_DIR))
+                )
+            ),
+            from_token=values.get("SIGN402_BANKR_SWAP_FROM_TOKEN", DEFAULT_SINGIT_TOKEN_ADDRESS),
+            chain=values.get("SIGN402_BANKR_SWAP_CHAIN", "base"),
+        )
+    else:
+        raise ValueError(f"unsupported SIGN402_BITREFILL_FUNDING_MODE: {mode}")
+    return BankrSingitToUsdcFundingRunner(
+        swap_client=swap_client,
+        from_token=values.get("SIGN402_BANKR_SWAP_FROM_TOKEN", DEFAULT_SINGIT_TOKEN_ADDRESS),
+        to_token=values.get("SIGN402_BANKR_SWAP_TO_TOKEN", "USDC"),
+        chain=values.get("SIGN402_BANKR_SWAP_CHAIN", "base"),
+    )
+
+
+def build_usdc_reserve_guard_from_env(env: dict[str, str] | None = None):
+    values = os.environ if env is None else env
+    mode = values.get("SIGN402_BITREFILL_MODE", "test").strip().lower()
+    payment_method = values.get("SIGN402_BITREFILL_PAYMENT_METHOD", "balance").strip().lower()
+    if mode != "live" or payment_method != "usdc_base":
+        return None
+    if values.get("SIGN402_DISABLE_TREASURY_RESERVE_GUARD", "").strip() == "1":
+        return None
+    return BankrUsdcReserveGuard(
+        treasury_client=BankrTreasuryClient(
+            bankr_cli=values.get("SIGN402_BANKR_CLI", DEFAULT_BANKR_CLI)
+        ),
+        buffer_bps=int(values.get("SIGN402_TREASURY_USDC_BUFFER_BPS", "1000")),
+        chain=values.get("SIGN402_TREASURY_CHAIN", "base"),
+    )
 
 
 def build_server(
@@ -820,7 +1188,20 @@ def build_server(
     agent_state_path: Path = DEFAULT_AGENT_STATE_PATH,
     resource_base_url: str = "http://127.0.0.1:8090",
     cdp_x402_service_dir: Path = DEFAULT_CDP_X402_SERVICE_DIR,
+    bitrefill_commerce_store_path: Path = DEFAULT_BITREFILL_COMMERCE_STORE_PATH,
 ) -> Sign402GatewayServer:
+    from .bitrefill_runner import (
+        BitrefillFulfillmentRunner,
+        BitrefillProductDetailsService,
+        BitrefillPurchaseRunner,
+        BitrefillQuoteService,
+        BitrefillSearchService,
+        BitrefillSettlementPreparationRunner,
+        WalletBitrefillPurchaseRunner,
+        lookup_bitrefill_order,
+    )
+    from .commerce_store import BitrefillCommerceStore
+
     firefly = FireflyClient(port=firefly_port)
     payment_executor = build_payment_executor(payment_executor_dir)
     x402_payment_signature_builder = build_x402_payment_signature_builder(payment_executor_dir)
@@ -828,6 +1209,42 @@ def build_server(
     bankr_x402_payment_client = BankrCliX402PaymentClient()
     event_store = LatestEventStore(event_store_path)
     agent_state_store = AgentStateStore(agent_state_path)
+    bitrefill_commerce_store = BitrefillCommerceStore(bitrefill_commerce_store_path)
+    bitrefill_client = build_bitrefill_client_from_env()
+    real_rate_pricer = build_real_rate_pricer_from_env()
+    bitrefill_search_service = BitrefillSearchService(bitrefill_client=bitrefill_client)
+    bitrefill_product_details_service = BitrefillProductDetailsService(
+        bitrefill_client=bitrefill_client
+    )
+    bitrefill_quote_service = BitrefillQuoteService(
+        bitrefill_client=bitrefill_client,
+        store=bitrefill_commerce_store,
+        singit_usd_price_provider=lambda: os.getenv("SIGN402_SINGIT_USD_PRICE", "0.01"),
+        real_rate_pricer=real_rate_pricer,
+        ttl_seconds=int(os.getenv("SIGN402_BITREFILL_QUOTE_TTL_SECONDS", "120")),
+    )
+    bitrefill_fulfillment_runner = BitrefillFulfillmentRunner(
+        store=bitrefill_commerce_store,
+        bitrefill_client=bitrefill_client,
+        funding_runner=build_bitrefill_funding_runner_from_env(),
+    )
+    bitrefill_settlement_preparation_runner = BitrefillSettlementPreparationRunner(
+        store=bitrefill_commerce_store,
+    )
+    bitrefill_purchase_runner = BitrefillPurchaseRunner(
+        store=bitrefill_commerce_store,
+        firefly=firefly,
+        bankr_payment_client=bankr_x402_payment_client,
+        bankr_resource_url=DEFAULT_BANKR_BITREFILL_URL,
+        pre_payment_guard=build_usdc_reserve_guard_from_env(),
+        settlement_verifier=build_singit_settlement_verifier_from_env(),
+        fulfillment_runner=bitrefill_fulfillment_runner,
+    )
+    bitrefill_wallet_purchase_runner = WalletBitrefillPurchaseRunner(
+        store=bitrefill_commerce_store,
+        approval_client=firefly.approve_payment_hash,
+        fulfillment_runner=bitrefill_fulfillment_runner,
+    )
     x402_inspector = ExternalX402Inspector()
     bankr_llm_topup_inspector = BankrLlmCreditsTopUpInspector()
     bankr_llm_topup = BankrLlmCreditsTopUpRunner(
@@ -863,6 +1280,19 @@ def build_server(
         x402_buyer=x402_buyer,
         bankr_llm_topup_inspector=bankr_llm_topup_inspector,
         bankr_llm_topup=bankr_llm_topup,
+        bitrefill_search_service=bitrefill_search_service,
+        bitrefill_product_details_service=bitrefill_product_details_service,
+        bitrefill_quote_service=bitrefill_quote_service,
+        bitrefill_purchase_runner=bitrefill_purchase_runner,
+        bitrefill_wallet_purchase_runner=bitrefill_wallet_purchase_runner,
+        bitrefill_order_lookup=lambda quote_id, **kwargs: lookup_bitrefill_order(
+            bitrefill_commerce_store,
+            quote_id,
+            bitrefill_client=bitrefill_client,
+            **kwargs,
+        ),
+        bitrefill_fulfillment_runner=bitrefill_fulfillment_runner,
+        bitrefill_settlement_preparation_runner=bitrefill_settlement_preparation_runner,
     )
 
 
@@ -1318,8 +1748,13 @@ class BankrLlmCreditsTopUpRunner:
 
 
 class BankrLlmCreditsTopUpClient:
-    def __init__(self, bankr_cli: str | None = None):
+    def __init__(
+        self,
+        bankr_cli: str | None = None,
+        receipt_fetcher: Callable[[str], dict[str, Any]] | None = None,
+    ):
         self.bankr_cli = bankr_cli or os.getenv("SIGN402_BANKR_CLI", "bankr")
+        self.receipt_fetcher = receipt_fetcher or fetch_base_transaction_receipt
 
     def __call__(self, *, credit_amount_usd: str, funding_token_address: str) -> dict[str, Any]:
         command = [
@@ -1349,13 +1784,600 @@ class BankrLlmCreditsTopUpClient:
         if result.returncode != 0:
             message = payload["stderr"] or payload["stdout"] or "Bankr LLM credits top-up failed"
             raise ValueError(message)
+        transaction_hash = _bankr_cli_transaction_hash(payload["stdout"])
+        payload["transactionHash"] = transaction_hash
         return payload
 
 
-class BankrCliX402PaymentClient:
+class SingitSettlementVerifier:
+    def __init__(
+        self,
+        *,
+        receipt_fetcher: Callable[[str], dict[str, Any]] | None = None,
+        transaction_resolver: Callable[..., str] | None = None,
+        payer_address: str | None = None,
+        singit_token_address: str = DEFAULT_SINGIT_TOKEN_ADDRESS,
+    ):
+        self.receipt_fetcher = receipt_fetcher or fetch_base_transaction_receipt
+        self.transaction_resolver = transaction_resolver
+        self.payer_address = payer_address
+        self.singit_token_address = singit_token_address
+
+    def __call__(self, *, bankr_result: dict[str, Any], quote: dict[str, Any]) -> dict[str, Any]:
+        tx_hash = _bankr_result_transaction_hash(bankr_result)
+        discovered = False
+        expected_amount = int(str(quote["maxSingitAtomic"]))
+        payment_made = bankr_result.get("paymentMade")
+        pay_to = payment_made.get("payTo") if isinstance(payment_made, dict) else None
+        if not tx_hash:
+            if self.transaction_resolver is None:
+                raise ValueError("SINGIT settlement transaction hash is missing")
+            if self.payer_address is None:
+                raise ValueError("SINGIT settlement payer address is missing")
+            start_block = bankr_result.get("startBlock")
+            if not isinstance(start_block, int):
+                raise ValueError("SINGIT settlement startBlock is missing")
+            if not isinstance(pay_to, str) or not pay_to.startswith("0x"):
+                raise ValueError("SINGIT settlement paymentMade.payTo is missing")
+            tx_hash = self.transaction_resolver(
+                token_address=self.singit_token_address,
+                sender=self.payer_address,
+                recipient=pay_to,
+                amount_atomic=str(expected_amount),
+                from_block=start_block,
+            )
+            discovered = True
+        receipt = self.receipt_fetcher(tx_hash)
+        if str(receipt.get("status", "")).lower() not in {"0x1", "1", "true"}:
+            raise ValueError(f"SINGIT settlement transaction failed: {tx_hash}")
+        transfers = _erc20_transfer_logs(
+            receipt,
+            token_address=self.singit_token_address,
+        )
+        if self.payer_address is not None:
+            if not isinstance(pay_to, str) or not pay_to.startswith("0x"):
+                raise ValueError("SINGIT settlement paymentMade.payTo is missing")
+            matching = [
+                transfer
+                for transfer in transfers
+                if _same_evm_address(transfer["from"], self.payer_address)
+                and _same_evm_address(transfer["to"], pay_to)
+                and int(str(transfer["amountAtomic"])) == expected_amount
+            ]
+            if not matching:
+                _raise_singit_transfer_mismatch(
+                    transfers=transfers,
+                    expected_sender=self.payer_address,
+                    expected_recipient=pay_to,
+                    expected_amount=expected_amount,
+                )
+            matched_transfer = matching[0]
+            return {
+                "network": "base-mainnet",
+                "transactionHash": tx_hash,
+                "tokenAddress": self.singit_token_address,
+                "from": self.payer_address,
+                "payTo": pay_to,
+                "amountAtomic": str(matched_transfer["amountAtomic"]),
+                "requiredAmountAtomic": str(expected_amount),
+                "discovered": discovered,
+            }
+        matching = [
+            transfer
+            for transfer in transfers
+            if int(str(transfer["amountAtomic"])) >= expected_amount
+        ]
+        if not matching:
+            raise ValueError(
+                "SINGIT settlement receipt did not include the required SINGIT transfer"
+            )
+        return {
+            "network": "base-mainnet",
+            "transactionHash": tx_hash,
+            "tokenAddress": self.singit_token_address,
+            "amountAtomic": str(max(int(str(transfer["amountAtomic"])) for transfer in matching)),
+            "requiredAmountAtomic": str(expected_amount),
+            "discovered": discovered,
+        }
+
+
+class BaseErc20TransactionResolver:
+    def __init__(
+        self,
+        *,
+        log_fetcher: Callable[..., list[dict[str, Any]]] | None = None,
+        sleeper: Callable[[float], None] | None = None,
+        attempts: int = 6,
+        interval_seconds: float = 2,
+    ):
+        self.log_fetcher = log_fetcher or fetch_base_erc20_transfer_logs
+        self.sleeper = sleeper or time.sleep
+        self.attempts = attempts
+        self.interval_seconds = interval_seconds
+
+    def __call__(
+        self,
+        *,
+        token_address: str,
+        sender: str,
+        recipient: str,
+        amount_atomic: str,
+        from_block: int,
+    ) -> str:
+        for attempt in range(max(1, self.attempts)):
+            logs = self.log_fetcher(
+                token_address=token_address,
+                sender=sender,
+                recipient=recipient,
+                from_block=from_block,
+            )
+            transaction_hashes = {
+                str(log.get("transactionHash"))
+                for log in logs
+                if _erc20_log_amount_atomic(log) == str(amount_atomic)
+                and isinstance(log.get("transactionHash"), str)
+                and str(log.get("transactionHash")).startswith("0x")
+            }
+            if len(transaction_hashes) == 1:
+                return next(iter(transaction_hashes))
+            if len(transaction_hashes) > 1:
+                raise ValueError("ambiguous SINGIT settlement")
+            if attempt < self.attempts - 1:
+                self.sleeper(self.interval_seconds)
+        raise ValueError("SINGIT settlement transaction was not found")
+
+
+class BankrTreasuryClient:
     def __init__(self, bankr_cli: str | None = None):
         configured = bankr_cli or os.getenv("SIGN402_BANKR_CLI")
         self.bankr_cli = configured or DEFAULT_BANKR_CLI
+
+    def usdc_balance(self, *, chain: str = "base") -> Decimal:
+        command = [
+            self.bankr_cli,
+            "wallet",
+            "portfolio",
+            "--chain",
+            str(chain),
+            "--json",
+            "--low-value",
+        ]
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if result.returncode != 0:
+            message = result.stderr.strip() or result.stdout.strip() or "Bankr portfolio failed"
+            raise ValueError(message)
+        json_start = result.stdout.find("{")
+        if json_start < 0:
+            raise ValueError("Bankr portfolio did not return JSON")
+        payload = json.loads(result.stdout[json_start:])
+        return usdc_balance_from_portfolio(payload, chain=chain)
+
+    def transfer_usdc(
+        self,
+        *,
+        to_address: str,
+        amount: str,
+        chain: str = "base",
+    ) -> dict[str, Any]:
+        return self.transfer_token(
+            to_address=to_address,
+            amount=amount,
+            token="USDC",
+            chain=chain,
+        )
+
+    def transfer_singit(
+        self,
+        *,
+        to_address: str,
+        amount: str,
+        token_address: str = DEFAULT_SINGIT_TOKEN_ADDRESS,
+        chain: str = "base",
+    ) -> dict[str, Any]:
+        return self.transfer_token(
+            to_address=to_address,
+            amount=amount,
+            token=token_address,
+            chain=chain,
+        )
+
+    def transfer_token(
+        self,
+        *,
+        to_address: str,
+        amount: str,
+        token: str,
+        chain: str = "base",
+    ) -> dict[str, Any]:
+        command = [
+            self.bankr_cli,
+            "--ni",
+            "wallet",
+            "transfer",
+            "--to",
+            str(to_address),
+            "--amount",
+            str(amount),
+            "--token",
+            str(token),
+            "--chain",
+            str(chain),
+        ]
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        payload = {
+            "ok": result.returncode == 0,
+            "command": command,
+            "returncode": result.returncode,
+            "stdout": result.stdout.strip(),
+            "stderr": result.stderr.strip(),
+            "txId": _bankr_cli_transaction_hash(result.stdout),
+        }
+        if result.returncode != 0:
+            message = payload["stderr"] or payload["stdout"] or "Bankr treasury transfer failed"
+            raise ValueError(message)
+        return payload
+
+
+class CdpWalletClient:
+    def __init__(self, service_dir: Path = DEFAULT_CDP_X402_SERVICE_DIR):
+        self.service_dir = Path(service_dir)
+
+    def quote(
+        self,
+        *,
+        from_token: str,
+        to_token: str,
+        amount: str,
+        chain: str = "base",
+    ) -> dict[str, Any]:
+        payload = self._run(
+            [
+                "swap-price",
+                "--from-token",
+                str(from_token),
+                "--to-token",
+                BASE_USDC_MAINNET if str(to_token).upper() == "USDC" else str(to_token),
+                "--amount",
+                str(amount),
+                "--chain",
+                str(chain),
+            ]
+        )
+        return {
+            "ok": True,
+            "fromAmount": str(amount),
+            "fromToken": "SINGIT",
+            "toAmount": _format_usdc_atomic(payload.get("toAmount", "0")),
+            "toToken": "USDC",
+            "minToAmount": _format_usdc_atomic(payload.get("minToAmount", payload.get("toAmount", "0"))),
+            "raw": payload,
+        }
+
+    def swap_singit_to_usdc(
+        self,
+        *,
+        amount: str,
+        from_token: str = DEFAULT_SINGIT_TOKEN_ADDRESS,
+        min_usdc: str = "",
+        chain: str = "base",
+    ) -> dict[str, Any]:
+        payload = self._run(
+            [
+                "swap",
+                "--from-token",
+                str(from_token),
+                "--to-token",
+                BASE_USDC_MAINNET,
+                "--amount",
+                str(amount),
+                "--chain",
+                str(chain),
+                "--min-usdc",
+                str(min_usdc),
+            ]
+        )
+        return self._with_tx_id(payload)
+
+    def transfer_usdc(
+        self,
+        *,
+        to_address: str,
+        amount: str,
+        chain: str = "base",
+    ) -> dict[str, Any]:
+        payload = self._run(
+            [
+                "transfer-usdc",
+                "--to",
+                str(to_address),
+                "--amount",
+                str(amount),
+                "--chain",
+                str(chain),
+            ]
+        )
+        return self._with_tx_id(payload)
+
+    def _run(self, args: list[str]) -> dict[str, Any]:
+        script = self.service_dir / "src" / "index.mjs"
+        command = ["node", str(script), *args]
+        result = subprocess.run(
+            command,
+            cwd=str(self.service_dir),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+        if result.returncode != 0:
+            message = result.stderr.strip() or result.stdout.strip() or "CDP wallet service failed"
+            raise ValueError(message)
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise ValueError("CDP wallet service returned non-JSON output") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("CDP wallet service returned non-object JSON")
+        return payload
+
+    def _with_tx_id(self, payload: dict[str, Any]) -> dict[str, Any]:
+        tx_id = payload.get("transactionHash") or payload.get("txId")
+        return {**payload, "txId": str(tx_id) if tx_id else None}
+
+
+class BankrTransferToCdpSwapFundingRunner:
+    def __init__(
+        self,
+        *,
+        bankr_transfer_client: Any,
+        cdp_client: CdpWalletClient,
+        cdp_wallet_address: str,
+        from_token: str,
+        chain: str = "base",
+    ):
+        self.bankr_transfer_client = bankr_transfer_client
+        self.cdp_client = cdp_client
+        self.cdp_wallet_address = cdp_wallet_address
+        self.from_token = from_token
+        self.chain = chain
+
+    def __call__(self, quote: dict[str, Any]) -> dict[str, Any]:
+        if quote.get("pricingMode") != "bankr_real_rate":
+            raise ValueError("CDP swap funding requires pricingMode=bankr_real_rate")
+        amount = str(quote.get("singitAmount", "")).strip()
+        if not amount:
+            raise ValueError("quote singitAmount is required for CDP swap funding")
+        required_usdc = str(quote.get("requiredUsdc") or quote.get("priceUsd") or "")
+        transfer_result = self.bankr_transfer_client.transfer_singit(
+            to_address=self.cdp_wallet_address,
+            amount=amount,
+            token_address=self.from_token,
+            chain=self.chain,
+        )
+        swap_result = self.cdp_client.swap_singit_to_usdc(
+            amount=amount,
+            from_token=self.from_token,
+            min_usdc=required_usdc,
+            chain=self.chain,
+        )
+        return {
+            "ok": bool(transfer_result.get("ok", True)) and bool(swap_result.get("ok", True)),
+            "pricingMode": "bankr_real_rate",
+            "mode": "bankr_transfer_to_cdp_swap",
+            "amount": amount,
+            "fromToken": self.from_token,
+            "toToken": "USDC",
+            "chain": self.chain,
+            "cdpWalletAddress": self.cdp_wallet_address,
+            "expectedUsdc": str(quote.get("expectedUsdc", "")),
+            "requiredUsdc": required_usdc,
+            "transfer": transfer_result,
+            "swap": swap_result,
+        }
+
+
+class CdpWalletSwapFundingRunner:
+    def __init__(
+        self,
+        *,
+        cdp_client: CdpWalletClient,
+        from_token: str,
+        chain: str = "base",
+    ):
+        self.cdp_client = cdp_client
+        self.from_token = from_token
+        self.chain = chain
+
+    def __call__(self, quote: dict[str, Any]) -> dict[str, Any]:
+        if quote.get("pricingMode") != "bankr_real_rate":
+            raise ValueError("CDP wallet swap funding requires pricingMode=bankr_real_rate")
+        amount = str(quote.get("singitAmount", "")).strip()
+        if not amount:
+            raise ValueError("quote singitAmount is required for CDP wallet swap funding")
+        required_usdc = str(quote.get("requiredUsdc") or quote.get("priceUsd") or "")
+        swap_result = self.cdp_client.swap_singit_to_usdc(
+            amount=amount,
+            from_token=self.from_token,
+            min_usdc=required_usdc,
+            chain=self.chain,
+        )
+        return {
+            "ok": bool(swap_result.get("ok", True)),
+            "pricingMode": "bankr_real_rate",
+            "mode": "cdp_wallet_swap",
+            "amount": amount,
+            "fromToken": self.from_token,
+            "toToken": "USDC",
+            "chain": self.chain,
+            "expectedUsdc": str(quote.get("expectedUsdc", "")),
+            "requiredUsdc": required_usdc,
+            "swap": swap_result,
+            "txId": swap_result.get("txId"),
+        }
+
+
+class BankrUsdcReserveGuard:
+    def __init__(
+        self,
+        *,
+        treasury_client: BankrTreasuryClient,
+        buffer_bps: int = 1000,
+        chain: str = "base",
+    ):
+        self.treasury_client = treasury_client
+        self.buffer_bps = int(buffer_bps)
+        self.chain = chain
+
+    def __call__(self, quote: dict[str, Any]) -> dict[str, Any]:
+        price = Decimal(str(quote["priceUsd"]))
+        required = (
+            price
+            * Decimal(10000 + self.buffer_bps)
+            / Decimal(10000)
+        ).quantize(Decimal("0.000001"), rounding=ROUND_CEILING)
+        available = self.treasury_client.usdc_balance(chain=self.chain)
+        if available < required:
+            raise ValueError(
+                f"insufficient USDC reserve: need {required} USDC, have {available} USDC"
+            )
+        return {
+            "ok": True,
+            "requiredUsdcReserve": str(required),
+            "availableUsdcReserve": str(available),
+        }
+
+
+def _first_present_amount(source: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
+    for key in keys:
+        value = source.get(key)
+        if value is not None and str(value).strip() != "":
+            return value
+    return None
+
+
+def _assert_usdc_floor(value_raw: Any, *, required_usdc: str, label: str) -> None:
+    """Raise when a known USDC amount is below the required floor.
+
+    No-op when the floor or the amount is unavailable/unparseable, so callers
+    that cannot observe a realized amount (e.g. the Bankr CLI swap) skip safely.
+    """
+    required_text = str(required_usdc).strip()
+    if not required_text or value_raw is None:
+        return
+    try:
+        value = Decimal(str(value_raw))
+        required = Decimal(required_text)
+    except (InvalidOperation, ValueError):
+        return
+    if value < required:
+        raise ValueError(f"{label} {value} USDC, below required {required} USDC")
+
+
+def _assert_quote_can_meet_required_usdc(
+    quote_result: dict[str, Any],
+    *,
+    required_usdc: str,
+) -> None:
+    """Reject before swapping when the quoted USDC floor cannot meet the target.
+
+    Both the Bankr CLI (``minToAmount`` parsed from "Min received") and the
+    Wallet API quote expose a guaranteed minimum, so this floor check covers the
+    CLI swap path, which returns no realized amount for the post-swap check.
+    """
+    _assert_usdc_floor(
+        _first_present_amount(quote_result, ("minToAmount", "toAmount")),
+        required_usdc=required_usdc,
+        label="Bankr swap quote floor",
+    )
+
+
+def _assert_swap_received_enough_usdc(
+    swap_result: dict[str, Any],
+    *,
+    required_usdc: str,
+) -> None:
+    """Reject a swap that demonstrably delivered less USDC than the quote needs.
+
+    Only enforced when the swap result reports a realized output amount
+    (``amountReceived``/``minToAmount``); the Bankr CLI swap path does not
+    expose one and therefore cannot be verified here.
+    """
+    _assert_usdc_floor(
+        _first_present_amount(swap_result, ("amountReceived", "minToAmount")),
+        required_usdc=required_usdc,
+        label="Bankr swap received",
+    )
+
+
+class BankrSingitToUsdcFundingRunner:
+    def __init__(
+        self,
+        *,
+        swap_client: Any,
+        from_token: str,
+        to_token: str = "USDC",
+        chain: str = "base",
+    ):
+        self.swap_client = swap_client
+        self.from_token = from_token
+        self.to_token = to_token
+        self.chain = chain
+
+    def __call__(self, quote: dict[str, Any]) -> dict[str, Any]:
+        if quote.get("pricingMode") != "bankr_real_rate":
+            raise ValueError("Bankr real-rate funding requires pricingMode=bankr_real_rate")
+        amount = str(quote.get("singitAmount", "")).strip()
+        if not amount:
+            raise ValueError("quote singitAmount is required for Bankr swap")
+        required_usdc = str(quote.get("requiredUsdc") or quote.get("priceUsd") or "")
+        if required_usdc:
+            pre_swap_quote = self.swap_client.quote(
+                from_token=self.from_token,
+                to_token=self.to_token,
+                amount=amount,
+                chain=self.chain,
+            )
+            _assert_quote_can_meet_required_usdc(pre_swap_quote, required_usdc=required_usdc)
+        result = self.swap_client.swap(
+            from_token=self.from_token,
+            to_token=self.to_token,
+            amount=amount,
+            chain=self.chain,
+        )
+        _assert_swap_received_enough_usdc(result, required_usdc=required_usdc)
+        return {
+            **result,
+            "pricingMode": "bankr_real_rate",
+            "fromToken": self.from_token,
+            "toToken": self.to_token,
+            "chain": self.chain,
+            "amount": amount,
+            "requiredUsdc": required_usdc,
+            "expectedUsdc": str(quote.get("expectedUsdc", "")),
+        }
+
+
+class BankrCliX402PaymentClient:
+    def __init__(
+        self,
+        bankr_cli: str | None = None,
+        block_number_fetcher: Callable[[], int] | None = None,
+    ):
+        configured = bankr_cli or os.getenv("SIGN402_BANKR_CLI")
+        self.bankr_cli = configured or DEFAULT_BANKR_CLI
+        self.block_number_fetcher = block_number_fetcher or fetch_base_block_number
 
     def __call__(
         self,
@@ -1367,6 +2389,11 @@ class BankrCliX402PaymentClient:
         if request_body is not None:
             command.extend(["-X", "POST", "-d", json.dumps(request_body, separators=(",", ":"))])
 
+        reported_command = list(command)
+        if "-d" in reported_command:
+            reported_command[reported_command.index("-d") + 1] = "<redacted>"
+
+        start_block = self.block_number_fetcher()
         result = subprocess.run(
             command,
             check=False,
@@ -1382,11 +2409,13 @@ class BankrCliX402PaymentClient:
             "ok": result.returncode == 0,
             "status": status,
             "resourceUrl": resource_url,
-            "command": command,
+            "command": reported_command,
             "stdout": result.stdout.strip(),
             "stderr": result.stderr.strip(),
             "body": body,
             "transactionHash": transaction_hash,
+            "startBlock": start_block,
+            "paymentMade": dict(raw_payload.get("paymentMade", {})) if raw_payload else {},
         }
         if payload["transactionHash"]:
             payload["paymentResponse"] = {"transaction": payload["transactionHash"]}
@@ -2223,8 +3252,173 @@ def _bankr_cli_raw_transaction_hash(payload: dict[str, Any] | None) -> str | Non
 
 
 def _bankr_cli_transaction_hash(stdout: str) -> str | None:
-    match = re.search(r"https://basescan\.org/tx/(0x[a-fA-F0-9]+)", stdout)
-    return match.group(1) if match else None
+    patterns = (
+        r"https://basescan\.org/tx/(0x[a-fA-F0-9]{64})",
+        r"\bTx Hash:\s*(0x[a-fA-F0-9]{64})\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, stdout)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _bankr_result_transaction_hash(result: dict[str, Any]) -> str | None:
+    for key in ("transactionHash", "txHash", "transaction", "txId"):
+        value = result.get(key)
+        if isinstance(value, str) and value.startswith("0x"):
+            return value
+    payment = result.get("paymentMade")
+    if isinstance(payment, dict):
+        for key in ("transactionHash", "txHash", "transaction", "txId"):
+            value = payment.get(key)
+            if isinstance(value, str) and value.startswith("0x"):
+                return value
+    body = result.get("body")
+    if isinstance(body, dict):
+        return _bankr_result_transaction_hash(body)
+    return None
+
+
+def _base_rpc_call(method: str, params: list[Any]) -> Any:
+    request_body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        BASE_MAINNET_RPC_URL,
+        data=request_body,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "Sign402/1.0",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Base RPC returned non-object JSON")
+    if payload.get("error") is not None:
+        raise ValueError(f"Base RPC error: {payload['error']}")
+    return payload.get("result")
+
+
+def fetch_base_block_number() -> int:
+    result = _base_rpc_call("eth_blockNumber", [])
+    if not isinstance(result, str) or not result.startswith("0x"):
+        raise ValueError("Base RPC returned an invalid block number")
+    return int(result, 16)
+
+
+def fetch_base_transaction_receipt(tx_hash: str) -> dict[str, Any]:
+    result = _base_rpc_call("eth_getTransactionReceipt", [tx_hash])
+    if not isinstance(result, dict):
+        raise ValueError(f"Base RPC did not return a receipt for {tx_hash}")
+    return result
+
+
+def fetch_base_erc20_transfer_logs(
+    *,
+    token_address: str,
+    sender: str,
+    recipient: str,
+    from_block: int,
+) -> list[dict[str, Any]]:
+    result = _base_rpc_call(
+        "eth_getLogs",
+        [
+            {
+                "address": token_address,
+                "fromBlock": hex(from_block),
+                "toBlock": "latest",
+                "topics": [
+                    ERC20_TRANSFER_TOPIC,
+                    _erc20_topic_address(sender),
+                    _erc20_topic_address(recipient),
+                ],
+            }
+        ],
+    )
+    if not isinstance(result, list):
+        raise ValueError("Base RPC returned invalid logs")
+    return [log for log in result if isinstance(log, dict)]
+
+
+def _erc20_topic_address(address: str) -> str:
+    return "0x" + address.lower().removeprefix("0x").rjust(64, "0")
+
+
+def _normalize_evm_address(address: str) -> str:
+    return "0x" + address.lower().removeprefix("0x")
+
+
+def _same_evm_address(left: str, right: str) -> bool:
+    return _normalize_evm_address(left) == _normalize_evm_address(right)
+
+
+def _erc20_log_amount_atomic(log: dict[str, Any]) -> str | None:
+    data = log.get("data")
+    if not isinstance(data, str):
+        return None
+    try:
+        return str(int(data, 16))
+    except ValueError:
+        return None
+
+
+def _format_usdc_atomic(value: Any) -> str:
+    return format_decimal(Decimal(str(value)) / Decimal(1_000_000))
+
+
+def _raise_singit_transfer_mismatch(
+    *,
+    transfers: list[dict[str, str]],
+    expected_sender: str,
+    expected_recipient: str,
+    expected_amount: int,
+) -> None:
+    if not transfers:
+        raise ValueError("SINGIT settlement receipt did not include the required token transfer")
+    if not any(_same_evm_address(transfer["from"], expected_sender) for transfer in transfers):
+        raise ValueError("SINGIT settlement receipt sender did not match the Bankr payer")
+    if not any(_same_evm_address(transfer["to"], expected_recipient) for transfer in transfers):
+        raise ValueError("SINGIT settlement receipt recipient did not match the Bankr payTo")
+    if not any(int(str(transfer["amountAtomic"])) == expected_amount for transfer in transfers):
+        raise ValueError("SINGIT settlement receipt amount did not match the quote")
+    raise ValueError("SINGIT settlement receipt did not include the exact SINGIT transfer")
+
+
+def _erc20_transfer_logs(
+    receipt: dict[str, Any],
+    *,
+    token_address: str,
+) -> list[dict[str, str]]:
+    token = token_address.lower()
+    transfers = []
+    for log in receipt.get("logs", []):
+        if not isinstance(log, dict):
+            continue
+        topics = log.get("topics")
+        if not isinstance(topics, list) or len(topics) < 3:
+            continue
+        if str(log.get("address", "")).lower() != token:
+            continue
+        if str(topics[0]).lower() != ERC20_TRANSFER_TOPIC:
+            continue
+        data = str(log.get("data", "0x0"))
+        transfers.append(
+            {
+                "from": "0x" + str(topics[1])[-40:],
+                "to": "0x" + str(topics[2])[-40:],
+                "amountAtomic": str(int(data, 16)),
+            }
+        )
+    return transfers
 
 
 def _bankr_cli_response_body(stdout: str) -> Any:
@@ -2267,6 +3461,16 @@ def _busy_payload() -> dict[str, Any]:
         "error": "firefly_busy",
         "message": "Firefly is already handling another approval request.",
     }
+
+
+def _without_fulfillment_token(result: dict[str, Any]) -> dict[str, Any]:
+    """Drop the plaintext fulfillment token before persisting/broadcasting.
+
+    The token is returned to the buying caller so they can reveal the
+    redemption code, but it must never reach the dashboard event store, which
+    is served back over an open-CORS GET endpoint.
+    """
+    return {key: value for key, value in result.items() if key != "fulfillmentToken"}
 
 
 if __name__ == "__main__":

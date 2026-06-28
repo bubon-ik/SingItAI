@@ -156,7 +156,11 @@ class FireflyClient:
             self.baudrate,
             timeout=self.timeout,
             write_timeout=2,
+            dsrdtr=False,
+            rtscts=False,
         ) as serial_port:
+            serial_port.dtr = True
+            serial_port.rts = True
             boot_raw = self._read_until_ready(serial_port, self.settle_seconds)
             raw = ""
             for index, (command, read_seconds) in enumerate(commands):

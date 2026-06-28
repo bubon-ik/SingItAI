@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING
 from typing import Any
 
+from .numeric import format_decimal
+
 
 SINGIT_DECIMALS = 18
 DEFAULT_QUOTE_TTL_SECONDS = 120
@@ -184,8 +186,3 @@ def recipient_commitment(recipient: dict[str, Any]) -> str:
         ensure_ascii=False,
     )
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def format_decimal(value: Decimal) -> str:
-    text = format(value.normalize(), "f")
-    return text[:-2] if text.endswith(".0") else text
