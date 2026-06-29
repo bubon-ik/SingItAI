@@ -1003,6 +1003,42 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         self.buy_tool_response_cache: dict[str, dict[str, Any]] = {}
 
 
+class DisabledApprovalClient:
+    approval_method = "disabled"
+
+    def approve_payment_hash(
+        self,
+        payment_hash: str,
+        *,
+        context_lines: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "approved": False,
+            "approvedHash": str(payment_hash).lower(),
+            "approvalMethod": self.approval_method,
+            "error": "approval_provider_disabled",
+            "message": (
+                "No approval provider is configured. Set SIGN402_APPROVAL_PROVIDER=firefly "
+                "for hardware approvals or configure an iMessage approval provider before spending."
+            ),
+        }
+
+
+def build_approval_client_from_env(
+    *,
+    firefly_port: str | None,
+    env: dict[str, str] | None = None,
+):
+    values = os.environ if env is None else env
+    provider = values.get("SIGN402_APPROVAL_PROVIDER", "firefly").strip().lower()
+    if provider in {"disabled", "none", "server"}:
+        return DisabledApprovalClient()
+    if provider == "firefly":
+        port = firefly_port or find_firefly_port()
+        return FireflyClient(port=port)
+    raise ValueError(f"unsupported SIGN402_APPROVAL_PROVIDER: {provider}")
+
+
 def build_bitrefill_client_from_env(env: dict[str, str] | None = None):
     from .bitrefill import LiveBitrefillClient, TestBitrefillClient
 
@@ -1182,7 +1218,8 @@ def build_server(
     host: str,
     port: int,
     *,
-    firefly_port: str,
+    firefly_port: str | None,
+    approval_provider: str | None = None,
     payment_executor_dir: Path = PAYMENT_EXECUTOR_DIR,
     event_store_path: Path = DEFAULT_EVENT_STORE_PATH,
     agent_state_path: Path = DEFAULT_AGENT_STATE_PATH,
@@ -1202,7 +1239,11 @@ def build_server(
     )
     from .commerce_store import BitrefillCommerceStore
 
-    firefly = FireflyClient(port=firefly_port)
+    approval_env = None
+    if approval_provider is not None:
+        approval_env = dict(os.environ)
+        approval_env["SIGN402_APPROVAL_PROVIDER"] = approval_provider
+    firefly = build_approval_client_from_env(firefly_port=firefly_port, env=approval_env)
     payment_executor = build_payment_executor(payment_executor_dir)
     x402_payment_signature_builder = build_x402_payment_signature_builder(payment_executor_dir)
     base_payment_client = CdpBaseX402PaymentClient(cdp_x402_service_dir)
@@ -1297,6 +1338,16 @@ def build_server(
 
 
 def build_payment_executor(payment_executor_dir: Path):
+    mode = os.getenv("SIGN402_PAYMENT_EXECUTOR_MODE", "local").strip().lower()
+    if mode in {"disabled", "none", "server"}:
+        def disabled_pay(requirement: dict[str, Any], policy_hash: str) -> dict[str, Any]:
+            raise RuntimeError(
+                "Algorand payment executor is disabled. Configure SIGN402_PAYMENT_EXECUTOR_MODE=local "
+                "and payment-executor/.env before sending Algorand payments."
+            )
+
+        return disabled_pay
+
     from algosdk.v2client.algod import AlgodClient
 
     env = _read_env(payment_executor_dir / ".env")
@@ -1317,6 +1368,17 @@ def build_payment_executor(payment_executor_dir: Path):
 
 
 def build_x402_payment_signature_builder(payment_executor_dir: Path):
+    mode = os.getenv("SIGN402_PAYMENT_EXECUTOR_MODE", "local").strip().lower()
+    if mode in {"disabled", "none", "server"}:
+        def disabled_build_signature(payment_required: dict[str, Any]) -> dict[str, Any]:
+            raise RuntimeError(
+                "x402-avm payment signature builder is disabled. Configure "
+                "SIGN402_PAYMENT_EXECUTOR_MODE=local and payment-executor/.env before "
+                "sending Algorand x402 payments."
+            )
+
+        return disabled_build_signature
+
     env = _read_env(payment_executor_dir / ".env")
     sender = env["ALGORAND_SENDER"]
     private_key = env["ALGORAND_PRIVATE_KEY"]
@@ -1362,13 +1424,21 @@ def main() -> None:
         type=Path,
         default=Path(os.getenv("SIGN402_CDP_X402_SERVICE_DIR", DEFAULT_CDP_X402_SERVICE_DIR)),
     )
+    parser.add_argument(
+        "--approval-provider",
+        default=os.getenv("SIGN402_APPROVAL_PROVIDER", "firefly"),
+        choices=("firefly", "disabled", "none", "server"),
+    )
     args = parser.parse_args()
 
-    firefly_port = args.firefly_port or find_firefly_port()
+    firefly_port = args.firefly_port
+    if args.approval_provider == "firefly":
+        firefly_port = firefly_port or find_firefly_port()
     server = build_server(
         args.host,
         args.port,
         firefly_port=firefly_port,
+        approval_provider=args.approval_provider,
         payment_executor_dir=args.payment_executor_dir,
         event_store_path=args.event_store_path,
         agent_state_path=args.agent_state_path,
@@ -1377,7 +1447,9 @@ def main() -> None:
     )
 
     print(f"Sign402 gateway listening on http://{args.host}:{args.port}")
-    print(f"Firefly port: {firefly_port}")
+    print(f"Approval provider: {args.approval_provider}")
+    if firefly_port:
+        print(f"Firefly port: {firefly_port}")
     print(f"Payment executor dir: {args.payment_executor_dir}")
     print(f"Event store path: {args.event_store_path}")
     print(f"Agent state path: {args.agent_state_path}")

@@ -20,6 +20,7 @@ from sign402_gateway.server import (
     BankrUsdcReserveGuard,
     CdpWalletClient,
     CdpWalletSwapFundingRunner,
+    DisabledApprovalClient,
     BankrWalletApiClient,
     DEFAULT_SINGIT_RISK_CHECK_URL,
     DEFAULT_SINGIT_TOKEN_ADDRESS,
@@ -28,6 +29,9 @@ from sign402_gateway.server import (
     SingitSettlementVerifier,
     build_bitrefill_funding_runner_from_env,
     build_bitrefill_client_from_env,
+    build_approval_client_from_env,
+    build_payment_executor,
+    build_x402_payment_signature_builder,
     build_real_rate_pricer_from_env,
     build_singit_settlement_verifier_from_env,
     build_usdc_reserve_guard_from_env,
@@ -101,6 +105,30 @@ class FakeSocket:
 
 
 class GatewayServerTests(unittest.TestCase):
+    def test_disabled_approval_provider_rejects_without_firefly(self):
+        client = build_approval_client_from_env(
+            firefly_port=None,
+            env={"SIGN402_APPROVAL_PROVIDER": "disabled"},
+        )
+
+        approval = client.approve_payment_hash("a" * 64, context_lines=["TEST"])
+
+        self.assertIsInstance(client, DisabledApprovalClient)
+        self.assertFalse(approval["approved"])
+        self.assertEqual(approval["approvedHash"], "a" * 64)
+        self.assertEqual(approval["error"], "approval_provider_disabled")
+        self.assertEqual(approval["approvalMethod"], "disabled")
+
+    def test_disabled_payment_executor_rejects_before_local_signing(self):
+        with patch.dict(os.environ, {"SIGN402_PAYMENT_EXECUTOR_MODE": "disabled"}):
+            executor = build_payment_executor(Path("/tmp/missing-payment-executor"))
+            signature_builder = build_x402_payment_signature_builder(Path("/tmp/missing-payment-executor"))
+
+        with self.assertRaisesRegex(RuntimeError, "disabled"):
+            executor({}, "a" * 64)
+        with self.assertRaisesRegex(RuntimeError, "disabled"):
+            signature_builder({})
+
     def test_bitrefill_client_factory_defaults_to_safe_test_mode(self):
         client = build_bitrefill_client_from_env({})
 
