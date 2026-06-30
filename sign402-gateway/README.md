@@ -39,6 +39,9 @@ POST /agent/inspect-x402
 POST /agent/buy-x402
 POST /agent/inspect-llm-credits-topup
 POST /agent/top-up-llm-credits
+POST /agent/wallet
+POST /agent/create-wallet
+POST /agent/wallet-balance
 ```
 
 `/agent/inspect-x402` and `/agent/buy-x402` now support two official x402 lanes:
@@ -99,6 +102,60 @@ curl -sS -X POST http://127.0.0.1:8099/agent/top-up-llm-credits \
 ```
 
 The gateway checks the stored policy against the SINGIT token address and `bankr_llm_credits_topup` purpose, asks Firefly to approve the exact top-up commitment, then invokes the Bankr CLI. Set `SIGN402_BANKR_CLI` if `bankr` is not on `PATH`. The default SINGIT token address is `0xc2c1e0b7C401e6217193732272444D928646eba3`; override it with `SIGN402_SINGIT_TOKEN_ADDRESS` if needed.
+
+## Managed Base Wallet MVP
+
+The hosted Telegram bot can create one managed Base agent wallet per Telegram user.
+This wallet is custodial and intended for small agent budgets only. Spending remains
+disabled until the iMessage approval provider and per-user spend limits are implemented.
+
+Generate required server secrets:
+
+```bash
+python3 - <<'PY'
+from cryptography.fernet import Fernet
+import secrets
+
+print("SIGN402_WALLET_MASTER_KEY=" + Fernet.generate_key().decode())
+print("SIGN402_WALLET_API_TOKEN=" + secrets.token_urlsafe(32))
+PY
+```
+
+Set them in the gateway service environment:
+
+```env
+SIGN402_WALLET_MASTER_KEY=...
+SIGN402_WALLET_API_TOKEN=...
+SIGN402_USER_WALLET_STORE_PATH=/home/hermes/.sign402/user-wallets.db
+```
+
+The wallet API token is required even on localhost. Hermes or any trusted local
+adapter must call wallet endpoints with:
+
+```text
+Authorization: Bearer <SIGN402_WALLET_API_TOKEN>
+```
+
+Agent-facing endpoints:
+
+```text
+POST /agent/wallet
+POST /agent/create-wallet
+POST /agent/wallet-balance
+```
+
+Example:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8099/agent/create-wallet \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SIGN402_WALLET_API_TOKEN" \
+  -d '{"telegramUserId":"1045618308","telegramUsername":"AlpskyKnedlik"}'
+```
+
+The response never includes private key material. The encrypted wallet database
+should stay on the VPS filesystem with restrictive permissions; the gateway
+creates the wallet directory as `0700` and the SQLite database as `0600`.
 
 ## Main Demo Flow
 
