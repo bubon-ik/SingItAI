@@ -91,6 +91,7 @@ class DummyServer:
 
     def __init__(self):
         self.user_wallet_service = Mock()
+        self.user_wallet_api_token = "test-wallet-token"
 
 
 class FakeSocket:
@@ -572,6 +573,7 @@ class GatewayServerTests(unittest.TestCase):
         body: dict | None = None,
         method: str = "POST",
         server=None,
+        headers: dict[str, str] | None = None,
     ):
         encoded = b""
         if body is not None:
@@ -581,6 +583,10 @@ class GatewayServerTests(unittest.TestCase):
             f"{method} {path} HTTP/1.1\r\n".encode("ascii")
             + f"Content-Length: {len(encoded)}\r\n".encode("ascii")
             + b"Content-Type: application/json\r\n"
+            + b"".join(
+                f"{key}: {value}\r\n".encode("ascii")
+                for key, value in (headers or {}).items()
+            )
             + b"\r\n"
             + encoded
         )
@@ -597,6 +603,9 @@ class GatewayServerTests(unittest.TestCase):
         _, body = response.split("\r\n\r\n", 1)
         return json.loads(body)
 
+    def wallet_auth_headers(self) -> dict[str, str]:
+        return {"Authorization": "Bearer test-wallet-token"}
+
     def test_agent_create_wallet_requires_telegram_user_id(self):
         server = DummyServer()
 
@@ -605,6 +614,7 @@ class GatewayServerTests(unittest.TestCase):
                 "/agent/create-wallet",
                 {"telegramUsername": "mp"},
                 server=server,
+                headers=self.wallet_auth_headers(),
             )
 
         response = self.response_text(handler)
@@ -632,6 +642,7 @@ class GatewayServerTests(unittest.TestCase):
                 "/agent/create-wallet",
                 {"telegramUserId": "1045618308", "telegramUsername": "AlpskyKnedlik"},
                 server=server,
+                headers=self.wallet_auth_headers(),
             )
 
         response = self.response_text(handler)
@@ -644,6 +655,75 @@ class GatewayServerTests(unittest.TestCase):
             telegram_user_id="1045618308",
             telegram_username="AlpskyKnedlik",
         )
+
+    def test_agent_create_wallet_requires_wallet_api_token(self):
+        server = DummyServer()
+        server.user_wallet_service.create_wallet.return_value = {"ok": True}
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/create-wallet",
+                {"telegramUserId": "1045618308"},
+                server=server,
+            )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 401 Unauthorized", response)
+        self.assertEqual(self.response_json(handler)["error"], "invalid wallet API token")
+        server.user_wallet_service.create_wallet.assert_not_called()
+
+    def test_agent_create_wallet_fails_when_wallet_api_token_not_configured(self):
+        server = DummyServer()
+        server.user_wallet_api_token = ""
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/create-wallet",
+                {"telegramUserId": "1045618308"},
+                server=server,
+                headers=self.wallet_auth_headers(),
+            )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 503 Service Unavailable", response)
+        self.assertEqual(self.response_json(handler)["error"], "SIGN402_WALLET_API_TOKEN is required")
+        server.user_wallet_service.create_wallet.assert_not_called()
+
+    def test_agent_create_wallet_strips_accidental_private_key_material(self):
+        server = DummyServer()
+        server.user_wallet_service.create_wallet.return_value = {
+            "ok": True,
+            "created": True,
+            "wallet": {
+                "chain": "base",
+                "address": "0x1111111111111111111111111111111111111111",
+                "status": "created",
+                "spendingEnabled": False,
+                "privateKey": "0x" + "a" * 64,
+                "nested": {"encrypted_private_key": "secret-ciphertext"},
+            },
+            "debug": [{"privateMaterial": "do-not-return"}],
+            "telegramText": "Wallet ready",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/create-wallet",
+                {"telegramUserId": "1045618308"},
+                server=server,
+                headers=self.wallet_auth_headers(),
+            )
+
+        response = self.response_text(handler)
+        body = self.response_json(handler)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertNotIn("private", response.lower())
+        self.assertNotIn("secret-ciphertext", response)
+        self.assertNotIn("0x" + "a" * 64, response)
+        self.assertEqual(body["wallet"]["address"], "0x1111111111111111111111111111111111111111")
 
     def test_agent_wallet_status_uses_user_wallet_service(self):
         server = DummyServer()
@@ -658,6 +738,7 @@ class GatewayServerTests(unittest.TestCase):
                 "/agent/wallet",
                 {"userId": "1045618308"},
                 server=server,
+                headers=self.wallet_auth_headers(),
             )
 
         response = self.response_text(handler)
@@ -684,6 +765,7 @@ class GatewayServerTests(unittest.TestCase):
                 "/agent/wallet-balance",
                 {"telegram_user_id": "1045618308"},
                 server=server,
+                headers=self.wallet_auth_headers(),
             )
 
         response = self.response_text(handler)

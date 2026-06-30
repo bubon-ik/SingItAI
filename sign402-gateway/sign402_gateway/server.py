@@ -587,6 +587,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
 
     def _handle_agent_create_wallet(self) -> None:
         try:
+            _require_wallet_api_token(self)
             payload = self._read_json()
             telegram_user_id = _read_telegram_user_id(payload)
             result = self.server.user_wallet_service.create_wallet(
@@ -594,6 +595,10 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 telegram_username=str(payload.get("telegramUsername", "") or ""),
             )
             self._send_json(_without_private_key_material(result), status=200)
+        except WalletApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except WalletApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
         except WalletEncryptionError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=503)
         except Exception as exc:
@@ -601,12 +606,17 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
 
     def _handle_agent_wallet(self) -> None:
         try:
+            _require_wallet_api_token(self)
             payload = self._read_json()
             result = self.server.user_wallet_service.wallet_status(
                 _read_telegram_user_id(payload)
             )
             status = 200 if bool(result.get("ok")) else 404
             self._send_json(_without_private_key_material(result), status=status)
+        except WalletApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except WalletApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
         except WalletEncryptionError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=503)
         except Exception as exc:
@@ -614,12 +624,17 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
 
     def _handle_agent_wallet_balance(self) -> None:
         try:
+            _require_wallet_api_token(self)
             payload = self._read_json()
             result = self.server.user_wallet_service.wallet_balance(
                 _read_telegram_user_id(payload)
             )
             status = 200 if bool(result.get("ok")) else 404
             self._send_json(_without_private_key_material(result), status=status)
+        except WalletApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except WalletApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
         except WalletEncryptionError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=503)
         except Exception as exc:
@@ -1038,6 +1053,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         bitrefill_fulfillment_runner: Callable[[dict[str, Any]], dict[str, Any]],
         bitrefill_settlement_preparation_runner: Callable[[dict[str, Any]], dict[str, Any]],
         user_wallet_service,
+        user_wallet_api_token: str,
     ):
         super().__init__(server_address, handler_class)
         self.firefly = firefly
@@ -1058,6 +1074,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         self.bitrefill_fulfillment_runner = bitrefill_fulfillment_runner
         self.bitrefill_settlement_preparation_runner = bitrefill_settlement_preparation_runner
         self.user_wallet_service = user_wallet_service
+        self.user_wallet_api_token = user_wallet_api_token
         self.firefly_lock = threading.Lock()
         self.buy_tool_response_cache: dict[str, dict[str, Any]] = {}
 
@@ -1399,6 +1416,7 @@ def build_server(
         bitrefill_fulfillment_runner=bitrefill_fulfillment_runner,
         bitrefill_settlement_preparation_runner=bitrefill_settlement_preparation_runner,
         user_wallet_service=user_wallet_service,
+        user_wallet_api_token=os.getenv("SIGN402_WALLET_API_TOKEN", ""),
     )
 
 
@@ -2825,6 +2843,30 @@ def _read_telegram_user_id(payload: dict[str, Any]) -> str:
         if value:
             return value
     raise ValueError("telegramUserId is required")
+
+
+class WalletApiAuthError(ValueError):
+    pass
+
+
+class WalletApiTokenNotConfiguredError(RuntimeError):
+    pass
+
+
+def _require_wallet_api_token(handler: BaseHTTPRequestHandler) -> None:
+    expected = str(getattr(handler.server, "user_wallet_api_token", "") or "").strip()
+    if not expected:
+        raise WalletApiTokenNotConfiguredError("SIGN402_WALLET_API_TOKEN is required")
+
+    authorization = str(handler.headers.get("Authorization", "") or "").strip()
+    supplied = ""
+    if authorization.lower().startswith("bearer "):
+        supplied = authorization[7:].strip()
+    if not supplied:
+        supplied = str(handler.headers.get("X-Sign402-Wallet-Token", "") or "").strip()
+
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        raise WalletApiAuthError("invalid wallet API token")
 
 
 def _without_private_key_material(value):
