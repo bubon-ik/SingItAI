@@ -1,0 +1,13 @@
+name: sign402-wallet
+kind: standalone
+version: 0.1.0
+description: Trusted Telegram commands for managed Sign402 Base wallets
+provides_hooks:
+  - pre_gateway_dispatch
+requires_env:
+  - name: SIGN402_GATEWAY_URL
+    description: Local Sign402 Gateway URL
+    password: false
+  - name: SIGN402_WALLET_API_TOKEN
+    description: Sign402 managed wallet API token
+    password: true

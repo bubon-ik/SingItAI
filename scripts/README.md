@@ -42,3 +42,21 @@ Logs are written to:
 ```text
 .demo-logs/
 ```
+
+## Hosted Hermes Telegram Wallet Plugin
+
+The VPS deployment can expose the managed Base wallet endpoints through
+deterministic Hermes Telegram commands without giving the LLM control of a
+Telegram user ID.
+
+Configure `SIGN402_GATEWAY_URL` and `SIGN402_WALLET_API_TOKEN` in the
+Hermes gateway environment, then install the repository plugin:
+
+```bash
+cd ~/apps/sign402
+./scripts/install-hermes-wallet-plugin.sh
+hermes gateway restart
+```
+
+See `hermes-plugins/sign402-wallet/README.md` for the secure configuration,
+allowlist-first test flow, and diagnostics.
