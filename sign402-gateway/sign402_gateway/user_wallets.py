@@ -242,7 +242,19 @@ class ManagedBaseWalletService:
                 ),
             }
 
-        balances = self.balance_provider(wallet["wallet_address"])
+        try:
+            balances = self.balance_provider(wallet["wallet_address"])
+        except Exception:
+            return {
+                "ok": True,
+                "wallet": safe_wallet,
+                "balanceUnavailable": True,
+                "telegramText": (
+                    f"Base agent wallet: {safe_wallet['address']}\n\n"
+                    "Balance lookup is unavailable right now. Spending is disabled "
+                    "until iMessage approval is configured."
+                ),
+            }
         return {
             "ok": True,
             "wallet": safe_wallet,

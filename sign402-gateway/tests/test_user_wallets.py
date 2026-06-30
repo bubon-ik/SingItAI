@@ -123,6 +123,22 @@ class UserWalletTests(unittest.TestCase):
         self.assertTrue(result["balanceUnavailable"])
         self.assertIn("Balance lookup is not configured", result["telegramText"])
 
+    def test_balance_degrades_when_provider_raises(self):
+        def failing_balance_provider(_address: str) -> dict[str, str]:
+            raise RuntimeError("rpc down")
+
+        service, _store = self.make_service()
+        service.balance_provider = failing_balance_provider
+        created = service.create_wallet("1045618308")
+
+        result = service.wallet_balance("1045618308")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["wallet"]["address"], created["wallet"]["address"])
+        self.assertTrue(result["balanceUnavailable"])
+        self.assertIn("Balance lookup is unavailable", result["telegramText"])
+        self.assertNotIn("private", str(result).lower())
+
 
 if __name__ == "__main__":
     unittest.main()
