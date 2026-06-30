@@ -1,6 +1,8 @@
 import base64
+import os
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -61,6 +63,32 @@ class UserWalletTests(unittest.TestCase):
         self.assertTrue(first["created"])
         self.assertFalse(second["created"])
         self.assertEqual(first["wallet"]["address"], second["wallet"]["address"])
+
+    def test_create_wallet_is_idempotent_for_concurrent_calls(self):
+        service, _store = self.make_service()
+
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            results = list(
+                executor.map(lambda _index: service.create_wallet("1045618308"), range(16))
+            )
+
+        addresses = {result["wallet"]["address"] for result in results}
+        created_count = sum(1 for result in results if result["created"])
+        self.assertEqual(created_count, 1)
+        self.assertEqual(len(addresses), 1)
+
+    def test_store_uses_private_directory_and_database_permissions(self):
+        if os.name != "posix":
+            self.skipTest("POSIX mode bits are not available on this platform")
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store_path = Path(tmp.name) / "wallets" / "wallets.db"
+
+        UserWalletStore(store_path)
+
+        self.assertEqual(store_path.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(store_path.stat().st_mode & 0o777, 0o600)
 
     def test_wallet_status_without_wallet_returns_clear_message(self):
         service, _store = self.make_service()

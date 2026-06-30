@@ -21,7 +21,9 @@ class UserWalletStore:
         self.path = path
         self.lock = threading.Lock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        _best_effort_chmod(self.path.parent, 0o700)
         self._init_db()
+        _best_effort_chmod(self.path, 0o600)
 
     def get_wallet_by_telegram_user_id(
         self, telegram_user_id: str
@@ -178,14 +180,25 @@ class ManagedBaseWalletService:
         encrypted_private_key = fernet.encrypt(private_key.encode("utf-8")).decode(
             "ascii"
         )
-        wallet = self.store.insert_wallet(
-            telegram_user_id=user_id,
-            telegram_username=telegram_username,
-            chain="base",
-            wallet_address=account.address,
-            encrypted_private_key=encrypted_private_key,
-            status="created",
-        )
+        try:
+            wallet = self.store.insert_wallet(
+                telegram_user_id=user_id,
+                telegram_username=telegram_username,
+                chain="base",
+                wallet_address=account.address,
+                encrypted_private_key=encrypted_private_key,
+                status="created",
+            )
+        except sqlite3.IntegrityError:
+            existing = self.store.get_wallet_by_telegram_user_id(user_id)
+            if existing is None:
+                raise
+            self.store.record_audit_event(
+                telegram_user_id=user_id,
+                event_type="wallet_create_idempotent",
+                wallet_address=existing["wallet_address"],
+            )
+            return _wallet_response(existing, created=False)
         self.store.record_audit_event(
             telegram_user_id=user_id,
             event_type="wallet_created",
@@ -312,6 +325,13 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
     return {key: row[key] for key in row.keys()}
+
+
+def _best_effort_chmod(path: Path, mode: int) -> None:
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
 
 
 def _safe_wallet(wallet: dict[str, Any]) -> dict[str, Any]:
