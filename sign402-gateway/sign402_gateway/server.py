@@ -85,6 +85,11 @@ from .bankr_swap import (
 from .numeric import format_decimal
 from .goplausible import fetch_x402_paid_resource, fetch_x402_payment_required, normalize_x402_payment_required
 from .real_rate_pricing import RealRateSingitPricer
+from .user_wallets import (
+    DEFAULT_USER_WALLET_STORE_PATH,
+    WalletEncryptionError,
+    build_wallet_service_from_env,
+)
 
 HEX_32_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 BUY_TOOL_DUPLICATE_SUPPRESSION_SECONDS = 120
@@ -404,6 +409,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                         "/agent/buy-bitrefill",
                         "/agent/buy-wallet-bitrefill",
                         "/agent/get-bitrefill-order",
+                        "/agent/wallet",
+                        "/agent/create-wallet",
+                        "/agent/wallet-balance",
                     ],
                 }
             )
@@ -468,6 +476,15 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if path == "/agent/get-bitrefill-order":
             self._handle_agent_get_bitrefill_order()
+            return
+        if path == "/agent/wallet":
+            self._handle_agent_wallet()
+            return
+        if path == "/agent/create-wallet":
+            self._handle_agent_create_wallet()
+            return
+        if path == "/agent/wallet-balance":
+            self._handle_agent_wallet_balance()
             return
         if path == "/internal/fulfill-bitrefill":
             self._handle_internal_fulfill_bitrefill()
@@ -565,6 +582,46 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                     "payment": payment,
                 }
             )
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_create_wallet(self) -> None:
+        try:
+            payload = self._read_json()
+            telegram_user_id = _read_telegram_user_id(payload)
+            result = self.server.user_wallet_service.create_wallet(
+                telegram_user_id=telegram_user_id,
+                telegram_username=str(payload.get("telegramUsername", "") or ""),
+            )
+            self._send_json(_without_private_key_material(result), status=200)
+        except WalletEncryptionError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_wallet(self) -> None:
+        try:
+            payload = self._read_json()
+            result = self.server.user_wallet_service.wallet_status(
+                _read_telegram_user_id(payload)
+            )
+            status = 200 if bool(result.get("ok")) else 404
+            self._send_json(_without_private_key_material(result), status=status)
+        except WalletEncryptionError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_wallet_balance(self) -> None:
+        try:
+            payload = self._read_json()
+            result = self.server.user_wallet_service.wallet_balance(
+                _read_telegram_user_id(payload)
+            )
+            status = 200 if bool(result.get("ok")) else 404
+            self._send_json(_without_private_key_material(result), status=status)
+        except WalletEncryptionError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
         except Exception as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=400)
 
@@ -980,6 +1037,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         bitrefill_order_lookup: Callable[..., dict[str, Any]],
         bitrefill_fulfillment_runner: Callable[[dict[str, Any]], dict[str, Any]],
         bitrefill_settlement_preparation_runner: Callable[[dict[str, Any]], dict[str, Any]],
+        user_wallet_service,
     ):
         super().__init__(server_address, handler_class)
         self.firefly = firefly
@@ -999,6 +1057,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         self.bitrefill_order_lookup = bitrefill_order_lookup
         self.bitrefill_fulfillment_runner = bitrefill_fulfillment_runner
         self.bitrefill_settlement_preparation_runner = bitrefill_settlement_preparation_runner
+        self.user_wallet_service = user_wallet_service
         self.firefly_lock = threading.Lock()
         self.buy_tool_response_cache: dict[str, dict[str, Any]] = {}
 
@@ -1226,6 +1285,7 @@ def build_server(
     resource_base_url: str = "http://127.0.0.1:8090",
     cdp_x402_service_dir: Path = DEFAULT_CDP_X402_SERVICE_DIR,
     bitrefill_commerce_store_path: Path = DEFAULT_BITREFILL_COMMERCE_STORE_PATH,
+    user_wallet_store_path: Path = DEFAULT_USER_WALLET_STORE_PATH,
 ) -> Sign402GatewayServer:
     from .bitrefill_runner import (
         BitrefillFulfillmentRunner,
@@ -1251,6 +1311,10 @@ def build_server(
     event_store = LatestEventStore(event_store_path)
     agent_state_store = AgentStateStore(agent_state_path)
     bitrefill_commerce_store = BitrefillCommerceStore(bitrefill_commerce_store_path)
+    user_wallet_service = build_wallet_service_from_env(
+        env=dict(os.environ),
+        store_path=user_wallet_store_path,
+    )
     bitrefill_client = build_bitrefill_client_from_env()
     real_rate_pricer = build_real_rate_pricer_from_env()
     bitrefill_search_service = BitrefillSearchService(bitrefill_client=bitrefill_client)
@@ -1334,6 +1398,7 @@ def build_server(
         ),
         bitrefill_fulfillment_runner=bitrefill_fulfillment_runner,
         bitrefill_settlement_preparation_runner=bitrefill_settlement_preparation_runner,
+        user_wallet_service=user_wallet_service,
     )
 
 
@@ -1425,6 +1490,11 @@ def main() -> None:
         default=Path(os.getenv("SIGN402_CDP_X402_SERVICE_DIR", DEFAULT_CDP_X402_SERVICE_DIR)),
     )
     parser.add_argument(
+        "--user-wallet-store-path",
+        type=Path,
+        default=Path(os.getenv("SIGN402_USER_WALLET_STORE_PATH", DEFAULT_USER_WALLET_STORE_PATH)),
+    )
+    parser.add_argument(
         "--approval-provider",
         default=os.getenv("SIGN402_APPROVAL_PROVIDER", "firefly"),
         choices=("firefly", "disabled", "none", "server"),
@@ -1444,6 +1514,7 @@ def main() -> None:
         agent_state_path=args.agent_state_path,
         resource_base_url=args.resource_base_url,
         cdp_x402_service_dir=args.cdp_x402_service_dir,
+        user_wallet_store_path=args.user_wallet_store_path,
     )
 
     print(f"Sign402 gateway listening on http://{args.host}:{args.port}")
@@ -1455,6 +1526,7 @@ def main() -> None:
     print(f"Agent state path: {args.agent_state_path}")
     print(f"Resource base URL: {args.resource_base_url}")
     print(f"CDP x402 service dir: {args.cdp_x402_service_dir}")
+    print(f"User wallet store path: {args.user_wallet_store_path}")
     server.serve_forever()
 
 
@@ -2744,6 +2816,26 @@ def _read_hash(payload: dict[str, Any], key: str) -> str:
     value = str(payload[key]).lower()
     if not HEX_32_RE.fullmatch(value):
         raise ValueError(f"{key} must be 64 hex characters")
+    return value
+
+
+def _read_telegram_user_id(payload: dict[str, Any]) -> str:
+    for key in ("telegramUserId", "telegram_user_id", "userId"):
+        value = str(payload.get(key, "") or "").strip()
+        if value:
+            return value
+    raise ValueError("telegramUserId is required")
+
+
+def _without_private_key_material(value):
+    if isinstance(value, dict):
+        return {
+            key: _without_private_key_material(item)
+            for key, item in value.items()
+            if "private" not in str(key).lower()
+        }
+    if isinstance(value, list):
+        return [_without_private_key_material(item) for item in value]
     return value
 
 

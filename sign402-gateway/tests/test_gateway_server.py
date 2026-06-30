@@ -89,6 +89,9 @@ class DummyServer:
     bankr_llm_topup_inspector = Mock()
     bankr_llm_topup = Mock()
 
+    def __init__(self):
+        self.user_wallet_service = Mock()
+
 
 class FakeSocket:
     def __init__(self, request: bytes):
@@ -588,6 +591,107 @@ class GatewayServerTests(unittest.TestCase):
 
     def response_text(self, handler) -> str:
         return handler.response.getvalue().decode("utf-8", "replace")
+
+    def response_json(self, handler) -> dict:
+        response = self.response_text(handler)
+        _, body = response.split("\r\n\r\n", 1)
+        return json.loads(body)
+
+    def test_agent_create_wallet_requires_telegram_user_id(self):
+        server = DummyServer()
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/create-wallet",
+                {"telegramUsername": "mp"},
+                server=server,
+            )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 400 Bad Request", response)
+        self.assertEqual(self.response_json(handler)["error"], "telegramUserId is required")
+        server.user_wallet_service.create_wallet.assert_not_called()
+
+    def test_agent_create_wallet_returns_safe_metadata(self):
+        server = DummyServer()
+        server.user_wallet_service.create_wallet.return_value = {
+            "ok": True,
+            "created": True,
+            "wallet": {
+                "chain": "base",
+                "address": "0x1111111111111111111111111111111111111111",
+                "status": "created",
+                "spendingEnabled": False,
+            },
+            "telegramText": "Wallet ready",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/create-wallet",
+                {"telegramUserId": "1045618308", "telegramUsername": "AlpskyKnedlik"},
+                server=server,
+            )
+
+        response = self.response_text(handler)
+        body = self.response_json(handler)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertNotIn("private", response.lower())
+        self.assertEqual(body["wallet"]["address"], "0x1111111111111111111111111111111111111111")
+        server.user_wallet_service.create_wallet.assert_called_once_with(
+            telegram_user_id="1045618308",
+            telegram_username="AlpskyKnedlik",
+        )
+
+    def test_agent_wallet_status_uses_user_wallet_service(self):
+        server = DummyServer()
+        server.user_wallet_service.wallet_status.return_value = {
+            "ok": False,
+            "wallet": None,
+            "telegramText": "No Base agent wallet yet.",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/wallet",
+                {"userId": "1045618308"},
+                server=server,
+            )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 404 Not Found", response)
+        server.user_wallet_service.wallet_status.assert_called_once_with("1045618308")
+
+    def test_agent_wallet_balance_degrades_safely(self):
+        server = DummyServer()
+        server.user_wallet_service.wallet_balance.return_value = {
+            "ok": True,
+            "wallet": {
+                "chain": "base",
+                "address": "0x2222222222222222222222222222222222222222",
+                "status": "created",
+                "spendingEnabled": False,
+            },
+            "balanceUnavailable": True,
+            "telegramText": "Balance lookup is not configured yet.",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/wallet-balance",
+                {"telegram_user_id": "1045618308"},
+                server=server,
+            )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertNotIn("private", response.lower())
+        self.assertTrue(self.response_json(handler)["balanceUnavailable"])
+        server.user_wallet_service.wallet_balance.assert_called_once_with("1045618308")
 
     def test_approve_payment_uses_firefly(self):
         payment_hash = "b" * 64
