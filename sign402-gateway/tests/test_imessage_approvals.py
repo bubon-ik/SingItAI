@@ -217,15 +217,21 @@ class ImessageApprovalTests(unittest.TestCase):
         old_project_secret = os.environ.get("PHOTON_PROJECT_SECRET")
         old_allowed_users = os.environ.get("PHOTON_ALLOWED_USERS")
         old_home_channel = os.environ.get("PHOTON_HOME_CHANNEL")
+        old_logname = os.environ.get("LOGNAME")
+        old_path = os.environ.get("PATH")
         old_token = os.environ.get("PHOTON_SIDECAR_TOKEN")
         old_port = os.environ.get("PHOTON_SIDECAR_PORT")
+        old_user = os.environ.get("USER")
         try:
             os.environ["PHOTON_PROJECT_ID"] = "project-id"
             os.environ["PHOTON_PROJECT_SECRET"] = "project-secret"
             os.environ["PHOTON_ALLOWED_USERS"] = "+15551234567"
             os.environ["PHOTON_HOME_CHANNEL"] = "+15551234567"
+            os.environ["LOGNAME"] = "hermes"
+            os.environ["PATH"] = "/home/hermes/.local/bin:/usr/bin"
             os.environ["PHOTON_SIDECAR_TOKEN"] = "sidecar-token"
             os.environ["PHOTON_SIDECAR_PORT"] = "8789"
+            os.environ["USER"] = "hermes"
 
             result = notifier.send(
                 photon_user_id="+15551234567",
@@ -248,6 +254,14 @@ class ImessageApprovalTests(unittest.TestCase):
                 os.environ.pop("PHOTON_HOME_CHANNEL", None)
             else:
                 os.environ["PHOTON_HOME_CHANNEL"] = old_home_channel
+            if old_logname is None:
+                os.environ.pop("LOGNAME", None)
+            else:
+                os.environ["LOGNAME"] = old_logname
+            if old_path is None:
+                os.environ.pop("PATH", None)
+            else:
+                os.environ["PATH"] = old_path
             if old_token is None:
                 os.environ.pop("PHOTON_SIDECAR_TOKEN", None)
             else:
@@ -256,8 +270,15 @@ class ImessageApprovalTests(unittest.TestCase):
                 os.environ.pop("PHOTON_SIDECAR_PORT", None)
             else:
                 os.environ["PHOTON_SIDECAR_PORT"] = old_port
+            if old_user is None:
+                os.environ.pop("USER", None)
+            else:
+                os.environ["USER"] = old_user
 
         self.assertTrue(result["ok"])
+        self.assertEqual(calls[0][1]["env"]["LOGNAME"], "hermes")
+        self.assertEqual(calls[0][1]["env"]["PATH"], "/home/hermes/.local/bin:/usr/bin")
+        self.assertEqual(calls[0][1]["env"]["USER"], "hermes")
         self.assertEqual(calls[0][1]["env"]["PHOTON_PROJECT_ID"], "project-id")
         self.assertEqual(
             calls[0][1]["env"]["PHOTON_PROJECT_SECRET"], "project-secret"

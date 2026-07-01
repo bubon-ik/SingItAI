@@ -132,7 +132,19 @@ class HermesCliNotifier:
             f"photon:{normalize_e164(photon_user_id)}",
             str(message),
         ]
-        env = {"HOME": home, "HERMES_HOME": self.hermes_home}
+        env = {
+            "HOME": home,
+            "HERMES_HOME": self.hermes_home,
+            "LOGNAME": os.environ.get("LOGNAME", "hermes"),
+            "PATH": os.environ.get(
+                "PATH",
+                (
+                    f"{home}/.local/bin:{home}/.hermes/node/bin:{home}/.hermes/bin:"
+                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                ),
+            ),
+            "USER": os.environ.get("USER", "hermes"),
+        }
         for key in (
             "PHOTON_PROJECT_ID",
             "PHOTON_PROJECT_SECRET",
