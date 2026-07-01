@@ -136,8 +136,8 @@ class PluginRegistrationTests(unittest.TestCase):
                 "wallet",
                 "create-wallet",
                 "balance",
-                "connect_imessage",
-                "test_approval",
+                "connect-imessage",
+                "test-approval",
             },
         )
         for command in context.commands.values():
@@ -211,8 +211,8 @@ class PluginRegistrationTests(unittest.TestCase):
 
         plugin.register(context)
 
-        self.assertIn("connect_imessage", context.commands)
-        self.assertIn("test_approval", context.commands)
+        self.assertIn("connect-imessage", context.commands)
+        self.assertIn("test-approval", context.commands)
 
     def test_connect_imessage_uses_trusted_telegram_identity(self):
         plugin = load_plugin()
@@ -227,7 +227,7 @@ class PluginRegistrationTests(unittest.TestCase):
             event=FakeEvent("/connect_imessage telegramUserId=999", "1045618308")
         )
 
-        result = asyncio.run(context.commands["connect_imessage"]["handler"](""))
+        result = asyncio.run(context.commands["connect-imessage"]["handler"](""))
 
         self.assertEqual(result, "Send ABCDEFGH to iMessage")
         self.assertEqual(
@@ -253,7 +253,7 @@ class PluginRegistrationTests(unittest.TestCase):
             event=FakeEvent("/test_approval telegramUserId=999", "1045618308")
         )
 
-        result = asyncio.run(context.commands["test_approval"]["handler"](""))
+        result = asyncio.run(context.commands["test-approval"]["handler"](""))
 
         self.assertEqual(result, "Test approval sent")
         self.assertEqual(

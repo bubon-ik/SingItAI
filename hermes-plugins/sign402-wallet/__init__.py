@@ -29,11 +29,11 @@ _COMMANDS = {
     "balance": ("balance", "Show your managed Base wallet balance"),
 }
 _IMESSAGE_COMMANDS = {
-    "connect_imessage": (
+    "connect-imessage": (
         "connect-imessage",
         "Link your iMessage number for Sign402 approvals",
     ),
-    "test_approval": (
+    "test-approval": (
         "test-imessage-approval",
         "Send a no-funds Sign402 approval test to iMessage",
     ),
