@@ -136,6 +136,8 @@ class HermesCliNotifier:
         for key in (
             "PHOTON_PROJECT_ID",
             "PHOTON_PROJECT_SECRET",
+            "PHOTON_ALLOWED_USERS",
+            "PHOTON_HOME_CHANNEL",
             "PHOTON_SIDECAR_TOKEN",
             "PHOTON_SIDECAR_PORT",
             "PHOTON_SIDECAR_BIND",

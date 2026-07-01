@@ -215,11 +215,15 @@ class ImessageApprovalTests(unittest.TestCase):
         )
         old_project_id = os.environ.get("PHOTON_PROJECT_ID")
         old_project_secret = os.environ.get("PHOTON_PROJECT_SECRET")
+        old_allowed_users = os.environ.get("PHOTON_ALLOWED_USERS")
+        old_home_channel = os.environ.get("PHOTON_HOME_CHANNEL")
         old_token = os.environ.get("PHOTON_SIDECAR_TOKEN")
         old_port = os.environ.get("PHOTON_SIDECAR_PORT")
         try:
             os.environ["PHOTON_PROJECT_ID"] = "project-id"
             os.environ["PHOTON_PROJECT_SECRET"] = "project-secret"
+            os.environ["PHOTON_ALLOWED_USERS"] = "+15551234567"
+            os.environ["PHOTON_HOME_CHANNEL"] = "+15551234567"
             os.environ["PHOTON_SIDECAR_TOKEN"] = "sidecar-token"
             os.environ["PHOTON_SIDECAR_PORT"] = "8789"
 
@@ -236,6 +240,14 @@ class ImessageApprovalTests(unittest.TestCase):
                 os.environ.pop("PHOTON_PROJECT_SECRET", None)
             else:
                 os.environ["PHOTON_PROJECT_SECRET"] = old_project_secret
+            if old_allowed_users is None:
+                os.environ.pop("PHOTON_ALLOWED_USERS", None)
+            else:
+                os.environ["PHOTON_ALLOWED_USERS"] = old_allowed_users
+            if old_home_channel is None:
+                os.environ.pop("PHOTON_HOME_CHANNEL", None)
+            else:
+                os.environ["PHOTON_HOME_CHANNEL"] = old_home_channel
             if old_token is None:
                 os.environ.pop("PHOTON_SIDECAR_TOKEN", None)
             else:
@@ -250,6 +262,8 @@ class ImessageApprovalTests(unittest.TestCase):
         self.assertEqual(
             calls[0][1]["env"]["PHOTON_PROJECT_SECRET"], "project-secret"
         )
+        self.assertEqual(calls[0][1]["env"]["PHOTON_ALLOWED_USERS"], "+15551234567")
+        self.assertEqual(calls[0][1]["env"]["PHOTON_HOME_CHANNEL"], "+15551234567")
         self.assertEqual(calls[0][1]["env"]["PHOTON_SIDECAR_TOKEN"], "sidecar-token")
         self.assertEqual(calls[0][1]["env"]["PHOTON_SIDECAR_PORT"], "8789")
 
