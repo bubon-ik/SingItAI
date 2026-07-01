@@ -277,7 +277,13 @@ class ImessageApprovalTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(calls[0][1]["env"]["LOGNAME"], "hermes")
-        self.assertEqual(calls[0][1]["env"]["PATH"], "/home/hermes/.local/bin:/usr/bin")
+        self.assertEqual(
+            calls[0][1]["env"]["PATH"],
+            (
+                "/home/hermes/.local/bin:/home/hermes/.hermes/node/bin:"
+                "/home/hermes/.hermes/bin:/home/hermes/.local/bin:/usr/bin"
+            ),
+        )
         self.assertEqual(calls[0][1]["env"]["USER"], "hermes")
         self.assertEqual(calls[0][1]["env"]["PHOTON_PROJECT_ID"], "project-id")
         self.assertEqual(

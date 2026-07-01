@@ -132,17 +132,17 @@ class HermesCliNotifier:
             f"photon:{normalize_e164(photon_user_id)}",
             str(message),
         ]
+        default_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        inherited_path = os.environ.get("PATH", default_path)
+        hermes_path = (
+            f"{home}/.local/bin:{home}/.hermes/node/bin:{home}/.hermes/bin:"
+            f"{inherited_path}"
+        )
         env = {
             "HOME": home,
             "HERMES_HOME": self.hermes_home,
             "LOGNAME": os.environ.get("LOGNAME", "hermes"),
-            "PATH": os.environ.get(
-                "PATH",
-                (
-                    f"{home}/.local/bin:{home}/.hermes/node/bin:{home}/.hermes/bin:"
-                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-                ),
-            ),
+            "PATH": hermes_path,
             "USER": os.environ.get("USER", "hermes"),
         }
         for key in (
