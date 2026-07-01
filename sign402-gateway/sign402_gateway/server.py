@@ -90,6 +90,10 @@ from .user_wallets import (
     WalletEncryptionError,
     build_wallet_service_from_env,
 )
+from .imessage_approvals import (
+    DEFAULT_IMESSAGE_APPROVAL_STORE_PATH,
+    build_imessage_approval_service_from_env,
+)
 
 HEX_32_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 BUY_TOOL_DUPLICATE_SUPPRESSION_SECONDS = 120
@@ -412,6 +416,11 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                         "/agent/wallet",
                         "/agent/create-wallet",
                         "/agent/wallet-balance",
+                        "/agent/imessage/pairing",
+                        "/agent/imessage/link",
+                        "/agent/imessage/pending",
+                        "/agent/imessage/decision",
+                        "/agent/test-imessage-approval",
                     ],
                 }
             )
@@ -485,6 +494,21 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if path == "/agent/wallet-balance":
             self._handle_agent_wallet_balance()
+            return
+        if path == "/agent/imessage/pairing":
+            self._handle_agent_imessage_pairing()
+            return
+        if path == "/agent/imessage/link":
+            self._handle_agent_imessage_link()
+            return
+        if path == "/agent/imessage/pending":
+            self._handle_agent_imessage_pending()
+            return
+        if path == "/agent/imessage/decision":
+            self._handle_agent_imessage_decision()
+            return
+        if path == "/agent/test-imessage-approval":
+            self._handle_agent_test_imessage_approval()
             return
         if path == "/internal/fulfill-bitrefill":
             self._handle_internal_fulfill_bitrefill()
@@ -637,6 +661,83 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=401)
         except WalletEncryptionError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_imessage_pairing(self) -> None:
+        try:
+            _require_imessage_approval_api_token(self)
+            payload = self._read_json()
+            result = self.server.imessage_approval_service.create_pairing(
+                _read_telegram_user_id(payload)
+            )
+            self._send_json(_without_private_key_material(result), status=200 if result.get("ok") else 400)
+        except ImessageApprovalApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except ImessageApprovalApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_imessage_link(self) -> None:
+        try:
+            _require_imessage_approval_api_token(self)
+            payload = self._read_json()
+            result = self.server.imessage_approval_service.link_photon_sender(
+                _read_required_text(payload, "code"),
+                _read_photon_user_id(payload),
+            )
+            self._send_json(_without_private_key_material(result), status=200 if result.get("ok") else 400)
+        except ImessageApprovalApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except ImessageApprovalApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_imessage_pending(self) -> None:
+        try:
+            _require_imessage_approval_api_token(self)
+            payload = self._read_json()
+            result = self.server.imessage_approval_service.pending_for_photon_sender(
+                _read_photon_user_id(payload)
+            )
+            self._send_json(_without_private_key_material(result), status=200)
+        except ImessageApprovalApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except ImessageApprovalApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_imessage_decision(self) -> None:
+        try:
+            _require_imessage_approval_api_token(self)
+            payload = self._read_json()
+            result = self.server.imessage_approval_service.record_decision(
+                _read_photon_user_id(payload),
+                _read_required_text(payload, "decision"),
+            )
+            self._send_json(_without_private_key_material(result), status=200 if result.get("ok") else 404)
+        except ImessageApprovalApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except ImessageApprovalApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_test_imessage_approval(self) -> None:
+        try:
+            _require_imessage_approval_api_token(self)
+            payload = self._read_json()
+            result = self.server.imessage_approval_service.create_test_approval(
+                _read_telegram_user_id(payload)
+            )
+            self._send_json(_without_private_key_material(result), status=200 if result.get("ok") else 400)
+        except ImessageApprovalApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except ImessageApprovalApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
         except Exception as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=400)
 
@@ -1054,6 +1155,8 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         bitrefill_settlement_preparation_runner: Callable[[dict[str, Any]], dict[str, Any]],
         user_wallet_service,
         user_wallet_api_token: str,
+        imessage_approval_service,
+        imessage_approval_api_token: str,
     ):
         super().__init__(server_address, handler_class)
         self.firefly = firefly
@@ -1075,6 +1178,8 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         self.bitrefill_settlement_preparation_runner = bitrefill_settlement_preparation_runner
         self.user_wallet_service = user_wallet_service
         self.user_wallet_api_token = user_wallet_api_token
+        self.imessage_approval_service = imessage_approval_service
+        self.imessage_approval_api_token = imessage_approval_api_token
         self.firefly_lock = threading.Lock()
         self.buy_tool_response_cache: dict[str, dict[str, Any]] = {}
 
@@ -1303,6 +1408,7 @@ def build_server(
     cdp_x402_service_dir: Path = DEFAULT_CDP_X402_SERVICE_DIR,
     bitrefill_commerce_store_path: Path = DEFAULT_BITREFILL_COMMERCE_STORE_PATH,
     user_wallet_store_path: Path = DEFAULT_USER_WALLET_STORE_PATH,
+    imessage_approval_store_path: Path = DEFAULT_IMESSAGE_APPROVAL_STORE_PATH,
 ) -> Sign402GatewayServer:
     from .bitrefill_runner import (
         BitrefillFulfillmentRunner,
@@ -1331,6 +1437,11 @@ def build_server(
     user_wallet_service = build_wallet_service_from_env(
         env=dict(os.environ),
         store_path=user_wallet_store_path,
+    )
+    imessage_approval_service = build_imessage_approval_service_from_env(
+        env=dict(os.environ),
+        wallet_service=user_wallet_service,
+        store_path=imessage_approval_store_path,
     )
     bitrefill_client = build_bitrefill_client_from_env()
     real_rate_pricer = build_real_rate_pricer_from_env()
@@ -1417,6 +1528,8 @@ def build_server(
         bitrefill_settlement_preparation_runner=bitrefill_settlement_preparation_runner,
         user_wallet_service=user_wallet_service,
         user_wallet_api_token=os.getenv("SIGN402_WALLET_API_TOKEN", ""),
+        imessage_approval_service=imessage_approval_service,
+        imessage_approval_api_token=os.getenv("SIGN402_PHOTON_API_TOKEN", ""),
     )
 
 
@@ -2845,11 +2958,34 @@ def _read_telegram_user_id(payload: dict[str, Any]) -> str:
     raise ValueError("telegramUserId is required")
 
 
+def _read_photon_user_id(payload: dict[str, Any]) -> str:
+    for key in ("photonUserId", "photon_user_id", "userId"):
+        value = str(payload.get(key, "") or "").strip()
+        if value:
+            return value
+    raise ValueError("photonUserId is required")
+
+
+def _read_required_text(payload: dict[str, Any], key: str) -> str:
+    value = str(payload.get(key, "") or "").strip()
+    if not value:
+        raise ValueError(f"{key} is required")
+    return value
+
+
 class WalletApiAuthError(ValueError):
     pass
 
 
 class WalletApiTokenNotConfiguredError(RuntimeError):
+    pass
+
+
+class ImessageApprovalApiAuthError(ValueError):
+    pass
+
+
+class ImessageApprovalApiTokenNotConfiguredError(RuntimeError):
     pass
 
 
@@ -2867,6 +3003,26 @@ def _require_wallet_api_token(handler: BaseHTTPRequestHandler) -> None:
 
     if not supplied or not hmac.compare_digest(supplied, expected):
         raise WalletApiAuthError("invalid wallet API token")
+
+
+def _require_imessage_approval_api_token(handler: BaseHTTPRequestHandler) -> None:
+    expected = str(
+        getattr(handler.server, "imessage_approval_api_token", "") or ""
+    ).strip()
+    if not expected:
+        raise ImessageApprovalApiTokenNotConfiguredError(
+            "SIGN402_PHOTON_API_TOKEN is required"
+        )
+
+    authorization = str(handler.headers.get("Authorization", "") or "").strip()
+    supplied = ""
+    if authorization.lower().startswith("bearer "):
+        supplied = authorization[7:].strip()
+    if not supplied:
+        supplied = str(handler.headers.get("X-Sign402-Photon-Token", "") or "").strip()
+
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        raise ImessageApprovalApiAuthError("invalid iMessage approval API token")
 
 
 def _without_private_key_material(value):

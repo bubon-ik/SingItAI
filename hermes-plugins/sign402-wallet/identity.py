@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from typing import Any
 
 
-_WALLET_COMMANDS = frozenset({"wallet", "create-wallet", "balance"})
+_TELEGRAM_COMMANDS = frozenset(
+    {"wallet", "create-wallet", "balance", "connect-imessage", "test-approval"}
+)
 
 
 @dataclass(frozen=True)
@@ -43,7 +45,7 @@ def capture_gateway_identity(*, event: Any, **_kwargs: Any) -> None:
     source = getattr(event, "source", None)
     if _platform_name(source) != "telegram":
         return
-    if _event_command(event) not in _WALLET_COMMANDS:
+    if _event_command(event) not in _TELEGRAM_COMMANDS:
         return
 
     user_id = str(getattr(source, "user_id", "") or "").strip()

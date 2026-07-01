@@ -41,6 +41,7 @@ class GatewayClientTests(unittest.TestCase):
         return GatewayClient(
             base_url="http://127.0.0.1:8099",
             api_token="wallet-token-secret-value",
+            photon_api_token="photon-token-secret-value",
             opener=opener,
             **kwargs,
         )
@@ -103,6 +104,76 @@ class GatewayClientTests(unittest.TestCase):
                     opener.requests[0][0].full_url,
                     f"http://127.0.0.1:8099{path}",
                 )
+
+    def test_execute_imessage_uses_photon_token_and_payload(self):
+        opener = RecordingOpener(response=FakeResponse(b'{"imessageText":"linked"}'))
+        client = self.make_client(opener)
+
+        result = client.execute_imessage(
+            "link",
+            {"code": "ABCDEFGH", "photonUserId": "+15551234567"},
+        )
+
+        self.assertEqual(result["imessageText"], "linked")
+        request, timeout = opener.requests[0]
+        self.assertEqual(
+            request.full_url,
+            "http://127.0.0.1:8099/agent/imessage/link",
+        )
+        self.assertEqual(timeout, 5.0)
+        self.assertEqual(
+            request.get_header("Authorization"),
+            "Bearer photon-token-secret-value",
+        )
+        self.assertEqual(
+            json.loads(request.data),
+            {"code": "ABCDEFGH", "photonUserId": "+15551234567"},
+        )
+
+    def test_execute_imessage_maps_operations_to_expected_endpoints(self):
+        cases = {
+            "connect-imessage": "/agent/imessage/pairing",
+            "test-imessage-approval": "/agent/test-imessage-approval",
+            "link": "/agent/imessage/link",
+            "pending": "/agent/imessage/pending",
+            "decision": "/agent/imessage/decision",
+        }
+
+        for operation, path in cases.items():
+            with self.subTest(operation=operation):
+                opener = RecordingOpener(response=FakeResponse(b'{"ok":true}'))
+                self.make_client(opener).execute_imessage(operation, {})
+                self.assertEqual(
+                    opener.requests[0][0].full_url,
+                    f"http://127.0.0.1:8099{path}",
+                )
+
+    def test_from_env_reads_independent_photon_api_token(self):
+        client = GatewayClient.from_env(
+            {
+                "SIGN402_GATEWAY_URL": "http://127.0.0.1:8099",
+                "SIGN402_WALLET_API_TOKEN": "wallet-token",
+                "SIGN402_PHOTON_API_TOKEN": "photon-token",
+            }
+        )
+
+        self.assertEqual(client.api_token, "wallet-token")
+        self.assertEqual(client.photon_api_token, "photon-token")
+
+    def test_execute_imessage_requires_photon_api_token(self):
+        opener = RecordingOpener(response=FakeResponse(b'{"ok":true}'))
+        client = GatewayClient(
+            base_url="http://127.0.0.1:8099",
+            api_token="wallet-token",
+            photon_api_token="",
+            opener=opener,
+        )
+
+        with self.assertRaises(GatewayClientError) as caught:
+            client.execute_imessage("pending", {"photonUserId": "+15551234567"})
+
+        self.assertIn("not configured", caught.exception.user_message)
+        self.assertEqual(opener.requests, [])
 
     def test_execute_omits_missing_username(self):
         opener = RecordingOpener(response=FakeResponse(b'{"telegramText":"ok"}'))

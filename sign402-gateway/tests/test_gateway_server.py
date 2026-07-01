@@ -92,6 +92,8 @@ class DummyServer:
     def __init__(self):
         self.user_wallet_service = Mock()
         self.user_wallet_api_token = "test-wallet-token"
+        self.imessage_approval_service = Mock()
+        self.imessage_approval_api_token = "test-photon-token"
 
 
 class FakeSocket:
@@ -606,6 +608,9 @@ class GatewayServerTests(unittest.TestCase):
     def wallet_auth_headers(self) -> dict[str, str]:
         return {"Authorization": "Bearer test-wallet-token"}
 
+    def photon_auth_headers(self) -> dict[str, str]:
+        return {"Authorization": "Bearer test-photon-token"}
+
     def test_agent_create_wallet_requires_telegram_user_id(self):
         server = DummyServer()
 
@@ -774,6 +779,153 @@ class GatewayServerTests(unittest.TestCase):
         self.assertNotIn("private", response.lower())
         self.assertTrue(self.response_json(handler)["balanceUnavailable"])
         server.user_wallet_service.wallet_balance.assert_called_once_with("1045618308")
+
+    def test_imessage_pairing_requires_photon_api_token(self):
+        server = DummyServer()
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/imessage/pairing",
+                {"telegramUserId": "1045618308"},
+                server=server,
+                headers=self.wallet_auth_headers(),
+            )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 401 Unauthorized", response)
+        self.assertEqual(
+            self.response_json(handler)["error"],
+            "invalid iMessage approval API token",
+        )
+        server.imessage_approval_service.create_pairing.assert_not_called()
+
+    def test_imessage_pairing_fails_when_photon_api_token_not_configured(self):
+        server = DummyServer()
+        server.imessage_approval_api_token = ""
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/imessage/pairing",
+                {"telegramUserId": "1045618308"},
+                server=server,
+                headers=self.photon_auth_headers(),
+            )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 503 Service Unavailable", response)
+        self.assertEqual(
+            self.response_json(handler)["error"],
+            "SIGN402_PHOTON_API_TOKEN is required",
+        )
+
+    def test_imessage_pairing_endpoint_returns_safe_text(self):
+        server = DummyServer()
+        server.imessage_approval_service.create_pairing.return_value = {
+            "ok": True,
+            "code": "ABCDEFGH",
+            "telegramText": "Send this code",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/imessage/pairing",
+                {"telegramUserId": "1045618308"},
+                server=server,
+                headers=self.photon_auth_headers(),
+            )
+
+        response = self.response_text(handler)
+        body = self.response_json(handler)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertEqual(body["telegramText"], "Send this code")
+        server.imessage_approval_service.create_pairing.assert_called_once_with(
+            "1045618308"
+        )
+
+    def test_imessage_link_endpoint_uses_trusted_photon_source(self):
+        server = DummyServer()
+        server.imessage_approval_service.link_photon_sender.return_value = {
+            "ok": True,
+            "imessageText": "iMessage linked.",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/imessage/link",
+                {"code": "ABCDEFGH", "photonUserId": "+15551234567"},
+                server=server,
+                headers=self.photon_auth_headers(),
+            )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        server.imessage_approval_service.link_photon_sender.assert_called_once_with(
+            "ABCDEFGH",
+            "+15551234567",
+        )
+
+    def test_imessage_pending_and_decision_endpoints_use_photon_source(self):
+        server = DummyServer()
+        server.imessage_approval_service.pending_for_photon_sender.return_value = {
+            "ok": True,
+            "pending": True,
+            "approvalId": "appr_1",
+        }
+        server.imessage_approval_service.record_decision.return_value = {
+            "ok": True,
+            "status": "approved",
+            "imessageText": "Approved.",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            pending_handler = self.make_handler(
+                "/agent/imessage/pending",
+                {"photonUserId": "+15551234567"},
+                server=server,
+                headers=self.photon_auth_headers(),
+            )
+            decision_handler = self.make_handler(
+                "/agent/imessage/decision",
+                {"photonUserId": "+15551234567", "decision": "YES"},
+                server=server,
+                headers=self.photon_auth_headers(),
+            )
+
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(pending_handler))
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(decision_handler))
+        server.imessage_approval_service.pending_for_photon_sender.assert_called_once_with(
+            "+15551234567"
+        )
+        server.imessage_approval_service.record_decision.assert_called_once_with(
+            "+15551234567",
+            "YES",
+        )
+
+    def test_test_imessage_approval_endpoint_uses_telegram_identity(self):
+        server = DummyServer()
+        server.imessage_approval_service.create_test_approval.return_value = {
+            "ok": True,
+            "telegramText": "Test approval sent",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/test-imessage-approval",
+                {"telegramUserId": "1045618308"},
+                server=server,
+                headers=self.photon_auth_headers(),
+            )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        server.imessage_approval_service.create_test_approval.assert_called_once_with(
+            "1045618308"
+        )
 
     def test_approve_payment_uses_firefly(self):
         payment_hash = "b" * 64

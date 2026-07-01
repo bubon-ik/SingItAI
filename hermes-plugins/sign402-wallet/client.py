@@ -24,6 +24,13 @@ _OPERATION_PATHS = {
     "create-wallet": "/agent/create-wallet",
     "balance": "/agent/wallet-balance",
 }
+_IMESSAGE_OPERATION_PATHS = {
+    "connect-imessage": "/agent/imessage/pairing",
+    "test-imessage-approval": "/agent/test-imessage-approval",
+    "link": "/agent/imessage/link",
+    "pending": "/agent/imessage/pending",
+    "decision": "/agent/imessage/decision",
+}
 _MAX_RESPONSE_BYTES = 64 * 1024
 _NOT_CONFIGURED = "Wallet service is not configured. Please contact the operator."
 _LOCALHOST_REQUIRED = "Wallet service must use a localhost gateway URL."
@@ -48,12 +55,14 @@ class GatewayClient:
         *,
         base_url: str,
         api_token: str,
+        photon_api_token: str = "",
         opener: Callable[..., Any] = urlopen,
         timeout: float = 5.0,
         max_response_bytes: int = _MAX_RESPONSE_BYTES,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_token = api_token
+        self.photon_api_token = photon_api_token
         self.opener = opener
         self.timeout = timeout
         self.max_response_bytes = max_response_bytes
@@ -67,6 +76,9 @@ class GatewayClient:
         values = os.environ if env is None else env
         base_url = str(values.get("SIGN402_GATEWAY_URL", "") or "").strip()
         api_token = str(values.get("SIGN402_WALLET_API_TOKEN", "") or "").strip()
+        photon_api_token = str(
+            values.get("SIGN402_PHOTON_API_TOKEN", "") or ""
+        ).strip()
         if not base_url or not api_token:
             raise GatewayClientError(_NOT_CONFIGURED)
 
@@ -81,6 +93,7 @@ class GatewayClient:
         return cls(
             base_url=base_url,
             api_token=api_token,
+            photon_api_token=photon_api_token,
             **kwargs,
         )
 
@@ -92,11 +105,43 @@ class GatewayClient:
         payload = {"telegramUserId": identity.user_id}
         if identity.username:
             payload["telegramUsername"] = identity.username
+        result = self._post(path, payload, token=self.api_token, operation=operation)
+
+        telegram_text = result.get("telegramText")
+        if not isinstance(telegram_text, str) or not telegram_text.strip():
+            raise GatewayClientError(_INVALID_RESPONSE)
+        return telegram_text.strip()
+
+    def execute_imessage(
+        self,
+        operation: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        path = _IMESSAGE_OPERATION_PATHS.get(operation)
+        if path is None:
+            raise GatewayClientError(_UNSUPPORTED)
+        if not self.photon_api_token:
+            raise GatewayClientError(_NOT_CONFIGURED)
+        return self._post(
+            path,
+            payload,
+            token=self.photon_api_token,
+            operation=operation,
+        )
+
+    def _post(
+        self,
+        path: str,
+        payload: Mapping[str, Any],
+        *,
+        token: str,
+        operation: str,
+    ) -> dict[str, Any]:
         request = Request(
             f"{self.base_url}{path}",
             data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
             headers={
-                "Authorization": f"Bearer {self.api_token}",
+                "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             },
@@ -146,8 +191,4 @@ class GatewayClient:
             result = None
         if not isinstance(result, dict):
             raise GatewayClientError(_INVALID_RESPONSE)
-
-        telegram_text = result.get("telegramText")
-        if not isinstance(telegram_text, str) or not telegram_text.strip():
-            raise GatewayClientError(_INVALID_RESPONSE)
-        return telegram_text.strip()
+        return result

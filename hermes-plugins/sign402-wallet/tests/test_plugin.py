@@ -41,11 +41,20 @@ class FakeSource:
 
 
 class FakeEvent:
-    def __init__(self, command: str, user_id: str, username: str | None = None):
+    def __init__(
+        self,
+        command: str,
+        user_id: str,
+        username: str | None = None,
+        platform: str = "telegram",
+        chat_id: str = "chat-1",
+    ):
         self.text = command
-        self.source = FakeSource(FakePlatform(), user_id, username)
+        self.source = FakeSource(FakePlatform(platform), user_id, username, chat_id)
 
     def get_command(self):
+        if not self.text.startswith("/"):
+            return None
         return self.text[1:].split(maxsplit=1)[0]
 
 
@@ -69,12 +78,48 @@ class FakeClient:
         self.result = result
         self.error = error
         self.calls = []
+        self.imessage_results = {}
+        self.imessage_calls = []
 
     def execute(self, operation, identity):
         self.calls.append((operation, identity))
         if self.error:
             raise self.error
         return self.result
+
+    def execute_imessage(self, operation, payload):
+        self.imessage_calls.append((operation, payload))
+        if self.error:
+            raise self.error
+        return self.imessage_results.get(operation, {"ok": True})
+
+
+class FakeAdapter:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, chat_id, text):
+        self.sent.append((chat_id, text))
+
+
+class FakePairingStore:
+    def __init__(self):
+        self.generated = []
+        self.approved = []
+
+    def generate_code(self, platform, user_id, user_name=""):
+        self.generated.append((platform, user_id, user_name))
+        return "HERMES1"
+
+    def approve_code(self, platform, code):
+        self.approved.append((platform, code))
+        return {"user_id": "+15551234567", "user_name": "Photon User"}
+
+
+class FakeGateway:
+    def __init__(self):
+        self.adapters = {"photon": FakeAdapter()}
+        self.pairing_store = FakePairingStore()
 
 
 class PluginRegistrationTests(unittest.TestCase):
@@ -87,7 +132,13 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertEqual(set(context.hooks), {"pre_gateway_dispatch"})
         self.assertEqual(
             set(context.commands),
-            {"wallet", "create-wallet", "balance"},
+            {
+                "wallet",
+                "create-wallet",
+                "balance",
+                "connect_imessage",
+                "test_approval",
+            },
         )
         for command in context.commands.values():
             self.assertTrue(command["description"])
@@ -153,6 +204,171 @@ class PluginRegistrationTests(unittest.TestCase):
         result = asyncio.run(context.commands["balance"]["handler"](""))
 
         self.assertEqual(result, safe_message)
+
+    def test_registers_imessage_commands(self):
+        plugin = load_plugin()
+        context = FakeContext()
+
+        plugin.register(context)
+
+        self.assertIn("connect_imessage", context.commands)
+        self.assertIn("test_approval", context.commands)
+
+    def test_connect_imessage_uses_trusted_telegram_identity(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.imessage_results["connect-imessage"] = {
+            "telegramText": "Send ABCDEFGH to iMessage"
+        }
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent("/connect_imessage telegramUserId=999", "1045618308")
+        )
+
+        result = asyncio.run(context.commands["connect_imessage"]["handler"](""))
+
+        self.assertEqual(result, "Send ABCDEFGH to iMessage")
+        self.assertEqual(
+            client.imessage_calls,
+            [
+                (
+                    "connect-imessage",
+                    {"telegramUserId": "1045618308"},
+                )
+            ],
+        )
+
+    def test_test_approval_uses_trusted_telegram_identity(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.imessage_results["test-imessage-approval"] = {
+            "telegramText": "Test approval sent"
+        }
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent("/test_approval telegramUserId=999", "1045618308")
+        )
+
+        result = asyncio.run(context.commands["test_approval"]["handler"](""))
+
+        self.assertEqual(result, "Test approval sent")
+        self.assertEqual(
+            client.imessage_calls,
+            [
+                (
+                    "test-imessage-approval",
+                    {"telegramUserId": "1045618308"},
+                )
+            ],
+        )
+
+    def test_photon_pairing_code_is_consumed_before_llm(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.imessage_results["link"] = {
+            "ok": True,
+            "imessageText": "iMessage linked.",
+        }
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway()
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "ABCDEFGH",
+                "+15551234567",
+                username="Photon User",
+                platform="photon",
+                chat_id="photon-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        self.assertEqual(
+            client.imessage_calls,
+            [
+                (
+                    "link",
+                    {"code": "ABCDEFGH", "photonUserId": "+15551234567"},
+                )
+            ],
+        )
+        self.assertEqual(gateway.adapters["photon"].sent, [("photon-chat", "iMessage linked.")])
+        self.assertEqual(
+            gateway.pairing_store.generated,
+            [("photon", "+15551234567", "Photon User")],
+        )
+        self.assertEqual(gateway.pairing_store.approved, [("photon", "HERMES1")])
+
+    def test_photon_yes_without_pending_passes_through_to_normal_chat(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.imessage_results["pending"] = {"ok": True, "pending": False}
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent("yes", "+15551234567", platform="photon"),
+            gateway=FakeGateway(),
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            client.imessage_calls,
+            [("pending", {"photonUserId": "+15551234567"})],
+        )
+
+    def test_photon_yes_with_pending_is_decided_and_consumed(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.imessage_results["pending"] = {"ok": True, "pending": True}
+        client.imessage_results["decision"] = {
+            "ok": True,
+            "imessageText": "Sign402 test approval approved.",
+        }
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway()
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                " yes ",
+                "+15551234567",
+                platform="photon",
+                chat_id="photon-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        self.assertEqual(
+            client.imessage_calls,
+            [
+                ("pending", {"photonUserId": "+15551234567"}),
+                (
+                    "decision",
+                    {"photonUserId": "+15551234567", "decision": "YES"},
+                ),
+            ],
+        )
+        self.assertEqual(
+            gateway.adapters["photon"].sent,
+            [("photon-chat", "Sign402 test approval approved.")],
+        )
 
 
 if __name__ == "__main__":
