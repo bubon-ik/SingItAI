@@ -97,7 +97,7 @@ def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
 
     capture_gateway_identity(event=event, **kwargs)
     source = getattr(event, "source", None)
-    if _platform_name(source) != "photon":
+    if not _is_photon_source(event, source):
         return None
 
     text = str(getattr(event, "text", "") or "").strip()
@@ -187,6 +187,9 @@ def _send_fixed_reply(gateway, source, text: str) -> None:
         return
     adapters = getattr(gateway, "adapters", {}) or {}
     adapter = adapters.get(_platform_name(source))
+    if adapter is None:
+        source_platform = getattr(source, "platform", None)
+        adapter = adapters.get(source_platform)
     send = getattr(adapter, "send", None)
     if not callable(send):
         return
@@ -220,6 +223,17 @@ def _approve_photon_source(gateway, source) -> None:
 def _platform_name(source) -> str:
     platform = getattr(source, "platform", None)
     return str(getattr(platform, "value", platform) or "").strip().lower()
+
+
+def _is_photon_source(event, source) -> bool:
+    platform_name = _platform_name(source)
+    if platform_name in {"photon", "imessage", "imessage via photon", "platforms/photon"}:
+        return True
+    raw_message = getattr(event, "raw_message", None)
+    if isinstance(raw_message, dict):
+        raw_platform = str(raw_message.get("platform", "") or "").strip().lower()
+        return raw_platform in {"imessage", "photon"}
+    return False
 
 
 def _looks_like_pairing_code(value: str) -> bool:

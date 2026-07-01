@@ -27,7 +27,7 @@ def load_plugin():
     return module
 
 
-@dataclass
+@dataclass(frozen=True)
 class FakePlatform:
     value: str = "telegram"
 
@@ -117,8 +117,8 @@ class FakePairingStore:
 
 
 class FakeGateway:
-    def __init__(self):
-        self.adapters = {"photon": FakeAdapter()}
+    def __init__(self, adapter_key="photon"):
+        self.adapters = {adapter_key: FakeAdapter()}
         self.pairing_store = FakePairingStore()
 
 
@@ -308,6 +308,45 @@ class PluginRegistrationTests(unittest.TestCase):
             [("photon", "+15551234567", "Photon User")],
         )
         self.assertEqual(gateway.pairing_store.approved, [("photon", "HERMES1")])
+
+    def test_imessage_platform_pairing_code_is_consumed_before_llm(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.imessage_results["link"] = {
+            "ok": True,
+            "imessageText": "iMessage linked.",
+        }
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        platform = FakePlatform("imessage")
+        gateway = FakeGateway(adapter_key=platform)
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "4JTLV6XQ",
+                "+15551234567",
+                username="Photon User",
+                platform="imessage",
+                chat_id="photon-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        self.assertEqual(
+            client.imessage_calls,
+            [
+                (
+                    "link",
+                    {"code": "4JTLV6XQ", "photonUserId": "+15551234567"},
+                )
+            ],
+        )
+        self.assertEqual(gateway.adapters[platform].sent, [("photon-chat", "iMessage linked.")])
 
     def test_photon_yes_without_pending_passes_through_to_normal_chat(self):
         plugin = load_plugin()
