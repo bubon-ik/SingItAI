@@ -213,9 +213,13 @@ class ImessageApprovalTests(unittest.TestCase):
             hermes_home="/home/hermes/.hermes",
             runner=runner,
         )
+        old_project_id = os.environ.get("PHOTON_PROJECT_ID")
+        old_project_secret = os.environ.get("PHOTON_PROJECT_SECRET")
         old_token = os.environ.get("PHOTON_SIDECAR_TOKEN")
         old_port = os.environ.get("PHOTON_SIDECAR_PORT")
         try:
+            os.environ["PHOTON_PROJECT_ID"] = "project-id"
+            os.environ["PHOTON_PROJECT_SECRET"] = "project-secret"
             os.environ["PHOTON_SIDECAR_TOKEN"] = "sidecar-token"
             os.environ["PHOTON_SIDECAR_PORT"] = "8789"
 
@@ -224,6 +228,14 @@ class ImessageApprovalTests(unittest.TestCase):
                 message="Sign402 approval request",
             )
         finally:
+            if old_project_id is None:
+                os.environ.pop("PHOTON_PROJECT_ID", None)
+            else:
+                os.environ["PHOTON_PROJECT_ID"] = old_project_id
+            if old_project_secret is None:
+                os.environ.pop("PHOTON_PROJECT_SECRET", None)
+            else:
+                os.environ["PHOTON_PROJECT_SECRET"] = old_project_secret
             if old_token is None:
                 os.environ.pop("PHOTON_SIDECAR_TOKEN", None)
             else:
@@ -234,6 +246,10 @@ class ImessageApprovalTests(unittest.TestCase):
                 os.environ["PHOTON_SIDECAR_PORT"] = old_port
 
         self.assertTrue(result["ok"])
+        self.assertEqual(calls[0][1]["env"]["PHOTON_PROJECT_ID"], "project-id")
+        self.assertEqual(
+            calls[0][1]["env"]["PHOTON_PROJECT_SECRET"], "project-secret"
+        )
         self.assertEqual(calls[0][1]["env"]["PHOTON_SIDECAR_TOKEN"], "sidecar-token")
         self.assertEqual(calls[0][1]["env"]["PHOTON_SIDECAR_PORT"], "8789")
 

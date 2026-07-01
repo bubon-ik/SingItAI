@@ -134,6 +134,8 @@ class HermesCliNotifier:
         ]
         env = {"HOME": home, "HERMES_HOME": self.hermes_home}
         for key in (
+            "PHOTON_PROJECT_ID",
+            "PHOTON_PROJECT_SECRET",
             "PHOTON_SIDECAR_TOKEN",
             "PHOTON_SIDECAR_PORT",
             "PHOTON_SIDECAR_BIND",
