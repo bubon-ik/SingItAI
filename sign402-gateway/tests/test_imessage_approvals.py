@@ -1,4 +1,5 @@
 import base64
+import os
 import tempfile
 import time
 import unittest
@@ -195,6 +196,46 @@ class ImessageApprovalTests(unittest.TestCase):
         self.assertFalse(calls[0][1]["shell"])
         self.assertEqual(calls[0][1]["env"]["HOME"], "/home/hermes")
         self.assertEqual(calls[0][1]["env"]["HERMES_HOME"], "/home/hermes/.hermes")
+
+    def test_hermes_cli_notifier_passes_photon_sidecar_environment(self):
+        calls = []
+
+        def runner(args, **kwargs):
+            calls.append((args, kwargs))
+            return type(
+                "Completed",
+                (),
+                {"returncode": 0, "stdout": "sent", "stderr": ""},
+            )()
+
+        notifier = HermesCliNotifier(
+            hermes_cli="/home/hermes/.local/bin/hermes",
+            hermes_home="/home/hermes/.hermes",
+            runner=runner,
+        )
+        old_token = os.environ.get("PHOTON_SIDECAR_TOKEN")
+        old_port = os.environ.get("PHOTON_SIDECAR_PORT")
+        try:
+            os.environ["PHOTON_SIDECAR_TOKEN"] = "sidecar-token"
+            os.environ["PHOTON_SIDECAR_PORT"] = "8789"
+
+            result = notifier.send(
+                photon_user_id="+15551234567",
+                message="Sign402 approval request",
+            )
+        finally:
+            if old_token is None:
+                os.environ.pop("PHOTON_SIDECAR_TOKEN", None)
+            else:
+                os.environ["PHOTON_SIDECAR_TOKEN"] = old_token
+            if old_port is None:
+                os.environ.pop("PHOTON_SIDECAR_PORT", None)
+            else:
+                os.environ["PHOTON_SIDECAR_PORT"] = old_port
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls[0][1]["env"]["PHOTON_SIDECAR_TOKEN"], "sidecar-token")
+        self.assertEqual(calls[0][1]["env"]["PHOTON_SIDECAR_PORT"], "8789")
 
     def test_invalid_master_key_fails_clearly(self):
         tmp = tempfile.TemporaryDirectory()

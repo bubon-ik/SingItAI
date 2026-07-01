@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import sqlite3
 import subprocess
@@ -131,13 +132,22 @@ class HermesCliNotifier:
             f"photon:{normalize_e164(photon_user_id)}",
             str(message),
         ]
+        env = {"HOME": home, "HERMES_HOME": self.hermes_home}
+        for key in (
+            "PHOTON_SIDECAR_TOKEN",
+            "PHOTON_SIDECAR_PORT",
+            "PHOTON_SIDECAR_BIND",
+        ):
+            value = os.environ.get(key)
+            if value:
+                env[key] = value
         completed = self.runner(
             args,
             shell=False,
             timeout=self.timeout,
             capture_output=True,
             text=True,
-            env={"HOME": home, "HERMES_HOME": self.hermes_home},
+            env=env,
         )
         return {
             "ok": getattr(completed, "returncode", 1) == 0,
