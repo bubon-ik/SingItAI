@@ -7,6 +7,7 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 
+from sign402_gateway.base_balances import AlchemyBaseBalanceProvider
 from sign402_gateway.user_wallets import (
     ManagedBaseWalletService,
     UserWalletStore,
@@ -20,13 +21,18 @@ def test_master_key() -> str:
 
 
 class UserWalletTests(unittest.TestCase):
-    def make_service(self, master_key: str | None = None):
+    def make_service(
+        self,
+        master_key: str | None = None,
+        balance_provider=None,
+    ):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         store = UserWalletStore(Path(tmp.name) / "wallets.db")
         service = ManagedBaseWalletService(
             store=store,
             master_key=master_key or test_master_key(),
+            balance_provider=balance_provider,
         )
         return service, store
 
@@ -131,6 +137,32 @@ class UserWalletTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertRegex(result["wallet"]["address"], r"^0x[a-fA-F0-9]{40}$")
+        self.assertIsNone(service.balance_provider)
+
+    def test_build_wallet_service_from_env_configures_alchemy_balance_provider(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        singit_address = "0x" + "44" * 20
+
+        service = build_wallet_service_from_env(
+            env={
+                "SIGN402_WALLET_MASTER_KEY": test_master_key(),
+                "SIGN402_BASE_RPC_URL": (
+                    "https://base-mainnet.g.alchemy.com/v2/private-key"
+                ),
+                "SIGN402_SINGIT_TOKEN_ADDRESS": singit_address,
+            },
+            store_path=Path(tmp.name) / "wallets.db",
+        )
+
+        self.assertIsInstance(
+            service.balance_provider,
+            AlchemyBaseBalanceProvider,
+        )
+        self.assertEqual(
+            service.balance_provider.singit_token_address,
+            singit_address,
+        )
 
     def test_invalid_master_key_fails_with_clear_error(self):
         service, _store = self.make_service(
@@ -166,6 +198,61 @@ class UserWalletTests(unittest.TestCase):
         self.assertTrue(result["balanceUnavailable"])
         self.assertIn("Balance lookup is unavailable", result["telegramText"])
         self.assertNotIn("private", str(result).lower())
+
+    def test_balance_accepts_structured_alchemy_provider_response(self):
+        token_address = "0x" + "11" * 20
+
+        def balance_provider(_address: str):
+            return {
+                "balances": {
+                    "SINGIT": "250",
+                    "ETH": "0.001",
+                    "USDC": "12.5",
+                },
+                "unverifiedTokens": [
+                    {
+                        "symbol": "OTHER",
+                        "contractAddress": token_address,
+                        "balance": "3",
+                    }
+                ],
+            }
+
+        service, _store = self.make_service(balance_provider=balance_provider)
+        service.create_wallet("1045618308")
+
+        result = service.wallet_balance("1045618308")
+
+        self.assertFalse(result["balanceUnavailable"])
+        self.assertEqual(
+            result["balances"],
+            {"SINGIT": "250", "ETH": "0.001", "USDC": "12.5"},
+        )
+        self.assertEqual(result["unverifiedTokens"][0]["symbol"], "OTHER")
+        text = result["telegramText"]
+        self.assertLess(text.index("- ETH:"), text.index("- USDC:"))
+        self.assertLess(text.index("- USDC:"), text.index("- SINGIT:"))
+        self.assertIn("Unverified tokens (not enabled for spending)", text)
+        self.assertIn("OTHER: 3 (0x111111...1111)", text)
+
+    def test_balance_keeps_legacy_dictionary_provider_compatible(self):
+        service, _store = self.make_service(
+            balance_provider=lambda _address: {
+                "USDC": "2",
+                "ETH": "0.5",
+            }
+        )
+        service.create_wallet("1045618308")
+
+        result = service.wallet_balance("1045618308")
+
+        self.assertFalse(result["balanceUnavailable"])
+        self.assertEqual(result["balances"], {"USDC": "2", "ETH": "0.5"})
+        self.assertNotIn("unverifiedTokens", result)
+        self.assertLess(
+            result["telegramText"].index("- ETH:"),
+            result["telegramText"].index("- USDC:"),
+        )
 
 
 if __name__ == "__main__":

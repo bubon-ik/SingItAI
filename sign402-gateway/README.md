@@ -157,6 +157,27 @@ The response never includes private key material. The encrypted wallet database
 should stay on the VPS filesystem with restrictive permissions; the gateway
 creates the wallet directory as `0700` and the SQLite database as `0600`.
 
+### Base wallet balances
+
+Hosted wallet balances require an explicit private Base Mainnet RPC endpoint.
+Use an Alchemy Base Mainnet HTTPS endpoint in the `sign402-gateway` service
+environment:
+
+```env
+SIGN402_BASE_RPC_URL=https://base-mainnet.g.alchemy.com/v2/<private-api-key>
+```
+
+Treat the full URL as a secret because it contains the Alchemy API key. Do not
+put it in Hermes prompts, Telegram, screenshots, repository files, or shared
+logs. The hosted balance provider does not silently fall back to the public,
+rate-limited Base endpoint.
+
+`/agent/wallet-balance` always reads Base Mainnet ETH, canonical USDC, and
+SINGIT. When the endpoint supports Alchemy Token API, it also discovers up to
+10 additional non-zero ERC-20 balances. Those assets are labeled as unverified,
+include their contract address, and remain display-only: discovery never grants
+the agent permission to spend them.
+
 ## Main Demo Flow
 
 For the normal hackathon demo, start all local services from the repository root:

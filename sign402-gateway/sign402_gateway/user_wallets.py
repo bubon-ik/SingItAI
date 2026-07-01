@@ -8,6 +8,8 @@ from typing import Any, Callable, Iterator
 from cryptography.fernet import Fernet, InvalidToken
 from eth_account import Account
 
+from .base_balances import build_base_balance_provider_from_env
+
 
 DEFAULT_USER_WALLET_STORE_PATH = Path.home() / ".sign402" / "user-wallets.db"
 
@@ -256,7 +258,10 @@ class ManagedBaseWalletService:
             }
 
         try:
-            balances = self.balance_provider(wallet["wallet_address"])
+            provider_result = self.balance_provider(wallet["wallet_address"])
+            balances, unverified_tokens = _normalize_balance_provider_result(
+                provider_result
+            )
         except Exception:
             return {
                 "ok": True,
@@ -268,13 +273,20 @@ class ManagedBaseWalletService:
                     "until iMessage approval is configured."
                 ),
             }
-        return {
+        response = {
             "ok": True,
             "wallet": safe_wallet,
             "balanceUnavailable": False,
             "balances": balances,
-            "telegramText": _balance_text(safe_wallet["address"], balances),
+            "telegramText": _balance_text(
+                safe_wallet["address"],
+                balances,
+                unverified_tokens,
+            ),
         }
+        if unverified_tokens:
+            response["unverifiedTokens"] = unverified_tokens
+        return response
 
     def decrypt_private_key_for_future_signing(self, telegram_user_id: str) -> str:
         user_id = _require_telegram_user_id(telegram_user_id)
@@ -311,6 +323,7 @@ def build_wallet_service_from_env(
     return ManagedBaseWalletService(
         store=UserWalletStore(store_path or DEFAULT_USER_WALLET_STORE_PATH),
         master_key=env.get("SIGN402_WALLET_MASTER_KEY", ""),
+        balance_provider=build_base_balance_provider_from_env(env),
     )
 
 
@@ -364,12 +377,50 @@ def _wallet_response(wallet: dict[str, Any], *, created: bool) -> dict[str, Any]
     }
 
 
-def _balance_text(address: str, balances: dict[str, Any]) -> str:
+def _normalize_balance_provider_result(
+    provider_result: object,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if not isinstance(provider_result, dict):
+        raise ValueError("balance provider must return an object")
+    structured_balances = provider_result.get("balances")
+    if isinstance(structured_balances, dict):
+        unverified = provider_result.get("unverifiedTokens", [])
+        if not isinstance(unverified, list):
+            raise ValueError("unverifiedTokens must be a list")
+        return structured_balances, [
+            token for token in unverified if isinstance(token, dict)
+        ]
+    return provider_result, []
+
+
+def _balance_text(
+    address: str,
+    balances: dict[str, Any],
+    unverified_tokens: list[dict[str, Any]] | None = None,
+) -> str:
     if not balances:
         return f"Base agent wallet: {address}\n\nNo balances found."
     lines = [f"Base agent wallet: {address}", "", "Balances:"]
-    for symbol, value in sorted(balances.items()):
+    trusted_order = ("ETH", "USDC", "SINGIT")
+    ordered_symbols = [symbol for symbol in trusted_order if symbol in balances]
+    ordered_symbols.extend(
+        sorted(symbol for symbol in balances if symbol not in trusted_order)
+    )
+    for symbol in ordered_symbols:
+        value = balances[symbol]
         lines.append(f"- {symbol}: {value}")
+    if unverified_tokens:
+        lines.extend(["", "Unverified tokens (not enabled for spending):"])
+        for token in unverified_tokens:
+            symbol = str(token.get("symbol", "ERC20"))
+            value = str(token.get("balance", "0"))
+            contract = str(token.get("contractAddress", ""))
+            short_contract = (
+                f"{contract[:8]}...{contract[-4:]}"
+                if len(contract) >= 12
+                else contract
+            )
+            lines.append(f"- {symbol}: {value} ({short_contract})")
     lines.append("")
     lines.append("Spending is disabled until iMessage approval is configured.")
     return "\n".join(lines)
