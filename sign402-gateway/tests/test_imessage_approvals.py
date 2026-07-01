@@ -1,5 +1,6 @@
 import base64
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -293,6 +294,33 @@ class ImessageApprovalTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["env"]["PHOTON_HOME_CHANNEL"], "+15551234567")
         self.assertEqual(calls[0][1]["env"]["PHOTON_SIDECAR_TOKEN"], "sidecar-token")
         self.assertEqual(calls[0][1]["env"]["PHOTON_SIDECAR_PORT"], "8789")
+
+    def test_hermes_cli_notifier_sanitizes_timeout_errors(self):
+        def runner(args, **kwargs):
+            raise subprocess.TimeoutExpired(
+                cmd=args,
+                timeout=kwargs["timeout"],
+                output="",
+                stderr="",
+            )
+
+        notifier = HermesCliNotifier(
+            hermes_cli="/home/hermes/.local/bin/hermes",
+            hermes_home="/home/hermes/.hermes",
+            runner=runner,
+            timeout=0.01,
+        )
+
+        result = notifier.send(
+            photon_user_id="+15551234567",
+            message="Sign402 approval request",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "timeout")
+        self.assertEqual(result["stderr"], "hermes send timed out")
+        self.assertNotIn("+15551234567", str(result))
+        self.assertNotIn("Sign402 approval request", str(result))
 
     def test_invalid_master_key_fails_clearly(self):
         tmp = tempfile.TemporaryDirectory()

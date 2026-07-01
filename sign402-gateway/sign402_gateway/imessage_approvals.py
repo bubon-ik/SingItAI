@@ -114,7 +114,7 @@ class HermesCliNotifier:
         hermes_cli: str,
         hermes_home: str,
         runner: Callable[..., Any] = subprocess.run,
-        timeout: float = 8.0,
+        timeout: float = 30.0,
     ):
         self.hermes_cli = str(hermes_cli or "").strip()
         self.hermes_home = str(hermes_home or "").strip()
@@ -157,14 +157,22 @@ class HermesCliNotifier:
             value = os.environ.get(key)
             if value:
                 env[key] = value
-        completed = self.runner(
-            args,
-            shell=False,
-            timeout=self.timeout,
-            capture_output=True,
-            text=True,
-            env=env,
-        )
+        try:
+            completed = self.runner(
+                args,
+                shell=False,
+                timeout=self.timeout,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "ok": False,
+                "error": "timeout",
+                "stdout": str(getattr(exc, "stdout", "") or "")[:2000],
+                "stderr": "hermes send timed out",
+            }
         return {
             "ok": getattr(completed, "returncode", 1) == 0,
             "stdout": str(getattr(completed, "stdout", "") or "")[:2000],
@@ -673,6 +681,7 @@ def build_imessage_approval_service_from_env(
         notifier=HermesCliNotifier(
             hermes_cli=env.get("SIGN402_HERMES_CLI", "/home/hermes/.local/bin/hermes"),
             hermes_home=env.get("SIGN402_HERMES_HOME", "/home/hermes/.hermes"),
+            timeout=float(env.get("SIGN402_HERMES_SEND_TIMEOUT", "30")),
         ),
     )
 
