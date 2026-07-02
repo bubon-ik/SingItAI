@@ -38,6 +38,9 @@ _IMESSAGE_COMMANDS = {
         "Send a no-funds Sign402 approval test to iMessage",
     ),
 }
+_PAID_TOOL_COMMANDS = {
+    "buy-crypto-news": ("news", "Buy crypto news through Sign402"),
+}
 
 _client_factory: Callable[[], GatewayClient] = GatewayClient.from_env
 
@@ -92,11 +95,40 @@ def _build_imessage_handler(operation: str):
     return handler
 
 
+def _build_paid_tool_handler(tool: str):
+    async def handler(_raw_args: str) -> str:
+        identity = consume_gateway_identity()
+        if identity is None:
+            return _TELEGRAM_ONLY_MESSAGE
+        try:
+            client = _client_factory()
+            return await asyncio.to_thread(client.execute_paid_tool, tool)
+        except GatewayClientError as exc:
+            return exc.user_message
+        except Exception as exc:
+            logger.warning(
+                "Unexpected Sign402 paid tool plugin failure tool=%s error=%s",
+                tool,
+                type(exc).__name__,
+            )
+            return _UNEXPECTED_ERROR_MESSAGE
+
+    return handler
+
+
 def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
     """Capture trusted identities and consume Photon approval messages."""
 
     capture_gateway_identity(event=event, **kwargs)
     source = getattr(event, "source", None)
+    telegram_tool = _telegram_paid_tool_intent(event, source)
+    if telegram_tool:
+        return _handle_telegram_paid_tool_request(
+            tool=telegram_tool,
+            source=source,
+            gateway=gateway,
+        )
+
     if not _is_photon_source(event, source):
         return None
 
@@ -123,6 +155,24 @@ def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
         )
 
     return None
+
+
+def _handle_telegram_paid_tool_request(*, tool: str, source, gateway):
+    try:
+        text = _client_factory().execute_paid_tool(tool)
+        _send_fixed_reply(gateway, source, text)
+        return dict(_SKIP_RESULT)
+    except GatewayClientError as exc:
+        _send_fixed_reply(gateway, source, exc.user_message)
+        return dict(_SKIP_RESULT)
+    except Exception as exc:
+        logger.warning(
+            "Unexpected Sign402 Telegram paid tool failure tool=%s error=%s",
+            tool,
+            type(exc).__name__,
+        )
+        _send_fixed_reply(gateway, source, _UNEXPECTED_ERROR_MESSAGE)
+        return dict(_SKIP_RESULT)
 
 
 def _handle_photon_pairing_code(*, code: str, photon_user_id: str, source, gateway):
@@ -236,6 +286,26 @@ def _is_photon_source(event, source) -> bool:
     return False
 
 
+def _is_telegram_source(source) -> bool:
+    return _platform_name(source) == "telegram"
+
+
+def _telegram_paid_tool_intent(event, source) -> str | None:
+    if not _is_telegram_source(source):
+        return None
+    text = str(getattr(event, "text", "") or "").strip().lower()
+    if text.startswith("/"):
+        return None
+    normalized = (
+        text.replace("_", " ")
+        .replace("-", " ")
+        .replace("crypto news", "cryptonews")
+    )
+    if "buy" in normalized and "cryptonews" in normalized:
+        return "news"
+    return None
+
+
 def _looks_like_pairing_code(value: str) -> bool:
     code = str(value or "").strip().upper()
     return (
@@ -258,5 +328,11 @@ def register(ctx) -> None:
         ctx.register_command(
             command,
             handler=_build_imessage_handler(operation),
+            description=description,
+        )
+    for command, (tool, description) in _PAID_TOOL_COMMANDS.items():
+        ctx.register_command(
+            command,
+            handler=_build_paid_tool_handler(tool),
             description=description,
         )

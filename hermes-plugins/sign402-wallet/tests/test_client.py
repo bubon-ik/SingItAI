@@ -175,6 +175,26 @@ class GatewayClientTests(unittest.TestCase):
         self.assertIn("not configured", caught.exception.user_message)
         self.assertEqual(opener.requests, [])
 
+    def test_execute_paid_tool_posts_buy_tool_with_long_timeout(self):
+        opener = RecordingOpener(
+            response=FakeResponse(
+                json.dumps({"telegramText": "Crypto News unlocked."}).encode("utf-8")
+            )
+        )
+        client = self.make_client(opener, purchase_timeout=180.0)
+
+        result = client.execute_paid_tool("news")
+
+        self.assertEqual(result, "Crypto News unlocked.")
+        request, timeout = opener.requests[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8099/agent/buy-tool")
+        self.assertEqual(timeout, 180.0)
+        self.assertEqual(
+            request.get_header("Authorization"),
+            "Bearer wallet-token-secret-value",
+        )
+        self.assertEqual(json.loads(request.data), {"tool": "news"})
+
     def test_execute_omits_missing_username(self):
         opener = RecordingOpener(response=FakeResponse(b'{"telegramText":"ok"}'))
 

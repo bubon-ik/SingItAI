@@ -6,7 +6,14 @@ from typing import Any
 
 
 _TELEGRAM_COMMANDS = frozenset(
-    {"wallet", "create-wallet", "balance", "connect-imessage", "test-approval"}
+    {
+        "wallet",
+        "create-wallet",
+        "balance",
+        "connect-imessage",
+        "test-approval",
+        "buy-crypto-news",
+    }
 )
 
 

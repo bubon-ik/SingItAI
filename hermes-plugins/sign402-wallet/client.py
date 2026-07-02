@@ -31,6 +31,7 @@ _IMESSAGE_OPERATION_PATHS = {
     "pending": "/agent/imessage/pending",
     "decision": "/agent/imessage/decision",
 }
+_PAID_TOOL_PATH = "/agent/buy-tool"
 _MAX_RESPONSE_BYTES = 64 * 1024
 _NOT_CONFIGURED = "Wallet service is not configured. Please contact the operator."
 _LOCALHOST_REQUIRED = "Wallet service must use a localhost gateway URL."
@@ -58,6 +59,7 @@ class GatewayClient:
         photon_api_token: str = "",
         opener: Callable[..., Any] = urlopen,
         timeout: float = 5.0,
+        purchase_timeout: float = 180.0,
         max_response_bytes: int = _MAX_RESPONSE_BYTES,
     ):
         self.base_url = base_url.rstrip("/")
@@ -65,6 +67,7 @@ class GatewayClient:
         self.photon_api_token = photon_api_token
         self.opener = opener
         self.timeout = timeout
+        self.purchase_timeout = purchase_timeout
         self.max_response_bytes = max_response_bytes
 
     @classmethod
@@ -129,6 +132,19 @@ class GatewayClient:
             operation=operation,
         )
 
+    def execute_paid_tool(self, tool: str) -> str:
+        result = self._post(
+            _PAID_TOOL_PATH,
+            {"tool": str(tool or "").strip()},
+            token=self.api_token,
+            operation="buy-tool",
+            timeout=self.purchase_timeout,
+        )
+        telegram_text = result.get("telegramText")
+        if not isinstance(telegram_text, str) or not telegram_text.strip():
+            raise GatewayClientError(_INVALID_RESPONSE)
+        return telegram_text.strip()
+
     def _post(
         self,
         path: str,
@@ -136,6 +152,7 @@ class GatewayClient:
         *,
         token: str,
         operation: str,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         request = Request(
             f"{self.base_url}{path}",
@@ -150,7 +167,7 @@ class GatewayClient:
 
         response = None
         try:
-            response = self.opener(request, timeout=self.timeout)
+            response = self.opener(request, timeout=self.timeout if timeout is None else timeout)
             body = response.read(self.max_response_bytes + 1)
         except HTTPError as exc:
             exc.close()

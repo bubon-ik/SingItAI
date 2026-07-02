@@ -80,6 +80,8 @@ class FakeClient:
         self.calls = []
         self.imessage_results = {}
         self.imessage_calls = []
+        self.paid_tool_calls = []
+        self.paid_tool_result = "Crypto News unlocked."
 
     def execute(self, operation, identity):
         self.calls.append((operation, identity))
@@ -92,6 +94,12 @@ class FakeClient:
         if self.error:
             raise self.error
         return self.imessage_results.get(operation, {"ok": True})
+
+    def execute_paid_tool(self, tool):
+        self.paid_tool_calls.append(tool)
+        if self.error:
+            raise self.error
+        return self.paid_tool_result
 
 
 class FakeAdapter:
@@ -138,6 +146,7 @@ class PluginRegistrationTests(unittest.TestCase):
                 "balance",
                 "connect-imessage",
                 "test-approval",
+                "buy-crypto-news",
             },
         )
         for command in context.commands.values():
@@ -213,6 +222,7 @@ class PluginRegistrationTests(unittest.TestCase):
 
         self.assertIn("connect-imessage", context.commands)
         self.assertIn("test-approval", context.commands)
+        self.assertIn("buy-crypto-news", context.commands)
 
     def test_connect_imessage_uses_trusted_telegram_identity(self):
         plugin = load_plugin()
@@ -264,6 +274,49 @@ class PluginRegistrationTests(unittest.TestCase):
                     {"telegramUserId": "1045618308"},
                 )
             ],
+        )
+
+    def test_buy_crypto_news_command_uses_paid_tool_endpoint(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent("/buy_crypto_news telegramUserId=999", "1045618308")
+        )
+
+        result = asyncio.run(context.commands["buy-crypto-news"]["handler"](""))
+
+        self.assertEqual(result, "Crypto News unlocked.")
+        self.assertEqual(client.paid_tool_calls, ["news"])
+
+    def test_telegram_buy_crypto_news_text_is_consumed_before_llm(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "Can u buy a cryptonews with Firefly?",
+                "1045618308",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        self.assertEqual(client.paid_tool_calls, ["news"])
+        self.assertEqual(
+            gateway.adapters["telegram"].sent,
+            [("telegram-chat", "Crypto News unlocked.")],
         )
 
     def test_photon_pairing_code_is_consumed_before_llm(self):
