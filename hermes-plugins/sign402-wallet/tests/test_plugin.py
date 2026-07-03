@@ -347,6 +347,7 @@ class PluginRegistrationTests(unittest.TestCase):
         context = FakeContext()
         client = FakeClient()
         plugin._client_factory = lambda: client
+        plugin._background_runner = lambda callback: callback()
         plugin.register(context)
         gateway = FakeGateway(adapter_key="telegram")
 
@@ -367,7 +368,49 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertEqual(client.paid_tool_calls, [("news", "1045618308", None)])
         self.assertEqual(
             gateway.adapters["telegram"].sent,
-            [("telegram-chat", "Crypto News unlocked.")],
+            [
+                ("telegram-chat", plugin._TELEGRAM_PAID_TOOL_STARTED_MESSAGE),
+                ("telegram-chat", "Crypto News unlocked."),
+            ],
+        )
+
+    def test_telegram_buy_crypto_news_starts_purchase_in_background(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        callbacks = []
+        plugin._client_factory = lambda: client
+        plugin._background_runner = callbacks.append
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "buy crypto news",
+                "1045618308",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        self.assertEqual(client.paid_tool_calls, [])
+        self.assertEqual(len(callbacks), 1)
+        self.assertEqual(
+            gateway.adapters["telegram"].sent,
+            [("telegram-chat", plugin._TELEGRAM_PAID_TOOL_STARTED_MESSAGE)],
+        )
+
+        callbacks[0]()
+
+        self.assertEqual(client.paid_tool_calls, [("news", "1045618308", None)])
+        self.assertEqual(
+            gateway.adapters["telegram"].sent[-1],
+            ("telegram-chat", "Crypto News unlocked."),
         )
 
     def test_telegram_buy_crypto_news_uses_direct_bot_api_when_token_is_available(self):
@@ -375,6 +418,7 @@ class PluginRegistrationTests(unittest.TestCase):
         context = FakeContext()
         client = FakeClient()
         plugin._client_factory = lambda: client
+        plugin._background_runner = lambda callback: callback()
         plugin.register(context)
         gateway = FakeGateway(adapter_key="telegram")
         requests = []
@@ -401,7 +445,7 @@ class PluginRegistrationTests(unittest.TestCase):
             {"action": "skip", "reason": "sign402-imessage-handled"},
         )
         self.assertEqual(gateway.adapters["telegram"].sent, [])
-        self.assertEqual(len(requests), 1)
+        self.assertEqual(len(requests), 2)
         request, timeout = requests[0]
         self.assertEqual(timeout, plugin._TELEGRAM_SEND_TIMEOUT_SECONDS)
         self.assertEqual(
@@ -410,8 +454,10 @@ class PluginRegistrationTests(unittest.TestCase):
         )
         payload = parse_qs(request.data.decode("utf-8"))
         self.assertEqual(payload["chat_id"], ["telegram-chat"])
-        self.assertEqual(payload["text"], ["Crypto News unlocked."])
+        self.assertEqual(payload["text"], [plugin._TELEGRAM_PAID_TOOL_STARTED_MESSAGE])
         self.assertEqual(payload["disable_web_page_preview"], ["true"])
+        final_payload = parse_qs(requests[1][0].data.decode("utf-8"))
+        self.assertEqual(final_payload["text"], ["Crypto News unlocked."])
 
     def test_photon_pairing_code_is_consumed_before_llm(self):
         plugin = load_plugin()

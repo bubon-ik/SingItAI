@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from collections.abc import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -38,6 +39,9 @@ _TELEGRAM_TOKEN_ENV_NAMES = (
 )
 _TELEGRAM_SEND_TIMEOUT_SECONDS = 15
 _TELEGRAM_MESSAGE_CHUNK_SIZE = 3900
+_TELEGRAM_PAID_TOOL_STARTED_MESSAGE = (
+    "Sign402 purchase started. Approve it in iMessage; I'll post the result here."
+)
 _COMMANDS = {
     "wallet": ("wallet", "Show your managed Base wallet"),
     "create-wallet": ("create-wallet", "Create your managed Base wallet"),
@@ -61,6 +65,15 @@ _PAID_TOOL_COMMANDS = {
 
 _client_factory: Callable[[], GatewayClient] = GatewayClient.from_env
 _telegram_api_opener: Callable[..., object] = urlopen
+_background_runner: Callable[[Callable[[], None]], None]
+
+
+def _default_background_runner(callback: Callable[[], None]) -> None:
+    thread = threading.Thread(target=callback, name="sign402-paid-tool", daemon=True)
+    thread.start()
+
+
+_background_runner = _default_background_runner
 
 
 def _build_handler(operation: str):
@@ -180,13 +193,30 @@ def _handle_telegram_paid_tool_request(*, tool: str, source, gateway):
     if identity is None:
         _send_fixed_reply(gateway, source, _TELEGRAM_ONLY_MESSAGE)
         return dict(_SKIP_RESULT)
+    _send_fixed_reply(gateway, source, _TELEGRAM_PAID_TOOL_STARTED_MESSAGE)
+    _run_in_background(
+        lambda: _execute_telegram_paid_tool_request(
+            tool=tool,
+            identity=identity,
+            source=source,
+            gateway=gateway,
+        )
+    )
+    return dict(_SKIP_RESULT)
+
+
+def _execute_telegram_paid_tool_request(
+    *,
+    tool: str,
+    identity: TelegramIdentity,
+    source,
+    gateway,
+) -> None:
     try:
         text = _client_factory().execute_paid_tool(tool, identity)
         _send_fixed_reply(gateway, source, text)
-        return dict(_SKIP_RESULT)
     except GatewayClientError as exc:
         _send_fixed_reply(gateway, source, exc.user_message)
-        return dict(_SKIP_RESULT)
     except Exception as exc:
         logger.warning(
             "Unexpected Sign402 Telegram paid tool failure tool=%s error=%s",
@@ -194,7 +224,10 @@ def _handle_telegram_paid_tool_request(*, tool: str, source, gateway):
             type(exc).__name__,
         )
         _send_fixed_reply(gateway, source, _UNEXPECTED_ERROR_MESSAGE)
-        return dict(_SKIP_RESULT)
+
+
+def _run_in_background(callback: Callable[[], None]) -> None:
+    _background_runner(callback)
 
 
 def _handle_photon_pairing_code(*, code: str, photon_user_id: str, source, gateway):
