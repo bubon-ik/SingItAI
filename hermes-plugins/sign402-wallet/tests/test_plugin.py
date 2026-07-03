@@ -145,6 +145,7 @@ class PluginRegistrationTests(unittest.TestCase):
                 "create-wallet",
                 "balance",
                 "last-purchase",
+                "last_purchase",
                 "connect-imessage",
                 "test-approval",
                 "buy-crypto-news",
@@ -303,6 +304,24 @@ class PluginRegistrationTests(unittest.TestCase):
         )
 
         result = asyncio.run(context.commands["last-purchase"]["handler"](""))
+
+        self.assertEqual(result, "Latest purchase text")
+        self.assertEqual(len(client.calls), 1)
+        operation, identity = client.calls[0]
+        self.assertEqual(operation, "last-purchase")
+        self.assertEqual(identity.user_id, "1045618308")
+
+    def test_last_purchase_underscore_alias_uses_trusted_identity(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient(result="Latest purchase text")
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent("/last_purchase telegramUserId=999", "1045618308")
+        )
+
+        result = asyncio.run(context.commands["last_purchase"]["handler"](""))
 
         self.assertEqual(result, "Latest purchase text")
         self.assertEqual(len(client.calls), 1)

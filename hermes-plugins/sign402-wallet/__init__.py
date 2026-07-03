@@ -32,6 +32,7 @@ _COMMANDS = {
     "create-wallet": ("create-wallet", "Create your managed Base wallet"),
     "balance": ("balance", "Show your managed Base wallet balance"),
     "last-purchase": ("last-purchase", "Show your latest completed Sign402 purchase"),
+    "last_purchase": ("last-purchase", "Show your latest completed Sign402 purchase"),
 }
 _IMESSAGE_COMMANDS = {
     "connect-imessage": (
