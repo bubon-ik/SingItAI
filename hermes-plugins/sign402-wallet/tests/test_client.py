@@ -218,6 +218,19 @@ class GatewayClientTests(unittest.TestCase):
             {"telegramUserId": "1045618308"},
         )
 
+    def test_execute_last_purchase_posts_last_purchase_endpoint(self):
+        opener = RecordingOpener(response=FakeResponse(b'{"telegramText":"latest"}'))
+
+        result = self.make_client(opener).execute(
+            "last-purchase",
+            TelegramIdentity(user_id="1045618308"),
+        )
+
+        request, _timeout = opener.requests[0]
+        self.assertEqual(result, "latest")
+        self.assertEqual(request.full_url, "http://127.0.0.1:8099/agent/last-purchase")
+        self.assertEqual(json.loads(request.data), {"telegramUserId": "1045618308"})
+
     def test_from_env_requires_gateway_url_and_token(self):
         with self.assertRaises(GatewayClientError) as missing_all:
             GatewayClient.from_env({})

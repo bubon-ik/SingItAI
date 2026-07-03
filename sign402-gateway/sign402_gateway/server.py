@@ -416,6 +416,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                         "/agent/wallet",
                         "/agent/create-wallet",
                         "/agent/wallet-balance",
+                        "/agent/last-purchase",
                         "/agent/imessage/pairing",
                         "/agent/imessage/link",
                         "/agent/imessage/pending",
@@ -494,6 +495,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if path == "/agent/wallet-balance":
             self._handle_agent_wallet_balance()
+            return
+        if path == "/agent/last-purchase":
+            self._handle_agent_last_purchase()
             return
         if path == "/agent/imessage/pairing":
             self._handle_agent_imessage_pairing()
@@ -655,6 +659,63 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             )
             status = 200 if bool(result.get("ok")) else 404
             self._send_json(_without_private_key_material(result), status=status)
+        except WalletApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except WalletApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+        except WalletEncryptionError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_last_purchase(self) -> None:
+        try:
+            _require_wallet_api_token(self)
+            payload = self._read_json()
+            telegram_user_id = _read_telegram_user_id(payload)
+            event = self.server.event_store.read()
+            if not isinstance(event, dict) or not event.get("ok"):
+                self._send_json(
+                    {
+                        "ok": False,
+                        "telegramText": "No completed Sign402 purchase found yet.",
+                    },
+                    status=404,
+                )
+                return
+            if not _event_belongs_to_telegram_user(
+                event,
+                telegram_user_id=telegram_user_id,
+                user_wallet_service=self.server.user_wallet_service,
+            ):
+                self._send_json(
+                    {
+                        "ok": False,
+                        "telegramText": "No completed Sign402 purchase found for this Telegram user.",
+                    },
+                    status=404,
+                )
+                return
+            telegram_text = event.get("telegramText")
+            if not isinstance(telegram_text, str) or not telegram_text.strip():
+                self._send_json(
+                    {
+                        "ok": False,
+                        "telegramText": "The last Sign402 purchase has no Telegram result text.",
+                    },
+                    status=404,
+                )
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "telegramText": telegram_text.strip(),
+                    "toolId": event.get("toolId"),
+                    "toolName": event.get("toolName"),
+                    "txId": event.get("txId"),
+                    "resourceUrl": event.get("resourceUrl"),
+                }
+            )
         except WalletApiTokenNotConfiguredError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=503)
         except WalletApiAuthError as exc:
@@ -913,6 +974,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             enriched = _tool_result(tool, result, resource_url)
             enriched["decision"] = result.get("decision", "approved_and_executed")
             enriched["ok"] = bool(result.get("ok", False))
+            enriched["telegramUserId"] = user_id
             if enriched.get("ok"):
                 self.server.event_store.write(enriched)
             self._send_json(enriched, status=200 if enriched.get("ok") else 400)
@@ -3236,6 +3298,38 @@ def _without_private_key_material(value):
     if isinstance(value, list):
         return [_without_private_key_material(item) for item in value]
     return value
+
+
+def _event_belongs_to_telegram_user(
+    event: dict[str, Any],
+    *,
+    telegram_user_id: str,
+    user_wallet_service,
+) -> bool:
+    event_user_id = str(event.get("telegramUserId", "") or "").strip()
+    if event_user_id:
+        return event_user_id == telegram_user_id
+
+    wallet_status = user_wallet_service.wallet_status(telegram_user_id)
+    wallet = wallet_status.get("wallet") if isinstance(wallet_status, dict) else None
+    address = str(wallet.get("address", "") if isinstance(wallet, dict) else "").strip().lower()
+    if not address:
+        return False
+
+    payment_response = event.get("paymentResponse")
+    payer = ""
+    if isinstance(payment_response, dict):
+        payer = str(
+            payment_response.get("payer")
+            or payment_response.get("from")
+            or payment_response.get("account")
+            or ""
+        ).strip()
+    if not payer:
+        resource_result = event.get("resourceResult")
+        if isinstance(resource_result, dict):
+            payer = str(resource_result.get("payer") or "").strip()
+    return bool(payer) and payer.lower() == address
 
 
 def _payment_context_lines(

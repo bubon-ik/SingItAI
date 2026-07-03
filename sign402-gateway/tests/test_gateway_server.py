@@ -1465,6 +1465,91 @@ class GatewayServerTests(unittest.TestCase):
         )
         DummyServer.firefly.approve_payment_hash.assert_not_called()
 
+    def test_agent_last_purchase_returns_latest_user_event(self):
+        server = DummyServer()
+        server.event_store = Mock()
+        server.event_store.read.return_value = {
+            "ok": True,
+            "telegramUserId": "1045618308",
+            "toolId": "otto.crypto_news",
+            "toolName": "Crypto News",
+            "txId": "0xTX",
+            "resourceUrl": "https://x402.ottoai.services/crypto-news",
+            "telegramText": "✅ Crypto News unlocked. Paid 0.001 USDC.",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/last-purchase",
+                {"telegramUserId": "1045618308"},
+                server=server,
+                headers=self.wallet_auth_headers(),
+            )
+
+        response = self.response_text(handler)
+        body = json.loads(response.split("\r\n\r\n", 1)[1])
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["telegramText"], "✅ Crypto News unlocked. Paid 0.001 USDC.")
+        self.assertEqual(body["txId"], "0xTX")
+        server.user_wallet_service.wallet_status.assert_not_called()
+
+    def test_agent_last_purchase_matches_legacy_event_by_wallet_payer(self):
+        server = DummyServer()
+        server.event_store = Mock()
+        server.event_store.read.return_value = {
+            "ok": True,
+            "paymentResponse": {
+                "payer": "0xAc4aCb03cAdaFE1d68262cf94cD5E8B56d9bf45C",
+            },
+            "telegramText": "✅ Legacy purchase text.",
+        }
+        server.user_wallet_service.wallet_status.return_value = {
+            "ok": True,
+            "wallet": {
+                "address": "0xAc4aCb03cAdaFE1d68262cf94cD5E8B56d9bf45C",
+            },
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/last-purchase",
+                {"telegramUserId": "1045618308"},
+                server=server,
+                headers=self.wallet_auth_headers(),
+            )
+
+        body = self.response_json(handler)
+
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["telegramText"], "✅ Legacy purchase text.")
+        server.user_wallet_service.wallet_status.assert_called_once_with("1045618308")
+
+    def test_agent_last_purchase_rejects_other_users_event(self):
+        server = DummyServer()
+        server.event_store = Mock()
+        server.event_store.read.return_value = {
+            "ok": True,
+            "telegramUserId": "999",
+            "telegramText": "Someone else's result.",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/last-purchase",
+                {"telegramUserId": "1045618308"},
+                server=server,
+                headers=self.wallet_auth_headers(),
+            )
+
+        response = self.response_text(handler)
+        body = json.loads(response.split("\r\n\r\n", 1)[1])
+
+        self.assertIn("HTTP/1.0 404 Not Found", response)
+        self.assertFalse(body["ok"])
+        self.assertIn("No completed Sign402 purchase found", body["telegramText"])
+
     def test_agent_buy_tool_with_user_identity_requires_wallet_auth(self):
         server = DummyServer()
 

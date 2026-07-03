@@ -10,6 +10,7 @@ _TELEGRAM_COMMANDS = frozenset(
         "wallet",
         "create-wallet",
         "balance",
+        "last-purchase",
         "connect-imessage",
         "test-approval",
         "buy-crypto-news",

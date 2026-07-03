@@ -144,6 +144,7 @@ class PluginRegistrationTests(unittest.TestCase):
                 "wallet",
                 "create-wallet",
                 "balance",
+                "last-purchase",
                 "connect-imessage",
                 "test-approval",
                 "buy-crypto-news",
@@ -290,6 +291,24 @@ class PluginRegistrationTests(unittest.TestCase):
 
         self.assertEqual(result, "Crypto News unlocked.")
         self.assertEqual(client.paid_tool_calls, [("news", "1045618308", None)])
+
+    def test_last_purchase_uses_trusted_telegram_identity(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient(result="Latest purchase text")
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent("/last_purchase telegramUserId=999", "1045618308")
+        )
+
+        result = asyncio.run(context.commands["last-purchase"]["handler"](""))
+
+        self.assertEqual(result, "Latest purchase text")
+        self.assertEqual(len(client.calls), 1)
+        operation, identity = client.calls[0]
+        self.assertEqual(operation, "last-purchase")
+        self.assertEqual(identity.user_id, "1045618308")
 
     def test_telegram_buy_crypto_news_text_is_consumed_before_llm(self):
         plugin = load_plugin()

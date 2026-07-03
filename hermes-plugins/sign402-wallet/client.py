@@ -23,6 +23,7 @@ _OPERATION_PATHS = {
     "wallet": "/agent/wallet",
     "create-wallet": "/agent/create-wallet",
     "balance": "/agent/wallet-balance",
+    "last-purchase": "/agent/last-purchase",
 }
 _IMESSAGE_OPERATION_PATHS = {
     "connect-imessage": "/agent/imessage/pairing",
