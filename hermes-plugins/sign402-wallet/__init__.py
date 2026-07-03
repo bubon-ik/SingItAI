@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import Callable
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from .client import GatewayClient, GatewayClientError
 from .identity import (
@@ -27,6 +31,13 @@ _IMESSAGE_UNEXPECTED_ERROR_MESSAGE = (
 )
 _SKIP_RESULT = {"action": "skip", "reason": "sign402-imessage-handled"}
 _PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+_TELEGRAM_TOKEN_ENV_NAMES = (
+    "TELEGRAM_BOT_TOKEN",
+    "HERMES_TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_TOKEN",
+)
+_TELEGRAM_SEND_TIMEOUT_SECONDS = 15
+_TELEGRAM_MESSAGE_CHUNK_SIZE = 3900
 _COMMANDS = {
     "wallet": ("wallet", "Show your managed Base wallet"),
     "create-wallet": ("create-wallet", "Create your managed Base wallet"),
@@ -49,6 +60,7 @@ _PAID_TOOL_COMMANDS = {
 }
 
 _client_factory: Callable[[], GatewayClient] = GatewayClient.from_env
+_telegram_api_opener: Callable[..., object] = urlopen
 
 
 def _build_handler(operation: str):
@@ -243,6 +255,8 @@ def _imessage_text(result: dict) -> str:
 
 
 def _send_fixed_reply(gateway, source, text: str) -> None:
+    if _is_telegram_source(source) and _send_telegram_reply_direct(source, text):
+        return
     if gateway is None:
         return
     adapters = getattr(gateway, "adapters", {}) or {}
@@ -262,7 +276,75 @@ def _send_fixed_reply(gateway, source, text: str) -> None:
     except RuntimeError:
         asyncio.run(coroutine)
     else:
-        loop.create_task(coroutine)
+        task = loop.create_task(coroutine)
+        task.add_done_callback(_log_send_task_failure)
+
+
+def _send_telegram_reply_direct(source, text: str) -> bool:
+    token = _telegram_bot_token()
+    chat_id = str(getattr(source, "chat_id", "") or getattr(source, "user_id", "") or "")
+    if not token or not chat_id:
+        return False
+
+    try:
+        for chunk in _telegram_message_chunks(text):
+            payload = urlencode(
+                {
+                    "chat_id": chat_id,
+                    "text": chunk,
+                    "disable_web_page_preview": "true",
+                }
+            ).encode("utf-8")
+            request = Request(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                data=payload,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            response = _telegram_api_opener(
+                request,
+                timeout=_TELEGRAM_SEND_TIMEOUT_SECONDS,
+            )
+            try:
+                read = getattr(response, "read", None)
+                if callable(read):
+                    read()
+            finally:
+                close = getattr(response, "close", None)
+                if callable(close):
+                    close()
+        return True
+    except (HTTPError, TimeoutError, URLError, OSError) as exc:
+        logger.warning(
+            "Direct Telegram reply failed error=%s; falling back to Hermes adapter",
+            type(exc).__name__,
+        )
+        return False
+
+
+def _telegram_bot_token() -> str:
+    for name in _TELEGRAM_TOKEN_ENV_NAMES:
+        value = str(os.environ.get(name, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _telegram_message_chunks(text: str) -> list[str]:
+    value = str(text or "")
+    if not value:
+        return [""]
+    return [
+        value[index : index + _TELEGRAM_MESSAGE_CHUNK_SIZE]
+        for index in range(0, len(value), _TELEGRAM_MESSAGE_CHUNK_SIZE)
+    ]
+
+
+def _log_send_task_failure(task) -> None:
+    try:
+        task.result()
+    except Exception as exc:
+        logger.warning("Hermes adapter reply failed error=%s", type(exc).__name__)
 
 
 def _approve_photon_source(gateway, source) -> None:

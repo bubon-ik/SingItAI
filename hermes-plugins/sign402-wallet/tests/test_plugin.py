@@ -4,6 +4,8 @@ import sys
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import parse_qs
+from unittest.mock import patch
 
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
@@ -108,6 +110,17 @@ class FakeAdapter:
 
     async def send(self, chat_id, text):
         self.sent.append((chat_id, text))
+
+
+class FakeTelegramResponse:
+    def __init__(self):
+        self.closed = False
+
+    def read(self):
+        return b'{"ok":true}'
+
+    def close(self):
+        self.closed = True
 
 
 class FakePairingStore:
@@ -356,6 +369,49 @@ class PluginRegistrationTests(unittest.TestCase):
             gateway.adapters["telegram"].sent,
             [("telegram-chat", "Crypto News unlocked.")],
         )
+
+    def test_telegram_buy_crypto_news_uses_direct_bot_api_when_token_is_available(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+        requests = []
+
+        def fake_opener(request, timeout):
+            requests.append((request, timeout))
+            return FakeTelegramResponse()
+
+        plugin._telegram_api_opener = fake_opener
+
+        with patch.dict(plugin.os.environ, {"TELEGRAM_BOT_TOKEN": "telegram-token"}):
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "buy crypto news",
+                    "1045618308",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        self.assertEqual(gateway.adapters["telegram"].sent, [])
+        self.assertEqual(len(requests), 1)
+        request, timeout = requests[0]
+        self.assertEqual(timeout, plugin._TELEGRAM_SEND_TIMEOUT_SECONDS)
+        self.assertEqual(
+            request.full_url,
+            "https://api.telegram.org/bottelegram-token/sendMessage",
+        )
+        payload = parse_qs(request.data.decode("utf-8"))
+        self.assertEqual(payload["chat_id"], ["telegram-chat"])
+        self.assertEqual(payload["text"], ["Crypto News unlocked."])
+        self.assertEqual(payload["disable_web_page_preview"], ["true"])
 
     def test_photon_pairing_code_is_consumed_before_llm(self):
         plugin = load_plugin()
