@@ -7,7 +7,11 @@ import logging
 from collections.abc import Callable
 
 from .client import GatewayClient, GatewayClientError
-from .identity import capture_gateway_identity, consume_gateway_identity
+from .identity import (
+    TelegramIdentity,
+    capture_gateway_identity,
+    consume_gateway_identity,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -102,7 +106,7 @@ def _build_paid_tool_handler(tool: str):
             return _TELEGRAM_ONLY_MESSAGE
         try:
             client = _client_factory()
-            return await asyncio.to_thread(client.execute_paid_tool, tool)
+            return await asyncio.to_thread(client.execute_paid_tool, tool, identity)
         except GatewayClientError as exc:
             return exc.user_message
         except Exception as exc:
@@ -158,8 +162,12 @@ def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
 
 
 def _handle_telegram_paid_tool_request(*, tool: str, source, gateway):
+    identity = consume_gateway_identity() or _identity_from_telegram_source(source)
+    if identity is None:
+        _send_fixed_reply(gateway, source, _TELEGRAM_ONLY_MESSAGE)
+        return dict(_SKIP_RESULT)
     try:
-        text = _client_factory().execute_paid_tool(tool)
+        text = _client_factory().execute_paid_tool(tool, identity)
         _send_fixed_reply(gateway, source, text)
         return dict(_SKIP_RESULT)
     except GatewayClientError as exc:
@@ -288,6 +296,23 @@ def _is_photon_source(event, source) -> bool:
 
 def _is_telegram_source(source) -> bool:
     return _platform_name(source) == "telegram"
+
+
+def _identity_from_telegram_source(source) -> TelegramIdentity | None:
+    if not _is_telegram_source(source):
+        return None
+    user_id = str(getattr(source, "user_id", "") or "").strip()
+    if not user_id.isdecimal():
+        return None
+    raw_username = getattr(source, "user_name", None)
+    username = str(raw_username).strip() if raw_username else None
+    raw_chat_id = getattr(source, "chat_id", None)
+    chat_id = str(raw_chat_id).strip() if raw_chat_id is not None else None
+    return TelegramIdentity(
+        user_id=user_id,
+        username=username or None,
+        chat_id=chat_id or None,
+    )
 
 
 def _telegram_paid_tool_intent(event, source) -> str | None:

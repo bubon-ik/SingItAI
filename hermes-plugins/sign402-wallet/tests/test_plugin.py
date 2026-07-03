@@ -95,8 +95,8 @@ class FakeClient:
             raise self.error
         return self.imessage_results.get(operation, {"ok": True})
 
-    def execute_paid_tool(self, tool):
-        self.paid_tool_calls.append(tool)
+    def execute_paid_tool(self, tool, identity):
+        self.paid_tool_calls.append((tool, identity.user_id, identity.username))
         if self.error:
             raise self.error
         return self.paid_tool_result
@@ -289,7 +289,7 @@ class PluginRegistrationTests(unittest.TestCase):
         result = asyncio.run(context.commands["buy-crypto-news"]["handler"](""))
 
         self.assertEqual(result, "Crypto News unlocked.")
-        self.assertEqual(client.paid_tool_calls, ["news"])
+        self.assertEqual(client.paid_tool_calls, [("news", "1045618308", None)])
 
     def test_telegram_buy_crypto_news_text_is_consumed_before_llm(self):
         plugin = load_plugin()
@@ -313,7 +313,7 @@ class PluginRegistrationTests(unittest.TestCase):
             result,
             {"action": "skip", "reason": "sign402-imessage-handled"},
         )
-        self.assertEqual(client.paid_tool_calls, ["news"])
+        self.assertEqual(client.paid_tool_calls, [("news", "1045618308", None)])
         self.assertEqual(
             gateway.adapters["telegram"].sent,
             [("telegram-chat", "Crypto News unlocked.")],

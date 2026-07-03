@@ -23,6 +23,7 @@ PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 PAIRING_CODE_LENGTH = 8
 PAIRING_TTL_SECONDS = 10 * 60
 TEST_APPROVAL_TTL_SECONDS = 2 * 60
+PURCHASE_APPROVAL_TTL_SECONDS = 2 * 60
 
 
 class ImessageApprovalStore:
@@ -189,12 +190,19 @@ class ImessageApprovalService:
         master_key: str,
         notifier,
         now: Callable[[], int | float] | None = None,
+        purchase_approval_timeout: float = 120.0,
+        purchase_approval_poll_interval: float = 1.0,
     ):
         self.store = store
         self.wallet_service = wallet_service
         self.master_key = str(master_key or "")
         self.notifier = notifier
         self.now = now or time.time
+        self.purchase_approval_timeout = max(1.0, float(purchase_approval_timeout))
+        self.purchase_approval_poll_interval = max(
+            0.2,
+            float(purchase_approval_poll_interval),
+        )
         self._fernet = _build_fernet(self.master_key)
 
     def create_pairing(self, telegram_user_id: str) -> dict[str, Any]:
@@ -486,6 +494,174 @@ class ImessageApprovalService:
             ),
         }
 
+    def request_purchase_approval(
+        self,
+        *,
+        telegram_user_id: str,
+        tool_name: str,
+        resource_url: str,
+        payment_requirements: dict[str, Any],
+        payment_context: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        user_id = _require_telegram_user_id(telegram_user_id)
+        wallet_status = self.wallet_service.wallet_status(user_id)
+        if not wallet_status.get("ok"):
+            return {
+                "ok": False,
+                "status": "wallet_missing",
+                "telegramText": wallet_status.get(
+                    "telegramText",
+                    "No Base agent wallet yet. Send /create_wallet to create one.",
+                ),
+            }
+        wallet = wallet_status.get("wallet") or {}
+        wallet_address = str(wallet.get("address", "") or "")
+
+        now = self._now()
+        with self.store.lock, self.store._database() as db:
+            self._expire_approvals(db, now)
+            link = db.execute(
+                """
+                SELECT encrypted_photon_user_id
+                FROM imessage_links
+                WHERE telegram_user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if link is None:
+                return {
+                    "ok": False,
+                    "status": "imessage_not_linked",
+                    "telegramText": (
+                        "iMessage is not linked yet. Send /connect_imessage first."
+                    ),
+                }
+
+            pending = db.execute(
+                """
+                SELECT approval_id
+                FROM imessage_approvals
+                WHERE telegram_user_id = ?
+                  AND status = 'pending'
+                  AND expires_at > ?
+                """,
+                (user_id, now),
+            ).fetchone()
+            if pending is not None:
+                return {
+                    "ok": False,
+                    "status": "approval_pending",
+                    "telegramText": (
+                        "An iMessage approval is already pending. Reply YES or NO there first."
+                    ),
+                }
+
+            expires_at = now + PURCHASE_APPROVAL_TTL_SECONDS
+            canonical = {
+                "schemaVersion": 1,
+                "actionType": "sign402_purchase",
+                "walletAddress": wallet_address,
+                "toolName": str(tool_name or "x402 resource"),
+                "resourceUrl": str(resource_url or ""),
+                "paymentRequirements": _approval_payment_requirements(payment_requirements),
+                "nonce": secrets.token_hex(16),
+                "createdAt": now,
+                "expiresAt": expires_at,
+            }
+            canonical_json = _canonical_json(canonical)
+            commitment_hash = hashlib.sha256(
+                canonical_json.encode("utf-8")
+            ).hexdigest()
+            approval_id = secrets.token_urlsafe(18)
+            context_lines = _purchase_context_lines(
+                tool_name=str(tool_name or "x402 resource"),
+                wallet_address=wallet_address,
+                resource_url=str(resource_url or ""),
+                payment_requirements=payment_requirements,
+            )
+            encrypted_photon = str(link["encrypted_photon_user_id"])
+            photon_user_id = self._fernet.decrypt(
+                encrypted_photon.encode("ascii")
+            ).decode("utf-8")
+            message = _purchase_approval_message(
+                context_lines=context_lines,
+                commitment_hash=commitment_hash,
+            )
+            db.execute(
+                """
+                INSERT INTO imessage_approvals (
+                    approval_id, telegram_user_id, action_type, commitment_hash,
+                    status, context_json, canonical_json, created_at, expires_at
+                )
+                VALUES (?, ?, 'sign402_purchase', ?, 'pending', ?, ?, ?, ?)
+                """,
+                (
+                    approval_id,
+                    user_id,
+                    commitment_hash,
+                    json.dumps(context_lines, separators=(",", ":")),
+                    canonical_json,
+                    now,
+                    expires_at,
+                ),
+            )
+            self._record_audit(
+                db,
+                telegram_user_id=user_id,
+                event_type="approval_created",
+                approval_id=approval_id,
+                action_type="sign402_purchase",
+                commitment_hash=commitment_hash,
+                status="pending",
+                metadata={"toolName": str(tool_name or ""), "resourceUrl": str(resource_url or "")},
+            )
+
+        delivery = self.notifier.send(photon_user_id=photon_user_id, message=message)
+        if not delivery.get("ok"):
+            with self.store.lock, self.store._database() as db:
+                db.execute(
+                    """
+                    UPDATE imessage_approvals
+                    SET status = 'delivery_failed'
+                    WHERE approval_id = ? AND status = 'pending'
+                    """,
+                    (approval_id,),
+                )
+                self._record_audit(
+                    db,
+                    telegram_user_id=user_id,
+                    event_type="approval_delivery_failed",
+                    approval_id=approval_id,
+                    action_type="sign402_purchase",
+                    commitment_hash=commitment_hash,
+                    status="delivery_failed",
+                )
+            return {
+                "ok": False,
+                "status": "delivery_failed",
+                "approvalId": approval_id,
+                "commitmentHash": commitment_hash,
+                "telegramText": "could not deliver the iMessage approval. No action was approved.",
+            }
+
+        with self.store.lock, self.store._database() as db:
+            self._record_audit(
+                db,
+                telegram_user_id=user_id,
+                event_type="approval_delivered",
+                approval_id=approval_id,
+                action_type="sign402_purchase",
+                commitment_hash=commitment_hash,
+                status="pending",
+            )
+
+        return self._wait_for_approval_decision(
+            approval_id=approval_id,
+            telegram_user_id=user_id,
+            commitment_hash=commitment_hash,
+            expires_at=expires_at,
+        )
+
     def pending_for_photon_sender(self, photon_user_id: str) -> dict[str, Any]:
         normalized_photon = normalize_e164(photon_user_id)
         photon_digest = self._digest(f"photon:{normalized_photon}")
@@ -582,7 +758,55 @@ class ImessageApprovalService:
         return {
             "ok": True,
             "status": final_status,
-            "imessageText": f"Sign402 test approval {final_status}.",
+            "imessageText": _decision_text(str(approval["action_type"]), final_status),
+        }
+
+    def _wait_for_approval_decision(
+        self,
+        *,
+        approval_id: str,
+        telegram_user_id: str,
+        commitment_hash: str,
+        expires_at: int,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + self.purchase_approval_timeout
+        while time.monotonic() <= deadline:
+            now = self._now()
+            with self.store.lock, self.store._database() as db:
+                self._expire_approvals(db, now)
+                row = db.execute(
+                    """
+                    SELECT status, decision_at
+                    FROM imessage_approvals
+                    WHERE approval_id = ?
+                    """,
+                    (approval_id,),
+                ).fetchone()
+            status = str(row["status"]) if row is not None else "missing"
+            if status == "approved":
+                return {
+                    "ok": True,
+                    "status": "approved",
+                    "approvalId": approval_id,
+                    "commitmentHash": commitment_hash,
+                }
+            if status in {"denied", "expired", "delivery_failed", "missing"}:
+                return {
+                    "ok": False,
+                    "status": status,
+                    "approvalId": approval_id,
+                    "commitmentHash": commitment_hash,
+                    "telegramText": "Purchase was not approved in iMessage.",
+                }
+            if now >= expires_at:
+                break
+            time.sleep(self.purchase_approval_poll_interval)
+        return {
+            "ok": False,
+            "status": "timeout",
+            "approvalId": approval_id,
+            "commitmentHash": commitment_hash,
+            "telegramText": "iMessage approval timed out. No funds were moved.",
         }
 
     def _now(self) -> int:
@@ -683,6 +907,12 @@ def build_imessage_approval_service_from_env(
             hermes_home=env.get("SIGN402_HERMES_HOME", "/home/hermes/.hermes"),
             timeout=float(env.get("SIGN402_HERMES_SEND_TIMEOUT", "30")),
         ),
+        purchase_approval_timeout=float(
+            env.get("SIGN402_IMESSAGE_PURCHASE_APPROVAL_TIMEOUT", "120")
+        ),
+        purchase_approval_poll_interval=float(
+            env.get("SIGN402_IMESSAGE_PURCHASE_APPROVAL_POLL_INTERVAL", "1")
+        ),
     )
 
 
@@ -749,6 +979,79 @@ def _approval_message(*, wallet_address: str, commitment_hash: str) -> str:
             "Reply YES or NO.",
         ]
     )
+
+
+def _approval_payment_requirements(requirement: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "scheme": str(requirement.get("scheme") or ""),
+        "network": str(requirement.get("network") or requirement.get("x402Network") or ""),
+        "asset": str(requirement.get("asset") or ""),
+        "amountAtomic": str(requirement.get("amountAtomic") or requirement.get("amount") or ""),
+        "receiver": str(requirement.get("receiver") or requirement.get("payTo") or ""),
+        "resource": str(requirement.get("resource") or ""),
+        "paymentIntent": str(requirement.get("paymentIntent") or ""),
+        "purpose": str(requirement.get("purpose") or ""),
+    }
+
+
+def _purchase_context_lines(
+    *,
+    tool_name: str,
+    wallet_address: str,
+    resource_url: str,
+    payment_requirements: dict[str, Any],
+) -> list[str]:
+    return [
+        f"Action: BUY {str(tool_name or 'x402 resource').upper()}",
+        f"Cost: {_display_amount(payment_requirements)}",
+        f"Wallet: {_short_address(wallet_address)}",
+        f"To: {_short_address(str(payment_requirements.get('receiver') or ''))}",
+        f"Resource: {_short_resource(resource_url)}",
+    ]
+
+
+def _purchase_approval_message(
+    *,
+    context_lines: list[str],
+    commitment_hash: str,
+) -> str:
+    return "\n".join(
+        [
+            "Sign402 approval request",
+            "",
+            *context_lines,
+            "Expires: 2 minutes",
+            f"Hash: {commitment_hash[:8]}",
+            "",
+            "Reply YES or NO.",
+        ]
+    )
+
+
+def _display_amount(requirement: dict[str, Any]) -> str:
+    amount_atomic = str(requirement.get("amountAtomic") or requirement.get("amount") or "0")
+    asset = str(requirement.get("asset") or "").lower()
+    try:
+        atomic = int(amount_atomic)
+    except ValueError:
+        return amount_atomic
+    if asset == "0x833589fcD6edb6e08f4c7c32d4f71b54bda02913".lower():
+        whole = atomic // 1_000_000
+        fractional = str(atomic % 1_000_000).rjust(6, "0").rstrip("0")
+        value = str(whole) if not fractional else f"{whole}.{fractional}"
+        return f"{value} USDC"
+    return amount_atomic
+
+
+def _short_resource(resource_url: str) -> str:
+    text = str(resource_url or "").removeprefix("https://").removeprefix("http://")
+    return text[:64] + "..." if len(text) > 67 else text
+
+
+def _decision_text(action_type: str, final_status: str) -> str:
+    if action_type == "sign402_purchase":
+        return f"Sign402 payment {final_status}."
+    return f"Sign402 test approval {final_status}."
 
 
 def _link_failed() -> dict[str, Any]:

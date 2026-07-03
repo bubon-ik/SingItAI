@@ -183,7 +183,10 @@ class GatewayClientTests(unittest.TestCase):
         )
         client = self.make_client(opener, purchase_timeout=180.0)
 
-        result = client.execute_paid_tool("news")
+        result = client.execute_paid_tool(
+            "news",
+            TelegramIdentity(user_id="1045618308", username="AlpskyKnedlik"),
+        )
 
         self.assertEqual(result, "Crypto News unlocked.")
         request, timeout = opener.requests[0]
@@ -193,7 +196,14 @@ class GatewayClientTests(unittest.TestCase):
             request.get_header("Authorization"),
             "Bearer wallet-token-secret-value",
         )
-        self.assertEqual(json.loads(request.data), {"tool": "news"})
+        self.assertEqual(
+            json.loads(request.data),
+            {
+                "tool": "news",
+                "telegramUserId": "1045618308",
+                "telegramUsername": "AlpskyKnedlik",
+            },
+        )
 
     def test_execute_omits_missing_username(self):
         opener = RecordingOpener(response=FakeResponse(b'{"telegramText":"ok"}'))

@@ -806,6 +806,15 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             tool = _resolve_paid_tool(payload)
             resource_url = _paid_tool_resource_url(tool, payload)
+            telegram_user_id = str(payload.get("telegramUserId", "") or "").strip()
+            if telegram_user_id:
+                self._handle_agent_buy_tool_for_user(
+                    payload=payload,
+                    tool=tool,
+                    resource_url=resource_url,
+                    telegram_user_id=telegram_user_id,
+                )
+                return
             cache_key = _buy_tool_cache_key(tool, resource_url)
             cached = self._read_buy_tool_cache(cache_key)
             if cached is not None:
@@ -843,6 +852,76 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"decision": "rejected", "ok": False, "error": str(exc)}, status=400)
         finally:
             self._release_firefly()
+
+    def _handle_agent_buy_tool_for_user(
+        self,
+        *,
+        payload: dict[str, Any],
+        tool: dict[str, Any],
+        resource_url: str,
+        telegram_user_id: str,
+    ) -> None:
+        try:
+            _require_wallet_api_token(self)
+            user_id = _read_telegram_user_id({"telegramUserId": telegram_user_id})
+            payment_context = _tool_payment_context(tool, payload)
+            request_body = tool.get("requestBody") if isinstance(tool.get("requestBody"), dict) else None
+            raw_payment_required = fetch_x402_payment_required(
+                resource_url,
+                request_body=request_body,
+            )
+            payment_requirements = normalize_x402_payment_required(
+                raw_payment_required,
+                resource_url=resource_url,
+            )
+            _validate_base_usdc_x402_requirement(payment_requirements)
+            approval = self.server.imessage_approval_service.request_purchase_approval(
+                telegram_user_id=user_id,
+                tool_name=str(tool.get("name") or "x402 resource"),
+                resource_url=resource_url,
+                payment_requirements=payment_requirements,
+                payment_context=payment_context,
+            )
+            if not approval.get("ok") or approval.get("status") != "approved":
+                self._send_json(
+                    {
+                        "decision": "rejected_by_imessage",
+                        "ok": False,
+                        "approval": approval,
+                        "telegramText": approval.get(
+                            "telegramText",
+                            "Purchase was not approved in iMessage.",
+                        ),
+                    },
+                    status=400,
+                )
+                return
+
+            private_key = self.server.user_wallet_service.decrypt_private_key_for_future_signing(
+                user_id
+            )
+            kwargs: dict[str, Any] = {
+                "private_key": private_key,
+                "approval": approval,
+                "payment_requirements": payment_requirements,
+            }
+            if payment_context:
+                kwargs["payment_context"] = payment_context
+            if request_body is not None:
+                kwargs["request_body"] = request_body
+            result = self.server.user_x402_buyer(resource_url, **kwargs)
+            enriched = _tool_result(tool, result, resource_url)
+            enriched["decision"] = result.get("decision", "approved_and_executed")
+            enriched["ok"] = bool(result.get("ok", False))
+            if enriched.get("ok"):
+                self.server.event_store.write(enriched)
+            self._send_json(enriched, status=200 if enriched.get("ok") else 400)
+        except WalletApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+        except WalletApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except Exception as exc:
+            self._send_json({"decision": "rejected", "ok": False, "error": str(exc)}, status=400)
 
     def _handle_agent_inspect_x402(self) -> None:
         try:
@@ -1143,6 +1222,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         agent_buy_probe: Callable[[str], dict[str, Any]],
         x402_inspector: Callable[[str, str], dict[str, Any]],
         x402_buyer: Callable[[str], dict[str, Any]],
+        user_x402_buyer: Callable[..., dict[str, Any]],
         bankr_llm_topup_inspector: Callable[[dict[str, Any], str], dict[str, Any]],
         bankr_llm_topup: Callable[[dict[str, Any]], dict[str, Any]],
         bitrefill_search_service: Callable[[dict[str, Any]], dict[str, Any]],
@@ -1166,6 +1246,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         self.agent_buy_probe = agent_buy_probe
         self.x402_inspector = x402_inspector
         self.x402_buyer = x402_buyer
+        self.user_x402_buyer = user_x402_buyer
         self.bankr_llm_topup_inspector = bankr_llm_topup_inspector
         self.bankr_llm_topup = bankr_llm_topup
         self.bitrefill_search_service = bitrefill_search_service
@@ -1494,6 +1575,10 @@ def build_server(
         event_store=event_store,
         agent_state_store=agent_state_store,
     )
+    user_x402_buyer = UserWalletX402Buyer(
+        base_payment_client=UserWalletBaseX402PaymentClient(cdp_x402_service_dir),
+        event_store=event_store,
+    )
     agent_buy_probe = AgentBuyProbeRunner(
         firefly=firefly,
         payment_executor=payment_executor,
@@ -1511,6 +1596,7 @@ def build_server(
         agent_buy_probe=agent_buy_probe,
         x402_inspector=x402_inspector,
         x402_buyer=x402_buyer,
+        user_x402_buyer=user_x402_buyer,
         bankr_llm_topup_inspector=bankr_llm_topup_inspector,
         bankr_llm_topup=bankr_llm_topup,
         bitrefill_search_service=bitrefill_search_service,
@@ -2729,6 +2815,121 @@ class CdpBaseX402PaymentClient:
         return payload
 
 
+class UserWalletBaseX402PaymentClient:
+    def __init__(
+        self,
+        service_dir: Path,
+        *,
+        runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+        timeout: float = 120.0,
+    ):
+        self.service_dir = service_dir
+        self.runner = runner
+        self.timeout = timeout
+
+    def __call__(self, resource_url: str, *, private_key: str) -> dict[str, Any]:
+        script = self.service_dir / "src" / "index.mjs"
+        if not script.exists():
+            raise ValueError(f"CDP x402 service script not found: {script}")
+        if not str(private_key or "").strip():
+            raise ValueError("user wallet private key is required")
+
+        env = dict(os.environ)
+        env["SIGN402_EVM_PRIVATE_KEY"] = str(private_key).strip()
+        result = self.runner(
+            ["node", str(script), "buy-user", "--url", resource_url],
+            cwd=str(self.service_dir),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=self.timeout,
+            env=env,
+        )
+        if result.returncode != 0:
+            message = result.stderr.strip() or result.stdout.strip() or "user wallet x402 payment failed"
+            raise ValueError(message)
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise ValueError("user wallet x402 service returned non-JSON output") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("user wallet x402 service returned non-object JSON")
+        return payload
+
+
+class UserWalletX402Buyer:
+    def __init__(
+        self,
+        *,
+        base_payment_client: Callable[..., dict[str, Any]],
+        event_store: "LatestEventStore",
+    ):
+        self.base_payment_client = base_payment_client
+        self.event_store = event_store
+
+    def __call__(
+        self,
+        resource_url: str,
+        *,
+        private_key: str,
+        approval: dict[str, Any],
+        payment_requirements: dict[str, Any],
+        payment_context: dict[str, str] | None = None,
+        request_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not approval.get("ok") or approval.get("status") != "approved":
+            event = {
+                "decision": "rejected_by_imessage",
+                "ok": False,
+                "resourceUrl": resource_url,
+                "approval": approval,
+            }
+            self.event_store.write(event)
+            return event
+        if request_body is not None:
+            raise ValueError("user wallet x402 purchases currently support GET resources only")
+        _validate_base_usdc_x402_requirement(payment_requirements)
+
+        resource_result = self.base_payment_client(resource_url, private_key=private_key)
+        if int(resource_result.get("status", 0)) != 200:
+            raise ValueError(f"Official x402 resource denied payment: {resource_result}")
+
+        payment_response = resource_result.get("paymentResponse", {})
+        tx_id = (
+            payment_response.get("transaction")
+            or payment_response.get("transactionHash")
+            or payment_response.get("txHash")
+            or resource_result.get("transactionHash")
+        )
+        event = {
+            "decision": "approved_and_executed",
+            "ok": True,
+            "mode": "official_x402_base_user_wallet",
+            "resourceUrl": resource_url,
+            "approvalId": approval.get("approvalId"),
+            "paymentApprovalHash": approval.get("commitmentHash"),
+            "txId": tx_id,
+            "paymentIntent": payment_requirements.get("paymentIntent"),
+            "amountAtomic": payment_requirements["amountAtomic"],
+            "asset": payment_requirements["asset"],
+            "network": payment_requirements["network"],
+            "x402Network": payment_requirements.get("x402Network"),
+            "receiver": payment_requirements["receiver"],
+            "paymentRequirements": payment_requirements,
+            "paymentResponse": payment_response,
+            "resourceResult": resource_result,
+            "result": "official_x402_resource_access_granted",
+            "telegramText": _user_wallet_x402_telegram_text(
+                payment_requirements=payment_requirements,
+                tx_id=str(tx_id or ""),
+                resource_result=resource_result,
+                payment_context=payment_context,
+            ),
+        }
+        self.event_store.write(event)
+        return event
+
+
 class LatestEventStore:
     def __init__(self, path: Path):
         self.path = path
@@ -3548,6 +3749,36 @@ def _x402_telegram_text(result: dict[str, Any]) -> str:
         f"Tx {tx_url}. "
         f"Budget left {remaining}."
     )
+
+
+def _user_wallet_x402_telegram_text(
+    *,
+    payment_requirements: dict[str, Any],
+    tx_id: str,
+    resource_result: dict[str, Any],
+    payment_context: dict[str, str] | None = None,
+) -> str:
+    tx_url = _evm_transaction_url(tx_id, str(payment_requirements.get("network") or ""))
+    amount = _format_display_amount(
+        {
+            "amountAtomic": payment_requirements.get("amountAtomic"),
+            "asset": payment_requirements.get("asset"),
+            "extra": payment_requirements.get("extra", {}),
+        }
+    )
+    title = str((payment_context or {}).get("title") or "x402 resource").strip()
+    if title.isupper():
+        title = title.title()
+    body = resource_result.get("body") if isinstance(resource_result.get("body"), dict) else {}
+    data = body.get("data") if isinstance(body.get("data"), dict) else {}
+    report = str(data.get("report") or body.get("report") or "").strip()
+
+    text = f"✅ {title} unlocked. Paid {amount}."
+    if tx_url:
+        text += f" Tx {tx_url}."
+    if report:
+        text += f"\n{_compact_multiline(report)}"
+    return text
 
 
 def _base_x402_quote_text(requirement: dict[str, Any]) -> str:

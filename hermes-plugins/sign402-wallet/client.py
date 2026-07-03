@@ -132,10 +132,13 @@ class GatewayClient:
             operation=operation,
         )
 
-    def execute_paid_tool(self, tool: str) -> str:
+    def execute_paid_tool(self, tool: str, identity: TelegramIdentity) -> str:
+        payload = {"tool": str(tool or "").strip(), "telegramUserId": identity.user_id}
+        if identity.username:
+            payload["telegramUsername"] = identity.username
         result = self._post(
             _PAID_TOOL_PATH,
-            {"tool": str(tool or "").strip()},
+            payload,
             token=self.api_token,
             operation="buy-tool",
             timeout=self.purchase_timeout,

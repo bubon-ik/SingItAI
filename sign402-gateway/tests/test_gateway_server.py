@@ -27,6 +27,8 @@ from sign402_gateway.server import (
     ExternalX402Buyer,
     Sign402GatewayHandler,
     SingitSettlementVerifier,
+    UserWalletBaseX402PaymentClient,
+    UserWalletX402Buyer,
     build_bitrefill_funding_runner_from_env,
     build_bitrefill_client_from_env,
     build_approval_client_from_env,
@@ -94,6 +96,7 @@ class DummyServer:
         self.user_wallet_api_token = "test-wallet-token"
         self.imessage_approval_service = Mock()
         self.imessage_approval_api_token = "test-photon-token"
+        self.user_x402_buyer = Mock()
 
 
 class FakeSocket:
@@ -1381,6 +1384,149 @@ class GatewayServerTests(unittest.TestCase):
             "base-intent-1",
             10000,
         )
+
+    def test_agent_buy_tool_with_user_identity_uses_imessage_and_user_wallet(self):
+        server = DummyServer()
+        server.imessage_approval_service.request_purchase_approval.return_value = {
+            "ok": True,
+            "status": "approved",
+            "approvalId": "approval-1",
+            "commitmentHash": "c" * 64,
+        }
+        server.user_wallet_service.decrypt_private_key_for_future_signing.return_value = (
+            "0xUSER_PRIVATE_KEY"
+        )
+        payment_requirements = {
+            "scheme": "exact",
+            "network": "base-mainnet",
+            "x402Network": "eip155:8453",
+            "amountAtomic": "1000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "receiver": "0x0E84dDEdAaE6A779c462C22a59F301EC31B6b808",
+            "paymentIntent": "crypto-news-1",
+            "purpose": "x402_api_access",
+            "extra": {"name": "USD Coin", "version": "2"},
+        }
+        server.user_x402_buyer.return_value = {
+            "decision": "approved_and_executed",
+            "ok": True,
+            "mode": "official_x402_base_user_wallet",
+            "resourceUrl": "https://x402.ottoai.services/crypto-news",
+            "txId": "0xTX",
+            "amountAtomic": "1000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "network": "base-mainnet",
+            "paymentRequirements": {"extra": {"name": "USD Coin", "version": "2"}},
+            "telegramText": "✅ Crypto News unlocked. Paid 0.001 USDC. Tx https://basescan.org/tx/0xTX.",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            with (
+                patch(
+                    "sign402_gateway.server.fetch_x402_payment_required",
+                    return_value={"x402Version": 2, "accepts": [{}]},
+                ),
+                patch(
+                    "sign402_gateway.server.normalize_x402_payment_required",
+                    return_value=payment_requirements,
+                ),
+            ):
+                handler = self.make_handler(
+                    "/agent/buy-tool",
+                    {"tool": "news", "telegramUserId": "1045618308"},
+                    server=server,
+                    headers=self.wallet_auth_headers(),
+                )
+
+        response = self.response_text(handler)
+        body = json.loads(response.split("\r\n\r\n", 1)[1])
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["mode"], "paid_tool_official_x402_base_user_wallet")
+        self.assertEqual(
+            body["telegramText"],
+            "✅ Crypto News unlocked. Paid 0.001 USDC. Tx https://basescan.org/tx/0xTX.",
+        )
+        server.imessage_approval_service.request_purchase_approval.assert_called_once()
+        approval_call = server.imessage_approval_service.request_purchase_approval.call_args.kwargs
+        self.assertEqual(approval_call["telegram_user_id"], "1045618308")
+        self.assertEqual(approval_call["tool_name"], "Crypto News")
+        self.assertEqual(approval_call["payment_requirements"], payment_requirements)
+        server.user_wallet_service.decrypt_private_key_for_future_signing.assert_called_once_with(
+            "1045618308"
+        )
+        server.user_x402_buyer.assert_called_once_with(
+            "https://x402.ottoai.services/crypto-news",
+            private_key="0xUSER_PRIVATE_KEY",
+            approval=server.imessage_approval_service.request_purchase_approval.return_value,
+            payment_requirements=payment_requirements,
+            payment_context={"title": "CRYPTO NEWS", "subject": "Otto AI"},
+        )
+        DummyServer.firefly.approve_payment_hash.assert_not_called()
+
+    def test_agent_buy_tool_with_user_identity_requires_wallet_auth(self):
+        server = DummyServer()
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/buy-tool",
+                {"tool": "news", "telegramUserId": "1045618308"},
+                server=server,
+            )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 401 Unauthorized", response)
+        server.imessage_approval_service.request_purchase_approval.assert_not_called()
+        server.user_x402_buyer.assert_not_called()
+
+    def test_user_wallet_base_x402_payment_client_passes_private_key_in_env_only(self):
+        completed = subprocess.CompletedProcess(
+            args=["node"],
+            returncode=0,
+            stdout=json.dumps({"ok": True, "status": 200}),
+            stderr="",
+        )
+        runner = Mock(return_value=completed)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service_dir = Path(tmpdir)
+            script = service_dir / "src" / "index.mjs"
+            script.parent.mkdir(parents=True)
+            script.write_text("// test", encoding="utf-8")
+            client = UserWalletBaseX402PaymentClient(service_dir, runner=runner)
+
+            result = client("https://x402.example/paid", private_key="0xSECRET")
+
+        self.assertTrue(result["ok"])
+        args = runner.call_args.args[0]
+        kwargs = runner.call_args.kwargs
+        self.assertEqual(args[-3:], ["buy-user", "--url", "https://x402.example/paid"])
+        self.assertNotIn("0xSECRET", args)
+        self.assertEqual(kwargs["env"]["SIGN402_EVM_PRIVATE_KEY"], "0xSECRET")
+
+    def test_user_wallet_x402_buyer_rejects_without_imessage_approval(self):
+        user_payment_client = Mock()
+        buyer = UserWalletX402Buyer(
+            base_payment_client=user_payment_client,
+            event_store=Mock(),
+        )
+
+        result = buyer(
+            "https://x402.ottoai.services/crypto-news",
+            private_key="0xSECRET",
+            approval={"ok": False, "status": "denied"},
+            payment_requirements={
+                "network": "base-mainnet",
+                "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "amountAtomic": "1000",
+                "receiver": "0x0E84dDEdAaE6A779c462C22a59F301EC31B6b808",
+            },
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["decision"], "rejected_by_imessage")
+        user_payment_client.assert_not_called()
 
     def test_external_x402_buyer_uses_bankr_cli_for_singit_bankr_endpoint(self):
         policy_hash = "a" * 64

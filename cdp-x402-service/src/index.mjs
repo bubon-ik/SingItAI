@@ -11,6 +11,7 @@ import {
   wrapFetchWithPaymentFromConfig,
 } from "@x402/fetch";
 import { parseUnits } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import { assertSwapMeetsMinUsdc } from "./swap-floor.mjs";
 
 dotenv.config();
@@ -31,6 +32,13 @@ async function main() {
   if (command === "buy") {
     const url = requiredOption(options, "url");
     const result = await buyPaidResource(url);
+    writeJson(result);
+    return;
+  }
+
+  if (command === "buy-user") {
+    const url = requiredOption(options, "url");
+    const result = await buyPaidResourceWithPrivateKey(url);
     writeJson(result);
     return;
   }
@@ -82,11 +90,21 @@ async function getCdpAccount() {
 
 async function buyPaidResource(url) {
   const cdpAccount = await getCdpAccount();
+  return buyPaidResourceWithSigner(url, cdpAccount);
+}
+
+async function buyPaidResourceWithPrivateKey(url) {
+  const privateKey = requiredEnv("SIGN402_EVM_PRIVATE_KEY");
+  const account = privateKeyToAccount(privateKey);
+  return buyPaidResourceWithSigner(url, account);
+}
+
+async function buyPaidResourceWithSigner(url, signer) {
   const fetchWithPayment = wrapFetchWithPaymentFromConfig(fetch, {
     schemes: [
       {
         network: BASE_MAINNET_CAIP2,
-        client: new ExactEvmScheme(cdpAccount),
+        client: new ExactEvmScheme(signer),
       },
     ],
   });
@@ -102,7 +120,7 @@ async function buyPaidResource(url) {
     ok: response.ok,
     status: response.status,
     resourceUrl: url,
-    payer: cdpAccount.address,
+    payer: signer.address,
     body: parseMaybeJson(bodyText),
     paymentResponse,
     transactionHash:
