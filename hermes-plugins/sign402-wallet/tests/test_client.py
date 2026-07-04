@@ -295,6 +295,30 @@ class GatewayClientTests(unittest.TestCase):
             "user-token-1",
         )
 
+    def test_execute_bitrefill_purchase_surfaces_safe_quote_errors(self):
+        error = HTTPError(
+            "http://127.0.0.1:8099/agent/quote-bitrefill",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(b'{"ok":false,"error":"unknown Bitrefill package"}'),
+        )
+        opener = RecordingOpener(error=error)
+
+        with self.assertRaises(GatewayClientError) as raised:
+            self.make_client(opener).execute_bitrefill_purchase(
+                TelegramIdentity(user_id="1045618308"),
+                product_id="test-gift-card-link",
+                package_id="0.1",
+                country="US",
+                user_access_token="user-token-1",
+            )
+
+        self.assertEqual(
+            raised.exception.user_message,
+            "Bitrefill request failed: unknown Bitrefill package",
+        )
+
     def test_execute_spending_limits_shows_current_limits(self):
         opener = RecordingOpener(
             response=FakeResponse(b'{"telegramText":"Current spending limits."}')

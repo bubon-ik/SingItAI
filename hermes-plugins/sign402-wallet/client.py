@@ -277,6 +277,7 @@ class GatewayClient:
             response = self.opener(request, timeout=self.timeout if timeout is None else timeout)
             body = response.read(self.max_response_bytes + 1)
         except HTTPError as exc:
+            error_message = self._safe_http_error_message(exc, operation=operation)
             exc.close()
             if exc.code in {401, 403}:
                 logger.warning(
@@ -289,7 +290,7 @@ class GatewayClient:
                 operation,
                 exc.code,
             )
-            raise GatewayClientError(_REQUEST_FAILED) from None
+            raise GatewayClientError(error_message or _REQUEST_FAILED) from None
         except (TimeoutError, URLError, OSError) as exc:
             logger.warning(
                 "Sign402 wallet request unavailable operation=%s error=%s",
@@ -316,3 +317,23 @@ class GatewayClient:
         if not isinstance(result, dict):
             raise GatewayClientError(_INVALID_RESPONSE)
         return result
+
+    def _safe_http_error_message(self, exc: HTTPError, *, operation: str) -> str | None:
+        if operation not in {"quote-bitrefill", "buy-wallet-bitrefill"}:
+            return None
+        try:
+            body = exc.read(self.max_response_bytes + 1)
+        except OSError:
+            return None
+        if len(body) > self.max_response_bytes:
+            return None
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        error = str(payload.get("error") or "").strip()
+        if not error:
+            return None
+        return f"Bitrefill request failed: {error}"
