@@ -642,7 +642,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             _require_wallet_api_token(self)
             payload = self._read_json()
             result = self.server.user_wallet_service.wallet_status(
-                _read_telegram_user_id(payload)
+                _authenticated_user_id(self, payload)
             )
             status = 200 if bool(result.get("ok")) else 404
             self._send_json(_without_private_key_material(result), status=status)
@@ -660,7 +660,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             _require_wallet_api_token(self)
             payload = self._read_json()
             result = self.server.user_wallet_service.wallet_balance(
-                _read_telegram_user_id(payload)
+                _authenticated_user_id(self, payload)
             )
             status = 200 if bool(result.get("ok")) else 404
             self._send_json(_without_private_key_material(result), status=status)
@@ -677,7 +677,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         try:
             _require_wallet_api_token(self)
             payload = self._read_json()
-            telegram_user_id = _read_telegram_user_id(payload)
+            telegram_user_id = _authenticated_user_id(self, payload)
             event = self.server.user_event_store.read(telegram_user_id)
             if not isinstance(event, dict) or not event.get("ok"):
                 self._send_json(
@@ -1098,8 +1098,14 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
     def _handle_agent_quote_bitrefill(self) -> None:
         try:
             payload = self._read_json()
+            if str(payload.get("telegramUserId", "") or "").strip():
+                _require_wallet_api_token(self)
+                user_id = _authenticated_user_id(self, payload)
+                payload = {**payload, "telegramUserId": user_id}
             result = self.server.bitrefill_quote_service(payload)
             self._send_json(result)
+        except WalletApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
         except Exception as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=400)
 
@@ -1142,10 +1148,21 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
 
         try:
             payload = self._read_json()
+            user_id = ""
+            if str(payload.get("telegramUserId", "") or "").strip():
+                _require_wallet_api_token(self)
+                user_id = _authenticated_user_id(self, payload)
+                payload = {**payload, "telegramUserId": user_id}
             result = self.server.bitrefill_wallet_purchase_runner(payload)
             if result.get("ok"):
                 self.server.event_store.write(_without_fulfillment_token(result))
+                if user_id:
+                    self.server.user_event_store.write(
+                        user_id, _without_fulfillment_token(result)
+                    )
             self._send_json(result)
+        except WalletApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
         except Exception as exc:
             self._send_json({"decision": "rejected", "ok": False, "error": str(exc)}, status=400)
         finally:
@@ -1666,9 +1683,24 @@ def build_server(
         settlement_verifier=build_singit_settlement_verifier_from_env(),
         fulfillment_runner=bitrefill_fulfillment_runner,
     )
+    def bitrefill_wallet_approval_client(
+        payment_hash: str,
+        *,
+        context_lines: list[str],
+        telegram_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        if telegram_user_id:
+            return imessage_approval_service.request_hash_approval(
+                telegram_user_id=telegram_user_id,
+                action_type="sign402_bitrefill",
+                commitment_hash=payment_hash,
+                context_lines=context_lines,
+            )
+        return firefly.approve_payment_hash(payment_hash, context_lines=context_lines)
+
     bitrefill_wallet_purchase_runner = WalletBitrefillPurchaseRunner(
         store=bitrefill_commerce_store,
-        approval_client=firefly.approve_payment_hash,
+        approval_client=bitrefill_wallet_approval_client,
         fulfillment_runner=bitrefill_fulfillment_runner,
     )
     x402_inspector = ExternalX402Inspector()

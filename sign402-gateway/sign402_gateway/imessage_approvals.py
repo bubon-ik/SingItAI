@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import subprocess
@@ -492,6 +493,169 @@ class ImessageApprovalService:
             "telegramText": (
                 "Test approval sent to iMessage. Reply YES or NO there."
             ),
+        }
+
+    def request_hash_approval(
+        self,
+        *,
+        telegram_user_id: str,
+        action_type: str,
+        commitment_hash: str,
+        context_lines: list[str],
+    ) -> dict[str, Any]:
+        user_id = _require_telegram_user_id(telegram_user_id)
+        normalized_hash = str(commitment_hash or "").strip().lower()
+        if not re.fullmatch(r"[a-f0-9]{64}", normalized_hash):
+            raise ValueError("commitment_hash must be a 64-character hex string")
+        wallet_status = self.wallet_service.wallet_status(user_id)
+        if not wallet_status.get("ok"):
+            return {
+                "ok": False,
+                "approved": False,
+                "telegramText": wallet_status.get(
+                    "telegramText",
+                    "No Base agent wallet yet. Send /create_wallet to create one.",
+                ),
+            }
+
+        now = self._now()
+        with self.store.lock, self.store._database() as db:
+            self._expire_approvals(db, now)
+            link = db.execute(
+                """
+                SELECT encrypted_photon_user_id
+                FROM imessage_links
+                WHERE telegram_user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            if link is None:
+                return {
+                    "ok": False,
+                    "approved": False,
+                    "telegramText": (
+                        "iMessage is not linked yet. Send /connect_imessage first."
+                    ),
+                }
+
+            pending = db.execute(
+                """
+                SELECT approval_id
+                FROM imessage_approvals
+                WHERE telegram_user_id = ?
+                  AND status = 'pending'
+                  AND expires_at > ?
+                """,
+                (user_id, now),
+            ).fetchone()
+            if pending is not None:
+                return {
+                    "ok": False,
+                    "approved": False,
+                    "telegramText": (
+                        "An iMessage approval is already pending. Reply YES or NO there first."
+                    ),
+                }
+
+            expires_at = now + PURCHASE_APPROVAL_TTL_SECONDS
+            canonical = {
+                "schemaVersion": 1,
+                "actionType": str(action_type or "sign402_external"),
+                "commitmentHash": normalized_hash,
+                "contextLines": [str(line) for line in context_lines],
+                "createdAt": now,
+                "expiresAt": expires_at,
+            }
+            canonical_json = _canonical_json(canonical)
+            approval_id = secrets.token_urlsafe(18)
+            encrypted_photon = str(link["encrypted_photon_user_id"])
+            photon_user_id = self._fernet.decrypt(
+                encrypted_photon.encode("ascii")
+            ).decode("utf-8")
+            message = _purchase_approval_message(
+                context_lines=[str(line) for line in context_lines],
+                commitment_hash=normalized_hash,
+            )
+            db.execute(
+                """
+                INSERT INTO imessage_approvals (
+                    approval_id, telegram_user_id, action_type, commitment_hash,
+                    status, context_json, canonical_json, created_at, expires_at
+                )
+                VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+                """,
+                (
+                    approval_id,
+                    user_id,
+                    str(action_type or "sign402_external"),
+                    normalized_hash,
+                    json.dumps(context_lines, separators=(",", ":")),
+                    canonical_json,
+                    now,
+                    expires_at,
+                ),
+            )
+            self._record_audit(
+                db,
+                telegram_user_id=user_id,
+                event_type="approval_created",
+                approval_id=approval_id,
+                action_type=str(action_type or "sign402_external"),
+                commitment_hash=normalized_hash,
+                status="pending",
+            )
+
+        delivery = self.notifier.send(photon_user_id=photon_user_id, message=message)
+        if not delivery.get("ok"):
+            with self.store.lock, self.store._database() as db:
+                db.execute(
+                    """
+                    UPDATE imessage_approvals
+                    SET status = 'delivery_failed'
+                    WHERE approval_id = ? AND status = 'pending'
+                    """,
+                    (approval_id,),
+                )
+                self._record_audit(
+                    db,
+                    telegram_user_id=user_id,
+                    event_type="approval_delivery_failed",
+                    approval_id=approval_id,
+                    action_type=str(action_type or "sign402_external"),
+                    commitment_hash=normalized_hash,
+                    status="delivery_failed",
+                )
+            return {
+                "ok": False,
+                "approved": False,
+                "approvalId": approval_id,
+                "approvedHash": "",
+                "commitmentHash": normalized_hash,
+                "telegramText": "could not deliver the iMessage approval. No action was approved.",
+            }
+
+        with self.store.lock, self.store._database() as db:
+            self._record_audit(
+                db,
+                telegram_user_id=user_id,
+                event_type="approval_delivered",
+                approval_id=approval_id,
+                action_type=str(action_type or "sign402_external"),
+                commitment_hash=normalized_hash,
+                status="pending",
+            )
+        decision = self._wait_for_approval_decision(
+            approval_id=approval_id,
+            telegram_user_id=user_id,
+            commitment_hash=normalized_hash,
+            expires_at=expires_at,
+        )
+        approved = bool(decision.get("ok")) and decision.get("status") == "approved"
+        return {
+            **decision,
+            "approved": approved,
+            "approvedHash": normalized_hash if approved else "",
+            "commitmentHash": normalized_hash,
         }
 
     def request_purchase_approval(

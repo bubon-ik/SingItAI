@@ -2893,6 +2893,40 @@ class GatewayServerTests(unittest.TestCase):
         server.bitrefill_purchase_runner.assert_not_called()
         self.assertFalse(server.firefly_busy)
 
+    def test_agent_buy_wallet_bitrefill_authenticates_telegram_user_token(self):
+        server = DummyServer()
+        server.firefly_busy = False
+        server.user_wallet_api_token = "wallet-token-secret-value"
+        server.user_event_store = Mock()
+        server.user_wallet_service.resolve_telegram_user_id = Mock(
+            return_value="1045618308"
+        )
+        server.bitrefill_wallet_purchase_runner = Mock(
+            return_value={"ok": True, "quoteId": "quote_wallet_1"}
+        )
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/buy-wallet-bitrefill",
+                {"quoteId": "quote_wallet_1", "telegramUserId": "1045618308"},
+                headers={
+                    "Authorization": "Bearer wallet-token-secret-value",
+                    "X-Sign402-User-Token": "user-token-1",
+                },
+                server=server,
+            )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        server.user_wallet_service.resolve_telegram_user_id.assert_called_once_with(
+            "user-token-1"
+        )
+        server.bitrefill_wallet_purchase_runner.assert_called_once_with(
+            {"quoteId": "quote_wallet_1", "telegramUserId": "1045618308"}
+        )
+        server.user_event_store.write.assert_called_once()
+
     def test_internal_fulfill_bitrefill_requires_service_secret(self):
         server = DummyServer()
         server.bitrefill_fulfillment_runner = Mock()

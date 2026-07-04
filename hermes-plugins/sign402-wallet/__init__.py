@@ -46,12 +46,16 @@ _TELEGRAM_MESSAGE_CHUNK_SIZE = 3900
 _TELEGRAM_PAID_TOOL_STARTED_MESSAGE = (
     "Sign402 purchase started. Approve it in iMessage; I'll post the result here."
 )
+_TELEGRAM_BITREFILL_STARTED_MESSAGE = (
+    "Bitrefill purchase started. Approve it in iMessage; I'll post the result here."
+)
 _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "start", "description": "Set up your Sign402 wallet"},
     {"command": "wallet", "description": "Show your Base wallet"},
     {"command": "balance", "description": "Show wallet balances"},
     {"command": "limits", "description": "Show or set spending limits"},
     {"command": "connect_imessage", "description": "Link iMessage approvals"},
+    {"command": "bitrefill", "description": "Buy Bitrefill with SINGIT"},
 )
 _COMMANDS = {
     "wallet": ("create-wallet", "Show your Base agent wallet"),
@@ -64,6 +68,7 @@ _IMESSAGE_COMMANDS = {
     ),
 }
 _LIMITS_USAGE = "Usage: /limits 0.005 0.05 or /set_limits 0.005 0.05"
+_BITREFILL_USAGE = "Usage: /bitrefill <productId> <packageId> [country]"
 
 _client_factory: Callable[[], GatewayClient] = GatewayClient.from_env
 _telegram_api_opener: Callable[..., object] = urlopen
@@ -183,6 +188,39 @@ def _build_limits_handler(command: str):
     return handler
 
 
+def _build_bitrefill_handler():
+    async def handler(raw_args: str) -> str:
+        identity = consume_gateway_identity()
+        if identity is None:
+            return _TELEGRAM_ONLY_MESSAGE
+        parsed = _parse_bitrefill_args(raw_args)
+        if parsed is None:
+            return _BITREFILL_USAGE
+        product_id, package_id, country = parsed
+        try:
+            client = _client_factory()
+            token = _user_access_token(client, identity)
+            return await asyncio.to_thread(
+                client.execute_bitrefill_purchase,
+                identity,
+                product_id=product_id,
+                package_id=package_id,
+                country=country,
+                recipient={},
+                user_access_token=token,
+            )
+        except GatewayClientError as exc:
+            return exc.user_message
+        except Exception as exc:
+            logger.warning(
+                "Unexpected Sign402 Bitrefill plugin failure error=%s",
+                type(exc).__name__,
+            )
+            return _UNEXPECTED_ERROR_MESSAGE
+
+    return handler
+
+
 def _start_text(wallet_text: str) -> str:
     return (
         "Welcome to Sign402.\n\n"
@@ -279,6 +317,24 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
             text = result.get("telegramText")
             if not isinstance(text, str) or not text.strip():
                 text = _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
+        elif command == "bitrefill":
+            parsed = _parse_bitrefill_args(args)
+            if parsed is None:
+                _send_fixed_reply(gateway, source, _BITREFILL_USAGE)
+                return dict(_SKIP_RESULT)
+            product_id, package_id, country = parsed
+            _send_fixed_reply(gateway, source, _TELEGRAM_BITREFILL_STARTED_MESSAGE)
+            _run_in_background(
+                lambda: _execute_telegram_bitrefill_request(
+                    product_id=product_id,
+                    package_id=package_id,
+                    country=country,
+                    identity=identity,
+                    source=source,
+                    gateway=gateway,
+                )
+            )
+            return dict(_SKIP_RESULT)
         else:
             return None
         _send_fixed_reply(gateway, source, text)
@@ -357,6 +413,37 @@ def _execute_telegram_paid_tool_request(
         logger.warning(
             "Unexpected Sign402 Telegram paid tool failure tool=%s error=%s",
             tool,
+            type(exc).__name__,
+        )
+        _send_fixed_reply(gateway, source, _UNEXPECTED_ERROR_MESSAGE)
+
+
+def _execute_telegram_bitrefill_request(
+    *,
+    product_id: str,
+    package_id: str,
+    country: str,
+    identity: TelegramIdentity,
+    source,
+    gateway,
+) -> None:
+    try:
+        client = _client_factory()
+        token = _user_access_token(client, identity)
+        text = client.execute_bitrefill_purchase(
+            identity,
+            product_id=product_id,
+            package_id=package_id,
+            country=country,
+            recipient={},
+            user_access_token=token,
+        )
+        _send_fixed_reply(gateway, source, text)
+    except GatewayClientError as exc:
+        _send_fixed_reply(gateway, source, exc.user_message)
+    except Exception as exc:
+        logger.warning(
+            "Unexpected Sign402 Telegram Bitrefill failure error=%s",
             type(exc).__name__,
         )
         _send_fixed_reply(gateway, source, _UNEXPECTED_ERROR_MESSAGE)
@@ -657,7 +744,15 @@ def _telegram_public_command(event, source) -> str | None:
         return None
     command = text[1:].split(maxsplit=1)[0].split("@", maxsplit=1)[0]
     normalized = command.strip().lower().replace("_", "-")
-    if normalized in {"start", "wallet", "balance", "limits", "set-limits", "connect-imessage"}:
+    if normalized in {
+        "start",
+        "wallet",
+        "balance",
+        "limits",
+        "set-limits",
+        "connect-imessage",
+        "bitrefill",
+    }:
         return normalized
     return None
 
@@ -679,6 +774,14 @@ def _parse_limit_args(command: str, raw_args: str) -> tuple[str | None, str | No
     if len(args) < 2:
         return None
     return (args[0], args[1])
+
+
+def _parse_bitrefill_args(raw_args: str) -> tuple[str, str, str] | None:
+    args = str(raw_args or "").strip().split()
+    if len(args) < 2:
+        return None
+    country = args[2].upper() if len(args) >= 3 else "US"
+    return (args[0], args[1], country)
 
 
 _NON_PURCHASE_MARKERS = (
@@ -734,6 +837,11 @@ def register(ctx) -> None:
         "set-limits",
         handler=_build_limits_handler("set-limits"),
         description="Set Sign402 spending limits",
+    )
+    ctx.register_command(
+        "bitrefill",
+        handler=_build_bitrefill_handler(),
+        description="Buy Bitrefill with SINGIT",
     )
     for command, (operation, description) in _IMESSAGE_COMMANDS.items():
         ctx.register_command(

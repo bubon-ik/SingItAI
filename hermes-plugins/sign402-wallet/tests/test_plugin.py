@@ -86,6 +86,8 @@ class FakeClient:
         self.paid_tool_calls = []
         self.paid_tool_tokens = []
         self.paid_tool_result = "Crypto News unlocked."
+        self.bitrefill_calls = []
+        self.bitrefill_result = "Bitrefill delivered."
         self.access_token = "user-access-token"
         self.create_wallet_calls = []
         self.limits_calls = []
@@ -115,6 +117,31 @@ class FakeClient:
         if self.error:
             raise self.error
         return self.paid_tool_result
+
+    def execute_bitrefill_purchase(
+        self,
+        identity,
+        *,
+        product_id,
+        package_id,
+        country="US",
+        recipient=None,
+        user_access_token=None,
+    ):
+        self.bitrefill_calls.append(
+            (
+                identity.user_id,
+                identity.username,
+                product_id,
+                package_id,
+                country,
+                recipient or {},
+                user_access_token,
+            )
+        )
+        if self.error:
+            raise self.error
+        return self.bitrefill_result
 
     def execute_spending_limits(self, identity, *, max_per_tx_usdc=None, daily_cap_usdc=None):
         self.limits_calls.append(
@@ -199,6 +226,7 @@ class PluginRegistrationTests(unittest.TestCase):
                 "limits",
                 "set-limits",
                 "connect-imessage",
+                "bitrefill",
             },
         )
         for command in context.commands.values():
@@ -426,6 +454,53 @@ class PluginRegistrationTests(unittest.TestCase):
         )
         self.assertEqual(client.calls[0][0], "create-wallet")
         self.assertIn("Welcome to Sign402.", gateway.adapters["telegram"].sent[0][1])
+
+    def test_bitrefill_command_quotes_and_buys_with_trusted_identity(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        plugin._client_factory = lambda: client
+        plugin._background_runner = lambda callback: callback()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "/bitrefill test-gift-card-link 1 US",
+                "1045618308",
+                username="AlpskyKnedlik",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        self.assertEqual(
+            gateway.adapters["telegram"].sent,
+            [
+                ("telegram-chat", "Bitrefill purchase started. Approve it in iMessage; I'll post the result here."),
+                ("telegram-chat", "Bitrefill delivered."),
+            ],
+        )
+        self.assertEqual(client.create_wallet_calls, ["1045618308"])
+        self.assertEqual(
+            client.bitrefill_calls,
+            [
+                (
+                    "1045618308",
+                    "AlpskyKnedlik",
+                    "test-gift-card-link",
+                    "1",
+                    "US",
+                    {},
+                    "user-access-token",
+                )
+            ],
+        )
 
     def test_connect_imessage_is_answered_in_pre_dispatch(self):
         plugin = load_plugin()

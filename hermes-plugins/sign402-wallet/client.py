@@ -32,6 +32,8 @@ _IMESSAGE_OPERATION_PATHS = {
     "pending": "/agent/imessage/pending",
     "decision": "/agent/imessage/decision",
 }
+_BITREFILL_QUOTE_PATH = "/agent/quote-bitrefill"
+_BITREFILL_BUY_PATH = "/agent/buy-wallet-bitrefill"
 _PAID_TOOL_PATH = "/agent/buy-tool"
 _SPENDING_LIMITS_PATH = "/agent/spending-limits"
 _MAX_RESPONSE_BYTES = 64 * 1024
@@ -161,6 +163,56 @@ class GatewayClient:
             payload,
             token=self.api_token,
             operation="buy-tool",
+            timeout=self.purchase_timeout,
+            user_token=user_access_token,
+        )
+        telegram_text = result.get("telegramText")
+        if not isinstance(telegram_text, str) or not telegram_text.strip():
+            raise GatewayClientError(_INVALID_RESPONSE)
+        return telegram_text.strip()
+
+    def execute_bitrefill_purchase(
+        self,
+        identity: TelegramIdentity,
+        *,
+        product_id: str,
+        package_id: str,
+        country: str = "US",
+        recipient: Mapping[str, Any] | None = None,
+        user_access_token: str | None = None,
+    ) -> str:
+        quote_payload: dict[str, Any] = {
+            "productId": str(product_id or "").strip(),
+            "packageId": str(package_id or "").strip(),
+            "country": str(country or "US").strip().upper(),
+            "recipient": dict(recipient or {}),
+            "telegramUserId": identity.user_id,
+        }
+        if identity.username:
+            quote_payload["telegramUsername"] = identity.username
+        quote = self._post(
+            _BITREFILL_QUOTE_PATH,
+            quote_payload,
+            token=self.api_token,
+            operation="quote-bitrefill",
+            user_token=user_access_token,
+        )
+        quote_id = str(quote.get("quoteId") or "").strip()
+        if not quote_id:
+            raise GatewayClientError(_INVALID_RESPONSE)
+
+        buy_payload: dict[str, Any] = {
+            "quoteId": quote_id,
+            "recipient": dict(recipient or {}),
+            "telegramUserId": identity.user_id,
+        }
+        if identity.username:
+            buy_payload["telegramUsername"] = identity.username
+        result = self._post(
+            _BITREFILL_BUY_PATH,
+            buy_payload,
+            token=self.api_token,
+            operation="buy-wallet-bitrefill",
             timeout=self.purchase_timeout,
             user_token=user_access_token,
         )

@@ -441,7 +441,11 @@ class BitrefillRunnerTests(unittest.TestCase):
             approval.return_value = {"approved": True, "approvedHash": expected_hash}
 
             result = runner.buy(
-                {"quoteId": "quote_wallet_1", "recipient": {"email": "buyer@example.com"}}
+                {
+                    "quoteId": "quote_wallet_1",
+                    "recipient": {"email": "buyer@example.com"},
+                    "telegramUserId": "1045618308",
+                }
             )
 
             self.assertTrue(result["ok"])
@@ -455,6 +459,7 @@ class BitrefillRunnerTests(unittest.TestCase):
             self.assertEqual(record["metadata"]["recipient"], {"email": "buyer@example.com"})
             self.assertEqual(record["metadata"]["walletCheckout"]["approval"]["approved"], True)
             self.assertNotIn("wallet_fulfill_secret_1", str(record["metadata"]))
+            self.assertEqual(approval.call_args.kwargs["telegram_user_id"], "1045618308")
 
     def test_wallet_runner_rejects_unconfirmed_checkout_before_fulfillment(self):
         with tempfile.TemporaryDirectory() as tmp:

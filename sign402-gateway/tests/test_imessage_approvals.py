@@ -31,6 +31,17 @@ class RecordingNotifier:
         return {"ok": self.ok, "stdout": "", "stderr": ""}
 
 
+class AutoDecisionNotifier(RecordingNotifier):
+    def __init__(self, decision_callback):
+        super().__init__(ok=True)
+        self.decision_callback = decision_callback
+
+    def send(self, *, photon_user_id: str, message: str) -> dict[str, object]:
+        result = super().send(photon_user_id=photon_user_id, message=message)
+        self.decision_callback(photon_user_id)
+        return result
+
+
 class ImessageApprovalTests(unittest.TestCase):
     def make_service(self, *, notifier: RecordingNotifier | None = None):
         tmp = tempfile.TemporaryDirectory()
@@ -130,6 +141,36 @@ class ImessageApprovalTests(unittest.TestCase):
         self.assertEqual(decided["status"], "approved")
         self.assertFalse(replay["ok"])
         self.assertIn("No pending approval", replay["imessageText"])
+
+    def test_external_hash_approval_uses_supplied_commitment_hash(self):
+        service_ref = []
+        notifier = AutoDecisionNotifier(
+            lambda photon_user_id: service_ref[0].record_decision(photon_user_id, "YES")
+        )
+        service, wallet_service, _store = self.make_service(notifier=notifier)
+        service_ref.append(service)
+        wallet_service.create_wallet("1045618308")
+        pairing = service.create_pairing("1045618308")
+        service.link_photon_sender(pairing["code"], "+1 (555) 123-4567")
+
+        created = service.request_hash_approval(
+            telegram_user_id="1045618308",
+            action_type="sign402_bitrefill",
+            commitment_hash="a" * 64,
+            context_lines=[
+                "Action: BUY BITREFILL",
+                "Cost: 100 SINGIT",
+                "Resource: Bitrefill",
+            ],
+        )
+        pending = service.pending_for_photon_sender("+15551234567")
+
+        self.assertTrue(created["ok"])
+        self.assertEqual(created["approved"], True)
+        self.assertEqual(created["approvedHash"], "a" * 64)
+        self.assertFalse(pending["pending"])
+        self.assertIn("Hash: aaaaaaaa", notifier.messages[0]["message"])
+        self.assertEqual(created["status"], "approved")
 
     def test_decision_with_matching_approval_id_is_approved(self):
         service, _wallet_service, _store, _notifier = self.make_linked_service()

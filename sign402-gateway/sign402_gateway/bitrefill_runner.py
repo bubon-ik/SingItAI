@@ -360,12 +360,14 @@ class WalletBitrefillPurchaseRunner:
 
         commitment = build_purchase_commitment(quote, recipient=recipient)
         payment_hash = hash_purchase_commitment(commitment)
+        telegram_user_id = str(payload.get("telegramUserId", "") or "").strip()
         approval = self.approval_client(
             payment_hash,
+            telegram_user_id=telegram_user_id or None,
             context_lines=[
-                "BUY BITREFILL",
-                str(quote.get("productName", quote.get("productId", "")))[:20],
-                f"MAX {quote['singitAmount']} SINGIT"[:20],
+                "Action: BUY BITREFILL",
+                f"Product: {str(quote.get('productName', quote.get('productId', '')))}"[:64],
+                f"Cost: max {quote['singitAmount']} SINGIT"[:64],
             ],
         )
         if not approval.get("approved"):

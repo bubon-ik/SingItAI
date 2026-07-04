@@ -231,6 +231,70 @@ class GatewayClientTests(unittest.TestCase):
         self.assertEqual(request.full_url, "http://127.0.0.1:8099/agent/last-purchase")
         self.assertEqual(json.loads(request.data), {"telegramUserId": "1045618308"})
 
+    def test_execute_bitrefill_purchase_quotes_then_buys_with_user_token(self):
+        responses = [
+            FakeResponse(b'{"ok":true,"quoteId":"quote_1"}'),
+            FakeResponse(b'{"ok":true,"telegramText":"Bitrefill delivered."}'),
+        ]
+        opener = RecordingOpener()
+
+        def open_next(request, timeout):
+            opener.requests.append((request, timeout))
+            return responses.pop(0)
+
+        client = self.make_client(open_next)
+
+        result = client.execute_bitrefill_purchase(
+            TelegramIdentity(user_id="1045618308", username="AlpskyKnedlik"),
+            product_id="test-gift-card-link",
+            package_id="1",
+            country="US",
+            recipient={},
+            user_access_token="user-token-1",
+        )
+
+        self.assertEqual(result, "Bitrefill delivered.")
+        quote_request, quote_timeout = opener.requests[0]
+        buy_request, buy_timeout = opener.requests[1]
+        self.assertEqual(
+            quote_request.full_url,
+            "http://127.0.0.1:8099/agent/quote-bitrefill",
+        )
+        self.assertEqual(quote_timeout, 5.0)
+        self.assertEqual(
+            json.loads(quote_request.data),
+            {
+                "productId": "test-gift-card-link",
+                "packageId": "1",
+                "country": "US",
+                "recipient": {},
+                "telegramUserId": "1045618308",
+                "telegramUsername": "AlpskyKnedlik",
+            },
+        )
+        self.assertEqual(
+            quote_request.get_header("X-sign402-user-token"),
+            "user-token-1",
+        )
+        self.assertEqual(
+            buy_request.full_url,
+            "http://127.0.0.1:8099/agent/buy-wallet-bitrefill",
+        )
+        self.assertEqual(buy_timeout, 180.0)
+        self.assertEqual(
+            json.loads(buy_request.data),
+            {
+                "quoteId": "quote_1",
+                "recipient": {},
+                "telegramUserId": "1045618308",
+                "telegramUsername": "AlpskyKnedlik",
+            },
+        )
+        self.assertEqual(
+            buy_request.get_header("X-sign402-user-token"),
+            "user-token-1",
+        )
+
     def test_execute_spending_limits_shows_current_limits(self):
         opener = RecordingOpener(
             response=FakeResponse(b'{"telegramText":"Current spending limits."}')
