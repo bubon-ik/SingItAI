@@ -186,17 +186,23 @@ class PluginRegistrationTests(unittest.TestCase):
         plugin = load_plugin()
         context = FakeContext()
         requests = []
+        callbacks = []
 
         def fake_opener(request, timeout):
             requests.append((request, timeout))
             return FakeTelegramResponse()
 
         plugin._telegram_api_opener = fake_opener
+        plugin._background_runner = callbacks.append
+        plugin._sleep = lambda _delay: None
+        plugin._TELEGRAM_COMMAND_MENU_REFRESH_DELAYS_SECONDS = (0,)
 
         with patch.dict(plugin.os.environ, {"TELEGRAM_BOT_TOKEN": "telegram-token"}):
             plugin.register(context)
+            self.assertEqual(len(callbacks), 1)
+            callbacks[0]()
 
-        self.assertEqual(len(requests), 1)
+        self.assertEqual(len(requests), 2)
         request, timeout = requests[0]
         self.assertEqual(timeout, plugin._TELEGRAM_COMMAND_MENU_TIMEOUT_SECONDS)
         self.assertEqual(
@@ -207,6 +213,15 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertEqual(
             json.loads(payload["commands"][0]),
             list(plugin._TELEGRAM_PUBLIC_COMMAND_MENU),
+        )
+        private_payload = parse_qs(requests[1][0].data.decode("utf-8"))
+        self.assertEqual(
+            json.loads(private_payload["commands"][0]),
+            list(plugin._TELEGRAM_PUBLIC_COMMAND_MENU),
+        )
+        self.assertEqual(
+            json.loads(private_payload["scope"][0]),
+            {"type": "all_private_chats"},
         )
 
     def test_command_uses_bound_identity_and_ignores_raw_arguments(self):
@@ -480,13 +495,13 @@ class PluginRegistrationTests(unittest.TestCase):
             {"action": "skip", "reason": "sign402-imessage-handled"},
         )
         self.assertEqual(client.paid_tool_calls, [])
-        self.assertEqual(len(callbacks), 1)
+        self.assertEqual(len(callbacks), 2)
         self.assertEqual(
             gateway.adapters["telegram"].sent,
             [("telegram-chat", plugin._TELEGRAM_PAID_TOOL_STARTED_MESSAGE)],
         )
 
-        callbacks[0]()
+        callbacks[-1]()
 
         self.assertEqual(client.paid_tool_calls, [("news", "1045618308", None)])
         self.assertEqual(

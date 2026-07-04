@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -40,6 +41,7 @@ _TELEGRAM_TOKEN_ENV_NAMES = (
 )
 _TELEGRAM_SEND_TIMEOUT_SECONDS = 15
 _TELEGRAM_COMMAND_MENU_TIMEOUT_SECONDS = 10
+_TELEGRAM_COMMAND_MENU_REFRESH_DELAYS_SECONDS = (0, 2, 8)
 _TELEGRAM_MESSAGE_CHUNK_SIZE = 3900
 _TELEGRAM_PAID_TOOL_STARTED_MESSAGE = (
     "Sign402 purchase started. Approve it in iMessage; I'll post the result here."
@@ -64,6 +66,7 @@ _IMESSAGE_COMMANDS = {
 _client_factory: Callable[[], GatewayClient] = GatewayClient.from_env
 _telegram_api_opener: Callable[..., object] = urlopen
 _background_runner: Callable[[Callable[[], None]], None]
+_sleep: Callable[[float], None] = time.sleep
 
 
 def _default_background_runner(callback: Callable[[], None]) -> None:
@@ -416,43 +419,63 @@ def _send_telegram_reply_direct(source, text: str) -> bool:
         return False
 
 
+def _schedule_telegram_public_command_menu_refresh() -> None:
+    _run_in_background(_refresh_telegram_public_command_menu)
+
+
+def _refresh_telegram_public_command_menu() -> None:
+    if not _telegram_bot_token():
+        return
+    for delay in _TELEGRAM_COMMAND_MENU_REFRESH_DELAYS_SECONDS:
+        if delay > 0:
+            _sleep(delay)
+        _configure_telegram_public_command_menu()
+
+
 def _configure_telegram_public_command_menu() -> None:
     token = _telegram_bot_token()
     if not token:
         return
 
-    payload = urlencode(
-        {
+    scopes: tuple[dict[str, str] | None, ...] = (
+        None,
+        {"type": "all_private_chats"},
+    )
+    for scope in scopes:
+        payload_fields = {
             "commands": json.dumps(
                 list(_TELEGRAM_PUBLIC_COMMAND_MENU),
                 separators=(",", ":"),
             )
         }
-    ).encode("utf-8")
-    request = Request(
-        f"https://api.telegram.org/bot{token}/setMyCommands",
-        data=payload,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    try:
-        response = _telegram_api_opener(
-            request,
-            timeout=_TELEGRAM_COMMAND_MENU_TIMEOUT_SECONDS,
+        if scope is not None:
+            payload_fields["scope"] = json.dumps(scope, separators=(",", ":"))
+        payload = urlencode(payload_fields).encode("utf-8")
+        request = Request(
+            f"https://api.telegram.org/bot{token}/setMyCommands",
+            data=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
         )
         try:
-            read = getattr(response, "read", None)
-            if callable(read):
-                read()
-        finally:
-            close = getattr(response, "close", None)
-            if callable(close):
-                close()
-    except (HTTPError, TimeoutError, URLError, OSError) as exc:
-        logger.warning(
-            "Could not configure Telegram command menu error=%s",
-            type(exc).__name__,
-        )
+            response = _telegram_api_opener(
+                request,
+                timeout=_TELEGRAM_COMMAND_MENU_TIMEOUT_SECONDS,
+            )
+            try:
+                read = getattr(response, "read", None)
+                if callable(read):
+                    read()
+            finally:
+                close = getattr(response, "close", None)
+                if callable(close):
+                    close()
+        except (HTTPError, TimeoutError, URLError, OSError) as exc:
+            logger.warning(
+                "Could not configure Telegram command menu scope=%s error=%s",
+                scope or "default",
+                type(exc).__name__,
+            )
 
 
 def _telegram_bot_token() -> str:
@@ -598,7 +621,7 @@ def _looks_like_pairing_code(value: str) -> bool:
 def register(ctx) -> None:
     """Register trusted Telegram identity capture and Sign402 commands."""
 
-    _configure_telegram_public_command_menu()
+    _schedule_telegram_public_command_menu_refresh()
     ctx.register_hook("pre_gateway_dispatch", handle_pre_gateway_dispatch)
     ctx.register_command(
         "start",
