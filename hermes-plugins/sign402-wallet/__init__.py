@@ -43,24 +43,14 @@ _TELEGRAM_PAID_TOOL_STARTED_MESSAGE = (
     "Sign402 purchase started. Approve it in iMessage; I'll post the result here."
 )
 _COMMANDS = {
-    "wallet": ("wallet", "Show your managed Base wallet"),
-    "create-wallet": ("create-wallet", "Create your managed Base wallet"),
+    "wallet": ("create-wallet", "Show your Base agent wallet"),
     "balance": ("balance", "Show your managed Base wallet balance"),
-    "last-purchase": ("last-purchase", "Show your latest completed Sign402 purchase"),
-    "last_purchase": ("last-purchase", "Show your latest completed Sign402 purchase"),
 }
 _IMESSAGE_COMMANDS = {
     "connect-imessage": (
         "connect-imessage",
         "Link your iMessage number for Sign402 approvals",
     ),
-    "test-approval": (
-        "test-imessage-approval",
-        "Send a no-funds Sign402 approval test to iMessage",
-    ),
-}
-_PAID_TOOL_COMMANDS = {
-    "buy-crypto-news": ("news", "Buy crypto news through Sign402"),
 }
 
 _client_factory: Callable[[], GatewayClient] = GatewayClient.from_env
@@ -126,25 +116,41 @@ def _build_imessage_handler(operation: str):
     return handler
 
 
-def _build_paid_tool_handler(tool: str):
+def _build_start_handler():
     async def handler(_raw_args: str) -> str:
         identity = consume_gateway_identity()
         if identity is None:
             return _TELEGRAM_ONLY_MESSAGE
         try:
             client = _client_factory()
-            return await asyncio.to_thread(client.execute_paid_tool, tool, identity)
+            wallet_text = await asyncio.to_thread(
+                client.execute,
+                "create-wallet",
+                identity,
+            )
+            return _start_text(wallet_text)
         except GatewayClientError as exc:
             return exc.user_message
         except Exception as exc:
             logger.warning(
-                "Unexpected Sign402 paid tool plugin failure tool=%s error=%s",
-                tool,
+                "Unexpected Sign402 start plugin failure error=%s",
                 type(exc).__name__,
             )
             return _UNEXPECTED_ERROR_MESSAGE
 
     return handler
+
+
+def _start_text(wallet_text: str) -> str:
+    return (
+        "Welcome to Sign402.\n\n"
+        f"{wallet_text.strip()}\n\n"
+        "Next steps:\n"
+        "1. Fund this Base wallet with ETH for gas and USDC for payments.\n"
+        "2. Run /balance to check funds.\n"
+        "3. Run /connect_imessage to link iMessage approvals.\n\n"
+        "After that, try: buy crypto news"
+    )
 
 
 def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
@@ -443,9 +449,35 @@ def _telegram_paid_tool_intent(event, source) -> str | None:
         .replace("-", " ")
         .replace("crypto news", "cryptonews")
     )
+    # Do not initiate a real spend flow from a message that merely mentions
+    # buying (a question, a negation, or a cancellation) rather than requesting
+    # one. This prevents casual chatter like "why did you buy crypto news?" from
+    # popping an approval prompt / starting a purchase.
+    if any(marker in normalized for marker in _NON_PURCHASE_MARKERS):
+        return None
     if "buy" in normalized and "cryptonews" in normalized:
         return "news"
     return None
+
+
+_NON_PURCHASE_MARKERS = (
+    "don't",
+    "do not",
+    "dont",
+    "didn't",
+    "did not",
+    "didnt",
+    "won't",
+    "will not",
+    "wont",
+    "shouldn't",
+    "should not",
+    "why",
+    "cancel",
+    "stop",
+    "never",
+    "already bought",
+)
 
 
 def _looks_like_pairing_code(value: str) -> bool:
@@ -460,6 +492,11 @@ def register(ctx) -> None:
     """Register trusted Telegram identity capture and Sign402 commands."""
 
     ctx.register_hook("pre_gateway_dispatch", handle_pre_gateway_dispatch)
+    ctx.register_command(
+        "start",
+        handler=_build_start_handler(),
+        description="Start Sign402 wallet onboarding",
+    )
     for command, (operation, description) in _COMMANDS.items():
         ctx.register_command(
             command,
@@ -470,11 +507,5 @@ def register(ctx) -> None:
         ctx.register_command(
             command,
             handler=_build_imessage_handler(operation),
-            description=description,
-        )
-    for command, (tool, description) in _PAID_TOOL_COMMANDS.items():
-        ctx.register_command(
-            command,
-            handler=_build_paid_tool_handler(tool),
             description=description,
         )

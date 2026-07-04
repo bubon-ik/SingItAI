@@ -7,13 +7,10 @@ from typing import Any
 
 _TELEGRAM_COMMANDS = frozenset(
     {
+        "start",
         "wallet",
-        "create-wallet",
         "balance",
-        "last-purchase",
         "connect-imessage",
-        "test-approval",
-        "buy-crypto-news",
     }
 )
 

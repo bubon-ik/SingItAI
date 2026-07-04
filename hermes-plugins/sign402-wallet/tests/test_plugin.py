@@ -143,6 +143,24 @@ class FakeGateway:
         self.pairing_store = FakePairingStore()
 
 
+class PaidToolIntentTests(unittest.TestCase):
+    def _intent(self, text):
+        plugin = load_plugin()
+        event = FakeEvent(text, "1045618308")
+        return plugin._telegram_paid_tool_intent(event, event.source)
+
+    def test_affirmative_requests_trigger_purchase(self):
+        self.assertEqual(self._intent("buy crypto news"), "news")
+        self.assertEqual(self._intent("Can u buy a cryptonews with Firefly?"), "news")
+
+    def test_negations_and_questions_do_not_trigger_purchase(self):
+        self.assertIsNone(self._intent("why did you buy crypto news?"))
+        self.assertIsNone(self._intent("don't buy crypto news for me"))
+        self.assertIsNone(self._intent("i didn't buy crypto news"))
+        self.assertIsNone(self._intent("please cancel the crypto news buy"))
+        self.assertIsNone(self._intent("do not buy crypto news"))
+
+
 class PluginRegistrationTests(unittest.TestCase):
     def test_registers_dispatch_hook_and_wallet_commands(self):
         plugin = load_plugin()
@@ -154,14 +172,10 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertEqual(
             set(context.commands),
             {
+                "start",
                 "wallet",
-                "create-wallet",
                 "balance",
-                "last-purchase",
-                "last_purchase",
                 "connect-imessage",
-                "test-approval",
-                "buy-crypto-news",
             },
         )
         for command in context.commands.values():
@@ -175,14 +189,14 @@ class PluginRegistrationTests(unittest.TestCase):
         plugin.register(context)
         context.hooks["pre_gateway_dispatch"](
             event=FakeEvent(
-                "/create_wallet telegramUserId=999",
+                "/wallet telegramUserId=999",
                 user_id="1045618308",
                 username="AlpskyKnedlik",
             )
         )
 
         result = asyncio.run(
-            context.commands["create-wallet"]["handler"](
+            context.commands["wallet"]["handler"](
                 "telegramUserId=999 telegramUsername=Attacker"
             )
         )
@@ -236,8 +250,8 @@ class PluginRegistrationTests(unittest.TestCase):
         plugin.register(context)
 
         self.assertIn("connect-imessage", context.commands)
-        self.assertIn("test-approval", context.commands)
-        self.assertIn("buy-crypto-news", context.commands)
+        self.assertNotIn("test-approval", context.commands)
+        self.assertNotIn("buy-crypto-news", context.commands)
 
     def test_connect_imessage_uses_trusted_telegram_identity(self):
         plugin = load_plugin()
@@ -265,81 +279,25 @@ class PluginRegistrationTests(unittest.TestCase):
             ],
         )
 
-    def test_test_approval_uses_trusted_telegram_identity(self):
+    def test_start_creates_wallet_and_returns_onboarding_text(self):
         plugin = load_plugin()
         context = FakeContext()
-        client = FakeClient()
-        client.imessage_results["test-imessage-approval"] = {
-            "telegramText": "Test approval sent"
-        }
+        client = FakeClient(result="Your Base agent wallet:\n0xabc")
         plugin._client_factory = lambda: client
         plugin.register(context)
         context.hooks["pre_gateway_dispatch"](
-            event=FakeEvent("/test_approval telegramUserId=999", "1045618308")
+            event=FakeEvent("/start telegramUserId=999", "1045618308")
         )
 
-        result = asyncio.run(context.commands["test-approval"]["handler"](""))
+        result = asyncio.run(context.commands["start"]["handler"](""))
 
-        self.assertEqual(result, "Test approval sent")
-        self.assertEqual(
-            client.imessage_calls,
-            [
-                (
-                    "test-imessage-approval",
-                    {"telegramUserId": "1045618308"},
-                )
-            ],
-        )
-
-    def test_buy_crypto_news_command_uses_paid_tool_endpoint(self):
-        plugin = load_plugin()
-        context = FakeContext()
-        client = FakeClient()
-        plugin._client_factory = lambda: client
-        plugin.register(context)
-        context.hooks["pre_gateway_dispatch"](
-            event=FakeEvent("/buy_crypto_news telegramUserId=999", "1045618308")
-        )
-
-        result = asyncio.run(context.commands["buy-crypto-news"]["handler"](""))
-
-        self.assertEqual(result, "Crypto News unlocked.")
-        self.assertEqual(client.paid_tool_calls, [("news", "1045618308", None)])
-
-    def test_last_purchase_uses_trusted_telegram_identity(self):
-        plugin = load_plugin()
-        context = FakeContext()
-        client = FakeClient(result="Latest purchase text")
-        plugin._client_factory = lambda: client
-        plugin.register(context)
-        context.hooks["pre_gateway_dispatch"](
-            event=FakeEvent("/last_purchase telegramUserId=999", "1045618308")
-        )
-
-        result = asyncio.run(context.commands["last-purchase"]["handler"](""))
-
-        self.assertEqual(result, "Latest purchase text")
+        self.assertIn("Welcome to Sign402.", result)
+        self.assertIn("Your Base agent wallet:\n0xabc", result)
+        self.assertIn("/balance", result)
+        self.assertIn("/connect_imessage", result)
         self.assertEqual(len(client.calls), 1)
         operation, identity = client.calls[0]
-        self.assertEqual(operation, "last-purchase")
-        self.assertEqual(identity.user_id, "1045618308")
-
-    def test_last_purchase_underscore_alias_uses_trusted_identity(self):
-        plugin = load_plugin()
-        context = FakeContext()
-        client = FakeClient(result="Latest purchase text")
-        plugin._client_factory = lambda: client
-        plugin.register(context)
-        context.hooks["pre_gateway_dispatch"](
-            event=FakeEvent("/last_purchase telegramUserId=999", "1045618308")
-        )
-
-        result = asyncio.run(context.commands["last_purchase"]["handler"](""))
-
-        self.assertEqual(result, "Latest purchase text")
-        self.assertEqual(len(client.calls), 1)
-        operation, identity = client.calls[0]
-        self.assertEqual(operation, "last-purchase")
+        self.assertEqual(operation, "create-wallet")
         self.assertEqual(identity.user_id, "1045618308")
 
     def test_telegram_buy_crypto_news_text_is_consumed_before_llm(self):
