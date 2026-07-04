@@ -134,7 +134,25 @@ class GatewayClient:
             operation=operation,
         )
 
-    def execute_paid_tool(self, tool: str, identity: TelegramIdentity) -> str:
+    def create_wallet(self, identity: TelegramIdentity) -> dict[str, Any]:
+        """Create/return the user's wallet, exposing the per-user access token."""
+        payload = {"telegramUserId": identity.user_id}
+        if identity.username:
+            payload["telegramUsername"] = identity.username
+        return self._post(
+            _OPERATION_PATHS["create-wallet"],
+            payload,
+            token=self.api_token,
+            operation="create-wallet",
+        )
+
+    def execute_paid_tool(
+        self,
+        tool: str,
+        identity: TelegramIdentity,
+        *,
+        user_access_token: str | None = None,
+    ) -> str:
         payload = {"tool": str(tool or "").strip(), "telegramUserId": identity.user_id}
         if identity.username:
             payload["telegramUsername"] = identity.username
@@ -144,6 +162,7 @@ class GatewayClient:
             token=self.api_token,
             operation="buy-tool",
             timeout=self.purchase_timeout,
+            user_token=user_access_token,
         )
         telegram_text = result.get("telegramText")
         if not isinstance(telegram_text, str) or not telegram_text.strip():
@@ -183,15 +202,21 @@ class GatewayClient:
         token: str,
         operation: str,
         timeout: float | None = None,
+        user_token: str | None = None,
     ) -> dict[str, Any]:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if user_token:
+            # Authenticates the caller AS a specific user so the gateway does
+            # not trust the body-supplied telegramUserId alone.
+            headers["X-Sign402-User-Token"] = str(user_token)
         request = Request(
             f"{self.base_url}{path}",
             data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
+            headers=headers,
             method="POST",
         )
 

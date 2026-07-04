@@ -84,9 +84,18 @@ class FakeClient:
         self.imessage_results = {}
         self.imessage_calls = []
         self.paid_tool_calls = []
+        self.paid_tool_tokens = []
         self.paid_tool_result = "Crypto News unlocked."
+        self.access_token = "user-access-token"
+        self.create_wallet_calls = []
         self.limits_calls = []
         self.limits_result = "Current spending limits."
+
+    def create_wallet(self, identity):
+        self.create_wallet_calls.append(identity.user_id)
+        if self.error:
+            raise self.error
+        return {"telegramText": self.result, "accessToken": self.access_token}
 
     def execute(self, operation, identity):
         self.calls.append((operation, identity))
@@ -100,8 +109,9 @@ class FakeClient:
             raise self.error
         return self.imessage_results.get(operation, {"ok": True})
 
-    def execute_paid_tool(self, tool, identity):
+    def execute_paid_tool(self, tool, identity, *, user_access_token=None):
         self.paid_tool_calls.append((tool, identity.user_id, identity.username))
+        self.paid_tool_tokens.append(user_access_token)
         if self.error:
             raise self.error
         return self.paid_tool_result
@@ -633,6 +643,8 @@ class PluginRegistrationTests(unittest.TestCase):
         callbacks[-1]()
 
         self.assertEqual(client.paid_tool_calls, [("news", "1045618308", None)])
+        # The purchase authenticates as the user via their per-user token.
+        self.assertEqual(client.paid_tool_tokens, ["user-access-token"])
         self.assertEqual(
             gateway.adapters["telegram"].sent[-1],
             ("telegram-chat", "Crypto News unlocked."),

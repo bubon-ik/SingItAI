@@ -313,6 +313,32 @@ def _handle_telegram_paid_tool_request(*, tool: str, source, gateway):
     return dict(_SKIP_RESULT)
 
 
+_USER_ACCESS_TOKENS: dict[str, str] = {}
+
+
+def _user_access_token(client, identity: TelegramIdentity) -> str | None:
+    """Return the caller's per-user gateway token, minting one if unseen.
+
+    Cached in-process across requests. create-wallet is idempotent and returns
+    a fresh token, so a cold cache (e.g. after restart) is refilled without a
+    separate bootstrap step. Failures degrade to None (gateway then falls back
+    to the shared-token path) rather than blocking the purchase.
+    """
+    user_id = str(identity.user_id)
+    cached = _USER_ACCESS_TOKENS.get(user_id)
+    if cached:
+        return cached
+    try:
+        result = client.create_wallet(identity)
+    except Exception:
+        return None
+    token = str(result.get("accessToken") or "") if isinstance(result, dict) else ""
+    if token:
+        _USER_ACCESS_TOKENS[user_id] = token
+        return token
+    return None
+
+
 def _execute_telegram_paid_tool_request(
     *,
     tool: str,
@@ -321,7 +347,9 @@ def _execute_telegram_paid_tool_request(
     gateway,
 ) -> None:
     try:
-        text = _client_factory().execute_paid_tool(tool, identity)
+        client = _client_factory()
+        token = _user_access_token(client, identity)
+        text = client.execute_paid_tool(tool, identity, user_access_token=token)
         _send_fixed_reply(gateway, source, text)
     except GatewayClientError as exc:
         _send_fixed_reply(gateway, source, exc.user_message)
