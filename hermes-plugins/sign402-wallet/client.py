@@ -195,6 +195,7 @@ class GatewayClient:
             quote_payload,
             token=self.api_token,
             operation="quote-bitrefill",
+            timeout=self.purchase_timeout,
             user_token=user_access_token,
         )
         quote_id = str(quote.get("quoteId") or "").strip()

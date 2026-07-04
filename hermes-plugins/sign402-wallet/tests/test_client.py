@@ -260,7 +260,7 @@ class GatewayClientTests(unittest.TestCase):
             quote_request.full_url,
             "http://127.0.0.1:8099/agent/quote-bitrefill",
         )
-        self.assertEqual(quote_timeout, 5.0)
+        self.assertEqual(quote_timeout, 180.0)
         self.assertEqual(
             json.loads(quote_request.data),
             {
