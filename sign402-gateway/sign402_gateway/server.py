@@ -956,7 +956,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
     ) -> None:
         try:
             _require_wallet_api_token(self)
-            user_id = _read_telegram_user_id({"telegramUserId": telegram_user_id})
+            user_id = _authenticated_user_id(self, {"telegramUserId": telegram_user_id})
             payment_context = _tool_payment_context(tool, payload)
             request_body = tool.get("requestBody") if isinstance(tool.get("requestBody"), dict) else None
             raw_payment_required = fetch_x402_payment_required(
@@ -3503,6 +3503,31 @@ def _read_telegram_user_id(payload: dict[str, Any]) -> str:
     raise ValueError("telegramUserId is required")
 
 
+def _authenticated_user_id(handler: BaseHTTPRequestHandler, payload: dict[str, Any]) -> str:
+    """Resolve which user the caller may act as.
+
+    When a per-user access token is supplied (X-Sign402-User-Token) it is
+    authoritative: the user id is taken from the token, and a body-supplied
+    telegramUserId that disagrees is rejected — so a token holder cannot act as
+    a different user. When absent, falls back to the body id (shared-token
+    migration path).
+    """
+    token = str(handler.headers.get("X-Sign402-User-Token", "") or "").strip()
+    if not token:
+        return _read_telegram_user_id(payload)
+    resolved = handler.server.user_wallet_service.resolve_telegram_user_id(token)
+    if not resolved:
+        raise WalletApiAuthError("invalid per-user access token")
+    body_user_id = ""
+    for key in ("telegramUserId", "telegram_user_id", "userId"):
+        body_user_id = str(payload.get(key, "") or "").strip()
+        if body_user_id:
+            break
+    if body_user_id and body_user_id != str(resolved):
+        raise WalletApiAuthError("per-user access token does not match requested user")
+    return str(resolved)
+
+
 def _read_photon_user_id(payload: dict[str, Any]) -> str:
     for key in ("photonUserId", "photon_user_id", "userId"):
         value = str(payload.get(key, "") or "").strip()
@@ -4219,27 +4244,6 @@ def _spending_limits_telegram_text(limits: dict[str, Any], *, updated: bool) -> 
         f"- Daily cap: {operator_daily} USDC\n\n"
         "To change: /limits 0.005 0.05"
     )
-
-
-def _enforce_user_wallet_tx_cap(payment_requirements: dict[str, Any]) -> None:
-    """Reject a managed-wallet purchase above the per-transaction ceiling.
-
-    Defense-in-depth beyond the human iMessage approval: caps the worst-case
-    single spend even if a user approves a malformed/oversized amount. Set
-    SIGN402_USER_WALLET_MAX_ATOMIC_PER_TX to an empty string to disable.
-    """
-    cap = _user_wallet_atomic_limit(
-        "SIGN402_USER_WALLET_MAX_ATOMIC_PER_TX",
-        DEFAULT_USER_WALLET_MAX_ATOMIC_PER_TX,
-    )
-    if cap is None:
-        return
-    amount = _payment_amount_atomic(payment_requirements)
-    if cap > 0 and amount > cap:
-        raise ValueError(
-            f"x402 amount {amount} exceeds the per-transaction cap {cap} "
-            "(SIGN402_USER_WALLET_MAX_ATOMIC_PER_TX)"
-        )
 
 
 def _enforce_user_wallet_spend_limits(

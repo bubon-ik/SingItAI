@@ -1922,6 +1922,29 @@ class GatewayServerTests(unittest.TestCase):
         server.user_x402_buyer.assert_not_called()
         server.user_spend_limit_store.record_successful_spend.assert_not_called()
 
+    def test_agent_buy_tool_rejects_per_user_token_acting_as_another_user(self):
+        server = DummyServer()
+        # Per-user token belongs to user A ...
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/buy-tool",
+                # ... but the request body claims to act as user B.
+                {"tool": "news", "telegramUserId": "999"},
+                server=server,
+                headers={
+                    "Authorization": "Bearer test-wallet-token",
+                    "X-Sign402-User-Token": "user-a-token",
+                },
+            )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 401", response)
+        server.imessage_approval_service.request_purchase_approval.assert_not_called()
+        server.user_wallet_service.decrypt_private_key_for_future_signing.assert_not_called()
+
     def test_agent_buy_tool_with_user_identity_requires_wallet_auth(self):
         server = DummyServer()
 

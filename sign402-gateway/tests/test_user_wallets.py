@@ -36,6 +36,29 @@ class UserWalletTests(unittest.TestCase):
         )
         return service, store
 
+    def test_issue_and_resolve_per_user_access_token(self):
+        _service, store = self.make_service()
+
+        token = store.issue_access_token("1045618308")
+
+        self.assertTrue(token)
+        self.assertEqual(store.resolve_telegram_user_id(token), "1045618308")
+        # Only the hash is stored, never the plaintext token.
+        self.assertNotIn(token, store.path.read_bytes().decode("utf-8", "replace"))
+        # Bogus / empty tokens resolve to nothing.
+        self.assertIsNone(store.resolve_telegram_user_id("bogus-token"))
+        self.assertIsNone(store.resolve_telegram_user_id(""))
+
+    def test_reissuing_access_token_revokes_the_previous_one(self):
+        _service, store = self.make_service()
+
+        first = store.issue_access_token("1045618308")
+        second = store.issue_access_token("1045618308")
+
+        self.assertNotEqual(first, second)
+        self.assertIsNone(store.resolve_telegram_user_id(first))
+        self.assertEqual(store.resolve_telegram_user_id(second), "1045618308")
+
     def test_create_wallet_encrypts_private_key_and_returns_safe_metadata(self):
         service, store = self.make_service()
 

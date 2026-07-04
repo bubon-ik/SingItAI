@@ -1,3 +1,5 @@
+import hashlib
+import secrets
 import sqlite3
 import threading
 import time
@@ -131,6 +133,49 @@ class UserWalletStore:
                 )
                 """
             )
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_access_tokens (
+                    telegram_user_id TEXT PRIMARY KEY,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    created_at INTEGER NOT NULL
+                )
+                """
+            )
+
+    def issue_access_token(self, telegram_user_id: str) -> str:
+        """Mint a fresh per-user API token, storing only its hash.
+
+        Binds a caller to one specific user so a leaked token compromises that
+        user alone rather than authorizing action as any user. Re-issuing
+        replaces (revokes) the previous token for that user.
+        """
+        token = secrets.token_urlsafe(32)
+        token_hash = _token_hash(token)
+        now = int(time.time())
+        with self.lock, self._database() as db:
+            db.execute(
+                """
+                INSERT INTO user_access_tokens (telegram_user_id, token_hash, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(telegram_user_id)
+                DO UPDATE SET token_hash = excluded.token_hash, created_at = excluded.created_at
+                """,
+                (str(telegram_user_id), token_hash, now),
+            )
+        return token
+
+    def resolve_telegram_user_id(self, access_token: str) -> str | None:
+        token = str(access_token or "")
+        if not token:
+            return None
+        token_hash = _token_hash(token)
+        with self.lock, self._database() as db:
+            row = db.execute(
+                "SELECT telegram_user_id FROM user_access_tokens WHERE token_hash = ?",
+                (token_hash,),
+            ).fetchone()
+        return str(row["telegram_user_id"]) if row is not None else None
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(str(self.path), timeout=5.0)
@@ -165,6 +210,9 @@ class ManagedBaseWalletService:
         telegram_username: str = "",
     ) -> dict[str, Any]:
         user_id = _require_telegram_user_id(telegram_user_id)
+        # Mint a fresh per-user access token on every create/start so the caller
+        # (Telegram plugin) can authenticate as this user on later requests.
+        access_token = self.store.issue_access_token(user_id)
         existing = self.store.get_wallet_by_telegram_user_id(user_id)
         if existing is not None:
             self.store.record_audit_event(
@@ -172,7 +220,7 @@ class ManagedBaseWalletService:
                 event_type="wallet_create_idempotent",
                 wallet_address=existing["wallet_address"],
             )
-            return _wallet_response(existing, created=False)
+            return {**_wallet_response(existing, created=False), "accessToken": access_token}
 
         fernet = self._fernet()
         account = Account.create()
@@ -200,13 +248,19 @@ class ManagedBaseWalletService:
                 event_type="wallet_create_idempotent",
                 wallet_address=existing["wallet_address"],
             )
-            return _wallet_response(existing, created=False)
+            return {**_wallet_response(existing, created=False), "accessToken": access_token}
         self.store.record_audit_event(
             telegram_user_id=user_id,
             event_type="wallet_created",
             wallet_address=wallet["wallet_address"],
         )
-        return _wallet_response(wallet, created=True)
+        return {**_wallet_response(wallet, created=True), "accessToken": access_token}
+
+    def issue_access_token(self, telegram_user_id: str) -> str:
+        return self.store.issue_access_token(_require_telegram_user_id(telegram_user_id))
+
+    def resolve_telegram_user_id(self, access_token: str) -> str | None:
+        return self.store.resolve_telegram_user_id(access_token)
 
     def wallet_status(self, telegram_user_id: str) -> dict[str, Any]:
         user_id = _require_telegram_user_id(telegram_user_id)
@@ -332,6 +386,10 @@ def _require_telegram_user_id(telegram_user_id: str) -> str:
     if not user_id:
         raise ValueError("telegramUserId is required")
     return user_id
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
 
 
 def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
