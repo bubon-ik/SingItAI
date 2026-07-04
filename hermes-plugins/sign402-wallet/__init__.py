@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -38,9 +39,16 @@ _TELEGRAM_TOKEN_ENV_NAMES = (
     "TELEGRAM_TOKEN",
 )
 _TELEGRAM_SEND_TIMEOUT_SECONDS = 15
+_TELEGRAM_COMMAND_MENU_TIMEOUT_SECONDS = 10
 _TELEGRAM_MESSAGE_CHUNK_SIZE = 3900
 _TELEGRAM_PAID_TOOL_STARTED_MESSAGE = (
     "Sign402 purchase started. Approve it in iMessage; I'll post the result here."
+)
+_TELEGRAM_PUBLIC_COMMAND_MENU = (
+    {"command": "start", "description": "Set up your Sign402 wallet"},
+    {"command": "wallet", "description": "Show your Base wallet"},
+    {"command": "balance", "description": "Show wallet balances"},
+    {"command": "connect_imessage", "description": "Link iMessage approvals"},
 )
 _COMMANDS = {
     "wallet": ("create-wallet", "Show your Base agent wallet"),
@@ -361,6 +369,45 @@ def _send_telegram_reply_direct(source, text: str) -> bool:
         return False
 
 
+def _configure_telegram_public_command_menu() -> None:
+    token = _telegram_bot_token()
+    if not token:
+        return
+
+    payload = urlencode(
+        {
+            "commands": json.dumps(
+                list(_TELEGRAM_PUBLIC_COMMAND_MENU),
+                separators=(",", ":"),
+            )
+        }
+    ).encode("utf-8")
+    request = Request(
+        f"https://api.telegram.org/bot{token}/setMyCommands",
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        response = _telegram_api_opener(
+            request,
+            timeout=_TELEGRAM_COMMAND_MENU_TIMEOUT_SECONDS,
+        )
+        try:
+            read = getattr(response, "read", None)
+            if callable(read):
+                read()
+        finally:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+    except (HTTPError, TimeoutError, URLError, OSError) as exc:
+        logger.warning(
+            "Could not configure Telegram command menu error=%s",
+            type(exc).__name__,
+        )
+
+
 def _telegram_bot_token() -> str:
     for name in _TELEGRAM_TOKEN_ENV_NAMES:
         value = str(os.environ.get(name, "") or "").strip()
@@ -491,6 +538,7 @@ def _looks_like_pairing_code(value: str) -> bool:
 def register(ctx) -> None:
     """Register trusted Telegram identity capture and Sign402 commands."""
 
+    _configure_telegram_public_command_menu()
     ctx.register_hook("pre_gateway_dispatch", handle_pre_gateway_dispatch)
     ctx.register_command(
         "start",

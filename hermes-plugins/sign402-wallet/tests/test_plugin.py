@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import json
 import sys
 import unittest
 from dataclasses import dataclass
@@ -180,6 +181,33 @@ class PluginRegistrationTests(unittest.TestCase):
         )
         for command in context.commands.values():
             self.assertTrue(command["description"])
+
+    def test_register_configures_public_telegram_command_menu(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        requests = []
+
+        def fake_opener(request, timeout):
+            requests.append((request, timeout))
+            return FakeTelegramResponse()
+
+        plugin._telegram_api_opener = fake_opener
+
+        with patch.dict(plugin.os.environ, {"TELEGRAM_BOT_TOKEN": "telegram-token"}):
+            plugin.register(context)
+
+        self.assertEqual(len(requests), 1)
+        request, timeout = requests[0]
+        self.assertEqual(timeout, plugin._TELEGRAM_COMMAND_MENU_TIMEOUT_SECONDS)
+        self.assertEqual(
+            request.full_url,
+            "https://api.telegram.org/bottelegram-token/setMyCommands",
+        )
+        payload = parse_qs(request.data.decode("utf-8"))
+        self.assertEqual(
+            json.loads(payload["commands"][0]),
+            list(plugin._TELEGRAM_PUBLIC_COMMAND_MENU),
+        )
 
     def test_command_uses_bound_identity_and_ignores_raw_arguments(self):
         plugin = load_plugin()
