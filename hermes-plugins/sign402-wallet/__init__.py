@@ -166,6 +166,14 @@ def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
 
     capture_gateway_identity(event=event, **kwargs)
     source = getattr(event, "source", None)
+    telegram_command = _telegram_public_command(event, source)
+    if telegram_command:
+        return _handle_telegram_public_command_request(
+            command=telegram_command,
+            source=source,
+            gateway=gateway,
+        )
+
     telegram_tool = _telegram_paid_tool_intent(event, source)
     if telegram_tool:
         return _handle_telegram_paid_tool_request(
@@ -200,6 +208,45 @@ def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
         )
 
     return None
+
+
+def _handle_telegram_public_command_request(*, command: str, source, gateway):
+    identity = consume_gateway_identity() or _identity_from_telegram_source(source)
+    if identity is None:
+        _send_fixed_reply(gateway, source, _TELEGRAM_ONLY_MESSAGE)
+        return dict(_SKIP_RESULT)
+    try:
+        client = _client_factory()
+        if command == "start":
+            wallet_text = client.execute("create-wallet", identity)
+            text = _start_text(wallet_text)
+        elif command == "wallet":
+            text = client.execute("create-wallet", identity)
+        elif command == "balance":
+            text = client.execute("balance", identity)
+        elif command == "connect-imessage":
+            result = client.execute_imessage(
+                "connect-imessage",
+                {"telegramUserId": identity.user_id},
+            )
+            text = result.get("telegramText")
+            if not isinstance(text, str) or not text.strip():
+                text = _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
+        else:
+            return None
+        _send_fixed_reply(gateway, source, text)
+        return dict(_SKIP_RESULT)
+    except GatewayClientError as exc:
+        _send_fixed_reply(gateway, source, exc.user_message)
+        return dict(_SKIP_RESULT)
+    except Exception as exc:
+        logger.warning(
+            "Unexpected Sign402 Telegram public command failure command=%s error=%s",
+            command,
+            type(exc).__name__,
+        )
+        _send_fixed_reply(gateway, source, _UNEXPECTED_ERROR_MESSAGE)
+        return dict(_SKIP_RESULT)
 
 
 def _handle_telegram_paid_tool_request(*, tool: str, source, gateway):
@@ -504,6 +551,19 @@ def _telegram_paid_tool_intent(event, source) -> str | None:
         return None
     if "buy" in normalized and "cryptonews" in normalized:
         return "news"
+    return None
+
+
+def _telegram_public_command(event, source) -> str | None:
+    if not _is_telegram_source(source):
+        return None
+    text = str(getattr(event, "text", "") or "").strip()
+    if not text.startswith("/"):
+        return None
+    command = text[1:].split(maxsplit=1)[0].split("@", maxsplit=1)[0]
+    normalized = command.strip().lower().replace("_", "-")
+    if normalized in {"start", "wallet", "balance", "connect-imessage"}:
+        return normalized
     return None
 
 

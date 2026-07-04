@@ -215,46 +215,44 @@ class PluginRegistrationTests(unittest.TestCase):
         client = FakeClient()
         plugin._client_factory = lambda: client
         plugin.register(context)
-        context.hooks["pre_gateway_dispatch"](
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
             event=FakeEvent(
                 "/wallet telegramUserId=999",
                 user_id="1045618308",
                 username="AlpskyKnedlik",
-            )
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
         )
 
-        result = asyncio.run(
-            context.commands["wallet"]["handler"](
-                "telegramUserId=999 telegramUsername=Attacker"
-            )
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
         )
-
-        self.assertEqual(result, "gateway telegram text")
+        self.assertEqual(
+            gateway.adapters["telegram"].sent,
+            [("telegram-chat", "gateway telegram text")],
+        )
         self.assertEqual(len(client.calls), 1)
         operation, identity = client.calls[0]
         self.assertEqual(operation, "create-wallet")
         self.assertEqual(identity.user_id, "1045618308")
         self.assertEqual(identity.username, "AlpskyKnedlik")
 
-    def test_identity_is_consumed_after_one_command(self):
+    def test_public_command_handler_without_pre_dispatch_rejects(self):
         plugin = load_plugin()
         context = FakeContext()
         client = FakeClient()
         plugin._client_factory = lambda: client
         plugin.register(context)
-        context.hooks["pre_gateway_dispatch"](
-            event=FakeEvent("/wallet", user_id="1045618308")
-        )
-        handler = context.commands["wallet"]["handler"]
 
-        async def run_twice():
-            return await handler(""), await handler("")
+        result = asyncio.run(context.commands["wallet"]["handler"](""))
 
-        first, second = asyncio.run(run_twice())
-
-        self.assertEqual(first, "gateway telegram text")
-        self.assertIn("Telegram", second)
-        self.assertEqual(len(client.calls), 1)
+        self.assertIn("Telegram", result)
+        self.assertEqual(client.calls, [])
 
     def test_gateway_error_returns_only_safe_user_message(self):
         plugin = load_plugin()
@@ -263,13 +261,26 @@ class PluginRegistrationTests(unittest.TestCase):
         client = FakeClient(error=plugin.GatewayClientError(safe_message))
         plugin._client_factory = lambda: client
         plugin.register(context)
-        context.hooks["pre_gateway_dispatch"](
-            event=FakeEvent("/balance", user_id="1045618308")
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "/balance",
+                user_id="1045618308",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
         )
 
-        result = asyncio.run(context.commands["balance"]["handler"](""))
-
-        self.assertEqual(result, safe_message)
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        self.assertEqual(
+            gateway.adapters["telegram"].sent,
+            [("telegram-chat", safe_message)],
+        )
 
     def test_registers_imessage_commands(self):
         plugin = load_plugin()
@@ -290,13 +301,26 @@ class PluginRegistrationTests(unittest.TestCase):
         }
         plugin._client_factory = lambda: client
         plugin.register(context)
-        context.hooks["pre_gateway_dispatch"](
-            event=FakeEvent("/connect_imessage telegramUserId=999", "1045618308")
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "/connect_imessage telegramUserId=999",
+                "1045618308",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
         )
 
-        result = asyncio.run(context.commands["connect-imessage"]["handler"](""))
-
-        self.assertEqual(result, "Send ABCDEFGH to iMessage")
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        self.assertEqual(
+            gateway.adapters["telegram"].sent,
+            [("telegram-chat", "Send ABCDEFGH to iMessage")],
+        )
         self.assertEqual(
             client.imessage_calls,
             [
@@ -313,20 +337,91 @@ class PluginRegistrationTests(unittest.TestCase):
         client = FakeClient(result="Your Base agent wallet:\n0xabc")
         plugin._client_factory = lambda: client
         plugin.register(context)
-        context.hooks["pre_gateway_dispatch"](
-            event=FakeEvent("/start telegramUserId=999", "1045618308")
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "/start telegramUserId=999",
+                "1045618308",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
         )
 
-        result = asyncio.run(context.commands["start"]["handler"](""))
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        text = gateway.adapters["telegram"].sent[0][1]
 
-        self.assertIn("Welcome to Sign402.", result)
-        self.assertIn("Your Base agent wallet:\n0xabc", result)
-        self.assertIn("/balance", result)
-        self.assertIn("/connect_imessage", result)
+        self.assertIn("Welcome to Sign402.", text)
+        self.assertIn("Your Base agent wallet:\n0xabc", text)
+        self.assertIn("/balance", text)
+        self.assertIn("/connect_imessage", text)
         self.assertEqual(len(client.calls), 1)
         operation, identity = client.calls[0]
         self.assertEqual(operation, "create-wallet")
         self.assertEqual(identity.user_id, "1045618308")
+
+    def test_start_is_answered_in_pre_dispatch(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient(result="Your Base agent wallet:\n0xabc")
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "/start",
+                "1045618308",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        self.assertEqual(client.calls[0][0], "create-wallet")
+        self.assertIn("Welcome to Sign402.", gateway.adapters["telegram"].sent[0][1])
+
+    def test_connect_imessage_is_answered_in_pre_dispatch(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.imessage_results["connect-imessage"] = {
+            "telegramText": "Send ABCDEFGH to iMessage"
+        }
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "/connect_imessage",
+                "1045618308",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        self.assertEqual(
+            client.imessage_calls,
+            [("connect-imessage", {"telegramUserId": "1045618308"})],
+        )
+        self.assertEqual(
+            gateway.adapters["telegram"].sent,
+            [("telegram-chat", "Send ABCDEFGH to iMessage")],
+        )
 
     def test_telegram_buy_crypto_news_text_is_consumed_before_llm(self):
         plugin = load_plugin()
