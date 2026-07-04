@@ -701,8 +701,15 @@ class ImessageApprovalService:
             "expiresAt": int(approval["expires_at"]),
         }
 
-    def record_decision(self, photon_user_id: str, decision: str) -> dict[str, Any]:
+    def record_decision(
+        self,
+        photon_user_id: str,
+        decision: str,
+        *,
+        approval_id: str | None = None,
+    ) -> dict[str, Any]:
         normalized_photon = normalize_e164(photon_user_id)
+        expected_approval_id = str(approval_id).strip() if approval_id is not None else ""
         normalized_decision = str(decision or "").strip().upper()
         if normalized_decision not in {"YES", "NO"}:
             return {"ok": False, "imessageText": "Reply YES or NO."}
@@ -722,18 +729,35 @@ class ImessageApprovalService:
             if link is None:
                 return _no_pending()
             user_id = str(link["telegram_user_id"])
-            approval = db.execute(
-                """
-                SELECT approval_id, action_type, commitment_hash
-                FROM imessage_approvals
-                WHERE telegram_user_id = ?
-                  AND status = 'pending'
-                  AND expires_at > ?
-                ORDER BY created_at ASC
-                LIMIT 1
-                """,
-                (user_id, now),
-            ).fetchone()
+            # When the caller (sidecar) echoes the approval it actually showed
+            # the user, bind the decision to that exact approval so a stale YES
+            # cannot approve a different, newer commitment.
+            if expected_approval_id:
+                approval = db.execute(
+                    """
+                    SELECT approval_id, action_type, commitment_hash
+                    FROM imessage_approvals
+                    WHERE telegram_user_id = ?
+                      AND approval_id = ?
+                      AND status = 'pending'
+                      AND expires_at > ?
+                    LIMIT 1
+                    """,
+                    (user_id, expected_approval_id, now),
+                ).fetchone()
+            else:
+                approval = db.execute(
+                    """
+                    SELECT approval_id, action_type, commitment_hash
+                    FROM imessage_approvals
+                    WHERE telegram_user_id = ?
+                      AND status = 'pending'
+                      AND expires_at > ?
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                    """,
+                    (user_id, now),
+                ).fetchone()
             if approval is None:
                 return _no_pending()
             updated = db.execute(

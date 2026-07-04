@@ -131,6 +131,31 @@ class ImessageApprovalTests(unittest.TestCase):
         self.assertFalse(replay["ok"])
         self.assertIn("No pending approval", replay["imessageText"])
 
+    def test_decision_with_matching_approval_id_is_approved(self):
+        service, _wallet_service, _store, _notifier = self.make_linked_service()
+        service.create_test_approval("1045618308")
+        pending = service.pending_for_photon_sender("+15551234567")
+
+        decided = service.record_decision(
+            "+15551234567", "YES", approval_id=pending["approvalId"]
+        )
+
+        self.assertTrue(decided["ok"])
+        self.assertEqual(decided["status"], "approved")
+
+    def test_decision_with_mismatched_approval_id_is_rejected(self):
+        service, _wallet_service, _store, _notifier = self.make_linked_service()
+        service.create_test_approval("1045618308")
+
+        decided = service.record_decision(
+            "+15551234567", "YES", approval_id="not-the-shown-approval"
+        )
+
+        self.assertFalse(decided["ok"])
+        # The real pending approval must remain decidable (not consumed).
+        pending = service.pending_for_photon_sender("+15551234567")
+        self.assertTrue(pending["pending"])
+
     def test_no_pending_approval_leaves_yes_for_normal_chat(self):
         service, _wallet_service, _store, _notifier = self.make_linked_service()
 

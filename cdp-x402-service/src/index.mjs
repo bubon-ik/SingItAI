@@ -13,6 +13,7 @@ import {
 import { parseUnits } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { assertSwapMeetsMinUsdc } from "./swap-floor.mjs";
+import { makePaymentRequirementsSelector } from "./payment-guard.mjs";
 
 dotenv.config();
 
@@ -38,7 +39,12 @@ async function main() {
 
   if (command === "buy-user") {
     const url = requiredOption(options, "url");
-    const result = await buyPaidResourceWithPrivateKey(url);
+    const caps = {
+      maxAtomic: options["max-atomic"] || "",
+      expectedReceiver: options["expected-receiver"] || "",
+      expectedAsset: options["expected-asset"] || "",
+    };
+    const result = await buyPaidResourceWithPrivateKey(url, caps);
     writeJson(result);
     return;
   }
@@ -93,21 +99,26 @@ async function buyPaidResource(url) {
   return buyPaidResourceWithSigner(url, cdpAccount);
 }
 
-async function buyPaidResourceWithPrivateKey(url) {
+async function buyPaidResourceWithPrivateKey(url, caps = {}) {
   const privateKey = requiredEnv("SIGN402_EVM_PRIVATE_KEY");
   const account = privateKeyToAccount(privateKey);
-  return buyPaidResourceWithSigner(url, account);
+  return buyPaidResourceWithSigner(url, account, caps);
 }
 
-async function buyPaidResourceWithSigner(url, signer) {
-  const fetchWithPayment = wrapFetchWithPaymentFromConfig(fetch, {
+async function buyPaidResourceWithSigner(url, signer, caps = {}) {
+  const config = {
     schemes: [
       {
         network: BASE_MAINNET_CAIP2,
         client: new ExactEvmScheme(signer),
       },
     ],
-  });
+  };
+  // Enforce the exact terms the user approved before any payment is signed.
+  if (caps.maxAtomic || caps.expectedReceiver || caps.expectedAsset) {
+    config.paymentRequirementsSelector = makePaymentRequirementsSelector(caps);
+  }
+  const fetchWithPayment = wrapFetchWithPaymentFromConfig(fetch, config);
 
   const response = await fetchWithPayment(url, {
     method: "GET",

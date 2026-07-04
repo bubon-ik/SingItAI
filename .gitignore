@@ -50,3 +50,5 @@ Sign402 X Longform Post.md
 # Local editor files
 .vscode/
 .idea/
+demo-dashboard/user-purchases.json
+sign402-gateway/sign402_gateway.egg-info/
