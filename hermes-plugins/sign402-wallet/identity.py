@@ -9,7 +9,10 @@ _TELEGRAM_COMMANDS = frozenset(
     {
         "start",
         "wallet",
+        "create-wallet",
         "balance",
+        "limits",
+        "set-limits",
         "connect-imessage",
     }
 )

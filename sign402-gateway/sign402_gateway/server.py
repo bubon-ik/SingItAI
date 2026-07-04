@@ -28,6 +28,7 @@ DEFAULT_EVENT_STORE_PATH = ROOT_DIR / "demo-dashboard" / "latest-run.json"
 DEFAULT_AGENT_STATE_PATH = ROOT_DIR / "demo-dashboard" / "agent-state.json"
 DEFAULT_BITREFILL_COMMERCE_STORE_PATH = ROOT_DIR / "demo-dashboard" / "bitrefill-orders.sqlite3"
 DEFAULT_CDP_X402_SERVICE_DIR = ROOT_DIR / "cdp-x402-service"
+DEFAULT_USER_SPEND_LIMIT_STORE_PATH = Path.home() / ".sign402" / "user-spend-limits.json"
 DEFAULT_BASE_REPORT_URL = "http://127.0.0.1:4021/paid/sign402-report"
 LOCAL_BANKR_CLI = ROOT_DIR / ".tools" / "bankr-cli" / "node_modules" / ".bin" / "bankr"
 DEFAULT_BANKR_CLI = str(LOCAL_BANKR_CLI) if LOCAL_BANKR_CLI.exists() else "bankr"
@@ -417,6 +418,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                         "/agent/create-wallet",
                         "/agent/wallet-balance",
                         "/agent/last-purchase",
+                        "/agent/spending-limits",
                         "/agent/imessage/pairing",
                         "/agent/imessage/link",
                         "/agent/imessage/pending",
@@ -498,6 +500,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if path == "/agent/last-purchase":
             self._handle_agent_last_purchase()
+            return
+        if path == "/agent/spending-limits":
+            self._handle_agent_spending_limits()
             return
         if path == "/agent/imessage/pairing":
             self._handle_agent_imessage_pairing()
@@ -673,21 +678,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             _require_wallet_api_token(self)
             payload = self._read_json()
             telegram_user_id = _read_telegram_user_id(payload)
-            event = self.server.event_store.read()
+            event = self.server.user_event_store.read(telegram_user_id)
             if not isinstance(event, dict) or not event.get("ok"):
-                self._send_json(
-                    {
-                        "ok": False,
-                        "telegramText": "No completed Sign402 purchase found yet.",
-                    },
-                    status=404,
-                )
-                return
-            if not _event_belongs_to_telegram_user(
-                event,
-                telegram_user_id=telegram_user_id,
-                user_wallet_service=self.server.user_wallet_service,
-            ):
                 self._send_json(
                     {
                         "ok": False,
@@ -722,6 +714,45 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=401)
         except WalletEncryptionError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_spending_limits(self) -> None:
+        try:
+            _require_wallet_api_token(self)
+            payload = self._read_json()
+            telegram_user_id = _read_telegram_user_id(payload)
+            operator_limits = _operator_user_wallet_limits()
+            if _payload_has_spending_limit_update(payload):
+                max_per_tx_atomic = _read_usdc_limit_atomic(payload, "maxPerTx")
+                daily_cap_atomic = _read_usdc_limit_atomic(payload, "dailyCap")
+                limits = self.server.user_spend_limit_store.set_limit_settings(
+                    telegram_user_id,
+                    max_per_tx_atomic=max_per_tx_atomic,
+                    daily_cap_atomic=daily_cap_atomic,
+                    operator_max_per_tx_atomic=operator_limits["maxPerTxAtomic"],
+                    operator_daily_cap_atomic=operator_limits["dailyCapAtomic"],
+                )
+                updated = True
+            else:
+                limits = self.server.user_spend_limit_store.limit_settings(
+                    telegram_user_id,
+                    operator_max_per_tx_atomic=operator_limits["maxPerTxAtomic"],
+                    operator_daily_cap_atomic=operator_limits["dailyCapAtomic"],
+                )
+                updated = False
+            self._send_json(
+                {
+                    "ok": True,
+                    "updated": updated,
+                    "limits": limits,
+                    "telegramText": _spending_limits_telegram_text(limits, updated=updated),
+                }
+            )
+        except WalletApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except WalletApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
         except Exception as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=400)
 
@@ -778,6 +809,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             result = self.server.imessage_approval_service.record_decision(
                 _read_photon_user_id(payload),
                 _read_required_text(payload, "decision"),
+                approval_id=str(payload.get("approvalId", "")).strip() or None,
             )
             self._send_json(_without_private_key_material(result), status=200 if result.get("ok") else 404)
         except ImessageApprovalApiTokenNotConfiguredError as exc:
@@ -936,6 +968,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 resource_url=resource_url,
             )
             _validate_base_usdc_x402_requirement(payment_requirements)
+            _enforce_user_wallet_spend_limits(self.server, user_id, payment_requirements)
             approval = self.server.imessage_approval_service.request_purchase_approval(
                 telegram_user_id=user_id,
                 tool_name=str(tool.get("name") or "x402 resource"),
@@ -976,11 +1009,21 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             enriched["ok"] = bool(result.get("ok", False))
             enriched["telegramUserId"] = user_id
             if enriched.get("ok"):
-                self.server.event_store.write(enriched)
+                _record_user_wallet_spend(
+                    self.server,
+                    user_id,
+                    tool,
+                    resource_url,
+                    payment_requirements,
+                    enriched,
+                )
+                self.server.user_event_store.write(user_id, enriched)
             self._send_json(enriched, status=200 if enriched.get("ok") else 400)
         except WalletApiAuthError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=401)
-        except WalletApiTokenNotConfiguredError as exc:
+        except (WalletApiTokenNotConfiguredError, WalletEncryptionError) as exc:
+            # Server-side misconfiguration (missing token / bad master key):
+            # signal 503 so callers retry rather than treating it as a bad request.
             self._send_json({"ok": False, "error": str(exc)}, status=503)
         except Exception as exc:
             self._send_json({"decision": "rejected", "ok": False, "error": str(exc)}, status=400)
@@ -1280,6 +1323,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         firefly: FireflyClient,
         payment_executor: Callable[[dict[str, Any], str], dict[str, Any]],
         event_store: "LatestEventStore",
+        user_event_store: "UserPurchaseStore",
         agent_state_store: "AgentStateStore",
         agent_buy_probe: Callable[[str], dict[str, Any]],
         x402_inspector: Callable[[str, str], dict[str, Any]],
@@ -1297,6 +1341,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         bitrefill_settlement_preparation_runner: Callable[[dict[str, Any]], dict[str, Any]],
         user_wallet_service,
         user_wallet_api_token: str,
+        user_spend_limit_store: "UserSpendLimitStore",
         imessage_approval_service,
         imessage_approval_api_token: str,
     ):
@@ -1304,6 +1349,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         self.firefly = firefly
         self.payment_executor = payment_executor
         self.event_store = event_store
+        self.user_event_store = user_event_store
         self.agent_state_store = agent_state_store
         self.agent_buy_probe = agent_buy_probe
         self.x402_inspector = x402_inspector
@@ -1321,6 +1367,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         self.bitrefill_settlement_preparation_runner = bitrefill_settlement_preparation_runner
         self.user_wallet_service = user_wallet_service
         self.user_wallet_api_token = user_wallet_api_token
+        self.user_spend_limit_store = user_spend_limit_store
         self.imessage_approval_service = imessage_approval_service
         self.imessage_approval_api_token = imessage_approval_api_token
         self.firefly_lock = threading.Lock()
@@ -1551,6 +1598,7 @@ def build_server(
     cdp_x402_service_dir: Path = DEFAULT_CDP_X402_SERVICE_DIR,
     bitrefill_commerce_store_path: Path = DEFAULT_BITREFILL_COMMERCE_STORE_PATH,
     user_wallet_store_path: Path = DEFAULT_USER_WALLET_STORE_PATH,
+    user_spend_limit_store_path: Path = DEFAULT_USER_SPEND_LIMIT_STORE_PATH,
     imessage_approval_store_path: Path = DEFAULT_IMESSAGE_APPROVAL_STORE_PATH,
 ) -> Sign402GatewayServer:
     from .bitrefill_runner import (
@@ -1575,6 +1623,8 @@ def build_server(
     base_payment_client = CdpBaseX402PaymentClient(cdp_x402_service_dir)
     bankr_x402_payment_client = BankrCliX402PaymentClient()
     event_store = LatestEventStore(event_store_path)
+    user_event_store = UserPurchaseStore(event_store_path.parent / "user-purchases.json")
+    user_spend_limit_store = UserSpendLimitStore(user_spend_limit_store_path)
     agent_state_store = AgentStateStore(agent_state_path)
     bitrefill_commerce_store = BitrefillCommerceStore(bitrefill_commerce_store_path)
     user_wallet_service = build_wallet_service_from_env(
@@ -1639,7 +1689,6 @@ def build_server(
     )
     user_x402_buyer = UserWalletX402Buyer(
         base_payment_client=UserWalletBaseX402PaymentClient(cdp_x402_service_dir),
-        event_store=event_store,
     )
     agent_buy_probe = AgentBuyProbeRunner(
         firefly=firefly,
@@ -1654,6 +1703,7 @@ def build_server(
         firefly=firefly,
         payment_executor=payment_executor,
         event_store=event_store,
+        user_event_store=user_event_store,
         agent_state_store=agent_state_store,
         agent_buy_probe=agent_buy_probe,
         x402_inspector=x402_inspector,
@@ -1676,6 +1726,7 @@ def build_server(
         bitrefill_settlement_preparation_runner=bitrefill_settlement_preparation_runner,
         user_wallet_service=user_wallet_service,
         user_wallet_api_token=os.getenv("SIGN402_WALLET_API_TOKEN", ""),
+        user_spend_limit_store=user_spend_limit_store,
         imessage_approval_service=imessage_approval_service,
         imessage_approval_api_token=os.getenv("SIGN402_PHOTON_API_TOKEN", ""),
     )
@@ -1774,6 +1825,13 @@ def main() -> None:
         default=Path(os.getenv("SIGN402_USER_WALLET_STORE_PATH", DEFAULT_USER_WALLET_STORE_PATH)),
     )
     parser.add_argument(
+        "--user-spend-limit-store-path",
+        type=Path,
+        default=Path(
+            os.getenv("SIGN402_USER_SPEND_LIMIT_STORE_PATH", DEFAULT_USER_SPEND_LIMIT_STORE_PATH)
+        ),
+    )
+    parser.add_argument(
         "--approval-provider",
         default=os.getenv("SIGN402_APPROVAL_PROVIDER", "firefly"),
         choices=("firefly", "disabled", "none", "server"),
@@ -1794,6 +1852,7 @@ def main() -> None:
         resource_base_url=args.resource_base_url,
         cdp_x402_service_dir=args.cdp_x402_service_dir,
         user_wallet_store_path=args.user_wallet_store_path,
+        user_spend_limit_store_path=args.user_spend_limit_store_path,
     )
 
     print(f"Sign402 gateway listening on http://{args.host}:{args.port}")
@@ -1806,6 +1865,7 @@ def main() -> None:
     print(f"Resource base URL: {args.resource_base_url}")
     print(f"CDP x402 service dir: {args.cdp_x402_service_dir}")
     print(f"User wallet store path: {args.user_wallet_store_path}")
+    print(f"User spend limit store path: {args.user_spend_limit_store_path}")
     server.serve_forever()
 
 
@@ -2889,17 +2949,35 @@ class UserWalletBaseX402PaymentClient:
         self.runner = runner
         self.timeout = timeout
 
-    def __call__(self, resource_url: str, *, private_key: str) -> dict[str, Any]:
+    def __call__(
+        self,
+        resource_url: str,
+        *,
+        private_key: str,
+        max_atomic: str | None = None,
+        expected_receiver: str | None = None,
+        expected_asset: str | None = None,
+    ) -> dict[str, Any]:
         script = self.service_dir / "src" / "index.mjs"
         if not script.exists():
             raise ValueError(f"CDP x402 service script not found: {script}")
         if not str(private_key or "").strip():
             raise ValueError("user wallet private key is required")
 
+        command = ["node", str(script), "buy-user", "--url", resource_url]
+        # Pass the exact terms the user approved so the node signer refuses to
+        # pay a different amount/receiver/asset than was shown in the approval.
+        if str(max_atomic or "").strip():
+            command += ["--max-atomic", str(max_atomic).strip()]
+        if str(expected_receiver or "").strip():
+            command += ["--expected-receiver", str(expected_receiver).strip()]
+        if str(expected_asset or "").strip():
+            command += ["--expected-asset", str(expected_asset).strip()]
+
         env = dict(os.environ)
         env["SIGN402_EVM_PRIVATE_KEY"] = str(private_key).strip()
         result = self.runner(
-            ["node", str(script), "buy-user", "--url", resource_url],
+            command,
             cwd=str(self.service_dir),
             check=False,
             capture_output=True,
@@ -2908,7 +2986,14 @@ class UserWalletBaseX402PaymentClient:
             env=env,
         )
         if result.returncode != 0:
-            message = result.stderr.strip() or result.stdout.strip() or "user wallet x402 payment failed"
+            key = str(private_key).strip()
+            raw = (result.stderr.strip() or result.stdout.strip() or "").replace(
+                key, "***"
+            ) if key else (result.stderr.strip() or result.stdout.strip())
+            # The node signer surfaces the approval-guard rejection on stderr
+            # (e.g. "does not match approved terms"); keep that useful line but
+            # never leak the wallet private key into the error text.
+            message = raw or "user wallet x402 payment failed"
             raise ValueError(message)
         try:
             payload = json.loads(result.stdout)
@@ -2924,10 +3009,8 @@ class UserWalletX402Buyer:
         self,
         *,
         base_payment_client: Callable[..., dict[str, Any]],
-        event_store: "LatestEventStore",
     ):
         self.base_payment_client = base_payment_client
-        self.event_store = event_store
 
     def __call__(
         self,
@@ -2940,19 +3023,23 @@ class UserWalletX402Buyer:
         request_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not approval.get("ok") or approval.get("status") != "approved":
-            event = {
+            return {
                 "decision": "rejected_by_imessage",
                 "ok": False,
                 "resourceUrl": resource_url,
                 "approval": approval,
             }
-            self.event_store.write(event)
-            return event
         if request_body is not None:
             raise ValueError("user wallet x402 purchases currently support GET resources only")
         _validate_base_usdc_x402_requirement(payment_requirements)
 
-        resource_result = self.base_payment_client(resource_url, private_key=private_key)
+        resource_result = self.base_payment_client(
+            resource_url,
+            private_key=private_key,
+            max_atomic=str(payment_requirements["amountAtomic"]),
+            expected_receiver=str(payment_requirements["receiver"]),
+            expected_asset=str(payment_requirements["asset"]),
+        )
         if int(resource_result.get("status", 0)) != 200:
             raise ValueError(f"Official x402 resource denied payment: {resource_result}")
 
@@ -2988,7 +3075,6 @@ class UserWalletX402Buyer:
                 payment_context=payment_context,
             ),
         }
-        self.event_store.write(event)
         return event
 
 
@@ -3016,6 +3102,212 @@ class LatestEventStore:
             )
             temp_path.replace(self.path)
             return event
+
+
+class UserPurchaseStore:
+    """Per-user latest purchase, kept OUT of the public global event store.
+
+    Purchases made from a user's managed wallet carry their telegram id, wallet
+    address and payment details. The global LatestEventStore is served
+    unauthenticated by /events/latest (the demo dashboard), so per-user
+    purchases are persisted here instead, keyed by telegram user id, and read
+    back only through the token-gated /agent/last-purchase.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+
+    def _read_all_unlocked(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {}
+        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+
+    def write(self, telegram_user_id: str, event: dict[str, Any]) -> dict[str, Any]:
+        key = str(telegram_user_id)
+        with self.lock:
+            data = self._read_all_unlocked()
+            data[key] = event
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+            temp_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temp_path.replace(self.path)
+            return event
+
+    def read(self, telegram_user_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            value = self._read_all_unlocked().get(str(telegram_user_id))
+            return value if isinstance(value, dict) else None
+
+
+class UserSpendLimitStore:
+    """Successful per-user wallet spends for enforcing daily caps."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+
+    def _today_key(self) -> str:
+        return time.strftime("%Y-%m-%d", time.gmtime())
+
+    def _read_all_unlocked(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {"records": [], "limits": {}}
+        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {"records": [], "limits": {}}
+
+    def _write_all_unlocked(self, data: dict[str, Any]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+        temp_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temp_path.replace(self.path)
+
+    def limit_settings(
+        self,
+        telegram_user_id: str,
+        *,
+        operator_max_per_tx_atomic: int | None,
+        operator_daily_cap_atomic: int | None,
+    ) -> dict[str, Any]:
+        user_id = str(telegram_user_id)
+        with self.lock:
+            data = self._read_all_unlocked()
+            limits = data.get("limits")
+            user_limits = limits.get(user_id) if isinstance(limits, dict) else None
+            if not isinstance(user_limits, dict):
+                user_limits = {}
+
+        user_max_per_tx = _optional_int(user_limits.get("maxPerTxAtomic"))
+        user_daily_cap = _optional_int(user_limits.get("dailyCapAtomic"))
+        max_per_tx = _effective_limit(user_max_per_tx, operator_max_per_tx_atomic)
+        daily_cap = _effective_limit(user_daily_cap, operator_daily_cap_atomic)
+        return {
+            "telegramUserId": user_id,
+            "maxPerTxAtomic": max_per_tx,
+            "dailyCapAtomic": daily_cap,
+            "maxPerTxUsdc": _format_usdc_atomic(max_per_tx),
+            "dailyCapUsdc": _format_usdc_atomic(daily_cap),
+            "operatorMaxPerTxAtomic": operator_max_per_tx_atomic,
+            "operatorDailyCapAtomic": operator_daily_cap_atomic,
+            "userMaxPerTxAtomic": user_max_per_tx,
+            "userDailyCapAtomic": user_daily_cap,
+            "userConfigured": user_max_per_tx is not None or user_daily_cap is not None,
+        }
+
+    def set_limit_settings(
+        self,
+        telegram_user_id: str,
+        *,
+        max_per_tx_atomic: int,
+        daily_cap_atomic: int,
+        operator_max_per_tx_atomic: int | None,
+        operator_daily_cap_atomic: int | None,
+    ) -> dict[str, Any]:
+        if max_per_tx_atomic <= 0:
+            raise ValueError("max per transaction limit must be greater than zero")
+        if daily_cap_atomic <= 0:
+            raise ValueError("daily spending limit must be greater than zero")
+        if daily_cap_atomic < max_per_tx_atomic:
+            raise ValueError("daily spending limit must be at least the per-transaction limit")
+        if operator_max_per_tx_atomic is not None and max_per_tx_atomic > operator_max_per_tx_atomic:
+            raise ValueError(
+                f"max per transaction exceeds operator maximum "
+                f"{_format_usdc_atomic(operator_max_per_tx_atomic)} USDC"
+            )
+        if operator_daily_cap_atomic is not None and daily_cap_atomic > operator_daily_cap_atomic:
+            raise ValueError(
+                f"daily spending limit exceeds operator maximum "
+                f"{_format_usdc_atomic(operator_daily_cap_atomic)} USDC"
+            )
+
+        user_id = str(telegram_user_id)
+        with self.lock:
+            data = self._read_all_unlocked()
+            limits = data.get("limits")
+            if not isinstance(limits, dict):
+                limits = {}
+            limits[user_id] = {
+                "maxPerTxAtomic": int(max_per_tx_atomic),
+                "dailyCapAtomic": int(daily_cap_atomic),
+                "updatedAt": time.time(),
+            }
+            data["limits"] = limits
+            self._write_all_unlocked(data)
+        return self.limit_settings(
+            user_id,
+            operator_max_per_tx_atomic=operator_max_per_tx_atomic,
+            operator_daily_cap_atomic=operator_daily_cap_atomic,
+        )
+
+    def spent_today_atomic(self, telegram_user_id: str, *, asset: str, network: str) -> int:
+        user_id = str(telegram_user_id)
+        asset_key = str(asset).lower()
+        network_key = str(network)
+        today = self._today_key()
+        total = 0
+        with self.lock:
+            records = self._read_all_unlocked().get("records", [])
+            if not isinstance(records, list):
+                return 0
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                if str(record.get("telegramUserId")) != user_id:
+                    continue
+                if str(record.get("day")) != today:
+                    continue
+                if str(record.get("asset", "")).lower() != asset_key:
+                    continue
+                if str(record.get("network")) != network_key:
+                    continue
+                try:
+                    total += int(str(record.get("amountAtomic", "0")))
+                except ValueError:
+                    continue
+        return total
+
+    def record_successful_spend(
+        self,
+        telegram_user_id: str,
+        *,
+        amount_atomic: int,
+        asset: str,
+        network: str,
+        tx_id: str,
+        payment_intent: str | None = None,
+        approval_id: str | None = None,
+        tool_id: str | None = None,
+        resource_url: str | None = None,
+    ) -> dict[str, Any]:
+        record = {
+            "telegramUserId": str(telegram_user_id),
+            "day": self._today_key(),
+            "amountAtomic": int(amount_atomic),
+            "asset": str(asset),
+            "network": str(network),
+            "txId": str(tx_id or ""),
+            "paymentIntent": str(payment_intent or ""),
+            "approvalId": str(approval_id or ""),
+            "toolId": str(tool_id or ""),
+            "resourceUrl": str(resource_url or ""),
+            "recordedAt": time.time(),
+        }
+        with self.lock:
+            data = self._read_all_unlocked()
+            records = data.get("records")
+            if not isinstance(records, list):
+                records = []
+            records.append(record)
+            data["records"] = records
+            self._write_all_unlocked(data)
+        return record
 
 
 class AgentStateStore:
@@ -3298,38 +3590,6 @@ def _without_private_key_material(value):
     if isinstance(value, list):
         return [_without_private_key_material(item) for item in value]
     return value
-
-
-def _event_belongs_to_telegram_user(
-    event: dict[str, Any],
-    *,
-    telegram_user_id: str,
-    user_wallet_service,
-) -> bool:
-    event_user_id = str(event.get("telegramUserId", "") or "").strip()
-    if event_user_id:
-        return event_user_id == telegram_user_id
-
-    wallet_status = user_wallet_service.wallet_status(telegram_user_id)
-    wallet = wallet_status.get("wallet") if isinstance(wallet_status, dict) else None
-    address = str(wallet.get("address", "") if isinstance(wallet, dict) else "").strip().lower()
-    if not address:
-        return False
-
-    payment_response = event.get("paymentResponse")
-    payer = ""
-    if isinstance(payment_response, dict):
-        payer = str(
-            payment_response.get("payer")
-            or payment_response.get("from")
-            or payment_response.get("account")
-            or ""
-        ).strip()
-    if not payer:
-        resource_result = event.get("resourceResult")
-        if isinstance(resource_result, dict):
-            payer = str(resource_result.get("payer") or "").strip()
-    return bool(payer) and payer.lower() == address
 
 
 def _payment_context_lines(
@@ -3878,6 +4138,184 @@ def _user_wallet_x402_telegram_text(
 def _base_x402_quote_text(requirement: dict[str, Any]) -> str:
     amount = _format_display_amount(requirement)
     return f"Base x402 quote: {amount} on Base Mainnet."
+
+
+DEFAULT_USER_WALLET_MAX_ATOMIC_PER_TX = "10000"  # 0.01 USDC (6 decimals)
+DEFAULT_USER_WALLET_DAILY_ATOMIC_CAP = "100000"  # 0.10 USDC (6 decimals)
+
+
+def _payment_amount_atomic(payment_requirements: dict[str, Any]) -> int:
+    amount = int(str(payment_requirements["amountAtomic"]))
+    if amount < 0:
+        raise ValueError("amountAtomic must be non-negative")
+    return amount
+
+
+def _user_wallet_atomic_limit(env_name: str, default_value: str) -> int | None:
+    limit_text = os.getenv(env_name, default_value).strip()
+    if not limit_text:
+        return None
+    limit = int(limit_text)
+    if limit <= 0:
+        return None
+    return limit
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(str(value))
+
+
+def _effective_limit(user_limit: int | None, operator_limit: int | None) -> int | None:
+    limits = [limit for limit in (user_limit, operator_limit) if limit is not None]
+    if not limits:
+        return None
+    return min(limits)
+
+
+def _operator_user_wallet_limits() -> dict[str, int | None]:
+    return {
+        "maxPerTxAtomic": _user_wallet_atomic_limit(
+            "SIGN402_USER_WALLET_MAX_ATOMIC_PER_TX",
+            DEFAULT_USER_WALLET_MAX_ATOMIC_PER_TX,
+        ),
+        "dailyCapAtomic": _user_wallet_atomic_limit(
+            "SIGN402_USER_WALLET_DAILY_ATOMIC_CAP",
+            DEFAULT_USER_WALLET_DAILY_ATOMIC_CAP,
+        ),
+    }
+
+
+def _format_usdc_atomic(value: int | None) -> str:
+    if value is None:
+        return "unlimited"
+    return format_decimal(Decimal(int(value)) / Decimal("1000000"))
+
+
+def _payload_has_spending_limit_update(payload: dict[str, Any]) -> bool:
+    return any(
+        key in payload
+        for key in (
+            "maxPerTxUsdc",
+            "dailyCapUsdc",
+            "maxPerTxAtomic",
+            "dailyCapAtomic",
+        )
+    )
+
+
+def _read_usdc_limit_atomic(payload: dict[str, Any], prefix: str) -> int:
+    atomic_key = f"{prefix}Atomic"
+    usdc_key = f"{prefix}Usdc"
+    if atomic_key in payload:
+        return int(str(payload[atomic_key]))
+    if usdc_key not in payload:
+        raise ValueError(f"{usdc_key} is required")
+    value = Decimal(str(payload[usdc_key]))
+    if value <= 0:
+        raise ValueError(f"{usdc_key} must be greater than zero")
+    atomic = value * Decimal("1000000")
+    if atomic != atomic.to_integral_value():
+        raise ValueError(f"{usdc_key} supports up to 6 decimal places")
+    return int(atomic)
+
+
+def _spending_limits_telegram_text(limits: dict[str, Any], *, updated: bool) -> str:
+    heading = "Spending limits updated." if updated else "Current spending limits."
+    max_per_tx = str(limits.get("maxPerTxUsdc") or "unlimited")
+    daily_cap = str(limits.get("dailyCapUsdc") or "unlimited")
+    operator_max = _format_usdc_atomic(limits.get("operatorMaxPerTxAtomic"))
+    operator_daily = _format_usdc_atomic(limits.get("operatorDailyCapAtomic"))
+    return (
+        f"{heading}\n\n"
+        f"Max per transaction: {max_per_tx} USDC\n"
+        f"Daily cap: {daily_cap} USDC\n\n"
+        "Operator maximums:\n"
+        f"- Max per transaction: {operator_max} USDC\n"
+        f"- Daily cap: {operator_daily} USDC\n\n"
+        "To change: /limits 0.005 0.05"
+    )
+
+
+def _enforce_user_wallet_tx_cap(payment_requirements: dict[str, Any]) -> None:
+    """Reject a managed-wallet purchase above the per-transaction ceiling.
+
+    Defense-in-depth beyond the human iMessage approval: caps the worst-case
+    single spend even if a user approves a malformed/oversized amount. Set
+    SIGN402_USER_WALLET_MAX_ATOMIC_PER_TX to an empty string to disable.
+    """
+    cap = _user_wallet_atomic_limit(
+        "SIGN402_USER_WALLET_MAX_ATOMIC_PER_TX",
+        DEFAULT_USER_WALLET_MAX_ATOMIC_PER_TX,
+    )
+    if cap is None:
+        return
+    amount = _payment_amount_atomic(payment_requirements)
+    if cap > 0 and amount > cap:
+        raise ValueError(
+            f"x402 amount {amount} exceeds the per-transaction cap {cap} "
+            "(SIGN402_USER_WALLET_MAX_ATOMIC_PER_TX)"
+        )
+
+
+def _enforce_user_wallet_spend_limits(
+    server: Sign402GatewayServer,
+    telegram_user_id: str,
+    payment_requirements: dict[str, Any],
+) -> None:
+    operator_limits = _operator_user_wallet_limits()
+    limits = server.user_spend_limit_store.limit_settings(
+        telegram_user_id,
+        operator_max_per_tx_atomic=operator_limits["maxPerTxAtomic"],
+        operator_daily_cap_atomic=operator_limits["dailyCapAtomic"],
+    )
+    max_per_tx = limits.get("maxPerTxAtomic")
+    daily_cap = limits.get("dailyCapAtomic")
+    amount = _payment_amount_atomic(payment_requirements)
+    if max_per_tx is not None and amount > int(max_per_tx):
+        raise ValueError(
+            f"x402 amount {amount} exceeds the per-transaction cap {int(max_per_tx)}"
+        )
+    if daily_cap is None:
+        return
+
+    asset = str(payment_requirements.get("asset", ""))
+    network = str(payment_requirements.get("network") or payment_requirements.get("x402Network") or "")
+    spent_today = int(
+        server.user_spend_limit_store.spent_today_atomic(
+            telegram_user_id,
+            asset=asset,
+            network=network,
+        )
+    )
+    if spent_today + amount > int(daily_cap):
+        raise ValueError(
+            f"x402 amount {amount} exceeds the daily spending cap {int(daily_cap)}; "
+            f"spent today {spent_today} (SIGN402_USER_WALLET_DAILY_ATOMIC_CAP)"
+        )
+
+
+def _record_user_wallet_spend(
+    server: Sign402GatewayServer,
+    telegram_user_id: str,
+    tool: dict[str, Any],
+    resource_url: str,
+    payment_requirements: dict[str, Any],
+    event: dict[str, Any],
+) -> None:
+    amount = _payment_amount_atomic(payment_requirements)
+    server.user_spend_limit_store.record_successful_spend(
+        telegram_user_id,
+        amount_atomic=amount,
+        asset=str(payment_requirements.get("asset", "")),
+        network=str(payment_requirements.get("network") or payment_requirements.get("x402Network") or ""),
+        tx_id=str(event.get("txId") or ""),
+        payment_intent=str(payment_requirements.get("paymentIntent") or event.get("paymentIntent") or ""),
+        approval_id=str(event.get("approvalId") or ""),
+        tool_id=str(tool.get("id") or event.get("toolId") or ""),
+        resource_url=resource_url,
+    )
 
 
 def _validate_base_usdc_x402_requirement(requirement: Any) -> None:

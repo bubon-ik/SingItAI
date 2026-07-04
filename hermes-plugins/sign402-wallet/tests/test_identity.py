@@ -78,6 +78,20 @@ class TelegramIdentityTests(unittest.TestCase):
             ),
         )
 
+    def test_captures_trusted_source_for_limits_commands(self):
+        for command in ("/limits", "/set_limits 0.005 0.05"):
+            with self.subTest(command=command):
+                capture_gateway_identity(event=telegram_event(command))
+
+                self.assertEqual(
+                    consume_gateway_identity(),
+                    TelegramIdentity(
+                        user_id="1045618308",
+                        username="AlpskyKnedlik",
+                        chat_id="chat-1",
+                    ),
+                )
+
     def test_ignores_non_wallet_command(self):
         capture_gateway_identity(event=telegram_event("/help"))
 

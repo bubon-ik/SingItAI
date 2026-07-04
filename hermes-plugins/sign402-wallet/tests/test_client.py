@@ -231,6 +231,44 @@ class GatewayClientTests(unittest.TestCase):
         self.assertEqual(request.full_url, "http://127.0.0.1:8099/agent/last-purchase")
         self.assertEqual(json.loads(request.data), {"telegramUserId": "1045618308"})
 
+    def test_execute_spending_limits_shows_current_limits(self):
+        opener = RecordingOpener(
+            response=FakeResponse(b'{"telegramText":"Current spending limits."}')
+        )
+
+        result = self.make_client(opener).execute_spending_limits(
+            TelegramIdentity(user_id="1045618308")
+        )
+
+        request, timeout = opener.requests[0]
+        self.assertEqual(result, "Current spending limits.")
+        self.assertEqual(request.full_url, "http://127.0.0.1:8099/agent/spending-limits")
+        self.assertEqual(timeout, 5.0)
+        self.assertEqual(json.loads(request.data), {"telegramUserId": "1045618308"})
+
+    def test_execute_spending_limits_posts_requested_limits(self):
+        opener = RecordingOpener(
+            response=FakeResponse(b'{"telegramText":"Spending limits updated."}')
+        )
+
+        result = self.make_client(opener).execute_spending_limits(
+            TelegramIdentity(user_id="1045618308", username="AlpskyKnedlik"),
+            max_per_tx_usdc="0.005",
+            daily_cap_usdc="0.05",
+        )
+
+        request, _timeout = opener.requests[0]
+        self.assertEqual(result, "Spending limits updated.")
+        self.assertEqual(
+            json.loads(request.data),
+            {
+                "telegramUserId": "1045618308",
+                "telegramUsername": "AlpskyKnedlik",
+                "maxPerTxUsdc": "0.005",
+                "dailyCapUsdc": "0.05",
+            },
+        )
+
     def test_from_env_requires_gateway_url_and_token(self):
         with self.assertRaises(GatewayClientError) as missing_all:
             GatewayClient.from_env({})

@@ -85,6 +85,8 @@ class FakeClient:
         self.imessage_calls = []
         self.paid_tool_calls = []
         self.paid_tool_result = "Crypto News unlocked."
+        self.limits_calls = []
+        self.limits_result = "Current spending limits."
 
     def execute(self, operation, identity):
         self.calls.append((operation, identity))
@@ -103,6 +105,14 @@ class FakeClient:
         if self.error:
             raise self.error
         return self.paid_tool_result
+
+    def execute_spending_limits(self, identity, *, max_per_tx_usdc=None, daily_cap_usdc=None):
+        self.limits_calls.append(
+            (identity.user_id, identity.username, max_per_tx_usdc, daily_cap_usdc)
+        )
+        if self.error:
+            raise self.error
+        return self.limits_result
 
 
 class FakeAdapter:
@@ -176,6 +186,8 @@ class PluginRegistrationTests(unittest.TestCase):
                 "start",
                 "wallet",
                 "balance",
+                "limits",
+                "set-limits",
                 "connect-imessage",
             },
         )
@@ -374,6 +386,7 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertIn("Your Base agent wallet:\n0xabc", text)
         self.assertIn("/balance", text)
         self.assertIn("/connect_imessage", text)
+        self.assertIn("/limits", text)
         self.assertEqual(len(client.calls), 1)
         operation, identity = client.calls[0]
         self.assertEqual(operation, "create-wallet")
@@ -437,6 +450,122 @@ class PluginRegistrationTests(unittest.TestCase):
             gateway.adapters["telegram"].sent,
             [("telegram-chat", "Send ABCDEFGH to iMessage")],
         )
+
+    def test_limits_shows_current_limits_from_trusted_identity(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.limits_result = "Current spending limits."
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "/limits telegramUserId=999",
+                "1045618308",
+                username="AlpskyKnedlik",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        self.assertEqual(
+            client.limits_calls,
+            [("1045618308", "AlpskyKnedlik", None, None)],
+        )
+        self.assertEqual(
+            gateway.adapters["telegram"].sent,
+            [("telegram-chat", "Current spending limits.")],
+        )
+
+    def test_set_limits_updates_limits_from_trusted_identity(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.limits_result = "Spending limits updated."
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "/set_limits 0.005 0.05 telegramUserId=999",
+                "1045618308",
+                username="AlpskyKnedlik",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        self.assertEqual(
+            client.limits_calls,
+            [("1045618308", "AlpskyKnedlik", "0.005", "0.05")],
+        )
+        self.assertEqual(
+            gateway.adapters["telegram"].sent,
+            [("telegram-chat", "Spending limits updated.")],
+        )
+
+    def test_limits_with_two_numbers_updates_limits(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.limits_result = "Spending limits updated."
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "/limits 0.004 0.04",
+                "1045618308",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        self.assertEqual(client.limits_calls, [("1045618308", None, "0.004", "0.04")])
+
+    def test_set_limits_requires_two_numbers(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "/set_limits 0.005",
+                "1045618308",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        self.assertEqual(client.limits_calls, [])
+        self.assertIn("Usage", gateway.adapters["telegram"].sent[0][1])
 
     def test_telegram_buy_crypto_news_text_is_consumed_before_llm(self):
         plugin = load_plugin()

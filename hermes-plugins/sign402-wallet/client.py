@@ -33,6 +33,7 @@ _IMESSAGE_OPERATION_PATHS = {
     "decision": "/agent/imessage/decision",
 }
 _PAID_TOOL_PATH = "/agent/buy-tool"
+_SPENDING_LIMITS_PATH = "/agent/spending-limits"
 _MAX_RESPONSE_BYTES = 64 * 1024
 _NOT_CONFIGURED = "Wallet service is not configured. Please contact the operator."
 _LOCALHOST_REQUIRED = "Wallet service must use a localhost gateway URL."
@@ -143,6 +144,31 @@ class GatewayClient:
             token=self.api_token,
             operation="buy-tool",
             timeout=self.purchase_timeout,
+        )
+        telegram_text = result.get("telegramText")
+        if not isinstance(telegram_text, str) or not telegram_text.strip():
+            raise GatewayClientError(_INVALID_RESPONSE)
+        return telegram_text.strip()
+
+    def execute_spending_limits(
+        self,
+        identity: TelegramIdentity,
+        *,
+        max_per_tx_usdc: str | None = None,
+        daily_cap_usdc: str | None = None,
+    ) -> str:
+        payload = {"telegramUserId": identity.user_id}
+        if identity.username:
+            payload["telegramUsername"] = identity.username
+        if max_per_tx_usdc is not None:
+            payload["maxPerTxUsdc"] = str(max_per_tx_usdc).strip()
+        if daily_cap_usdc is not None:
+            payload["dailyCapUsdc"] = str(daily_cap_usdc).strip()
+        result = self._post(
+            _SPENDING_LIMITS_PATH,
+            payload,
+            token=self.api_token,
+            operation="spending-limits",
         )
         telegram_text = result.get("telegramText")
         if not isinstance(telegram_text, str) or not telegram_text.strip():

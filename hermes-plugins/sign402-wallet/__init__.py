@@ -50,6 +50,7 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "start", "description": "Set up your Sign402 wallet"},
     {"command": "wallet", "description": "Show your Base wallet"},
     {"command": "balance", "description": "Show wallet balances"},
+    {"command": "limits", "description": "Show or set spending limits"},
     {"command": "connect_imessage", "description": "Link iMessage approvals"},
 )
 _COMMANDS = {
@@ -62,6 +63,7 @@ _IMESSAGE_COMMANDS = {
         "Link your iMessage number for Sign402 approvals",
     ),
 }
+_LIMITS_USAGE = "Usage: /limits 0.005 0.05 or /set_limits 0.005 0.05"
 
 _client_factory: Callable[[], GatewayClient] = GatewayClient.from_env
 _telegram_api_opener: Callable[..., object] = urlopen
@@ -152,6 +154,35 @@ def _build_start_handler():
     return handler
 
 
+def _build_limits_handler(command: str):
+    async def handler(raw_args: str) -> str:
+        identity = consume_gateway_identity()
+        if identity is None:
+            return _TELEGRAM_ONLY_MESSAGE
+        parsed_limits = _parse_limit_args(command, raw_args)
+        if parsed_limits is None:
+            return _LIMITS_USAGE
+        try:
+            max_per_tx_usdc, daily_cap_usdc = parsed_limits
+            client = _client_factory()
+            return await asyncio.to_thread(
+                client.execute_spending_limits,
+                identity,
+                max_per_tx_usdc=max_per_tx_usdc,
+                daily_cap_usdc=daily_cap_usdc,
+            )
+        except GatewayClientError as exc:
+            return exc.user_message
+        except Exception as exc:
+            logger.warning(
+                "Unexpected Sign402 limits plugin failure error=%s",
+                type(exc).__name__,
+            )
+            return _UNEXPECTED_ERROR_MESSAGE
+
+    return handler
+
+
 def _start_text(wallet_text: str) -> str:
     return (
         "Welcome to Sign402.\n\n"
@@ -159,7 +190,8 @@ def _start_text(wallet_text: str) -> str:
         "Next steps:\n"
         "1. Fund this Base wallet with ETH for gas and USDC for payments.\n"
         "2. Run /balance to check funds.\n"
-        "3. Run /connect_imessage to link iMessage approvals.\n\n"
+        "3. Run /limits to review spending limits.\n"
+        "4. Run /connect_imessage to link iMessage approvals.\n\n"
         "After that, try: buy crypto news"
     )
 
@@ -173,6 +205,7 @@ def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
     if telegram_command:
         return _handle_telegram_public_command_request(
             command=telegram_command,
+            args=_telegram_command_args(event),
             source=source,
             gateway=gateway,
         )
@@ -213,7 +246,7 @@ def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
     return None
 
 
-def _handle_telegram_public_command_request(*, command: str, source, gateway):
+def _handle_telegram_public_command_request(*, command: str, args: str = "", source, gateway):
     identity = consume_gateway_identity() or _identity_from_telegram_source(source)
     if identity is None:
         _send_fixed_reply(gateway, source, _TELEGRAM_ONLY_MESSAGE)
@@ -227,6 +260,17 @@ def _handle_telegram_public_command_request(*, command: str, source, gateway):
             text = client.execute("create-wallet", identity)
         elif command == "balance":
             text = client.execute("balance", identity)
+        elif command in {"limits", "set-limits"}:
+            parsed_limits = _parse_limit_args(command, args)
+            if parsed_limits is None:
+                text = _LIMITS_USAGE
+            else:
+                max_per_tx_usdc, daily_cap_usdc = parsed_limits
+                text = client.execute_spending_limits(
+                    identity,
+                    max_per_tx_usdc=max_per_tx_usdc,
+                    daily_cap_usdc=daily_cap_usdc,
+                )
         elif command == "connect-imessage":
             result = client.execute_imessage(
                 "connect-imessage",
@@ -585,9 +629,28 @@ def _telegram_public_command(event, source) -> str | None:
         return None
     command = text[1:].split(maxsplit=1)[0].split("@", maxsplit=1)[0]
     normalized = command.strip().lower().replace("_", "-")
-    if normalized in {"start", "wallet", "balance", "connect-imessage"}:
+    if normalized in {"start", "wallet", "balance", "limits", "set-limits", "connect-imessage"}:
         return normalized
     return None
+
+
+def _telegram_command_args(event) -> str:
+    text = str(getattr(event, "text", "") or "").strip()
+    if not text.startswith("/"):
+        return ""
+    parts = text.split(maxsplit=1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+def _parse_limit_args(command: str, raw_args: str) -> tuple[str | None, str | None] | None:
+    args = str(raw_args or "").strip().split()
+    if command == "limits" and not args:
+        return (None, None)
+    if command == "limits" and len(args) == 1 and "=" in args[0]:
+        return (None, None)
+    if len(args) < 2:
+        return None
+    return (args[0], args[1])
 
 
 _NON_PURCHASE_MARKERS = (
@@ -634,6 +697,16 @@ def register(ctx) -> None:
             handler=_build_handler(operation),
             description=description,
         )
+    ctx.register_command(
+        "limits",
+        handler=_build_limits_handler("limits"),
+        description="Show or set Sign402 spending limits",
+    )
+    ctx.register_command(
+        "set-limits",
+        handler=_build_limits_handler("set-limits"),
+        description="Set Sign402 spending limits",
+    )
     for command, (operation, description) in _IMESSAGE_COMMANDS.items():
         ctx.register_command(
             command,
