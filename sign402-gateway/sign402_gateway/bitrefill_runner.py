@@ -330,12 +330,14 @@ class WalletBitrefillPurchaseRunner:
         store: BitrefillCommerceStore,
         approval_client: Callable[..., dict[str, Any]],
         fulfillment_runner: Callable[[dict[str, Any]], dict[str, Any]],
+        user_funding_runner: Callable[..., dict[str, Any]] | None = None,
         now_provider: Callable[[], int] = now_epoch,
         fulfillment_token_provider: Callable[[], str] = lambda: secrets.token_urlsafe(32),
     ):
         self.store = store
         self.approval_client = approval_client
         self.fulfillment_runner = fulfillment_runner
+        self.user_funding_runner = user_funding_runner
         self.now_provider = now_provider
         self.fulfillment_token_provider = fulfillment_token_provider
 
@@ -396,13 +398,30 @@ class WalletBitrefillPurchaseRunner:
         if approved_hash and approved_hash != payment_hash:
             raise ValueError("approved hash does not match Bitrefill purchase hash")
 
-        fulfillment_token = self.fulfillment_token_provider()
-        token_hash = hashlib.sha256(fulfillment_token.encode("utf-8")).hexdigest()
         wallet_checkout = {
             "paymentApprovalHash": payment_hash,
             "approval": approval,
             "mode": "wallet_native",
         }
+        try:
+            if telegram_user_id:
+                if self.user_funding_runner is None:
+                    raise ValueError("user wallet funding runner is required")
+                wallet_checkout["userFunding"] = self.user_funding_runner(
+                    telegram_user_id=telegram_user_id,
+                    quote=quote,
+                    recipient=recipient,
+                )
+        except Exception as exc:
+            self.store.advance_state(
+                quote_id,
+                "RECONCILIATION_REQUIRED",
+                {"walletCheckout": {**wallet_checkout, "fundingError": str(exc)}},
+            )
+            raise
+
+        fulfillment_token = self.fulfillment_token_provider()
+        token_hash = hashlib.sha256(fulfillment_token.encode("utf-8")).hexdigest()
         self.store.advance_state(
             quote_id,
             "USER_APPROVED",
@@ -435,7 +454,14 @@ class WalletBitrefillPurchaseRunner:
             "fulfillmentToken": fulfillment_token,
             "walletCheckout": wallet_checkout,
             "bitrefill": bitrefill_result,
-            "telegramText": _bitrefill_purchase_telegram_text(quote),
+            "telegramText": _bitrefill_purchase_telegram_text(
+                quote,
+                source_wallet=str(
+                    wallet_checkout.get("userFunding", {}).get("fromWallet", "")
+                    if isinstance(wallet_checkout.get("userFunding"), dict)
+                    else ""
+                ),
+            ),
         }
 
 
@@ -584,13 +610,18 @@ def _provider_is_delivered(result: dict[str, Any], quote: dict[str, Any]) -> boo
     return True
 
 
-def _bitrefill_purchase_telegram_text(quote: dict[str, Any]) -> str:
+def _bitrefill_purchase_telegram_text(
+    quote: dict[str, Any],
+    *,
+    source_wallet: str = "",
+) -> str:
     product_name = str(quote.get("productName") or quote.get("productId") or "Your item")
     package_value = str(quote.get("packageValue") or "").strip()
     value_text = f" ${package_value}" if package_value else ""
+    source_text = f" Paid from {_short_address(source_wallet)}." if source_wallet else ""
     return (
         f"✅ {product_name}{value_text} is ready. "
-        "The purchase was paid with SINGIT. "
+        f"The purchase was paid with SINGIT.{source_text} "
         "Use get-bitrefill-order to reveal the code in this chat."
     )
 
@@ -600,3 +631,10 @@ def _bitrefill_delivery_telegram_text(quote: dict[str, Any]) -> str:
     package_value = str(quote.get("packageValue") or "").strip()
     value_text = f" ${package_value}" if package_value else ""
     return f"✅ {product_name}{value_text} is ready. Your code is ready."
+
+
+def _short_address(address: str) -> str:
+    value = str(address or "").strip()
+    if len(value) <= 12:
+        return value
+    return f"{value[:6]}...{value[-4:]}"

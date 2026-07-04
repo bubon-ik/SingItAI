@@ -10,10 +10,12 @@ import {
   decodePaymentResponseHeader,
   wrapFetchWithPaymentFromConfig,
 } from "@x402/fetch";
-import { parseUnits } from "viem";
+import { createPublicClient, createWalletClient, erc20Abi, http, parseUnits } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { base } from "viem/chains";
 import { assertSwapMeetsMinUsdc } from "./swap-floor.mjs";
 import { makePaymentRequirementsSelector } from "./payment-guard.mjs";
+import { humanTokenAmountToAtomic } from "./user-token-transfer.mjs";
 
 dotenv.config();
 
@@ -63,6 +65,12 @@ async function main() {
 
   if (command === "transfer-usdc") {
     const result = await transferUsdc(options);
+    writeJson(result);
+    return;
+  }
+
+  if (command === "transfer-token-user") {
+    const result = await transferTokenFromUserWallet(options);
     writeJson(result);
     return;
   }
@@ -225,6 +233,51 @@ async function transferUsdc(options) {
   };
 }
 
+async function transferTokenFromUserWallet(options) {
+  const privateKey = requiredEnv("SIGN402_EVM_PRIVATE_KEY");
+  const account = privateKeyToAccount(privateKey);
+  const to = requiredOption(options, "to");
+  const token = requiredOption(options, "token");
+  const amount = humanTokenAmountToAtomic(
+    requiredOption(options, "amount"),
+    Number(options.decimals || "18"),
+  );
+  const chain = viemChain(options.chain || "base");
+  const rpcUrl = process.env.SIGN402_BASE_RPC_URL || process.env.BASE_RPC_URL || chain.rpcUrls.default.http[0];
+  const transport = http(rpcUrl);
+  const walletClient = createWalletClient({
+    account,
+    chain,
+    transport,
+  });
+  const publicClient = createPublicClient({
+    chain,
+    transport,
+  });
+
+  const transactionHash = await walletClient.writeContract({
+    address: token,
+    abi: erc20Abi,
+    functionName: "transfer",
+    args: [to, amount],
+  });
+  const receipt = await publicClient.waitForTransactionReceipt({
+    hash: transactionHash,
+  });
+  if (receipt.status !== "success") {
+    throw new Error(`user wallet token transfer failed: ${transactionHash}`);
+  }
+  return {
+    ok: true,
+    transactionHash,
+    from: account.address,
+    to,
+    token,
+    amount: amount.toString(),
+    network: networkName(options.chain || "base"),
+  };
+}
+
 async function serveSeller() {
   const payTo = requiredEnv("CDP_SELLER_PAY_TO");
   const port = Number(process.env.CDP_X402_SELLER_PORT || "4021");
@@ -309,6 +362,11 @@ function networkName(chain) {
   if (chain === "base") return "base";
   if (chain === "base-mainnet") return "base";
   throw new Error(`Unsupported CDP chain: ${chain}`);
+}
+
+function viemChain(chain) {
+  if (chain === "base" || chain === "base-mainnet") return base;
+  throw new Error(`Unsupported EVM chain: ${chain}`);
 }
 
 function singitAmountToAtomic(amount) {

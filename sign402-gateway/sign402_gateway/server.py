@@ -1585,6 +1585,41 @@ def build_bitrefill_funding_runner_from_env(env: dict[str, str] | None = None):
     )
 
 
+def build_bitrefill_user_funding_runner_from_env(
+    *,
+    user_wallet_service: Any,
+    env: dict[str, str] | None = None,
+):
+    values = os.environ if env is None else env
+    mode = values.get("SIGN402_BITREFILL_USER_FUNDING_MODE", "").strip().lower()
+    funding_mode = values.get("SIGN402_BITREFILL_FUNDING_MODE", "none").strip().lower()
+    if not mode and funding_mode == "cdp_wallet_swap":
+        mode = "user_wallet_transfer_to_cdp"
+    if mode in {"", "none", "disabled"}:
+        return None
+    if mode != "user_wallet_transfer_to_cdp":
+        raise ValueError(f"unsupported SIGN402_BITREFILL_USER_FUNDING_MODE: {mode}")
+
+    cdp_wallet_address = (
+        values.get("SIGN402_CDP_WALLET_ADDRESS", "").strip()
+        or values.get("CDP_EVM_ACCOUNT_ADDRESS", "").strip()
+    )
+    if not re.fullmatch(r"0x[a-fA-F0-9]{40}", cdp_wallet_address):
+        raise ValueError(
+            "SIGN402_CDP_WALLET_ADDRESS or CDP_EVM_ACCOUNT_ADDRESS is required "
+            "for user wallet Bitrefill funding"
+        )
+    return UserWalletTransferToCdpFundingRunner(
+        wallet_service=user_wallet_service,
+        transfer_client=UserWalletTokenTransferClient(
+            Path(values.get("SIGN402_CDP_X402_SERVICE_DIR", str(DEFAULT_CDP_X402_SERVICE_DIR)))
+        ),
+        cdp_wallet_address=cdp_wallet_address,
+        from_token=values.get("SIGN402_BANKR_SWAP_FROM_TOKEN", DEFAULT_SINGIT_TOKEN_ADDRESS),
+        chain=values.get("SIGN402_BANKR_SWAP_CHAIN", "base"),
+    )
+
+
 def build_usdc_reserve_guard_from_env(env: dict[str, str] | None = None):
     values = os.environ if env is None else env
     mode = values.get("SIGN402_BITREFILL_MODE", "test").strip().lower()
@@ -1702,6 +1737,9 @@ def build_server(
         store=bitrefill_commerce_store,
         approval_client=bitrefill_wallet_approval_client,
         fulfillment_runner=bitrefill_fulfillment_runner,
+        user_funding_runner=build_bitrefill_user_funding_runner_from_env(
+            user_wallet_service=user_wallet_service,
+        ),
     )
     x402_inspector = ExternalX402Inspector()
     bankr_llm_topup_inspector = BankrLlmCreditsTopUpInspector()
@@ -3034,6 +3072,130 @@ class UserWalletBaseX402PaymentClient:
         if not isinstance(payload, dict):
             raise ValueError("user wallet x402 service returned non-object JSON")
         return payload
+
+
+class UserWalletTokenTransferClient:
+    def __init__(
+        self,
+        service_dir: Path = DEFAULT_CDP_X402_SERVICE_DIR,
+        *,
+        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        timeout: int = 240,
+    ):
+        self.service_dir = service_dir
+        self.runner = runner
+        self.timeout = timeout
+
+    def transfer_token(
+        self,
+        *,
+        private_key: str,
+        to_address: str,
+        token_address: str,
+        amount: str,
+        chain: str = "base",
+    ) -> dict[str, Any]:
+        script = self.service_dir / "src" / "index.mjs"
+        if not script.exists():
+            raise ValueError(f"CDP x402 service script not found: {script}")
+        if not str(private_key or "").strip():
+            raise ValueError("user wallet private key is required")
+
+        command = [
+            "node",
+            str(script),
+            "transfer-token-user",
+            "--to",
+            str(to_address),
+            "--token",
+            str(token_address),
+            "--amount",
+            str(amount),
+            "--chain",
+            str(chain),
+        ]
+        env = dict(os.environ)
+        env["SIGN402_EVM_PRIVATE_KEY"] = str(private_key).strip()
+        result = self.runner(
+            command,
+            cwd=str(self.service_dir),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=self.timeout,
+            env=env,
+        )
+        if result.returncode != 0:
+            key = str(private_key).strip()
+            raw = result.stderr.strip() or result.stdout.strip() or ""
+            if key:
+                raw = raw.replace(key, "***")
+            raise ValueError(raw or "user wallet token transfer failed")
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise ValueError("user wallet token transfer returned non-JSON output") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("user wallet token transfer returned non-object JSON")
+        tx_id = payload.get("transactionHash") or payload.get("txId")
+        return {**payload, "txId": str(tx_id) if tx_id else None}
+
+
+class UserWalletTransferToCdpFundingRunner:
+    def __init__(
+        self,
+        *,
+        wallet_service: Any,
+        transfer_client: UserWalletTokenTransferClient,
+        cdp_wallet_address: str,
+        from_token: str,
+        chain: str = "base",
+    ):
+        self.wallet_service = wallet_service
+        self.transfer_client = transfer_client
+        self.cdp_wallet_address = cdp_wallet_address
+        self.from_token = from_token
+        self.chain = chain
+
+    def __call__(
+        self,
+        *,
+        telegram_user_id: str,
+        quote: dict[str, Any],
+        recipient: dict[str, Any],
+    ) -> dict[str, Any]:
+        del recipient
+        if quote.get("pricingMode") != "bankr_real_rate":
+            raise ValueError("user wallet Bitrefill funding requires pricingMode=bankr_real_rate")
+        amount = str(quote.get("singitAmount", "")).strip()
+        if not amount:
+            raise ValueError("quote singitAmount is required for user wallet Bitrefill funding")
+        user_id = str(telegram_user_id or "").strip()
+        if not user_id:
+            raise ValueError("telegramUserId is required for user wallet Bitrefill funding")
+
+        private_key = self.wallet_service.decrypt_private_key_for_future_signing(user_id)
+        wallet_status = self.wallet_service.wallet_status(user_id)
+        wallet = wallet_status.get("wallet") if isinstance(wallet_status, dict) else {}
+        from_wallet = str(wallet.get("address", "") if isinstance(wallet, dict) else "")
+        transfer_result = self.transfer_client.transfer_token(
+            private_key=private_key,
+            to_address=self.cdp_wallet_address,
+            token_address=self.from_token,
+            amount=amount,
+            chain=self.chain,
+        )
+        return {
+            "ok": bool(transfer_result.get("ok", True)),
+            "mode": "user_wallet_transfer_to_cdp_swap",
+            "fromWallet": from_wallet or str(transfer_result.get("from", "")),
+            "toWallet": self.cdp_wallet_address,
+            "amount": amount,
+            "fromToken": self.from_token,
+            "chain": self.chain,
+            "transfer": transfer_result,
+            "txId": transfer_result.get("txId"),
+        }
 
 
 class UserWalletX402Buyer:

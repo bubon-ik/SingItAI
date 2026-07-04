@@ -83,6 +83,28 @@ class FakeFundingRunner:
         }
 
 
+class FakeUserFundingRunner:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, *, telegram_user_id, quote, recipient):
+        self.calls.append(
+            {
+                "telegram_user_id": telegram_user_id,
+                "quote": quote,
+                "recipient": recipient,
+            }
+        )
+        return {
+            "ok": True,
+            "mode": "user_wallet_transfer_to_cdp_swap",
+            "fromWallet": "0xAc4aCb03cAdaFE1d68262cf94cD5E8B56d9bf45C",
+            "toWallet": "0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+            "transfer": {"ok": True, "txId": "0xUSERTRANSFER"},
+            "funding": {"ok": True, "txId": "0xCDPSWAP"},
+        }
+
+
 class BitrefillRunnerTests(unittest.TestCase):
     def test_catalog_services_search_and_return_product_details(self):
         client = TestBitrefillClient()
@@ -426,11 +448,13 @@ class BitrefillRunnerTests(unittest.TestCase):
                 funding_runner=funding,
                 now_provider=lambda: 1_719_000_002,
             )
+            user_funding = FakeUserFundingRunner()
             approval = Mock()
             runner = WalletBitrefillPurchaseRunner(
                 store=store,
                 approval_client=approval,
                 fulfillment_runner=fulfillment,
+                user_funding_runner=user_funding,
                 now_provider=lambda: 1_719_000_001,
                 fulfillment_token_provider=lambda: "wallet_fulfill_secret_1",
             )
@@ -452,12 +476,18 @@ class BitrefillRunnerTests(unittest.TestCase):
             self.assertEqual(result["decision"], "approved_and_fulfilled")
             self.assertEqual(result["fulfillmentToken"], "wallet_fulfill_secret_1")
             self.assertEqual(result["walletCheckout"]["paymentApprovalHash"], expected_hash)
+            self.assertEqual(result["walletCheckout"]["userFunding"]["fromWallet"], "0xAc4aCb03cAdaFE1d68262cf94cD5E8B56d9bf45C")
+            self.assertIn("Paid from 0xAc4a...f45C", result["telegramText"])
             self.assertNotIn("bankr", result)
             self.assertEqual(len(funding.calls), 1)
+            self.assertEqual(len(user_funding.calls), 1)
+            self.assertEqual(user_funding.calls[0]["telegram_user_id"], "1045618308")
+            self.assertEqual(user_funding.calls[0]["quote"]["quoteId"], "quote_wallet_1")
             record = store.get_quote("quote_wallet_1")
             self.assertEqual(record["state"], "DELIVERED")
             self.assertEqual(record["metadata"]["recipient"], {"email": "buyer@example.com"})
             self.assertEqual(record["metadata"]["walletCheckout"]["approval"]["approved"], True)
+            self.assertEqual(record["metadata"]["walletCheckout"]["userFunding"]["transfer"]["txId"], "0xUSERTRANSFER")
             self.assertNotIn("wallet_fulfill_secret_1", str(record["metadata"]))
             self.assertEqual(approval.call_args.kwargs["telegram_user_id"], "1045618308")
 

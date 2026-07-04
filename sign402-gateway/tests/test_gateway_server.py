@@ -29,8 +29,11 @@ from sign402_gateway.server import (
     SingitSettlementVerifier,
     UserSpendLimitStore,
     UserWalletBaseX402PaymentClient,
+    UserWalletTokenTransferClient,
+    UserWalletTransferToCdpFundingRunner,
     UserWalletX402Buyer,
     build_bitrefill_funding_runner_from_env,
+    build_bitrefill_user_funding_runner_from_env,
     build_bitrefill_client_from_env,
     build_approval_client_from_env,
     build_payment_executor,
@@ -2015,6 +2018,115 @@ class GatewayServerTests(unittest.TestCase):
         self.assertIn("0xRECV", args)
         self.assertIn("--expected-asset", args)
         self.assertIn("0xASSET", args)
+
+    def test_user_wallet_token_transfer_client_passes_private_key_in_env_only(self):
+        completed = subprocess.CompletedProcess(
+            args=["node"],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "transactionHash": "0xUSERTRANSFER",
+                    "from": "0xAc4aCb03cAdaFE1d68262cf94cD5E8B56d9bf45C",
+                }
+            ),
+            stderr="",
+        )
+        runner = Mock(return_value=completed)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service_dir = Path(tmpdir)
+            script = service_dir / "src" / "index.mjs"
+            script.parent.mkdir(parents=True)
+            script.write_text("// test", encoding="utf-8")
+            client = UserWalletTokenTransferClient(service_dir, runner=runner)
+
+            result = client.transfer_token(
+                private_key="0xSECRET",
+                to_address="0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+                token_address=DEFAULT_SINGIT_TOKEN_ADDRESS,
+                amount="130000",
+                chain="base",
+            )
+
+        self.assertTrue(result["ok"])
+        args = runner.call_args.args[0]
+        kwargs = runner.call_args.kwargs
+        self.assertEqual(args[2], "transfer-token-user")
+        self.assertIn("--to", args)
+        self.assertIn("0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd", args)
+        self.assertIn("--token", args)
+        self.assertIn(DEFAULT_SINGIT_TOKEN_ADDRESS, args)
+        self.assertIn("--amount", args)
+        self.assertIn("130000", args)
+        self.assertNotIn("0xSECRET", args)
+        self.assertEqual(kwargs["env"]["SIGN402_EVM_PRIVATE_KEY"], "0xSECRET")
+
+    def test_user_wallet_transfer_to_cdp_funding_runner_debits_user_wallet(self):
+        wallet_service = Mock(
+            **{
+                "decrypt_private_key_for_future_signing.return_value": "0xSECRET",
+                "wallet_status.return_value": {
+                    "wallet": {
+                        "address": "0xAc4aCb03cAdaFE1d68262cf94cD5E8B56d9bf45C",
+                    }
+                },
+            }
+        )
+        transfer_client = Mock(
+            **{
+                "transfer_token.return_value": {
+                    "ok": True,
+                    "txId": "0xUSERTRANSFER",
+                    "from": "0xAc4aCb03cAdaFE1d68262cf94cD5E8B56d9bf45C",
+                }
+            }
+        )
+        runner = UserWalletTransferToCdpFundingRunner(
+            wallet_service=wallet_service,
+            transfer_client=transfer_client,
+            cdp_wallet_address="0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+            from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+            chain="base",
+        )
+
+        result = runner(
+            telegram_user_id="1045618308",
+            quote={
+                "pricingMode": "bankr_real_rate",
+                "singitAmount": "130000",
+            },
+            recipient={},
+        )
+
+        self.assertEqual(result["mode"], "user_wallet_transfer_to_cdp_swap")
+        self.assertEqual(result["fromWallet"], "0xAc4aCb03cAdaFE1d68262cf94cD5E8B56d9bf45C")
+        self.assertEqual(result["toWallet"], "0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd")
+        self.assertEqual(result["transfer"]["txId"], "0xUSERTRANSFER")
+        wallet_service.decrypt_private_key_for_future_signing.assert_called_once_with(
+            "1045618308"
+        )
+        transfer_client.transfer_token.assert_called_once_with(
+            private_key="0xSECRET",
+            to_address="0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+            token_address=DEFAULT_SINGIT_TOKEN_ADDRESS,
+            amount="130000",
+            chain="base",
+        )
+
+    def test_user_wallet_bitrefill_funding_env_builder_uses_user_transfer_to_cdp(self):
+        wallet_service = Mock()
+
+        runner = build_bitrefill_user_funding_runner_from_env(
+            user_wallet_service=wallet_service,
+            env={
+                "SIGN402_BITREFILL_FUNDING_MODE": "cdp_wallet_swap",
+                "SIGN402_CDP_WALLET_ADDRESS": "0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+                "SIGN402_CDP_X402_SERVICE_DIR": "/tmp/cdp",
+            },
+        )
+
+        self.assertIsInstance(runner, UserWalletTransferToCdpFundingRunner)
+        self.assertIs(runner.wallet_service, wallet_service)
 
     def test_user_wallet_x402_buyer_enforces_approved_caps_on_payment(self):
         user_payment_client = Mock(
