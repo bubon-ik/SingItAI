@@ -3186,8 +3186,8 @@ class UserSpendLimitStore:
 
         user_max_per_tx = _optional_int(user_limits.get("maxPerTxAtomic"))
         user_daily_cap = _optional_int(user_limits.get("dailyCapAtomic"))
-        max_per_tx = _effective_limit(user_max_per_tx, operator_max_per_tx_atomic)
-        daily_cap = _effective_limit(user_daily_cap, operator_daily_cap_atomic)
+        max_per_tx = user_max_per_tx if user_max_per_tx is not None else operator_max_per_tx_atomic
+        daily_cap = user_daily_cap if user_daily_cap is not None else operator_daily_cap_atomic
         return {
             "telegramUserId": user_id,
             "maxPerTxAtomic": max_per_tx,
@@ -3216,16 +3216,6 @@ class UserSpendLimitStore:
             raise ValueError("daily spending limit must be greater than zero")
         if daily_cap_atomic < max_per_tx_atomic:
             raise ValueError("daily spending limit must be at least the per-transaction limit")
-        if operator_max_per_tx_atomic is not None and max_per_tx_atomic > operator_max_per_tx_atomic:
-            raise ValueError(
-                f"max per transaction exceeds operator maximum "
-                f"{_format_usdc_atomic(operator_max_per_tx_atomic)} USDC"
-            )
-        if operator_daily_cap_atomic is not None and daily_cap_atomic > operator_daily_cap_atomic:
-            raise ValueError(
-                f"daily spending limit exceeds operator maximum "
-                f"{_format_usdc_atomic(operator_daily_cap_atomic)} USDC"
-            )
 
         user_id = str(telegram_user_id)
         with self.lock:
@@ -4167,13 +4157,6 @@ def _optional_int(value: Any) -> int | None:
     return int(str(value))
 
 
-def _effective_limit(user_limit: int | None, operator_limit: int | None) -> int | None:
-    limits = [limit for limit in (user_limit, operator_limit) if limit is not None]
-    if not limits:
-        return None
-    return min(limits)
-
-
 def _operator_user_wallet_limits() -> dict[str, int | None]:
     return {
         "maxPerTxAtomic": _user_wallet_atomic_limit(
@@ -4231,7 +4214,7 @@ def _spending_limits_telegram_text(limits: dict[str, Any], *, updated: bool) -> 
         f"{heading}\n\n"
         f"Max per transaction: {max_per_tx} USDC\n"
         f"Daily cap: {daily_cap} USDC\n\n"
-        "Operator maximums:\n"
+        "Default safety limits:\n"
         f"- Max per transaction: {operator_max} USDC\n"
         f"- Daily cap: {operator_daily} USDC\n\n"
         "To change: /limits 0.005 0.05"

@@ -1601,7 +1601,7 @@ class GatewayServerTests(unittest.TestCase):
         self.assertTrue(body["limits"]["userConfigured"])
         self.assertIn("updated", body["telegramText"].lower())
 
-    def test_agent_spending_limits_rejects_limits_above_operator_caps(self):
+    def test_agent_spending_limits_allows_user_limits_above_default_caps(self):
         server = DummyServer()
         with tempfile.TemporaryDirectory() as tmpdir:
             server.user_spend_limit_store = UserSpendLimitStore(Path(tmpdir) / "limits.json")
@@ -1611,8 +1611,8 @@ class GatewayServerTests(unittest.TestCase):
                     "/agent/spending-limits",
                     {
                         "telegramUserId": "1045618308",
-                        "maxPerTxUsdc": "0.02",
-                        "dailyCapUsdc": "0.05",
+                        "maxPerTxUsdc": "100",
+                        "dailyCapUsdc": "500",
                     },
                     server=server,
                     headers=self.wallet_auth_headers(),
@@ -1621,9 +1621,11 @@ class GatewayServerTests(unittest.TestCase):
         response = self.response_text(handler)
         body = json.loads(response.split("\r\n\r\n", 1)[1])
 
-        self.assertIn("HTTP/1.0 400", response)
-        self.assertFalse(body["ok"])
-        self.assertIn("operator maximum", body["error"])
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["limits"]["maxPerTxAtomic"], 100000000)
+        self.assertEqual(body["limits"]["dailyCapAtomic"], 500000000)
+        self.assertTrue(body["limits"]["userConfigured"])
 
     def test_agent_buy_tool_for_user_rejects_amount_over_default_tx_cap(self):
         server = DummyServer()
@@ -1714,6 +1716,71 @@ class GatewayServerTests(unittest.TestCase):
         self.assertIn("500", body["error"])
         server.imessage_approval_service.request_purchase_approval.assert_not_called()
         server.user_wallet_service.decrypt_private_key_for_future_signing.assert_not_called()
+
+    def test_agent_buy_tool_for_user_allows_amount_over_default_under_user_limit(self):
+        server = DummyServer()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server.user_spend_limit_store = UserSpendLimitStore(Path(tmpdir) / "limits.json")
+            server.user_spend_limit_store.set_limit_settings(
+                "1045618308",
+                max_per_tx_atomic=100000000,
+                daily_cap_atomic=500000000,
+                operator_max_per_tx_atomic=10000,
+                operator_daily_cap_atomic=100000,
+            )
+            server.imessage_approval_service.request_purchase_approval.return_value = {
+                "ok": True,
+                "status": "approved",
+                "approvalId": "approval-1",
+                "commitmentHash": "c" * 64,
+            }
+            server.user_wallet_service.decrypt_private_key_for_future_signing.return_value = (
+                "0xUSER_PRIVATE_KEY"
+            )
+            server.user_x402_buyer.return_value = {
+                "decision": "approved_and_executed",
+                "ok": True,
+                "mode": "official_x402_base_user_wallet",
+                "resourceUrl": "https://x402.ottoai.services/crypto-news",
+                "txId": "0xTX",
+                "paymentRequirements": {},
+                "telegramText": "paid",
+            }
+            payment_requirements = {
+                "scheme": "exact",
+                "network": "base-mainnet",
+                "x402Network": "eip155:8453",
+                "amountAtomic": "11000",
+                "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "receiver": "0x0E84dDEdAaE6A779c462C22a59F301EC31B6b808",
+                "paymentIntent": "crypto-news-1",
+                "purpose": "x402_api_access",
+                "extra": {"name": "USD Coin", "version": "2"},
+            }
+
+            with patch("sys.stderr", io.StringIO()):
+                with (
+                    patch(
+                        "sign402_gateway.server.fetch_x402_payment_required",
+                        return_value={"x402Version": 2, "accepts": [{}]},
+                    ),
+                    patch(
+                        "sign402_gateway.server.normalize_x402_payment_required",
+                        return_value=payment_requirements,
+                    ),
+                ):
+                    handler = self.make_handler(
+                        "/agent/buy-tool",
+                        {"tool": "news", "telegramUserId": "1045618308"},
+                        server=server,
+                        headers=self.wallet_auth_headers(),
+                    )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        server.imessage_approval_service.request_purchase_approval.assert_called_once()
+        server.user_wallet_service.decrypt_private_key_for_future_signing.assert_called_once()
 
     def test_agent_buy_tool_for_user_rejects_amount_over_configured_tx_cap(self):
         server = DummyServer()
