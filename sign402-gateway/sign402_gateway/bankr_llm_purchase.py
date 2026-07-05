@@ -25,6 +25,7 @@ BASE_USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 BASE_MAINNET_NETWORK = "base-mainnet"
 DEFAULT_SINGIT_TOKEN_ADDRESS = "0xc2c1e0b7C401e6217193732272444D928646eba3"
 PRIVY_AUTH_URL = "https://auth.privy.io/api/v1"
+DEFAULT_PRIVY_BROWSER_ORIGIN = "https://bankr.bot"
 MAX_RESPONSE_BYTES = 64 * 1024
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -861,9 +862,21 @@ class BankrIdentityClient:
 
     @staticmethod
     def _privy_headers(app_id: str, client_id: str) -> dict[str, str]:
+        origin = (
+            os.environ.get("SIGN402_BANKR_PRIVY_ORIGIN")
+            or DEFAULT_PRIVY_BROWSER_ORIGIN
+        ).rstrip("/")
         return {
             "Privy-App-Id": app_id,
             "Privy-Client-Id": client_id,
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/126.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+            "Origin": origin,
+            "Referer": f"{origin}/",
         }
 
     @staticmethod

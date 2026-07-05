@@ -174,6 +174,21 @@ class BankrIdentityClientTests(unittest.TestCase):
             opener.requests[1].get_header("Content-type"),
             "application/json",
         )
+        self.assertTrue(
+            opener.requests[1].get_header("User-agent").startswith("Mozilla/5.0"),
+        )
+        self.assertEqual(
+            opener.requests[1].get_header("Accept-language"),
+            "en-US,en;q=0.9",
+        )
+        self.assertEqual(
+            opener.requests[1].get_header("Origin"),
+            "https://bankr.bot",
+        )
+        self.assertEqual(
+            opener.requests[1].get_header("Referer"),
+            "https://bankr.bot/",
+        )
         self.assertEqual(opener.timeouts, [7.5, 7.5])
         self.assertTrue(config_response.closed)
         self.assertTrue(otp_response.closed)
