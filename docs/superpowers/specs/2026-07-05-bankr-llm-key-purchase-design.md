@@ -110,8 +110,9 @@ The service owns the purchase state machine:
 AWAITING_TERMS
   -> AWAITING_OTP
   -> AWAITING_IMESSAGE_APPROVAL
+  -> AWAITING_TRANSFER
   -> TRANSFERRING_SINGIT
-  -> TOPPING_UP
+  -> TOPPING_UP_BANKR
   -> COMPLETE
 ```
 
@@ -185,8 +186,9 @@ identity tokens, or API keys through the LLM.
 
 1. Price the requested USD credit amount in SINGIT using the existing real-rate
    pricer and its configured buffer.
-2. Enforce the user's per-transaction and daily limits before requesting
-   approval.
+2. Enforce the user's USD-denominated per-transaction and daily limits before
+   requesting approval. The limit store receives 6-decimal USD atomic values;
+   the SINGIT atomic amount remains separate in the approval commitment.
 3. Create a commitment containing the exact USD amount, maximum SINGIT amount,
    source wallet, Bankr destination wallet, purchase ID, and expiration.
 4. Require `YES` from the linked iMessage sender.
@@ -196,6 +198,10 @@ identity tokens, or API keys through the LLM.
 7. Call Bankr `POST /llm/credits/topup` with the encrypted API key and SINGIT as
    the source token.
 8. Store the resulting balance and return the key once in Telegram.
+
+The Base transfer client receives a human-readable SINGIT amount and converts
+it to 18-decimal token units itself. Sign402 verifies that this human amount
+matches the approved SINGIT atomic amount before calling the transfer client.
 
 The API key may be created before iMessage approval, but it is not delivered
 until the top-up succeeds. A rejected or expired purchase leaves the key stored
