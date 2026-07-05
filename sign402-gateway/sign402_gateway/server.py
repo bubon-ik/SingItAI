@@ -83,6 +83,10 @@ from .bankr_swap import (
     load_bankr_api_key,
     usdc_balance_from_portfolio,
 )
+from .bankr_llm_purchase import (
+    BankrLlmError,
+    build_bankr_llm_purchase_service_from_env,
+)
 from .numeric import format_decimal
 from .goplausible import fetch_x402_paid_resource, fetch_x402_payment_required, normalize_x402_payment_required
 from .real_rate_pricing import RealRateSingitPricer
@@ -419,6 +423,10 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                         "/agent/wallet-balance",
                         "/agent/last-purchase",
                         "/agent/spending-limits",
+                        "/agent/llm-key/start",
+                        "/agent/llm-key/accept-terms",
+                        "/agent/llm-key/verify",
+                        "/agent/llm-credits",
                         "/agent/imessage/pairing",
                         "/agent/imessage/link",
                         "/agent/imessage/pending",
@@ -503,6 +511,18 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if path == "/agent/spending-limits":
             self._handle_agent_spending_limits()
+            return
+        if path == "/agent/llm-key/start":
+            self._handle_agent_llm_key_start()
+            return
+        if path == "/agent/llm-key/accept-terms":
+            self._handle_agent_llm_key_accept_terms()
+            return
+        if path == "/agent/llm-key/verify":
+            self._handle_agent_llm_key_verify()
+            return
+        if path == "/agent/llm-credits":
+            self._handle_agent_llm_credits()
             return
         if path == "/agent/imessage/pairing":
             self._handle_agent_imessage_pairing()
@@ -762,6 +782,79 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=401)
         except Exception as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_llm_key_start(self) -> None:
+        self._handle_agent_llm_purchase("start")
+
+    def _handle_agent_llm_key_accept_terms(self) -> None:
+        self._handle_agent_llm_purchase("accept-terms")
+
+    def _handle_agent_llm_key_verify(self) -> None:
+        self._handle_agent_llm_purchase("verify")
+
+    def _handle_agent_llm_credits(self) -> None:
+        self._handle_agent_llm_purchase("credits")
+
+    def _handle_agent_llm_purchase(self, operation: str) -> None:
+        try:
+            payload = self._read_json()
+            user_id = _require_authenticated_user(self, payload)
+            service = self.server.bankr_llm_purchase_service
+            if service is None:
+                raise WalletApiTokenNotConfiguredError(
+                    "Bankr LLM purchase service is not configured"
+                )
+            if operation == "start":
+                result = service.start(
+                    telegram_user_id=user_id,
+                    amount_usd=_read_required_text(payload, "amountUsd"),
+                    email=_read_required_text(payload, "email"),
+                )
+            elif operation == "accept-terms":
+                result = service.accept_terms(user_id)
+            elif operation == "verify":
+                result = service.verify_otp(
+                    telegram_user_id=user_id,
+                    code=_read_required_text(payload, "code"),
+                )
+                if result.get("state") == "AWAITING_TRANSFER":
+                    result = service.resume(str(result.get("purchaseId") or ""))
+            elif operation == "credits":
+                result = service.credits(user_id)
+            else:
+                raise ValueError("unsupported Bankr LLM operation")
+            self._send_json(result, status=200)
+        except WalletApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except WalletApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+        except BankrLlmError as exc:
+            self._send_json(
+                {
+                    "ok": False,
+                    "error": exc.code,
+                    "telegramText": exc.user_message,
+                },
+                status=400,
+            )
+        except WalletEncryptionError:
+            self._send_json(
+                {
+                    "ok": False,
+                    "error": "wallet_unavailable",
+                    "telegramText": "Wallet service is temporarily unavailable.",
+                },
+                status=503,
+            )
+        except Exception:
+            self._send_json(
+                {
+                    "ok": False,
+                    "error": "bankr_llm_request_failed",
+                    "telegramText": "Bankr LLM request failed. Please try again.",
+                },
+                status=500,
+            )
 
     def _handle_agent_imessage_pairing(self) -> None:
         try:
@@ -1384,6 +1477,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         user_wallet_service,
         user_wallet_api_token: str,
         user_spend_limit_store: "UserSpendLimitStore",
+        bankr_llm_purchase_service,
         imessage_approval_service,
         imessage_approval_api_token: str,
     ):
@@ -1410,6 +1504,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         self.user_wallet_service = user_wallet_service
         self.user_wallet_api_token = user_wallet_api_token
         self.user_spend_limit_store = user_spend_limit_store
+        self.bankr_llm_purchase_service = bankr_llm_purchase_service
         self.imessage_approval_service = imessage_approval_service
         self.imessage_approval_api_token = imessage_approval_api_token
         self.firefly_lock = threading.Lock()
@@ -1796,7 +1891,7 @@ def build_server(
         agent_state_store=agent_state_store,
         resource_base_url=resource_base_url,
     )
-    return Sign402GatewayServer(
+    server = Sign402GatewayServer(
         (host, port),
         Sign402GatewayHandler,
         firefly=firefly,
@@ -1826,9 +1921,29 @@ def build_server(
         user_wallet_service=user_wallet_service,
         user_wallet_api_token=os.getenv("SIGN402_WALLET_API_TOKEN", ""),
         user_spend_limit_store=user_spend_limit_store,
+        bankr_llm_purchase_service=None,
         imessage_approval_service=imessage_approval_service,
         imessage_approval_api_token=os.getenv("SIGN402_PHOTON_API_TOKEN", ""),
     )
+    server.bankr_llm_purchase_service = build_bankr_llm_purchase_service_from_env(
+        env=dict(os.environ),
+        wallet_service=user_wallet_service,
+        pricer=real_rate_pricer,
+        approval_service=imessage_approval_service,
+        transfer_client=UserWalletTokenTransferClient(cdp_x402_service_dir),
+        enforce_spend=lambda user_id, requirement: _enforce_user_wallet_spend_limits(
+            server,
+            user_id,
+            requirement,
+        ),
+        record_spend=lambda user_id, purchase, metadata: _record_bankr_llm_spend(
+            server,
+            user_id,
+            purchase,
+            metadata,
+        ),
+    )
+    return server
 
 
 def build_payment_executor(payment_executor_dir: Path):
@@ -3751,6 +3866,17 @@ def _authenticated_user_id(handler: BaseHTTPRequestHandler, payload: dict[str, A
     return str(resolved)
 
 
+def _require_authenticated_user(
+    handler: BaseHTTPRequestHandler,
+    payload: dict[str, Any],
+) -> str:
+    _require_wallet_api_token(handler)
+    token = str(handler.headers.get("X-Sign402-User-Token", "") or "").strip()
+    if not token:
+        raise WalletApiAuthError("per-user access token is required")
+    return _authenticated_user_id(handler, payload)
+
+
 def _read_photon_user_id(payload: dict[str, Any]) -> str:
     for key in ("photonUserId", "photon_user_id", "userId"):
         value = str(payload.get(key, "") or "").strip()
@@ -4525,6 +4651,25 @@ def _record_user_wallet_spend(
         approval_id=str(event.get("approvalId") or ""),
         tool_id=str(tool.get("id") or event.get("toolId") or ""),
         resource_url=resource_url,
+    )
+
+
+def _record_bankr_llm_spend(
+    server: Sign402GatewayServer,
+    telegram_user_id: str,
+    purchase: dict[str, Any],
+    metadata: dict[str, Any],
+) -> None:
+    server.user_spend_limit_store.record_successful_spend(
+        telegram_user_id,
+        amount_atomic=int(str(metadata["amountAtomic"])),
+        asset=str(metadata["asset"]),
+        network=str(metadata["network"]),
+        tx_id=str(metadata.get("transferHash") or ""),
+        payment_intent=str(purchase.get("purchaseId") or ""),
+        approval_id=str(purchase.get("approvalRequestId") or ""),
+        tool_id="bankr.llm.credits",
+        resource_url="bankr://llm-credits/top-up",
     )
 
 

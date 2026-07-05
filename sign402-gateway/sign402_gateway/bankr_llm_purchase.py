@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -22,6 +23,7 @@ DEFAULT_BANKR_LLM_URL = "https://llm.bankr.bot"
 DEFAULT_BANKR_LLM_STORE_PATH = Path.home() / ".sign402" / "bankr-llm.db"
 BASE_USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 BASE_MAINNET_NETWORK = "base-mainnet"
+DEFAULT_SINGIT_TOKEN_ADDRESS = "0xc2c1e0b7C401e6217193732272444D928646eba3"
 PRIVY_AUTH_URL = "https://auth.privy.io/api/v1"
 MAX_RESPONSE_BYTES = 64 * 1024
 
@@ -2002,6 +2004,96 @@ class BankrLlmPurchaseService:
                 "Enter a USD amount from 1.00 to 1000.00.",
             )
         return format(amount, "f")
+
+
+def build_bankr_llm_purchase_service_from_env(
+    *,
+    wallet_service: Any,
+    pricer: Any,
+    approval_service: Any,
+    transfer_client: Any,
+    enforce_spend: Callable[[str, dict[str, Any]], None],
+    record_spend: Callable[[str, dict[str, Any], dict[str, Any]], None],
+    env: Mapping[str, str] | None = None,
+) -> BankrLlmPurchaseService:
+    values = os.environ if env is None else env
+    master_key = str(values.get("SIGN402_WALLET_MASTER_KEY") or "").strip()
+    if not master_key:
+        raise BankrLlmError(
+            "invalid_configuration",
+            "SIGN402_WALLET_MASTER_KEY is required for Bankr LLM purchases.",
+        )
+    if pricer is None:
+        raise BankrLlmError(
+            "invalid_configuration",
+            "Real-rate SINGIT pricing is required for Bankr LLM purchases.",
+        )
+
+    try:
+        timeout = float(
+            str(values.get("SIGN402_BANKR_HTTP_TIMEOUT_SECONDS") or "20")
+        )
+        otp_ttl_seconds = int(
+            str(values.get("SIGN402_BANKR_OTP_TTL_SECONDS") or "600")
+        )
+        max_otp_attempts = int(
+            str(values.get("SIGN402_BANKR_MAX_OTP_ATTEMPTS") or "3")
+        )
+    except ValueError as exc:
+        raise BankrLlmError(
+            "invalid_configuration",
+            "Bankr LLM timeout and OTP settings must be numeric.",
+        ) from exc
+    if (
+        not math.isfinite(timeout)
+        or timeout <= 0
+        or otp_ttl_seconds <= 0
+        or max_otp_attempts <= 0
+    ):
+        raise BankrLlmError(
+            "invalid_configuration",
+            "Bankr LLM timeout and OTP settings must be positive.",
+        )
+
+    singit_token_address = str(
+        values.get("SIGN402_SINGIT_TOKEN_ADDRESS")
+        or DEFAULT_SINGIT_TOKEN_ADDRESS
+    ).strip()
+    if EVM_ADDRESS_RE.fullmatch(singit_token_address) is None:
+        raise BankrLlmError(
+            "invalid_configuration",
+            "SIGN402_SINGIT_TOKEN_ADDRESS must be an EVM address.",
+        )
+
+    store_path = Path(
+        str(
+            values.get("SIGN402_BANKR_LLM_STORE_PATH")
+            or DEFAULT_BANKR_LLM_STORE_PATH
+        )
+    )
+    return BankrLlmPurchaseService(
+        store=BankrLlmStore(store_path, master_key=master_key),
+        bankr=BankrIdentityClient(
+            api_url=str(
+                values.get("SIGN402_BANKR_API_URL")
+                or DEFAULT_BANKR_API_URL
+            ),
+            llm_url=str(
+                values.get("SIGN402_BANKR_LLM_URL")
+                or DEFAULT_BANKR_LLM_URL
+            ),
+            timeout=timeout,
+        ),
+        wallet_service=wallet_service,
+        pricer=pricer,
+        approval_service=approval_service,
+        transfer_client=transfer_client,
+        enforce_spend=enforce_spend,
+        record_spend=record_spend,
+        singit_token_address=singit_token_address,
+        otp_ttl_seconds=otp_ttl_seconds,
+        max_otp_attempts=max_otp_attempts,
+    )
 
 
 def _api_key_fingerprint(api_key: str) -> str:

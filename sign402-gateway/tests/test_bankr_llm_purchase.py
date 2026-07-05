@@ -21,6 +21,7 @@ from sign402_gateway.bankr_llm_purchase import (
     BankrLlmError,
     BankrLlmPurchaseService,
     BankrLlmStore,
+    build_bankr_llm_purchase_service_from_env,
 )
 
 
@@ -1716,6 +1717,95 @@ class BankrLlmPurchaseServiceAuthTests(unittest.TestCase):
         self.assertEqual(result["state"], "AWAITING_TRANSFER")
         self.assertEqual(result["credits"], {"credits": "10.00", "currency": "USD"})
         self.assertNotIn(API_KEY, repr(result))
+
+
+class BankrLlmPurchaseFactoryTests(unittest.TestCase):
+    def test_factory_builds_service_from_environment(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store_path = Path(tempdir) / "bankr-llm.db"
+            wallet = FakeWalletServiceForPurchase()
+            pricer = FakePricerForPurchase()
+            approval = FakeApprovalServiceForPurchase()
+            transfer = FakeTransferForPurchase()
+
+            service = build_bankr_llm_purchase_service_from_env(
+                env={
+                    "SIGN402_WALLET_MASTER_KEY": Fernet.generate_key().decode(
+                        "ascii"
+                    ),
+                    "SIGN402_BANKR_API_URL": "https://api.example.test",
+                    "SIGN402_BANKR_LLM_URL": "https://llm.example.test",
+                    "SIGN402_BANKR_LLM_STORE_PATH": str(store_path),
+                    "SIGN402_BANKR_HTTP_TIMEOUT_SECONDS": "12",
+                    "SIGN402_BANKR_OTP_TTL_SECONDS": "420",
+                    "SIGN402_BANKR_MAX_OTP_ATTEMPTS": "4",
+                    "SIGN402_SINGIT_TOKEN_ADDRESS": (
+                        "0x3333333333333333333333333333333333333333"
+                    ),
+                },
+                wallet_service=wallet,
+                pricer=pricer,
+                approval_service=approval,
+                transfer_client=transfer,
+                enforce_spend=lambda _user_id, _requirement: None,
+                record_spend=lambda _user_id, _purchase, _metadata: None,
+            )
+
+            self.assertIsInstance(service, BankrLlmPurchaseService)
+            self.assertEqual(service.store.path, store_path)
+            self.assertEqual(service.bankr.api_url, "https://api.example.test")
+            self.assertEqual(service.bankr.llm_url, "https://llm.example.test")
+            self.assertEqual(service.bankr.timeout, 12.0)
+            self.assertEqual(service.otp_ttl_seconds, 420)
+            self.assertEqual(service.max_otp_attempts, 4)
+            self.assertIs(service.wallet_service, wallet)
+            self.assertIs(service.pricer, pricer)
+            self.assertIs(service.transfer_client, transfer)
+
+    def test_factory_requires_master_key_and_pricer(self):
+        dependencies = {
+            "wallet_service": FakeWalletServiceForPurchase(),
+            "approval_service": FakeApprovalServiceForPurchase(),
+            "transfer_client": FakeTransferForPurchase(),
+            "enforce_spend": lambda _user_id, _requirement: None,
+            "record_spend": lambda _user_id, _purchase, _metadata: None,
+        }
+
+        with self.assertRaises(BankrLlmError) as missing_key:
+            build_bankr_llm_purchase_service_from_env(
+                env={},
+                pricer=FakePricerForPurchase(),
+                **dependencies,
+            )
+        with self.assertRaises(BankrLlmError) as missing_pricer:
+            build_bankr_llm_purchase_service_from_env(
+                env={
+                    "SIGN402_WALLET_MASTER_KEY": Fernet.generate_key().decode(
+                        "ascii"
+                    )
+                },
+                pricer=None,
+                **dependencies,
+            )
+        with tempfile.TemporaryDirectory() as tempdir:
+            with self.assertRaises(BankrLlmError) as invalid_timeout:
+                build_bankr_llm_purchase_service_from_env(
+                    env={
+                        "SIGN402_WALLET_MASTER_KEY": Fernet.generate_key().decode(
+                            "ascii"
+                        ),
+                        "SIGN402_BANKR_LLM_STORE_PATH": str(
+                            Path(tempdir) / "bankr-llm.db"
+                        ),
+                        "SIGN402_BANKR_HTTP_TIMEOUT_SECONDS": "NaN",
+                    },
+                    pricer=FakePricerForPurchase(),
+                    **dependencies,
+                )
+
+        self.assertEqual(missing_key.exception.code, "invalid_configuration")
+        self.assertEqual(missing_pricer.exception.code, "invalid_configuration")
+        self.assertEqual(invalid_timeout.exception.code, "invalid_configuration")
 
 
 class BankrLlmPurchasePaymentTests(unittest.TestCase):

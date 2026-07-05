@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import ANY, Mock, patch
 
+from sign402_gateway.bankr_llm_purchase import BankrLlmError
 from sign402_gateway.bitrefill import LiveBitrefillClient, TestBitrefillClient
 from sign402_gateway.server import (
     AgentStateStore,
@@ -99,6 +100,7 @@ class DummyServer:
     def __init__(self):
         self.user_wallet_service = Mock()
         self.user_wallet_api_token = "test-wallet-token"
+        self.bankr_llm_purchase_service = Mock()
         self.imessage_approval_service = Mock()
         self.imessage_approval_api_token = "test-photon-token"
         self.user_x402_buyer = Mock()
@@ -629,6 +631,198 @@ class GatewayServerTests(unittest.TestCase):
 
     def photon_auth_headers(self) -> dict[str, str]:
         return {"Authorization": "Bearer test-photon-token"}
+
+    def llm_auth_headers(self, user_token: str = "user-token-1") -> dict[str, str]:
+        return {
+            **self.wallet_auth_headers(),
+            "X-Sign402-User-Token": user_token,
+        }
+
+    def test_llm_key_start_requires_per_user_token(self):
+        server = DummyServer()
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/llm-key/start",
+                {
+                    "telegramUserId": "123",
+                    "amountUsd": "10",
+                    "email": "user@example.com",
+                },
+                server=server,
+                headers=self.wallet_auth_headers(),
+            )
+
+        self.assertIn("HTTP/1.0 401 Unauthorized", self.response_text(handler))
+        server.bankr_llm_purchase_service.start.assert_not_called()
+
+    def test_llm_key_start_rejects_token_for_another_user(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "456"
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/llm-key/start",
+                {
+                    "telegramUserId": "123",
+                    "amountUsd": "10",
+                    "email": "user@example.com",
+                },
+                server=server,
+                headers=self.llm_auth_headers(),
+            )
+
+        self.assertIn("HTTP/1.0 401 Unauthorized", self.response_text(handler))
+        server.bankr_llm_purchase_service.start.assert_not_called()
+
+    def test_llm_key_start_dispatches_authenticated_user(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "123"
+        server.bankr_llm_purchase_service.start.return_value = {
+            "ok": True,
+            "state": "AWAITING_TERMS",
+            "telegramText": "Review terms.",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/llm-key/start",
+                {
+                    "telegramUserId": "123",
+                    "amountUsd": "10",
+                    "email": "user@example.com",
+                },
+                server=server,
+                headers=self.llm_auth_headers(),
+            )
+
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(handler))
+        server.bankr_llm_purchase_service.start.assert_called_once_with(
+            telegram_user_id="123",
+            amount_usd="10",
+            email="user@example.com",
+        )
+
+    def test_llm_key_accept_terms_dispatches_authenticated_user(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "123"
+        server.bankr_llm_purchase_service.accept_terms.return_value = {
+            "ok": True,
+            "state": "AWAITING_OTP",
+            "telegramText": "Verification code sent.",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/llm-key/accept-terms",
+                {"telegramUserId": "123"},
+                server=server,
+                headers=self.llm_auth_headers(),
+            )
+
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(handler))
+        server.bankr_llm_purchase_service.accept_terms.assert_called_once_with("123")
+
+    def test_llm_key_verify_resumes_approved_purchase(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "123"
+        server.bankr_llm_purchase_service.verify_otp.return_value = {
+            "ok": True,
+            "purchaseId": "purchase-1",
+            "state": "AWAITING_TRANSFER",
+        }
+        server.bankr_llm_purchase_service.resume.return_value = {
+            "ok": True,
+            "purchaseId": "purchase-1",
+            "state": "COMPLETE",
+            "apiKey": "bk_return_once",
+            "telegramText": "Bankr LLM purchase complete.",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/llm-key/verify",
+                {"telegramUserId": "123", "code": "123456"},
+                server=server,
+                headers=self.llm_auth_headers(),
+            )
+
+        body = self.response_json(handler)
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(handler))
+        self.assertEqual(body["apiKey"], "bk_return_once")
+        server.bankr_llm_purchase_service.verify_otp.assert_called_once_with(
+            telegram_user_id="123",
+            code="123456",
+        )
+        server.bankr_llm_purchase_service.resume.assert_called_once_with("purchase-1")
+
+    def test_llm_credits_dispatches_authenticated_user(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "123"
+        server.bankr_llm_purchase_service.credits.return_value = {
+            "ok": True,
+            "state": "COMPLETE",
+            "credits": {"credits": "10.00"},
+            "apiKeyFingerprint": "abc123",
+            "telegramText": "Credits: $10.00",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/llm-credits",
+                {"telegramUserId": "123"},
+                server=server,
+                headers=self.llm_auth_headers(),
+            )
+
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(handler))
+        server.bankr_llm_purchase_service.credits.assert_called_once_with("123")
+
+    def test_llm_route_returns_only_safe_bankr_error(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "123"
+        error = BankrLlmError(
+            "bankr_auth_unavailable",
+            "Bankr authentication is unavailable. Please try again.",
+        )
+        error.__cause__ = RuntimeError("raw provider token and response")
+        server.bankr_llm_purchase_service.start.side_effect = error
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/llm-key/start",
+                {
+                    "telegramUserId": "123",
+                    "amountUsd": "10",
+                    "email": "user@example.com",
+                },
+                server=server,
+                headers=self.llm_auth_headers(),
+            )
+
+        response = self.response_text(handler)
+        body = self.response_json(handler)
+        self.assertIn("HTTP/1.0 400 Bad Request", response)
+        self.assertEqual(body["error"], "bankr_auth_unavailable")
+        self.assertEqual(
+            body["telegramText"],
+            "Bankr authentication is unavailable. Please try again.",
+        )
+        self.assertNotIn("raw provider", response)
+
+    def test_health_lists_bankr_llm_purchase_routes(self):
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/health",
+                method="GET",
+                server=DummyServer(),
+            )
+
+        endpoints = self.response_json(handler)["endpoints"]
+        self.assertIn("/agent/llm-key/start", endpoints)
+        self.assertIn("/agent/llm-key/accept-terms", endpoints)
+        self.assertIn("/agent/llm-key/verify", endpoints)
+        self.assertIn("/agent/llm-credits", endpoints)
 
     def test_agent_create_wallet_requires_telegram_user_id(self):
         server = DummyServer()
