@@ -1022,6 +1022,8 @@ class BankrLlmPurchaseService:
             purchase = self.store.get_purchase(purchase["purchaseId"]) or purchase
             if transitioned:
                 self.bankr.send_otp(purchase["email"])
+        elif purchase["state"] == "AWAITING_OTP":
+            self.bankr.send_otp(purchase["email"])
         return self._safe_purchase_response(purchase)
 
     def verify_otp(

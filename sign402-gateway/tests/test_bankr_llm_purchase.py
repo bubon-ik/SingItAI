@@ -1338,6 +1338,22 @@ class BankrLlmPurchaseServiceAuthTests(unittest.TestCase):
         self.assertEqual(result["state"], "AWAITING_OTP")
         self.assertEqual(self.bankr.sent_otps, ["user@example.com"])
 
+    def test_accept_terms_resends_otp_when_already_waiting_for_code(self):
+        self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        self.service.accept_terms("123")
+
+        result = self.service.accept_terms("123")
+
+        self.assertEqual(result["state"], "AWAITING_OTP")
+        self.assertEqual(
+            self.bankr.sent_otps,
+            ["user@example.com", "user@example.com"],
+        )
+
     def test_verify_creates_one_key_and_requests_approval(self):
         self.approval.result = {"ok": False, "status": "rejected"}
         self.service.start(
