@@ -1886,6 +1886,8 @@ class BankrLlmPurchaseFactoryTests(unittest.TestCase):
                     "SIGN402_BANKR_TOPUP_ATTEMPTS": "2",
                     "SIGN402_BANKR_TOPUP_RETRY_DELAY_SECONDS": "7.5",
                     "SIGN402_BANKR_SINGIT_APPROVAL_BUFFER_PERCENT": "7",
+                    "SIGN402_BANKR_TOPUP_POLL_ATTEMPTS": "4",
+                    "SIGN402_BANKR_TOPUP_POLL_INTERVAL_SECONDS": "15",
                 },
                 wallet_service=wallet,
                 pricer=pricer,
@@ -1909,6 +1911,8 @@ class BankrLlmPurchaseFactoryTests(unittest.TestCase):
             self.assertEqual(service.topup_attempts, 2)
             self.assertEqual(service.topup_retry_delay_seconds, 7.5)
             self.assertEqual(service.singit_approval_buffer_percent, 7.0)
+            self.assertEqual(service.topup_poll_attempts, 4)
+            self.assertEqual(service.topup_poll_interval_seconds, 15.0)
             self.assertIs(service.wallet_service, wallet)
             self.assertIs(service.pricer, pricer)
             self.assertIs(service.transfer_client, transfer)
@@ -2154,8 +2158,27 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
         result = self.complete_purchase(reconcile_required=True)
 
         self.assertEqual(result["state"], "RECONCILIATION_REQUIRED")
+        # The top-up call itself is never repeated after an ambiguous result;
+        # only the read-only balance polling runs.
         self.assertEqual(len(self.bankr.topups), 1)
-        self.assertEqual(self.sleeps, [])
+        self.assertEqual(self.sleeps, [10.0] * 9)
+
+    def test_ambiguous_topup_completes_when_polling_sees_the_credit(self):
+        awaiting = self.approved_purchase()
+        # Balance grows from the 10.00 baseline to 20.00 while polling, as if
+        # Bankr finished the swap right after our HTTP request timed out.
+        self.bankr.topup_error = BankrLlmError(
+            "bankr_topup_ambiguous",
+            "Bankr LLM credit top-up result is unclear. Do not retry automatically.",
+        )
+        self.bankr.credits_result = {"credits": "20.00", "currency": "USD"}
+
+        result = self.service.resume(awaiting["purchaseId"])
+
+        self.assertEqual(result["state"], "COMPLETE")
+        self.assertEqual(result["apiKey"], API_KEY)
+        self.assertEqual(len(self.bankr.topups), 1)
+        self.assertEqual(self.sleeps, [10.0])
 
     def test_topup_uses_configured_source_token(self):
         self.service.topup_source_token = (

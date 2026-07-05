@@ -1048,6 +1048,8 @@ class BankrLlmPurchaseService:
         topup_source_token: str = "SINGIT",
         topup_attempts: int = 3,
         topup_retry_delay_seconds: float = 5.0,
+        topup_poll_attempts: int = 9,
+        topup_poll_interval_seconds: float = 10.0,
         singit_approval_buffer_percent: float = 5.0,
         sleep: Callable[[float], None] = time.sleep,
     ):
@@ -1066,6 +1068,8 @@ class BankrLlmPurchaseService:
         self.topup_source_token = str(topup_source_token)
         self.topup_attempts = int(topup_attempts)
         self.topup_retry_delay_seconds = float(topup_retry_delay_seconds)
+        self.topup_poll_attempts = int(topup_poll_attempts)
+        self.topup_poll_interval_seconds = float(topup_poll_interval_seconds)
         self.singit_approval_buffer_percent = float(singit_approval_buffer_percent)
         self._sleep = sleep
 
@@ -1576,6 +1580,16 @@ class BankrLlmPurchaseService:
                 amount_usd=str(purchase["amountUsd"]),
             )
         except BankrLlmError as exc:
+            if exc.code == "bankr_topup_ambiguous":
+                credits = self._await_topup_credit(purchase, key)
+                if credits is not None:
+                    return self._complete_purchase(
+                        purchase,
+                        expected_state=state,
+                        api_key=key,
+                        reveal_api_key=reveal_api_key,
+                        credits=credits,
+                    )
             self.store.transition(
                 purchase["purchaseId"],
                 expected_state=state,
@@ -1607,6 +1621,28 @@ class BankrLlmPurchaseService:
             reveal_api_key=reveal_api_key,
             topup=topup,
         )
+
+    def _await_topup_credit(
+        self,
+        purchase: Mapping[str, Any],
+        api_key: str,
+    ) -> dict[str, Any] | None:
+        """Poll the Bankr balance after an ambiguous top-up.
+
+        Bankr keeps processing the swap after our HTTP request dies, so the
+        credit usually lands shortly after the timeout. Returns the credits
+        payload once the balance covers the purchase, or None when polling
+        is exhausted and reconciliation is genuinely required.
+        """
+        for _ in range(self.topup_poll_attempts):
+            self._sleep(self.topup_poll_interval_seconds)
+            try:
+                credits = self.bankr.credits(api_key=api_key)
+            except Exception:
+                continue
+            if self._credits_cover_purchase(credits, purchase):
+                return credits
+        return None
 
     def _top_up_with_retries(
         self,
@@ -2235,6 +2271,15 @@ def build_bankr_llm_purchase_service_from_env(
                 or "5"
             )
         )
+        topup_poll_attempts = int(
+            str(values.get("SIGN402_BANKR_TOPUP_POLL_ATTEMPTS") or "9")
+        )
+        topup_poll_interval_seconds = float(
+            str(
+                values.get("SIGN402_BANKR_TOPUP_POLL_INTERVAL_SECONDS")
+                or "10"
+            )
+        )
     except ValueError as exc:
         raise BankrLlmError(
             "invalid_configuration",
@@ -2250,6 +2295,9 @@ def build_bankr_llm_purchase_service_from_env(
         or topup_retry_delay_seconds < 0
         or not math.isfinite(singit_approval_buffer_percent)
         or not 0 <= singit_approval_buffer_percent <= 100
+        or topup_poll_attempts < 0
+        or not math.isfinite(topup_poll_interval_seconds)
+        or topup_poll_interval_seconds < 0
     ):
         raise BankrLlmError(
             "invalid_configuration",
@@ -2307,6 +2355,8 @@ def build_bankr_llm_purchase_service_from_env(
         topup_source_token=topup_source_token,
         topup_attempts=topup_attempts,
         topup_retry_delay_seconds=topup_retry_delay_seconds,
+        topup_poll_attempts=topup_poll_attempts,
+        topup_poll_interval_seconds=topup_poll_interval_seconds,
         singit_approval_buffer_percent=singit_approval_buffer_percent,
     )
 
