@@ -342,6 +342,35 @@ class PluginRegistrationTests(unittest.TestCase):
 
         self.assertIn(("balance", "user-access-token"), client.execute_tokens)
 
+    def test_last_purchase_command_uses_trusted_telegram_identity(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient(result="Code: SECRET-CODE")
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "/last_purchase",
+                user_id="1045618308",
+                username="AlpskyKnedlik",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        self.assertEqual(
+            gateway.adapters["telegram"].sent,
+            [("telegram-chat", "Code: SECRET-CODE")],
+        )
+        self.assertIn(("last-purchase", "user-access-token"), client.execute_tokens)
+
     def test_gateway_error_returns_only_safe_user_message(self):
         plugin = load_plugin()
         context = FakeContext()

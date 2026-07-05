@@ -309,6 +309,12 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
                 identity,
                 user_access_token=_user_access_token(client, identity),
             )
+        elif command == "last-purchase":
+            text = client.execute(
+                "last-purchase",
+                identity,
+                user_access_token=_user_access_token(client, identity),
+            )
         elif command in {"limits", "set-limits"}:
             parsed_limits = _parse_limit_args(command, args)
             if parsed_limits is None:
