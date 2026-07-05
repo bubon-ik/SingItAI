@@ -1155,11 +1155,13 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 payload = {**payload, "telegramUserId": user_id}
             result = self.server.bitrefill_wallet_purchase_runner(payload)
             if result.get("ok"):
-                self.server.event_store.write(_without_fulfillment_token(result))
+                redacted = _without_fulfillment_token(result)
                 if user_id:
-                    self.server.user_event_store.write(
-                        user_id, _without_fulfillment_token(result)
-                    )
+                    # Per-user purchase: keep it out of the public /events/latest
+                    # feed; only the token-gated /agent/last-purchase reads it.
+                    self.server.user_event_store.write(user_id, redacted)
+                else:
+                    self.server.event_store.write(redacted)
             self._send_json(result)
         except WalletApiAuthError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=401)

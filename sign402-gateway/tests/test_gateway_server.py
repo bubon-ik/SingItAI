@@ -3009,6 +3009,7 @@ class GatewayServerTests(unittest.TestCase):
         server = DummyServer()
         server.firefly_busy = False
         server.user_wallet_api_token = "wallet-token-secret-value"
+        server.event_store = Mock()
         server.user_event_store = Mock()
         server.user_wallet_service.resolve_telegram_user_id = Mock(
             return_value="1045618308"
@@ -3038,6 +3039,8 @@ class GatewayServerTests(unittest.TestCase):
             {"quoteId": "quote_wallet_1", "telegramUserId": "1045618308"}
         )
         server.user_event_store.write.assert_called_once()
+        # A per-user purchase must not leak into the public /events/latest store.
+        server.event_store.write.assert_not_called()
 
     def test_internal_fulfill_bitrefill_requires_service_secret(self):
         server = DummyServer()
