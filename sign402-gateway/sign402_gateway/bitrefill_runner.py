@@ -449,6 +449,7 @@ class WalletBitrefillPurchaseRunner:
             "ok": bool(bitrefill_result.get("ok", False)),
             "decision": "approved_and_fulfilled",
             "quoteId": quote_id,
+            "priceUsd": quote.get("priceUsd"),
             "paymentApprovalHash": payment_hash,
             "paymentCommitment": commitment,
             "fulfillmentToken": fulfillment_token,

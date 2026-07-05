@@ -3042,6 +3042,56 @@ class GatewayServerTests(unittest.TestCase):
         # A per-user purchase must not leak into the public /events/latest store.
         server.event_store.write.assert_not_called()
 
+    def test_quote_bitrefill_rejects_amount_over_spend_cap(self):
+        server = DummyServer()
+        server.user_wallet_api_token = "wallet-token-secret-value"
+        server.user_wallet_service.resolve_telegram_user_id = Mock(return_value="1045618308")
+        # $5.00 = 5_000_000 atomic USDC, far above the 0.01 USDC operator cap.
+        server.bitrefill_quote_service = Mock(
+            return_value={"ok": True, "priceUsd": "5.00", "quoteId": "q1"}
+        )
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/quote-bitrefill",
+                {"productId": "p", "packageId": "1", "telegramUserId": "1045618308"},
+                headers={
+                    "Authorization": "Bearer wallet-token-secret-value",
+                    "X-Sign402-User-Token": "user-token-1",
+                },
+                server=server,
+            )
+
+        response = self.response_text(handler)
+        self.assertIn("HTTP/1.0 400", response)
+        self.assertIn("cap", response.lower())
+
+    def test_buy_wallet_bitrefill_records_user_spend(self):
+        server = DummyServer()
+        server.firefly_busy = False
+        server.user_wallet_api_token = "wallet-token-secret-value"
+        server.user_event_store = Mock()
+        server.user_wallet_service.resolve_telegram_user_id = Mock(return_value="1045618308")
+        server.bitrefill_wallet_purchase_runner = Mock(
+            return_value={"ok": True, "quoteId": "q1", "priceUsd": "0.005", "txId": "0xTX"}
+        )
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/buy-wallet-bitrefill",
+                {"quoteId": "q1", "telegramUserId": "1045618308"},
+                headers={
+                    "Authorization": "Bearer wallet-token-secret-value",
+                    "X-Sign402-User-Token": "user-token-1",
+                },
+                server=server,
+            )
+
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(handler))
+        server.user_spend_limit_store.record_successful_spend.assert_called_once()
+        kwargs = server.user_spend_limit_store.record_successful_spend.call_args.kwargs
+        self.assertEqual(kwargs["amount_atomic"], 5000)  # 0.005 USDC
+
     def test_internal_fulfill_bitrefill_requires_service_secret(self):
         server = DummyServer()
         server.bitrefill_fulfillment_runner = Mock()

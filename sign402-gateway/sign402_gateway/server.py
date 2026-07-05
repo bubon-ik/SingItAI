@@ -1098,11 +1098,18 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
     def _handle_agent_quote_bitrefill(self) -> None:
         try:
             payload = self._read_json()
+            user_id = ""
             if str(payload.get("telegramUserId", "") or "").strip():
                 _require_wallet_api_token(self)
                 user_id = _authenticated_user_id(self, payload)
                 payload = {**payload, "telegramUserId": user_id}
             result = self.server.bitrefill_quote_service(payload)
+            if user_id and isinstance(result, dict) and result.get("priceUsd"):
+                _enforce_user_wallet_spend_limits(
+                    self.server,
+                    user_id,
+                    _bitrefill_spend_requirement(result["priceUsd"]),
+                )
             self._send_json(result)
         except WalletApiAuthError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=401)
@@ -1160,6 +1167,15 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                     # Per-user purchase: keep it out of the public /events/latest
                     # feed; only the token-gated /agent/last-purchase reads it.
                     self.server.user_event_store.write(user_id, redacted)
+                    if result.get("priceUsd"):
+                        _record_user_wallet_spend(
+                            self.server,
+                            user_id,
+                            {"id": "bitrefill"},
+                            "bitrefill",
+                            _bitrefill_spend_requirement(result["priceUsd"]),
+                            result,
+                        )
                 else:
                     self.server.event_store.write(redacted)
             self._send_json(result)
@@ -4499,6 +4515,20 @@ def _record_user_wallet_spend(
         tool_id=str(tool.get("id") or event.get("toolId") or ""),
         resource_url=resource_url,
     )
+
+
+def _bitrefill_spend_requirement(price_usd: Any) -> dict[str, Any]:
+    """Represent a Bitrefill purchase's USD value as a USDC spend requirement.
+
+    Spending limits are denominated in USD (6-decimal atomic), so a Bitrefill
+    order is capped by its USD price regardless of the token actually debited.
+    """
+    amount_atomic = int((Decimal(str(price_usd)) * Decimal(1_000_000)).to_integral_value())
+    return {
+        "amountAtomic": str(amount_atomic),
+        "asset": BASE_USDC_MAINNET,
+        "network": "base-mainnet",
+    }
 
 
 def _validate_base_usdc_x402_requirement(requirement: Any) -> None:
