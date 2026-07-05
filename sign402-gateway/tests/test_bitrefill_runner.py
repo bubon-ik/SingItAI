@@ -478,6 +478,7 @@ class BitrefillRunnerTests(unittest.TestCase):
             self.assertEqual(result["walletCheckout"]["paymentApprovalHash"], expected_hash)
             self.assertEqual(result["walletCheckout"]["userFunding"]["fromWallet"], "0xAc4aCb03cAdaFE1d68262cf94cD5E8B56d9bf45C")
             self.assertIn("Paid from 0xAc4a...f45C", result["telegramText"])
+            self.assertIn("Use /last_purchase to reveal your code", result["telegramText"])
             self.assertNotIn("bankr", result)
             self.assertEqual(len(funding.calls), 1)
             self.assertEqual(len(user_funding.calls), 1)
@@ -928,7 +929,7 @@ class BitrefillRunnerTests(unittest.TestCase):
             self.assertEqual(result["redemption"]["value"]["code"], "SECRET-CODE")
             self.assertEqual(
                 result["telegramText"],
-                "✅ Test Gift Card Code $25 is ready. Your code is ready.",
+                "✅ Test Gift Card Code $25 is ready.\nCode: SECRET-CODE",
             )
 
     def test_order_lookup_requires_fulfillment_token_when_no_recipient_stored(self):

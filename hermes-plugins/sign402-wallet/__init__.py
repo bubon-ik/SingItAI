@@ -53,6 +53,7 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "start", "description": "Set up your Sign402 wallet"},
     {"command": "wallet", "description": "Show your Base wallet"},
     {"command": "balance", "description": "Show wallet balances"},
+    {"command": "last_purchase", "description": "Show your latest purchase"},
     {"command": "limits", "description": "Show or set spending limits"},
     {"command": "connect_imessage", "description": "Link iMessage approvals"},
     {"command": "bitrefill", "description": "Buy Bitrefill with SINGIT"},
@@ -60,6 +61,7 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
 _COMMANDS = {
     "wallet": ("create-wallet", "Show your Base agent wallet"),
     "balance": ("balance", "Show your managed Base wallet balance"),
+    "last-purchase": ("last-purchase", "Show your latest Sign402 purchase"),
 }
 _IMESSAGE_COMMANDS = {
     "connect-imessage": (
@@ -757,6 +759,7 @@ def _telegram_public_command(event, source) -> str | None:
         "start",
         "wallet",
         "balance",
+        "last-purchase",
         "limits",
         "set-limits",
         "connect-imessage",

@@ -688,6 +688,13 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                     status=404,
                 )
                 return
+            bitrefill_response = _last_bitrefill_purchase_response(
+                self.server,
+                event,
+            )
+            if bitrefill_response is not None:
+                self._send_json(bitrefill_response)
+                return
             telegram_text = event.get("telegramText")
             if not isinstance(telegram_text, str) or not telegram_text.strip():
                 self._send_json(
@@ -1166,7 +1173,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 if user_id:
                     # Per-user purchase: keep it out of the public /events/latest
                     # feed; only the token-gated /agent/last-purchase reads it.
-                    self.server.user_event_store.write(user_id, redacted)
+                    self.server.user_event_store.write(user_id, result)
                     if result.get("priceUsd"):
                         _record_user_wallet_spend(
                             self.server,
@@ -4809,6 +4816,40 @@ def _without_fulfillment_token(result: dict[str, Any]) -> dict[str, Any]:
     is served back over an open-CORS GET endpoint.
     """
     return {key: value for key, value in result.items() if key != "fulfillmentToken"}
+
+
+def _last_bitrefill_purchase_response(
+    server: Any,
+    event: dict[str, Any],
+) -> dict[str, Any] | None:
+    quote_id = str(event.get("quoteId", "") or "").strip()
+    fulfillment_token = str(event.get("fulfillmentToken", "") or "").strip()
+    if not quote_id or not fulfillment_token or "bitrefill" not in event:
+        return None
+
+    order = server.bitrefill_order_lookup(
+        quote_id,
+        include_redemption=True,
+        fulfillment_token=fulfillment_token,
+    )
+    telegram_text = order.get("telegramText")
+    if not isinstance(telegram_text, str) or not telegram_text.strip():
+        product_name = str(
+            order.get("productName")
+            or event.get("productName")
+            or "Your Bitrefill order"
+        )
+        telegram_text = (
+            f"{product_name} is still processing. Try /last_purchase again in a minute."
+        )
+    return {
+        "ok": True,
+        "telegramText": telegram_text.strip(),
+        "quoteId": quote_id,
+        "orderId": order.get("orderId"),
+        "state": order.get("state"),
+        "status": order.get("status"),
+    }
 
 
 if __name__ == "__main__":

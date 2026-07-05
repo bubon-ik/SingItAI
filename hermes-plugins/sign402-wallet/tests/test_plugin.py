@@ -225,6 +225,7 @@ class PluginRegistrationTests(unittest.TestCase):
                 "start",
                 "wallet",
                 "balance",
+                "last-purchase",
                 "limits",
                 "set-limits",
                 "connect-imessage",

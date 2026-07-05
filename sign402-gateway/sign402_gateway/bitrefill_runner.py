@@ -73,7 +73,10 @@ def lookup_bitrefill_order(
         redemption = provider_result.get("redemption")
         if redemption is not None:
             result["redemption"] = deepcopy(redemption)
-            result["telegramText"] = _bitrefill_delivery_telegram_text(quote)
+            result["telegramText"] = _bitrefill_delivery_telegram_text(
+                quote,
+                redemption=redemption,
+            )
     return result
 
 
@@ -623,15 +626,48 @@ def _bitrefill_purchase_telegram_text(
     return (
         f"✅ {product_name}{value_text} is ready. "
         f"The purchase was paid with SINGIT.{source_text} "
-        "Use get-bitrefill-order to reveal the code in this chat."
+        "Use /last_purchase to reveal your code."
     )
 
 
-def _bitrefill_delivery_telegram_text(quote: dict[str, Any]) -> str:
+def _bitrefill_delivery_telegram_text(
+    quote: dict[str, Any],
+    *,
+    redemption: Any | None = None,
+) -> str:
     product_name = str(quote.get("productName") or quote.get("productId") or "Your item")
     package_value = str(quote.get("packageValue") or "").strip()
     value_text = f" ${package_value}" if package_value else ""
+    detail = _redemption_detail_text(redemption)
+    if detail:
+        return f"✅ {product_name}{value_text} is ready.\n{detail}"
     return f"✅ {product_name}{value_text} is ready. Your code is ready."
+
+
+def _redemption_detail_text(redemption: Any | None) -> str:
+    if not isinstance(redemption, dict):
+        value = str(redemption or "").strip()
+        return f"Redemption: {value}" if value else ""
+    value = redemption.get("value")
+    if isinstance(value, dict):
+        for key, label in (
+            ("code", "Code"),
+            ("pin", "PIN"),
+            ("url", "Link"),
+            ("link", "Link"),
+            ("voucher", "Voucher"),
+        ):
+            item = str(value.get(key, "") or "").strip()
+            if item:
+                return f"{label}: {item}"
+        if value:
+            return "Redemption: " + json.dumps(value, ensure_ascii=False, sort_keys=True)
+        return ""
+    value_text = str(value or "").strip()
+    if value_text:
+        label = str(redemption.get("label", "") or "Redemption").strip()
+        return f"{label}: {value_text}"
+    return ""
 
 
 def _short_address(address: str) -> str:

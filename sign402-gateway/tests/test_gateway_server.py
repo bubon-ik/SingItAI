@@ -1532,6 +1532,48 @@ class GatewayServerTests(unittest.TestCase):
         # Ownership is enforced by the per-user key, not a payer heuristic.
         server.user_event_store.read.assert_called_once_with("1045618308")
 
+    def test_agent_last_purchase_reveals_users_bitrefill_code(self):
+        server = DummyServer()
+        server.user_event_store = Mock()
+        server.user_event_store.read.return_value = {
+            "ok": True,
+            "decision": "approved_and_fulfilled",
+            "quoteId": "quote_wallet_1",
+            "fulfillmentToken": "reveal_secret_1",
+            "bitrefill": {"orderId": "order_1"},
+            "telegramText": "✅ Bitrefill Gift Card (USD) $0.1 is ready. Use /last_purchase to reveal your code.",
+        }
+        server.bitrefill_order_lookup = Mock(
+            return_value={
+                "ok": True,
+                "quoteId": "quote_wallet_1",
+                "state": "DELIVERED",
+                "telegramText": "✅ Bitrefill Gift Card (USD) $0.1 is ready.\nCode: SECRET-CODE",
+            }
+        )
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/last-purchase",
+                {"telegramUserId": "1045618308"},
+                server=server,
+                headers=self.wallet_auth_headers(),
+            )
+
+        response = self.response_text(handler)
+        body = json.loads(response.split("\r\n\r\n", 1)[1])
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertEqual(
+            body["telegramText"],
+            "✅ Bitrefill Gift Card (USD) $0.1 is ready.\nCode: SECRET-CODE",
+        )
+        server.bitrefill_order_lookup.assert_called_once_with(
+            "quote_wallet_1",
+            include_redemption=True,
+            fulfillment_token="reveal_secret_1",
+        )
+
     def test_agent_last_purchase_isolated_per_user(self):
         server = DummyServer()
         server.user_event_store = Mock()
@@ -2984,7 +3026,11 @@ class GatewayServerTests(unittest.TestCase):
         server = DummyServer()
         server.firefly_busy = False
         server.bitrefill_wallet_purchase_runner = Mock(
-            return_value={"ok": True, "quoteId": "quote_wallet_1"}
+            return_value={
+                "ok": True,
+                "quoteId": "quote_wallet_1",
+                "fulfillmentToken": "reveal_secret_1",
+            }
         )
         server.bitrefill_purchase_runner = Mock()
 
@@ -3015,7 +3061,11 @@ class GatewayServerTests(unittest.TestCase):
             return_value="1045618308"
         )
         server.bitrefill_wallet_purchase_runner = Mock(
-            return_value={"ok": True, "quoteId": "quote_wallet_1"}
+            return_value={
+                "ok": True,
+                "quoteId": "quote_wallet_1",
+                "fulfillmentToken": "reveal_secret_1",
+            }
         )
 
         with patch("sys.stderr", io.StringIO()):
@@ -3039,6 +3089,8 @@ class GatewayServerTests(unittest.TestCase):
             {"quoteId": "quote_wallet_1", "telegramUserId": "1045618308"}
         )
         server.user_event_store.write.assert_called_once()
+        saved_user_event = server.user_event_store.write.call_args.args[1]
+        self.assertEqual(saved_user_event.get("fulfillmentToken"), "reveal_secret_1")
         # A per-user purchase must not leak into the public /events/latest store.
         server.event_store.write.assert_not_called()
 
