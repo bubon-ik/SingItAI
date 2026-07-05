@@ -455,6 +455,7 @@ class BitrefillRunnerTests(unittest.TestCase):
                 approval_client=approval,
                 fulfillment_runner=fulfillment,
                 user_funding_runner=user_funding,
+                source_wallet_provider=lambda user_id: "0xAc4aCb03cAdaFE1d68262cf94cD5E8B56d9bf45C",
                 now_provider=lambda: 1_719_000_001,
                 fulfillment_token_provider=lambda: "wallet_fulfill_secret_1",
             )
@@ -491,6 +492,15 @@ class BitrefillRunnerTests(unittest.TestCase):
             self.assertEqual(record["metadata"]["walletCheckout"]["userFunding"]["transfer"]["txId"], "0xUSERTRANSFER")
             self.assertNotIn("wallet_fulfill_secret_1", str(record["metadata"]))
             self.assertEqual(approval.call_args.kwargs["telegram_user_id"], "1045618308")
+            context_lines = approval.call_args.kwargs["context_lines"]
+            self.assertIn("Action: BUY BITREFILL", context_lines)
+            self.assertIn("Product: Test Gift Card Link", context_lines)
+            self.assertIn("Cost: 1 USD", context_lines)
+            self.assertIn("Max spend: 105 SINGIT", context_lines)
+            self.assertIn("Paid from: 0xAc4a...f45C", context_lines)
+            self.assertIn("Expires: 2 minutes", context_lines)
+            self.assertIn("Spent: 105 SINGIT", result["telegramText"])
+            self.assertIn("Transfer tx: https://basescan.org/tx/0xUSERTRANSFER", result["telegramText"])
 
     def test_wallet_runner_rejects_unconfirmed_checkout_before_fulfillment(self):
         with tempfile.TemporaryDirectory() as tmp:

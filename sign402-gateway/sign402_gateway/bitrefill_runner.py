@@ -334,6 +334,7 @@ class WalletBitrefillPurchaseRunner:
         approval_client: Callable[..., dict[str, Any]],
         fulfillment_runner: Callable[[dict[str, Any]], dict[str, Any]],
         user_funding_runner: Callable[..., dict[str, Any]] | None = None,
+        source_wallet_provider: Callable[[str], str] | None = None,
         now_provider: Callable[[], int] = now_epoch,
         fulfillment_token_provider: Callable[[], str] = lambda: secrets.token_urlsafe(32),
     ):
@@ -341,6 +342,7 @@ class WalletBitrefillPurchaseRunner:
         self.approval_client = approval_client
         self.fulfillment_runner = fulfillment_runner
         self.user_funding_runner = user_funding_runner
+        self.source_wallet_provider = source_wallet_provider
         self.now_provider = now_provider
         self.fulfillment_token_provider = fulfillment_token_provider
 
@@ -366,14 +368,17 @@ class WalletBitrefillPurchaseRunner:
         commitment = build_purchase_commitment(quote, recipient=recipient)
         payment_hash = hash_purchase_commitment(commitment)
         telegram_user_id = str(payload.get("telegramUserId", "") or "").strip()
+        source_wallet = ""
+        if telegram_user_id and self.source_wallet_provider is not None:
+            source_wallet = str(self.source_wallet_provider(telegram_user_id) or "").strip()
         approval = self.approval_client(
             payment_hash,
             telegram_user_id=telegram_user_id or None,
-            context_lines=[
-                "Action: BUY BITREFILL",
-                f"Product: {str(quote.get('productName', quote.get('productId', '')))}"[:64],
-                f"Cost: max {quote['singitAmount']} SINGIT"[:64],
-            ],
+            context_lines=_bitrefill_approval_context_lines(
+                quote,
+                source_wallet=source_wallet,
+                now_epoch_value=self.now_provider(),
+            ),
         )
         if not approval.get("approved"):
             self.store.advance_state(
@@ -463,6 +468,13 @@ class WalletBitrefillPurchaseRunner:
                 source_wallet=str(
                     wallet_checkout.get("userFunding", {}).get("fromWallet", "")
                     if isinstance(wallet_checkout.get("userFunding"), dict)
+                    else ""
+                ),
+                singit_spent=str(quote.get("singitAmount", "")),
+                transfer_tx_id=str(
+                    wallet_checkout.get("userFunding", {}).get("transfer", {}).get("txId", "")
+                    if isinstance(wallet_checkout.get("userFunding"), dict)
+                    and isinstance(wallet_checkout.get("userFunding", {}).get("transfer"), dict)
                     else ""
                 ),
             ),
@@ -618,16 +630,43 @@ def _bitrefill_purchase_telegram_text(
     quote: dict[str, Any],
     *,
     source_wallet: str = "",
+    singit_spent: str = "",
+    transfer_tx_id: str = "",
 ) -> str:
     product_name = str(quote.get("productName") or quote.get("productId") or "Your item")
     package_value = str(quote.get("packageValue") or "").strip()
     value_text = f" ${package_value}" if package_value else ""
     source_text = f" Paid from {_short_address(source_wallet)}." if source_wallet else ""
+    spent_text = f"\nSpent: {_format_amount(singit_spent)} SINGIT" if singit_spent else ""
+    tx_url = _base_tx_url(transfer_tx_id)
+    tx_text = f"\nTransfer tx: {tx_url}" if tx_url else ""
     return (
         f"✅ {product_name}{value_text} is ready. "
         f"The purchase was paid with SINGIT.{source_text} "
         "Use /last_purchase to reveal your code."
+        f"{spent_text}"
+        f"{tx_text}"
     )
+
+
+def _bitrefill_approval_context_lines(
+    quote: dict[str, Any],
+    *,
+    source_wallet: str = "",
+    now_epoch_value: int,
+) -> list[str]:
+    expires_in = max(0, int(quote.get("expiresAtEpoch", now_epoch_value)) - int(now_epoch_value))
+    expires_minutes = max(1, (expires_in + 59) // 60)
+    lines = [
+        "Action: BUY BITREFILL",
+        f"Product: {str(quote.get('productName', quote.get('productId', '')))}",
+        f"Cost: {_format_amount(str(quote.get('priceUsd', '')))} USD",
+        f"Max spend: {_format_amount(str(quote.get('singitAmount', '')))} SINGIT",
+    ]
+    if source_wallet:
+        lines.append(f"Paid from: {_short_address(source_wallet)}")
+    lines.append(f"Expires: {expires_minutes} minute{'s' if expires_minutes != 1 else ''}")
+    return [line[:80] for line in lines if line.strip()]
 
 
 def _bitrefill_delivery_telegram_text(
@@ -675,3 +714,23 @@ def _short_address(address: str) -> str:
     if len(value) <= 12:
         return value
     return f"{value[:6]}...{value[-4:]}"
+
+
+def _format_amount(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "." not in text:
+        return text
+    return text.rstrip("0").rstrip(".")
+
+
+def _base_tx_url(tx_id: str) -> str:
+    value = str(tx_id or "").strip()
+    if not value:
+        return ""
+    if value.startswith(("http://", "https://")):
+        return value
+    if value.startswith("0x"):
+        return f"https://basescan.org/tx/{value}"
+    return ""

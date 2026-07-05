@@ -1765,6 +1765,10 @@ def build_server(
         user_funding_runner=build_bitrefill_user_funding_runner_from_env(
             user_wallet_service=user_wallet_service,
         ),
+        source_wallet_provider=lambda user_id: _managed_wallet_address(
+            user_wallet_service,
+            user_id,
+        ),
     )
     x402_inspector = ExternalX402Inspector()
     bankr_llm_topup_inspector = BankrLlmCreditsTopUpInspector()
@@ -4850,6 +4854,14 @@ def _last_bitrefill_purchase_response(
         "state": order.get("state"),
         "status": order.get("status"),
     }
+
+
+def _managed_wallet_address(wallet_service: Any, telegram_user_id: str) -> str:
+    status = wallet_service.wallet_status(str(telegram_user_id or "").strip())
+    wallet = status.get("wallet") if isinstance(status, dict) else {}
+    if not isinstance(wallet, dict):
+        return ""
+    return str(wallet.get("address", "") or "").strip()
 
 
 if __name__ == "__main__":
