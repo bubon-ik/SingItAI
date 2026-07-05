@@ -2075,7 +2075,8 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
 
     def test_reconciliation_marks_complete_when_expected_credits_are_present(self):
         result = self.complete_purchase(reconcile_required=True)
-        self.bankr.credits_result = {"credits": "10.00", "currency": "USD"}
+        # Baseline at key creation was 10.00; the purchase adds another 10.
+        self.bankr.credits_result = {"credits": "20.00", "currency": "USD"}
 
         reconciled = self.service.reconcile(result["purchaseId"])
 
@@ -2085,6 +2086,38 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
         self.assertEqual(len(self.bankr.topups), 1)
         self.assertEqual(reconciled["apiKey"], API_KEY)
         self.assertNotIn("apiKey", self.service.resume(result["purchaseId"]))
+
+    def test_key_creation_snapshots_baseline_credits(self):
+        result = self.complete_purchase()
+
+        loaded = self.store.get_purchase(result["purchaseId"])
+        self.assertEqual(loaded["baselineCreditsUsd"], "10.00")
+
+    def test_reconciliation_ignores_preexisting_credits_balance(self):
+        result = self.complete_purchase(reconcile_required=True)
+        # Balance is unchanged since key creation, so the purchase was never
+        # credited even though the absolute balance covers the amount.
+        self.bankr.credits_result = {"credits": "10.00", "currency": "USD"}
+
+        reconciled = self.service.reconcile(result["purchaseId"])
+
+        self.assertEqual(reconciled["state"], "COMPLETE")
+        self.assertEqual(len(self.bankr.topups), 2)
+
+    def test_reconciliation_without_baseline_uses_absolute_balance(self):
+        result = self.complete_purchase(reconcile_required=True)
+        self.store.transition(
+            result["purchaseId"],
+            expected_state="RECONCILIATION_REQUIRED",
+            new_state="RECONCILIATION_REQUIRED",
+            fields={"baselineCreditsUsd": ""},
+        )
+        self.bankr.credits_result = {"credits": "10.00", "currency": "USD"}
+
+        reconciled = self.service.reconcile(result["purchaseId"])
+
+        self.assertEqual(reconciled["state"], "COMPLETE")
+        self.assertEqual(len(self.bankr.topups), 1)
 
     def test_topup_rejection_is_retried_with_backoff_before_reconciliation(self):
         self.bankr.topup_error = BankrLlmError(
@@ -2136,6 +2169,7 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
 
     def test_reconcile_rejects_purchase_owned_by_another_user(self):
         result = self.complete_purchase(reconcile_required=True)
+        credits_calls_before = len(self.bankr.credits_calls)
 
         with self.assertRaises(BankrLlmError) as raised:
             self.service.reconcile(
@@ -2144,7 +2178,7 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "purchase_not_found")
-        self.assertEqual(self.bankr.credits_calls, [])
+        self.assertEqual(len(self.bankr.credits_calls), credits_calls_before)
 
     def test_reconcile_accepts_matching_owner(self):
         result = self.complete_purchase(reconcile_required=True)

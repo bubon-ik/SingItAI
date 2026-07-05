@@ -93,6 +93,7 @@ class BankrLlmStore:
         "transferHash": "transfer_hash",
         "topupResultJson": "topup_result_json",
         "creditsJson": "credits_json",
+        "baselineCreditsUsd": "baseline_credits_usd",
         "errorCode": "error_code",
         "errorMessage": "error_message",
         "otpAttempts": "otp_attempts",
@@ -380,6 +381,7 @@ class BankrLlmStore:
                     transfer_hash TEXT NOT NULL DEFAULT '',
                     topup_result_json TEXT NOT NULL DEFAULT '',
                     credits_json TEXT NOT NULL DEFAULT '',
+                    baseline_credits_usd TEXT NOT NULL DEFAULT '',
                     error_code TEXT NOT NULL DEFAULT '',
                     error_message TEXT NOT NULL DEFAULT '',
                     otp_attempts TEXT NOT NULL DEFAULT '',
@@ -388,6 +390,17 @@ class BankrLlmStore:
                 )
                 """
             )
+            existing_columns = {
+                str(column["name"])
+                for column in db.execute(
+                    "PRAGMA table_info(bankr_llm_purchases)"
+                ).fetchall()
+            }
+            if "baseline_credits_usd" not in existing_columns:
+                db.execute(
+                    "ALTER TABLE bankr_llm_purchases "
+                    "ADD COLUMN baseline_credits_usd TEXT NOT NULL DEFAULT ''"
+                )
             db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS bankr_llm_users (
@@ -1228,6 +1241,9 @@ class BankrLlmPurchaseService:
                 purchase["purchaseId"],
                 expected_state="CREATING_BANKR_KEY",
                 new_state="BANKR_KEY_CREATED",
+                fields={
+                    "baselineCreditsUsd": self._baseline_credits_usd(api_key),
+                },
             )
             purchase = self.store.get_purchase(purchase["purchaseId"]) or purchase
             if not transitioned:
@@ -2027,6 +2043,20 @@ class BankrLlmPurchaseService:
             )
         return tx_hash
 
+    def _baseline_credits_usd(self, api_key: str) -> str:
+        """Snapshot the account balance before the purchase credits it.
+
+        A blank snapshot degrades reconciliation to the legacy absolute
+        balance check instead of blocking the purchase.
+        """
+        try:
+            balance = self._credits_usd_balance(
+                self.bankr.credits(api_key=api_key)
+            )
+        except Exception:
+            return ""
+        return format(balance, "f") if balance is not None else ""
+
     @staticmethod
     def _credits_cover_purchase(
         credits: Mapping[str, Any],
@@ -2039,6 +2069,16 @@ class BankrLlmPurchaseService:
             expected = Decimal(str(purchase.get("amountUsd") or ""))
         except (InvalidOperation, ValueError):
             return False
+        baseline_text = str(purchase.get("baselineCreditsUsd") or "").strip()
+        if baseline_text:
+            try:
+                baseline = Decimal(baseline_text)
+            except (InvalidOperation, ValueError):
+                baseline = None
+            if baseline is not None and baseline.is_finite() and baseline >= 0:
+                # The purchase is credited only when the balance grew by the
+                # purchased amount; a pre-existing balance must not satisfy it.
+                return balance >= baseline + expected
         return balance >= expected
 
     @staticmethod
@@ -2288,6 +2328,7 @@ def _purchase_row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
         "transfer_hash": "transferHash",
         "topup_result_json": "topupResultJson",
         "credits_json": "creditsJson",
+        "baseline_credits_usd": "baselineCreditsUsd",
         "error_code": "errorCode",
         "error_message": "errorMessage",
         "otp_attempts": "otpAttempts",
