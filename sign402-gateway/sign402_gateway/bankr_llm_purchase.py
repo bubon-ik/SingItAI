@@ -1,13 +1,16 @@
 import json
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
 
 DEFAULT_BANKR_API_URL = "https://api.bankr.bot"
 DEFAULT_BANKR_LLM_URL = "https://llm.bankr.bot"
 PRIVY_AUTH_URL = "https://auth.privy.io/api/v1"
+MAX_RESPONSE_BYTES = 64 * 1024
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 OTP_RE = re.compile(r"^\d{6}$")
@@ -32,6 +35,22 @@ def _key_capabilities() -> dict[str, Any]:
     }
 
 
+class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
+
+
+_DEFAULT_OPENER = urllib.request.build_opener(_RejectRedirectHandler())
+
+
 class BankrLlmError(RuntimeError):
     def __init__(self, code: str, user_message: str):
         super().__init__(user_message)
@@ -45,12 +64,12 @@ class BankrIdentityClient:
         *,
         api_url: str = DEFAULT_BANKR_API_URL,
         llm_url: str = DEFAULT_BANKR_LLM_URL,
-        opener: Callable[..., Any] = urllib.request.urlopen,
+        opener: Callable[..., Any] | None = None,
         timeout: float = 20.0,
     ):
-        self.api_url = str(api_url).rstrip("/")
-        self.llm_url = str(llm_url).rstrip("/")
-        self.opener = opener
+        self.api_url = self._validate_service_url(api_url)
+        self.llm_url = self._validate_service_url(llm_url)
+        self.opener = _DEFAULT_OPENER.open if opener is None else opener
         self.timeout = timeout
 
     def send_otp(self, email: str) -> None:
@@ -127,11 +146,11 @@ class BankrIdentityClient:
             url=f"{self.api_url}/api-keys",
             payload=key_payload,
             headers=self._identity_headers(identity_token),
-            error_scope="auth",
+            error_scope="key_creation",
         )
         api_key = key_response.get("apiKey")
         if not isinstance(api_key, str) or not api_key.startswith("bk_"):
-            self._invalid_response()
+            self._invalid_response("key_creation")
 
         return {
             "evmAddress": evm_address,
@@ -162,7 +181,7 @@ class BankrIdentityClient:
         chain: str = "base",
     ) -> dict[str, Any]:
         key = self._validate_api_key(api_key)
-        return self._request_json(
+        result = self._request_json(
             method="POST",
             url=f"{self.api_url}/llm/credits/topup",
             payload={
@@ -171,8 +190,10 @@ class BankrIdentityClient:
                 "sourceToken": str(source_token),
             },
             headers={"X-API-Key": key},
-            error_scope="llm",
+            error_scope="topup",
         )
+        self._validate_topup_result(result)
+        return result
 
     def credits(self, *, api_key: str) -> dict[str, Any]:
         key = self._validate_api_key(api_key)
@@ -223,30 +244,45 @@ class BankrIdentityClient:
         )
 
         response = None
+        http_status = None
+        transport_failed = False
         try:
             response = self.opener(request, timeout=self.timeout)
-            raw_body = response.read()
+            raw_body = response.read(MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as exc:
+            http_status = exc.code
             self._close_quietly(exc)
-            self._raise_http_error(exc.code, error_scope)
         except Exception:
-            self._raise_unavailable(error_scope)
+            transport_failed = True
         finally:
             if response is not None:
                 self._close_quietly(response)
 
+        if http_status is not None:
+            self._raise_http_error(http_status, error_scope)
+        if transport_failed:
+            self._raise_unavailable(error_scope)
+        if (
+            isinstance(raw_body, (bytes, str))
+            and len(raw_body) > MAX_RESPONSE_BYTES
+        ):
+            self._invalid_response(error_scope)
+
+        parse_failed = False
         try:
             if isinstance(raw_body, bytes):
                 body = raw_body.decode("utf-8")
             elif isinstance(raw_body, str):
                 body = raw_body
             else:
-                self._invalid_response()
+                body = ""
+                parse_failed = True
             parsed = json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError):
-            self._invalid_response()
-        if not isinstance(parsed, dict):
-            self._invalid_response()
+            parsed = None
+            parse_failed = True
+        if parse_failed or not isinstance(parsed, dict):
+            self._invalid_response(error_scope)
         return parsed
 
     def _normalize_key_metadata(
@@ -255,22 +291,27 @@ class BankrIdentityClient:
         *,
         key_name: str,
     ) -> dict[str, Any]:
-        capabilities = _key_capabilities()
-        for field, expected in capabilities.items():
+        requested_capabilities = _key_capabilities()
+        if key_response.get("llmGatewayEnabled") is not True:
+            self._invalid_response("key_creation")
+        for field, expected in requested_capabilities.items():
+            if field == "llmGatewayEnabled":
+                continue
             if field in key_response and key_response[field] != expected:
-                self._invalid_response()
+                self._invalid_response("key_creation")
 
         name = key_response.get("name", key_name)
         if not isinstance(name, str) or not name:
-            self._invalid_response()
+            self._invalid_response("key_creation")
         metadata: dict[str, Any] = {}
         key_id = key_response.get("id")
         if key_id is not None:
             if not isinstance(key_id, str) or not key_id:
-                self._invalid_response()
+                self._invalid_response("key_creation")
             metadata["id"] = key_id
         metadata["name"] = name
-        metadata.update(capabilities)
+        metadata["llmGatewayEnabled"] = True
+        metadata["requestedCapabilities"] = requested_capabilities
         return metadata
 
     @staticmethod
@@ -294,6 +335,60 @@ class BankrIdentityClient:
         return value
 
     @staticmethod
+    def _validate_service_url(url: str) -> str:
+        value = str(url).rstrip("/")
+        parse_failed = False
+        try:
+            parsed = urllib.parse.urlsplit(value)
+        except ValueError:
+            parsed = None
+            parse_failed = True
+        if (
+            parse_failed
+            or parsed is None
+            or parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise BankrLlmError(
+                "invalid_configuration",
+                "Bankr service URLs must use HTTPS.",
+            )
+        return value
+
+    @staticmethod
+    def _validate_topup_result(result: dict[str, Any]) -> None:
+        if result.get("success") is not True:
+            BankrIdentityClient._invalid_response("topup")
+        credits = result.get("credits")
+        if isinstance(credits, dict):
+            balance = credits.get("balanceUsd")
+            if BankrIdentityClient._is_valid_usd_balance(balance):
+                return
+        balance = result.get("balanceUsd")
+        if BankrIdentityClient._is_valid_usd_balance(balance):
+            return
+        BankrIdentityClient._invalid_response("topup")
+
+    @staticmethod
+    def _is_valid_usd_balance(value: Any) -> bool:
+        if isinstance(value, bool):
+            return False
+        if not isinstance(value, (str, int, float, Decimal)):
+            return False
+        text = str(value).strip()
+        if not text:
+            return False
+        try:
+            amount = Decimal(text)
+        except (InvalidOperation, ValueError):
+            return False
+        return amount.is_finite() and amount >= 0
+
+    @staticmethod
     def _privy_headers(app_id: str, client_id: str) -> dict[str, str]:
         return {
             "Privy-App-Id": app_id,
@@ -312,7 +407,9 @@ class BankrIdentityClient:
             pass
 
     @staticmethod
-    def _invalid_response() -> None:
+    def _invalid_response(error_scope: str | None = None) -> None:
+        if error_scope in {"key_creation", "topup"}:
+            BankrIdentityClient._raise_unavailable(error_scope)
         raise BankrLlmError(
             "invalid_response",
             "Bankr returned an invalid response. Please try again.",
@@ -330,10 +427,34 @@ class BankrIdentityClient:
                 "invalid_otp",
                 "That verification code is invalid or expired.",
             )
+        if error_scope == "key_creation":
+            if 400 <= status < 500:
+                raise BankrLlmError(
+                    "bankr_key_creation_rejected",
+                    "Bankr rejected the API key creation request.",
+                )
+            BankrIdentityClient._raise_unavailable(error_scope)
+        if error_scope == "topup":
+            if 400 <= status < 500:
+                raise BankrLlmError(
+                    "bankr_topup_rejected",
+                    "Bankr rejected the LLM credit top-up.",
+                )
+            BankrIdentityClient._raise_unavailable(error_scope)
         BankrIdentityClient._raise_unavailable(error_scope)
 
     @staticmethod
     def _raise_unavailable(error_scope: str) -> None:
+        if error_scope == "key_creation":
+            raise BankrLlmError(
+                "bankr_key_creation_ambiguous",
+                "Bankr API key creation result is unclear. Please check status before retrying.",
+            )
+        if error_scope == "topup":
+            raise BankrLlmError(
+                "bankr_topup_ambiguous",
+                "Bankr LLM credit top-up result is unclear. Do not retry automatically.",
+            )
         if error_scope == "llm":
             raise BankrLlmError(
                 "bankr_llm_unavailable",

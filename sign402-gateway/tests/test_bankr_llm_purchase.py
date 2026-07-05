@@ -1,6 +1,8 @@
 import io
 import json
+import traceback
 import unittest
+import urllib.request
 from urllib.error import HTTPError, URLError
 
 from sign402_gateway.bankr_llm_purchase import (
@@ -22,9 +24,11 @@ class FakeResponse:
             else json.dumps(payload).encode("utf-8")
         )
         self.closed = False
+        self.read_size = None
 
-    def read(self):
-        return self.body
+    def read(self, size=-1):
+        self.read_size = size
+        return self.body if size < 0 else self.body[:size]
 
     def close(self):
         self.closed = True
@@ -69,6 +73,55 @@ def request_json(request):
 
 
 class BankrIdentityClientTests(unittest.TestCase):
+    def test_rejects_non_https_service_urls_before_http(self):
+        for argument, value in (
+            ("api_url", "http://api.bankr.example"),
+            ("llm_url", "http://llm.bankr.example"),
+            ("api_url", "https:///missing-host"),
+        ):
+            with self.subTest(argument=argument, value=value):
+                with self.assertRaises(BankrLlmError) as raised:
+                    BankrIdentityClient(**{argument: value})
+                self.assertEqual(
+                    raised.exception.code,
+                    "invalid_configuration",
+                )
+                self.assertEqual(
+                    raised.exception.user_message,
+                    "Bankr service URLs must use HTTPS.",
+                )
+                self.assertIsNone(raised.exception.__context__)
+                self.assertIsNone(raised.exception.__cause__)
+
+    def test_default_transport_rejects_redirects_without_forwarding_headers(self):
+        client = BankrIdentityClient()
+        opener = getattr(client.opener, "__self__", None)
+
+        self.assertIsInstance(opener, urllib.request.OpenerDirector)
+        redirect_handler = next(
+            handler
+            for handler in opener.handlers
+            if type(handler).__name__ == "_RejectRedirectHandler"
+        )
+        request = urllib.request.Request(
+            "https://api.bankr.bot/api-keys",
+            headers={
+                "X-API-Key": API_KEY,
+                "Privy-Id-Token": IDENTITY_TOKEN,
+            },
+        )
+
+        redirected = redirect_handler.redirect_request(
+            request,
+            io.BytesIO(),
+            302,
+            "Found",
+            {"Location": "https://attacker.example/steal"},
+            "https://attacker.example/steal",
+        )
+
+        self.assertIsNone(redirected)
+
     def test_send_otp_uses_privy_configuration_and_closes_responses(self):
         config_response = json_response(
             {"privyAppId": "app-1", "privyClientId": "client-1"}
@@ -197,13 +250,16 @@ class BankrIdentityClientTests(unittest.TestCase):
                 "key": {
                     "id": "key-1",
                     "name": "Sign402-123",
-                    "walletApiEnabled": True,
-                    "agentApiEnabled": False,
-                    "readOnly": False,
-                    "tokenLaunchApiEnabled": False,
                     "llmGatewayEnabled": True,
-                    "allowedIps": [],
-                    "allowedRecipients": [],
+                    "requestedCapabilities": {
+                        "walletApiEnabled": True,
+                        "agentApiEnabled": False,
+                        "readOnly": False,
+                        "tokenLaunchApiEnabled": False,
+                        "llmGatewayEnabled": True,
+                        "allowedIps": [],
+                        "allowedRecipients": [],
+                    },
                 },
             },
         )
@@ -220,7 +276,13 @@ class BankrIdentityClientTests(unittest.TestCase):
                 }
             ),
             json_response({"success": True}),
-            json_response({"apiKey": API_KEY, "name": "Sign402-123"}),
+            json_response(
+                {
+                    "apiKey": API_KEY,
+                    "name": "Sign402-123",
+                    "llmGatewayEnabled": True,
+                }
+            ),
         )
         client = BankrIdentityClient(opener=opener)
 
@@ -256,7 +318,13 @@ class BankrIdentityClientTests(unittest.TestCase):
                             "hasAcceptedTerms": True,
                         }
                     ),
-                    json_response({"apiKey": API_KEY, "name": "Sign402-123"}),
+                    json_response(
+                        {
+                            "apiKey": API_KEY,
+                            "name": "Sign402-123",
+                            "llmGatewayEnabled": True,
+                        }
+                    ),
                 ]
                 * 2
             )
@@ -269,7 +337,9 @@ class BankrIdentityClientTests(unittest.TestCase):
             key_name="Sign402-123",
             accept_terms=False,
         )
-        first["key"]["allowedIps"].append("private-mutation")
+        first["key"]["requestedCapabilities"]["allowedIps"].append(
+            "private-mutation"
+        )
         try:
             client.verify_and_create_key(
                 email="user@example.com",
@@ -279,7 +349,7 @@ class BankrIdentityClientTests(unittest.TestCase):
             )
             self.assertEqual(request_json(opener.requests[7])["allowedIps"], [])
         finally:
-            first["key"]["allowedIps"].clear()
+            first["key"]["requestedCapabilities"]["allowedIps"].clear()
 
     def test_verify_requires_terms_without_creating_a_key(self):
         opener = QueueOpener(
@@ -355,6 +425,7 @@ class BankrIdentityClientTests(unittest.TestCase):
                     ),
                 ],
                 "invalid_response",
+                "Bankr returned an invalid response. Please try again.",
             ),
             (
                 [
@@ -375,11 +446,12 @@ class BankrIdentityClientTests(unittest.TestCase):
                         }
                     ),
                 ],
-                "invalid_response",
+                "bankr_key_creation_ambiguous",
+                "Bankr API key creation result is unclear. Please check status before retrying.",
             ),
         )
 
-        for responses, code in cases:
+        for responses, code, message in cases:
             with self.subTest(request_count=len(responses)):
                 client = BankrIdentityClient(opener=QueueOpener(*responses))
                 with self.assertRaises(BankrLlmError) as raised:
@@ -390,14 +462,77 @@ class BankrIdentityClientTests(unittest.TestCase):
                         accept_terms=False,
                     )
                 self.assertEqual(raised.exception.code, code)
-                self.assertEqual(
-                    raised.exception.user_message,
-                    "Bankr returned an invalid response. Please try again.",
-                )
+                self.assertEqual(raised.exception.user_message, message)
                 error_text = str(raised.exception)
                 self.assertNotIn("123456", error_text)
                 self.assertNotIn(IDENTITY_TOKEN, error_text)
                 self.assertNotIn("private-invalid", error_text)
+
+    def test_rejects_key_response_without_confirmed_llm_gateway(self):
+        responses = [
+            json_response({"privyAppId": "app-1", "privyClientId": "client-1"}),
+            json_response({"identity_token": IDENTITY_TOKEN}),
+            json_response(
+                {
+                    "evmAddress": EVM_ADDRESS,
+                    "hasAcceptedTerms": True,
+                }
+            ),
+            json_response(
+                {
+                    "apiKey": API_KEY,
+                    "name": "Sign402-123",
+                }
+            ),
+        ]
+        client = BankrIdentityClient(opener=QueueOpener(*responses))
+
+        with self.assertRaises(BankrLlmError) as raised:
+            client.verify_and_create_key(
+                email="user@example.com",
+                code="123456",
+                key_name="Sign402-123",
+                accept_terms=False,
+            )
+
+        self.assertEqual(raised.exception.code, "bankr_key_creation_ambiguous")
+        self.assertEqual(
+            raised.exception.user_message,
+            "Bankr API key creation result is unclear. Please check status before retrying.",
+        )
+        self.assertNotIn(API_KEY, str(raised.exception))
+
+    def test_key_creation_transport_error_is_ambiguous_and_redacted(self):
+        upstream_secret = f"private failure for {IDENTITY_TOKEN}"
+        responses = [
+            json_response({"privyAppId": "app-1", "privyClientId": "client-1"}),
+            json_response({"identity_token": IDENTITY_TOKEN}),
+            json_response(
+                {
+                    "evmAddress": EVM_ADDRESS,
+                    "hasAcceptedTerms": True,
+                }
+            ),
+            URLError(upstream_secret),
+        ]
+        client = BankrIdentityClient(opener=QueueOpener(*responses))
+
+        with self.assertRaises(BankrLlmError) as raised:
+            client.verify_and_create_key(
+                email="user@example.com",
+                code="123456",
+                key_name="Sign402-123",
+                accept_terms=False,
+            )
+
+        rendered = "".join(traceback.format_exception(raised.exception))
+        self.assertEqual(raised.exception.code, "bankr_key_creation_ambiguous")
+        self.assertEqual(
+            raised.exception.user_message,
+            "Bankr API key creation result is unclear. Please check status before retrying.",
+        )
+        self.assertNotIn(upstream_secret, rendered)
+        self.assertNotIn(IDENTITY_TOKEN, rendered)
 
     def test_rate_limit_error_is_stable_redacted_and_closed(self):
         error = http_error(429, {"secret": "private-upstream-body"})
@@ -413,6 +548,8 @@ class BankrIdentityClientTests(unittest.TestCase):
         )
         self.assertNotIn("private-upstream-body", str(raised.exception))
         self.assertTrue(error.tracked_body.closed)
+        self.assertIsNone(raised.exception.__context__)
+        self.assertIsNone(raised.exception.__cause__)
 
     def test_invalid_otp_http_error_is_stable_redacted_and_closed(self):
         error = http_error(
@@ -447,6 +584,60 @@ class BankrIdentityClientTests(unittest.TestCase):
         self.assertNotIn(IDENTITY_TOKEN, error_text)
         self.assertNotIn(API_KEY, error_text)
         self.assertTrue(error.tracked_body.closed)
+
+    def test_transport_error_traceback_discards_sensitive_exception(self):
+        upstream_secret = f"connection failed for {API_KEY}"
+        client = BankrIdentityClient(
+            opener=QueueOpener(URLError(upstream_secret))
+        )
+
+        with self.assertRaises(BankrLlmError) as raised:
+            client.credits(api_key=API_KEY)
+
+        rendered = "".join(traceback.format_exception(raised.exception))
+        self.assertNotIn(upstream_secret, rendered)
+        self.assertNotIn(API_KEY, rendered)
+        self.assertIsNone(raised.exception.__context__)
+        self.assertIsNone(raised.exception.__cause__)
+
+    def test_invalid_json_traceback_discards_sensitive_document(self):
+        upstream_secret = f"{IDENTITY_TOKEN}-{API_KEY}"
+        response = json_response(
+            b'{"private":"' + upstream_secret.encode("utf-8")
+        )
+        client = BankrIdentityClient(opener=QueueOpener(response))
+
+        with self.assertRaises(BankrLlmError) as raised:
+            client.send_otp("user@example.com")
+
+        rendered = "".join(traceback.format_exception(raised.exception))
+        self.assertEqual(raised.exception.code, "invalid_response")
+        self.assertNotIn(upstream_secret, rendered)
+        self.assertNotIn(IDENTITY_TOKEN, rendered)
+        self.assertNotIn(API_KEY, rendered)
+        self.assertIsNone(raised.exception.__context__)
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertTrue(response.closed)
+
+    def test_oversized_response_is_bounded_closed_and_redacted(self):
+        upstream_secret = f"{IDENTITY_TOKEN}-{API_KEY}"
+        response = json_response(
+            upstream_secret.encode("utf-8") + b"x" * (64 * 1024)
+        )
+        client = BankrIdentityClient(opener=QueueOpener(response))
+
+        with self.assertRaises(BankrLlmError) as raised:
+            client.send_otp("user@example.com")
+
+        rendered = "".join(traceback.format_exception(raised.exception))
+        self.assertEqual(raised.exception.code, "invalid_response")
+        self.assertEqual(response.read_size, 64 * 1024 + 1)
+        self.assertNotIn(upstream_secret, rendered)
+        self.assertNotIn(IDENTITY_TOKEN, rendered)
+        self.assertNotIn(API_KEY, rendered)
+        self.assertIsNone(raised.exception.__context__)
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertTrue(response.closed)
 
     def test_transport_error_is_stable_and_redacts_api_key(self):
         client = BankrIdentityClient(
@@ -501,6 +692,96 @@ class BankrIdentityClientTests(unittest.TestCase):
         )
         self.assertEqual(opener.timeouts, [9])
         self.assertTrue(response.closed)
+
+    def test_top_up_rejects_false_success_or_invalid_balance_as_ambiguous(self):
+        cases = (
+            {"success": False, "error": "private-no-credit"},
+            {"success": True},
+            {"success": True, "balanceUsd": False},
+            {"success": True, "balanceUsd": "not-a-balance"},
+            {"success": True, "balanceUsd": "NaN"},
+            {"success": True, "balanceUsd": "-1"},
+        )
+        for payload in cases:
+            with self.subTest(payload=payload):
+                client = BankrIdentityClient(
+                    opener=QueueOpener(json_response(payload))
+                )
+
+                with self.assertRaises(BankrLlmError) as raised:
+                    client.top_up(
+                        api_key=API_KEY,
+                        amount_usd="10.00",
+                        source_token="SINGIT",
+                    )
+
+                self.assertEqual(raised.exception.code, "bankr_topup_ambiguous")
+                self.assertEqual(
+                    raised.exception.user_message,
+                    "Bankr LLM credit top-up result is unclear. Do not retry automatically.",
+                )
+                self.assertNotIn("private-no-credit", str(raised.exception))
+
+    def test_top_up_accepts_decimal_balance(self):
+        for payload in (
+            {"success": True, "balanceUsd": "12.50"},
+            {"success": True, "credits": {"balanceUsd": 12.5}},
+        ):
+            with self.subTest(payload=payload):
+                response = json_response(payload)
+                client = BankrIdentityClient(opener=QueueOpener(response))
+
+                result = client.top_up(
+                    api_key=API_KEY,
+                    amount_usd="10.00",
+                    source_token="SINGIT",
+                )
+
+                self.assertEqual(result, payload)
+                self.assertTrue(response.closed)
+
+    def test_top_up_4xx_is_definitive_rejection(self):
+        error = http_error(400, {"error": f"bad key {API_KEY}"})
+        client = BankrIdentityClient(opener=QueueOpener(error))
+
+        with self.assertRaises(BankrLlmError) as raised:
+            client.top_up(
+                api_key=API_KEY,
+                amount_usd="10.00",
+                source_token="SINGIT",
+            )
+
+        self.assertEqual(raised.exception.code, "bankr_topup_rejected")
+        self.assertEqual(
+            raised.exception.user_message,
+            "Bankr rejected the LLM credit top-up.",
+        )
+        self.assertNotIn(API_KEY, str(raised.exception))
+        self.assertTrue(error.tracked_body.closed)
+
+    def test_top_up_5xx_or_transport_failure_is_ambiguous(self):
+        cases = (
+            http_error(503, {"error": f"maybe processed {API_KEY}"}),
+            URLError(f"timeout after transfer {API_KEY}"),
+        )
+        for failure in cases:
+            with self.subTest(failure=type(failure).__name__):
+                client = BankrIdentityClient(opener=QueueOpener(failure))
+
+                with self.assertRaises(BankrLlmError) as raised:
+                    client.top_up(
+                        api_key=API_KEY,
+                        amount_usd="10.00",
+                        source_token="SINGIT",
+                    )
+
+                rendered = "".join(traceback.format_exception(raised.exception))
+                self.assertEqual(raised.exception.code, "bankr_topup_ambiguous")
+                self.assertEqual(
+                    raised.exception.user_message,
+                    "Bankr LLM credit top-up result is unclear. Do not retry automatically.",
+                )
+                self.assertNotIn(API_KEY, rendered)
 
     def test_credits_gets_llm_gateway_balance_with_api_key(self):
         response = json_response(
