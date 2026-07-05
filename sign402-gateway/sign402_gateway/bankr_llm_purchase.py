@@ -1,14 +1,25 @@
+import hashlib
 import json
+import os
 import re
+import sqlite3
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
+from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable
+from pathlib import Path
+from typing import Any, Callable, Iterator, Mapping
+
+from cryptography.fernet import Fernet, InvalidToken
 
 
 DEFAULT_BANKR_API_URL = "https://api.bankr.bot"
 DEFAULT_BANKR_LLM_URL = "https://llm.bankr.bot"
+DEFAULT_BANKR_LLM_STORE_PATH = Path.home() / ".sign402" / "bankr-llm.db"
 PRIVY_AUTH_URL = "https://auth.privy.io/api/v1"
 MAX_RESPONSE_BYTES = 64 * 1024
 
@@ -56,6 +67,384 @@ class BankrLlmError(RuntimeError):
         super().__init__(user_message)
         self.code = code
         self.user_message = user_message
+
+
+class BankrLlmStore:
+    TERMINAL_STATES = frozenset(
+        {
+            "COMPLETE",
+            "COMPLETED",
+            "REJECTED",
+            "EXPIRED",
+            "FAILED_BEFORE_TRANSFER",
+            "RECONCILIATION_REQUIRED",
+        }
+    )
+    TRANSITION_FIELDS = {
+        "approvalRequestId": "approval_request_id",
+        "sourceWalletAddress": "source_wallet_address",
+        "singitAmountAtomic": "singit_amount_atomic",
+        "commitmentHash": "commitment_hash",
+        "transferHash": "transfer_hash",
+        "topupResultJson": "topup_result_json",
+        "creditsJson": "credits_json",
+        "errorCode": "error_code",
+        "errorMessage": "error_message",
+        "otpAttempts": "otp_attempts",
+    }
+
+    def __init__(self, path: Path, *, master_key: str):
+        self.path = Path(path)
+        self.lock = threading.Lock()
+        try:
+            self.fernet = Fernet(str(master_key or "").encode("ascii"))
+        except Exception as exc:
+            raise BankrLlmError(
+                "invalid_configuration",
+                "Bankr LLM store master key must be a valid Fernet key.",
+            ) from exc
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        _enforce_private_mode(self.path.parent, 0o700)
+        self._init_db()
+        _enforce_private_mode(self.path, 0o600)
+
+    def create_purchase(
+        self,
+        *,
+        telegram_user_id: str,
+        email: str,
+        amount_usd: str,
+        state: str,
+        expires_at: int,
+    ) -> dict[str, Any]:
+        now = int(time.time())
+        purchase_id = uuid.uuid4().hex
+        with self.lock, self._database() as db:
+            db.execute(
+                """
+                INSERT INTO bankr_llm_purchases (
+                    purchase_id, telegram_user_id, email, amount_usd, state,
+                    expires_at, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    purchase_id,
+                    str(telegram_user_id),
+                    str(email),
+                    str(amount_usd),
+                    str(state),
+                    int(expires_at),
+                    now,
+                    now,
+                ),
+            )
+            self._record_audit(
+                db,
+                purchase_id=purchase_id,
+                telegram_user_id=str(telegram_user_id),
+                event_type="purchase_created",
+            )
+        purchase = self.get_purchase(purchase_id)
+        if purchase is None:
+            raise RuntimeError("purchase insert failed")
+        return purchase
+
+    def get_active_purchase(
+        self,
+        telegram_user_id: str,
+    ) -> dict[str, Any] | None:
+        placeholders = ",".join("?" for _ in self.TERMINAL_STATES)
+        parameters = [str(telegram_user_id), *sorted(self.TERMINAL_STATES)]
+        with self.lock, self._database() as db:
+            row = db.execute(
+                f"""
+                SELECT *
+                FROM bankr_llm_purchases
+                WHERE telegram_user_id = ?
+                  AND state NOT IN ({placeholders})
+                ORDER BY created_at DESC, purchase_id DESC
+                LIMIT 1
+                """,
+                parameters,
+            ).fetchone()
+        return _purchase_row_to_dict(row)
+
+    def get_purchase(self, purchase_id: str) -> dict[str, Any] | None:
+        with self.lock, self._database() as db:
+            row = db.execute(
+                """
+                SELECT *
+                FROM bankr_llm_purchases
+                WHERE purchase_id = ?
+                """,
+                (str(purchase_id),),
+            ).fetchone()
+        return _purchase_row_to_dict(row)
+
+    def record_terms_acceptance(
+        self,
+        telegram_user_id: str,
+        *,
+        accepted_at: int,
+    ) -> None:
+        user_id = str(telegram_user_id)
+        now = int(time.time())
+        with self.lock, self._database() as db:
+            db.execute(
+                """
+                INSERT INTO bankr_llm_users (
+                    telegram_user_id, terms_accepted_at, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(telegram_user_id)
+                DO UPDATE SET
+                    terms_accepted_at = excluded.terms_accepted_at,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, int(accepted_at), now, now),
+            )
+            self._record_audit(
+                db,
+                purchase_id="",
+                telegram_user_id=user_id,
+                event_type="terms_accepted",
+            )
+
+    def has_accepted_terms(self, telegram_user_id: str) -> bool:
+        with self.lock, self._database() as db:
+            row = db.execute(
+                """
+                SELECT terms_accepted_at
+                FROM bankr_llm_users
+                WHERE telegram_user_id = ?
+                """,
+                (str(telegram_user_id),),
+            ).fetchone()
+        return row is not None and int(row["terms_accepted_at"]) > 0
+
+    def save_bankr_identity(
+        self,
+        purchase_id: str,
+        *,
+        bankr_wallet_address: str,
+        api_key: str,
+    ) -> None:
+        encrypted_key = self.fernet.encrypt(str(api_key).encode("utf-8")).decode(
+            "ascii"
+        )
+        fingerprint = _api_key_fingerprint(str(api_key))
+        now = int(time.time())
+        with self.lock, self._database() as db:
+            result = db.execute(
+                """
+                UPDATE bankr_llm_purchases
+                SET bankr_wallet_address = ?,
+                    encrypted_api_key = ?,
+                    api_key_fingerprint = ?,
+                    updated_at = ?
+                WHERE purchase_id = ?
+                """,
+                (
+                    str(bankr_wallet_address),
+                    encrypted_key,
+                    fingerprint,
+                    now,
+                    str(purchase_id),
+                ),
+            )
+            if result.rowcount != 1:
+                raise ValueError("purchase not found")
+            row = db.execute(
+                """
+                SELECT telegram_user_id
+                FROM bankr_llm_purchases
+                WHERE purchase_id = ?
+                """,
+                (str(purchase_id),),
+            ).fetchone()
+            self._record_audit(
+                db,
+                purchase_id=str(purchase_id),
+                telegram_user_id=str(row["telegram_user_id"]),
+                event_type="bankr_identity_saved",
+                metadata={"apiKeyFingerprint": fingerprint},
+            )
+
+    def decrypt_api_key(self, purchase: Mapping[str, Any]) -> str:
+        purchase_id = str(
+            purchase.get("purchaseId") or purchase.get("purchase_id") or ""
+        )
+        if not purchase_id:
+            raise ValueError("purchaseId is required")
+        with self.lock, self._database() as db:
+            row = db.execute(
+                """
+                SELECT encrypted_api_key
+                FROM bankr_llm_purchases
+                WHERE purchase_id = ?
+                """,
+                (purchase_id,),
+            ).fetchone()
+        if row is None or not row["encrypted_api_key"]:
+            raise ValueError("purchase has no Bankr API key")
+        try:
+            return self.fernet.decrypt(
+                str(row["encrypted_api_key"]).encode("ascii")
+            ).decode("utf-8")
+        except (InvalidToken, UnicodeDecodeError) as exc:
+            raise BankrLlmError(
+                "invalid_api_key",
+                "Stored Bankr API key could not be decrypted.",
+            ) from exc
+
+    def transition(
+        self,
+        purchase_id: str,
+        *,
+        expected_state: str,
+        new_state: str,
+        fields: Mapping[str, Any] | None = None,
+    ) -> bool:
+        updates = {
+            "state": str(new_state),
+            "updated_at": int(time.time()),
+        }
+        for field, value in (fields or {}).items():
+            column = self.TRANSITION_FIELDS.get(str(field))
+            if column is None:
+                raise ValueError(f"unsupported transition field: {field}")
+            updates[column] = str(value)
+
+        assignments = ", ".join(f"{column} = ?" for column in updates)
+        values = [updates[column] for column in updates]
+        values.extend([str(purchase_id), str(expected_state)])
+        with self.lock, self._database() as db:
+            result = db.execute(
+                f"""
+                UPDATE bankr_llm_purchases
+                SET {assignments}
+                WHERE purchase_id = ? AND state = ?
+                """,
+                values,
+            )
+            if result.rowcount != 1:
+                return False
+            row = db.execute(
+                """
+                SELECT telegram_user_id
+                FROM bankr_llm_purchases
+                WHERE purchase_id = ?
+                """,
+                (str(purchase_id),),
+            ).fetchone()
+            self._record_audit(
+                db,
+                purchase_id=str(purchase_id),
+                telegram_user_id=str(row["telegram_user_id"]),
+                event_type="state_transition",
+                metadata={
+                    "expectedState": str(expected_state),
+                    "newState": str(new_state),
+                    "fields": sorted(str(field) for field in (fields or {})),
+                },
+            )
+        return True
+
+    def _init_db(self) -> None:
+        with self._database() as db:
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bankr_llm_purchases (
+                    purchase_id TEXT PRIMARY KEY,
+                    telegram_user_id TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    amount_usd TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    bankr_wallet_address TEXT NOT NULL DEFAULT '',
+                    encrypted_api_key TEXT NOT NULL DEFAULT '',
+                    api_key_fingerprint TEXT NOT NULL DEFAULT '',
+                    approval_request_id TEXT NOT NULL DEFAULT '',
+                    source_wallet_address TEXT NOT NULL DEFAULT '',
+                    singit_amount_atomic TEXT NOT NULL DEFAULT '',
+                    commitment_hash TEXT NOT NULL DEFAULT '',
+                    transfer_hash TEXT NOT NULL DEFAULT '',
+                    topup_result_json TEXT NOT NULL DEFAULT '',
+                    credits_json TEXT NOT NULL DEFAULT '',
+                    error_code TEXT NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    otp_attempts TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+                """
+            )
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bankr_llm_users (
+                    telegram_user_id TEXT PRIMARY KEY,
+                    terms_accepted_at INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+                """
+            )
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bankr_llm_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    purchase_id TEXT NOT NULL DEFAULT '',
+                    telegram_user_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL
+                )
+                """
+            )
+
+    def _connect(self) -> sqlite3.Connection:
+        db = sqlite3.connect(str(self.path), timeout=5.0)
+        db.row_factory = sqlite3.Row
+        return db
+
+    @contextmanager
+    def _database(self) -> Iterator[sqlite3.Connection]:
+        db = self._connect()
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
+
+    @staticmethod
+    def _record_audit(
+        db: sqlite3.Connection,
+        *,
+        purchase_id: str,
+        telegram_user_id: str,
+        event_type: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
+        db.execute(
+            """
+            INSERT INTO bankr_llm_audit (
+                purchase_id, telegram_user_id, event_type, metadata_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                str(purchase_id or ""),
+                str(telegram_user_id),
+                str(event_type),
+                json.dumps(
+                    dict(metadata or {}),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                int(time.time()),
+            ),
+        )
 
 
 class BankrIdentityClient:
@@ -463,4 +852,58 @@ class BankrIdentityClient:
         raise BankrLlmError(
             "bankr_auth_unavailable",
             "Bankr authentication is unavailable. Please try again.",
+        )
+
+
+def _api_key_fingerprint(api_key: str) -> str:
+    return hashlib.sha256(str(api_key).encode("utf-8")).hexdigest()[:12]
+
+
+def _purchase_row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    fields = {
+        "purchase_id": "purchaseId",
+        "telegram_user_id": "telegramUserId",
+        "email": "email",
+        "amount_usd": "amountUsd",
+        "state": "state",
+        "expires_at": "expiresAt",
+        "bankr_wallet_address": "bankrWalletAddress",
+        "api_key_fingerprint": "apiKeyFingerprint",
+        "approval_request_id": "approvalRequestId",
+        "source_wallet_address": "sourceWalletAddress",
+        "singit_amount_atomic": "singitAmountAtomic",
+        "commitment_hash": "commitmentHash",
+        "transfer_hash": "transferHash",
+        "topup_result_json": "topupResultJson",
+        "credits_json": "creditsJson",
+        "error_code": "errorCode",
+        "error_message": "errorMessage",
+        "otp_attempts": "otpAttempts",
+        "created_at": "createdAt",
+        "updated_at": "updatedAt",
+    }
+    result: dict[str, Any] = {}
+    for column, key in fields.items():
+        if column in row.keys():
+            result[key] = row[column]
+    return result
+
+
+def _enforce_private_mode(path: Path, mode: int) -> None:
+    if os.name == "nt":
+        return
+    try:
+        path.chmod(mode)
+        actual = path.stat().st_mode & 0o777
+    except OSError as exc:
+        raise BankrLlmError(
+            "invalid_configuration",
+            "Bankr LLM store files must be private.",
+        ) from exc
+    if actual != mode:
+        raise BankrLlmError(
+            "invalid_configuration",
+            "Bankr LLM store files must be private.",
         )

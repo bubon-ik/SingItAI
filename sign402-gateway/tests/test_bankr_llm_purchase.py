@@ -1,13 +1,22 @@
+import hashlib
 import io
 import json
+import os
+import sqlite3
+import tempfile
 import traceback
 import unittest
 import urllib.request
+from pathlib import Path
+from unittest.mock import patch
 from urllib.error import HTTPError, URLError
+
+from cryptography.fernet import Fernet
 
 from sign402_gateway.bankr_llm_purchase import (
     BankrIdentityClient,
     BankrLlmError,
+    BankrLlmStore,
 )
 
 
@@ -827,6 +836,248 @@ class BankrIdentityClientTests(unittest.TestCase):
                 )
                 self.assertNotIn("private-key", str(raised.exception))
                 self.assertEqual(opener.requests, [])
+
+
+class BankrLlmStoreTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.key = Fernet.generate_key().decode("ascii")
+        self.path = Path(self.tempdir.name) / "nested" / "bankr-llm.db"
+        self.store = BankrLlmStore(self.path, master_key=self.key)
+
+    def tearDown(self):
+        self.tempdir.cleanup()
+
+    def test_api_key_is_encrypted_at_rest(self):
+        purchase = self.store.create_purchase(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+            state="AWAITING_OTP",
+            expires_at=2000,
+        )
+
+        self.store.save_bankr_identity(
+            purchase["purchaseId"],
+            bankr_wallet_address=EVM_ADDRESS,
+            api_key="bk_secret",
+        )
+
+        raw = self.path.read_bytes()
+        loaded = self.store.get_active_purchase("123")
+        self.assertNotIn(b"bk_secret", raw)
+        self.assertEqual(self.store.decrypt_api_key(loaded), "bk_secret")
+        self.assertEqual(
+            loaded["apiKeyFingerprint"],
+            hashlib.sha256(b"bk_secret").hexdigest()[:12],
+        )
+
+    def test_compare_and_set_rejects_duplicate_transfer_transition(self):
+        purchase = self.store.create_purchase(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+            state="AWAITING_IMESSAGE_APPROVAL",
+            expires_at=2000,
+        )
+
+        first_store = BankrLlmStore(self.path, master_key=self.key)
+        second_store = BankrLlmStore(self.path, master_key=self.key)
+
+        self.assertTrue(
+            first_store.transition(
+                purchase["purchaseId"],
+                expected_state="AWAITING_IMESSAGE_APPROVAL",
+                new_state="TRANSFERRING_SINGIT",
+            )
+        )
+        self.assertFalse(
+            second_store.transition(
+                purchase["purchaseId"],
+                expected_state="AWAITING_IMESSAGE_APPROVAL",
+                new_state="TRANSFERRING_SINGIT",
+            )
+        )
+        loaded = self.store.get_purchase(purchase["purchaseId"])
+        self.assertEqual(loaded["state"], "TRANSFERRING_SINGIT")
+        self.assertEqual(
+            self._audit_events(),
+            ["purchase_created", "state_transition"],
+        )
+
+    def test_store_path_permissions_are_private(self):
+        directory_mode = self.path.parent.stat().st_mode & 0o777
+        db_mode = self.path.stat().st_mode & 0o777
+
+        if os.name != "nt":
+            self.assertEqual(directory_mode, 0o700)
+            self.assertEqual(db_mode, 0o600)
+
+    def test_store_fails_closed_when_permissions_cannot_be_hardened(self):
+        if os.name == "nt":
+            self.skipTest("POSIX permission hardening is not meaningful on Windows")
+
+        with patch.object(Path, "chmod", side_effect=OSError("private fail")):
+            with self.assertRaises(BankrLlmError) as raised:
+                BankrLlmStore(
+                    Path(self.tempdir.name) / "locked" / "bankr-llm.db",
+                    master_key=self.key,
+                )
+
+        self.assertEqual(raised.exception.code, "invalid_configuration")
+        self.assertEqual(
+            raised.exception.user_message,
+            "Bankr LLM store files must be private.",
+        )
+
+    def test_terms_acceptance_is_recorded_per_user(self):
+        self.assertFalse(self.store.has_accepted_terms("123"))
+
+        self.store.record_terms_acceptance("123", accepted_at=1700000000)
+
+        self.assertTrue(self.store.has_accepted_terms("123"))
+        self.assertFalse(self.store.has_accepted_terms("456"))
+        self.assertEqual(self._audit_events(), ["terms_accepted"])
+
+    def test_get_active_purchase_returns_latest_non_terminal_purchase(self):
+        old = self.store.create_purchase(
+            telegram_user_id="123",
+            email="old@example.com",
+            amount_usd="5",
+            state="AWAITING_OTP",
+            expires_at=1000,
+        )
+        self.assertTrue(
+            self.store.transition(
+                old["purchaseId"],
+                expected_state="AWAITING_OTP",
+                new_state="COMPLETED",
+            )
+        )
+        active = self.store.create_purchase(
+            telegram_user_id="123",
+            email="new@example.com",
+            amount_usd="10",
+            state="AWAITING_TERMS",
+            expires_at=2000,
+        )
+
+        loaded = self.store.get_active_purchase("123")
+
+        self.assertEqual(loaded["purchaseId"], active["purchaseId"])
+        self.assertEqual(loaded["email"], "new@example.com")
+
+    def test_get_active_purchase_ignores_spec_terminal_states(self):
+        for state in (
+            "COMPLETE",
+            "REJECTED",
+            "EXPIRED",
+            "FAILED_BEFORE_TRANSFER",
+            "RECONCILIATION_REQUIRED",
+        ):
+            self.store.create_purchase(
+                telegram_user_id="123",
+                email=f"{state.lower()}@example.com",
+                amount_usd="10",
+                state=state,
+                expires_at=2000,
+            )
+
+        self.assertIsNone(self.store.get_active_purchase("123"))
+
+    def test_safe_purchase_dict_never_exposes_ciphertext(self):
+        purchase = self.store.create_purchase(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+            state="AWAITING_OTP",
+            expires_at=2000,
+        )
+        self.store.save_bankr_identity(
+            purchase["purchaseId"],
+            bankr_wallet_address=EVM_ADDRESS,
+            api_key="bk_secret",
+        )
+
+        loaded = self.store.get_purchase(purchase["purchaseId"])
+
+        self.assertNotIn("encryptedApiKey", loaded)
+        self.assertNotIn("encrypted_api_key", loaded)
+        self.assertNotIn("bk_secret", repr(loaded))
+        with self._connect() as db:
+            encrypted_key = db.execute(
+                """
+                SELECT encrypted_api_key
+                FROM bankr_llm_purchases
+                WHERE purchase_id = ?
+                """,
+                (purchase["purchaseId"],),
+            ).fetchone()["encrypted_api_key"]
+        self.assertIsInstance(encrypted_key, str)
+        self.assertNotEqual(encrypted_key, "bk_secret")
+
+    def test_transition_updates_only_whitelisted_fields(self):
+        purchase = self.store.create_purchase(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+            state="AWAITING_IMESSAGE_APPROVAL",
+            expires_at=2000,
+        )
+
+        self.assertTrue(
+            self.store.transition(
+                purchase["purchaseId"],
+                expected_state="AWAITING_IMESSAGE_APPROVAL",
+                new_state="TRANSFERRING_SINGIT",
+                fields={
+                    "approvalRequestId": "approval-1",
+                    "transferHash": "0xabc",
+                },
+            )
+        )
+        loaded = self.store.get_purchase(purchase["purchaseId"])
+
+        self.assertEqual(loaded["approvalRequestId"], "approval-1")
+        self.assertEqual(loaded["transferHash"], "0xabc")
+        with self.assertRaises(ValueError):
+            self.store.transition(
+                purchase["purchaseId"],
+                expected_state="TRANSFERRING_SINGIT",
+                new_state="COMPLETED",
+                fields={"encryptedApiKey": "plaintext"},
+            )
+
+    def test_failed_compare_and_set_does_not_write_audit(self):
+        purchase = self.store.create_purchase(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+            state="AWAITING_OTP",
+            expires_at=2000,
+        )
+
+        self.assertFalse(
+            self.store.transition(
+                purchase["purchaseId"],
+                expected_state="AWAITING_IMESSAGE_APPROVAL",
+                new_state="TRANSFERRING_SINGIT",
+            )
+        )
+
+        self.assertEqual(self._audit_events(), ["purchase_created"])
+
+    def _audit_events(self):
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT event_type FROM bankr_llm_audit ORDER BY id"
+            ).fetchall()
+        return [row["event_type"] for row in rows]
+
+    def _connect(self):
+        db = sqlite3.connect(str(self.path), timeout=5.0)
+        db.row_factory = sqlite3.Row
+        return db
 
 
 if __name__ == "__main__":
