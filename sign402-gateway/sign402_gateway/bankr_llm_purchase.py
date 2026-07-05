@@ -657,7 +657,8 @@ class BankrIdentityClient:
             method="POST",
             url=f"{self.api_url}/llm/credits/topup",
             payload={
-                "amountUsd": str(amount_usd),
+                # Bankr validates amountUsd as a JSON number, not a string.
+                "amountUsd": _usd_amount_number(amount_usd),
                 "chain": str(chain),
                 "sourceToken": str(source_token),
             },
@@ -2192,15 +2193,6 @@ def build_bankr_llm_purchase_service_from_env(
             "Bankr LLM timeout and OTP settings must be positive.",
         )
 
-    topup_source_token = str(
-        values.get("SIGN402_BANKR_TOPUP_SOURCE_TOKEN") or "SINGIT"
-    ).strip()
-    if not topup_source_token:
-        raise BankrLlmError(
-            "invalid_configuration",
-            "SIGN402_BANKR_TOPUP_SOURCE_TOKEN must not be blank.",
-        )
-
     singit_token_address = str(
         values.get("SIGN402_SINGIT_TOKEN_ADDRESS")
         or DEFAULT_SINGIT_TOKEN_ADDRESS
@@ -2209,6 +2201,16 @@ def build_bankr_llm_purchase_service_from_env(
         raise BankrLlmError(
             "invalid_configuration",
             "SIGN402_SINGIT_TOKEN_ADDRESS must be an EVM address.",
+        )
+
+    # Bankr requires sourceToken to be a token contract address, not a symbol.
+    topup_source_token = str(
+        values.get("SIGN402_BANKR_TOPUP_SOURCE_TOKEN") or singit_token_address
+    ).strip()
+    if not topup_source_token:
+        raise BankrLlmError(
+            "invalid_configuration",
+            "SIGN402_BANKR_TOPUP_SOURCE_TOKEN must not be blank.",
         )
 
     store_path = Path(
@@ -2243,6 +2245,24 @@ def build_bankr_llm_purchase_service_from_env(
         topup_attempts=topup_attempts,
         topup_retry_delay_seconds=topup_retry_delay_seconds,
     )
+
+
+def _usd_amount_number(amount_usd: str) -> int | float:
+    try:
+        amount = Decimal(str(amount_usd).strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise BankrLlmError(
+            "invalid_amount",
+            "Enter a valid USD amount.",
+        ) from exc
+    if not amount.is_finite() or amount <= 0:
+        raise BankrLlmError(
+            "invalid_amount",
+            "Enter a valid USD amount.",
+        )
+    if amount == amount.to_integral_value():
+        return int(amount)
+    return float(amount)
 
 
 def _api_key_fingerprint(api_key: str) -> str:

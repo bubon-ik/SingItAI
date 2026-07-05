@@ -748,7 +748,7 @@ class BankrIdentityClientTests(unittest.TestCase):
         self.assertEqual(
             request_json(request),
             {
-                "amountUsd": "10.00",
+                "amountUsd": 10,
                 "chain": "base",
                 "sourceToken": "0x2222222222222222222222222222222222222222",
             },
@@ -759,6 +759,40 @@ class BankrIdentityClientTests(unittest.TestCase):
         )
         self.assertEqual(opener.timeouts, [9])
         self.assertTrue(response.closed)
+
+    def test_top_up_sends_amount_usd_as_json_number(self):
+        for amount_text, expected in (("1", 1), ("10.00", 10), ("1.50", 1.5)):
+            with self.subTest(amount=amount_text):
+                response = json_response(
+                    {"success": True, "credits": {"balanceUsd": "12.50"}}
+                )
+                opener = QueueOpener(response)
+                client = BankrIdentityClient(opener=opener)
+
+                client.top_up(
+                    api_key=API_KEY,
+                    amount_usd=amount_text,
+                    source_token="0x2222222222222222222222222222222222222222",
+                )
+
+                sent = request_json(opener.requests[0])["amountUsd"]
+                self.assertEqual(sent, expected)
+                self.assertIsInstance(sent, type(expected))
+
+    def test_top_up_rejects_invalid_amount_before_http(self):
+        opener = QueueOpener()
+        client = BankrIdentityClient(opener=opener)
+
+        for bad_amount in ("", "NaN", "-1", "0", "ten"):
+            with self.subTest(amount=bad_amount):
+                with self.assertRaises(BankrLlmError) as raised:
+                    client.top_up(
+                        api_key=API_KEY,
+                        amount_usd=bad_amount,
+                        source_token="0x2222222222222222222222222222222222222222",
+                    )
+                self.assertEqual(raised.exception.code, "invalid_amount")
+        self.assertEqual(opener.requests, [])
 
     def test_top_up_rejects_false_success_or_invalid_balance_as_ambiguous(self):
         cases = (
@@ -1875,6 +1909,33 @@ class BankrLlmPurchaseFactoryTests(unittest.TestCase):
             self.assertIs(service.wallet_service, wallet)
             self.assertIs(service.pricer, pricer)
             self.assertIs(service.transfer_client, transfer)
+
+    def test_factory_defaults_topup_source_token_to_singit_address(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            service = build_bankr_llm_purchase_service_from_env(
+                env={
+                    "SIGN402_WALLET_MASTER_KEY": Fernet.generate_key().decode(
+                        "ascii"
+                    ),
+                    "SIGN402_BANKR_LLM_STORE_PATH": str(
+                        Path(tempdir) / "bankr-llm.db"
+                    ),
+                    "SIGN402_SINGIT_TOKEN_ADDRESS": (
+                        "0x3333333333333333333333333333333333333333"
+                    ),
+                },
+                wallet_service=FakeWalletServiceForPurchase(),
+                pricer=FakePricerForPurchase(),
+                approval_service=FakeApprovalServiceForPurchase(),
+                transfer_client=FakeTransferForPurchase(),
+                enforce_spend=lambda _user_id, _requirement: None,
+                record_spend=lambda _user_id, _purchase, _metadata: None,
+            )
+
+        self.assertEqual(
+            service.topup_source_token,
+            "0x3333333333333333333333333333333333333333",
+        )
 
     def test_factory_requires_master_key_and_pricer(self):
         dependencies = {
