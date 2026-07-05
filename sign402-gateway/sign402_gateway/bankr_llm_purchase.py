@@ -119,32 +119,47 @@ class BankrLlmStore:
     ) -> dict[str, Any]:
         now = int(time.time())
         purchase_id = uuid.uuid4().hex
+        existing_purchase: dict[str, Any] | None = None
         with self.lock, self._database() as db:
-            db.execute(
-                """
-                INSERT INTO bankr_llm_purchases (
-                    purchase_id, telegram_user_id, email, amount_usd, state,
-                    expires_at, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    purchase_id,
-                    str(telegram_user_id),
-                    str(email),
-                    str(amount_usd),
-                    str(state),
-                    int(expires_at),
-                    now,
-                    now,
-                ),
-            )
-            self._record_audit(
-                db,
-                purchase_id=purchase_id,
-                telegram_user_id=str(telegram_user_id),
-                event_type="purchase_created",
-            )
+            active = self._get_active_purchase_row(db, str(telegram_user_id))
+            if active is not None:
+                existing_purchase = _purchase_row_to_dict(active)
+            else:
+                try:
+                    db.execute(
+                        """
+                        INSERT INTO bankr_llm_purchases (
+                            purchase_id, telegram_user_id, email, amount_usd, state,
+                            expires_at, created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            purchase_id,
+                            str(telegram_user_id),
+                            str(email),
+                            str(amount_usd),
+                            str(state),
+                            int(expires_at),
+                            now,
+                            now,
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    active = self._get_active_purchase_row(db, str(telegram_user_id))
+                    if active is not None:
+                        existing_purchase = _purchase_row_to_dict(active)
+                    else:
+                        raise
+                else:
+                    self._record_audit(
+                        db,
+                        purchase_id=purchase_id,
+                        telegram_user_id=str(telegram_user_id),
+                        event_type="purchase_created",
+                    )
+        if existing_purchase is not None:
+            return existing_purchase
         purchase = self.get_purchase(purchase_id)
         if purchase is None:
             raise RuntimeError("purchase insert failed")
@@ -154,20 +169,8 @@ class BankrLlmStore:
         self,
         telegram_user_id: str,
     ) -> dict[str, Any] | None:
-        placeholders = ",".join("?" for _ in self.TERMINAL_STATES)
-        parameters = [str(telegram_user_id), *sorted(self.TERMINAL_STATES)]
         with self.lock, self._database() as db:
-            row = db.execute(
-                f"""
-                SELECT *
-                FROM bankr_llm_purchases
-                WHERE telegram_user_id = ?
-                  AND state NOT IN ({placeholders})
-                ORDER BY created_at DESC, purchase_id DESC
-                LIMIT 1
-                """,
-                parameters,
-            ).fetchone()
+            row = self._get_active_purchase_row(db, str(telegram_user_id))
         return _purchase_row_to_dict(row)
 
     def get_purchase(self, purchase_id: str) -> dict[str, Any] | None:
@@ -402,6 +405,81 @@ class BankrLlmStore:
                 )
                 """
             )
+            self._repair_duplicate_active_purchases(db)
+            terminal_states = ",".join(
+                f"'{state}'" for state in sorted(self.TERMINAL_STATES)
+            )
+            db.execute(
+                f"""
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    bankr_llm_one_active_purchase_per_user
+                ON bankr_llm_purchases(telegram_user_id)
+                WHERE state NOT IN ({terminal_states})
+                """
+            )
+
+    def _repair_duplicate_active_purchases(self, db: sqlite3.Connection) -> None:
+        placeholders = ",".join("?" for _ in self.TERMINAL_STATES)
+        terminal_parameters = sorted(self.TERMINAL_STATES)
+        users = db.execute(
+            f"""
+            SELECT telegram_user_id
+            FROM bankr_llm_purchases
+            WHERE state NOT IN ({placeholders})
+            GROUP BY telegram_user_id
+            HAVING COUNT(*) > 1
+            """,
+            terminal_parameters,
+        ).fetchall()
+        now = int(time.time())
+        for user in users:
+            rows = db.execute(
+                f"""
+                SELECT purchase_id
+                FROM bankr_llm_purchases
+                WHERE telegram_user_id = ?
+                  AND state NOT IN ({placeholders})
+                ORDER BY created_at DESC, purchase_id DESC
+                """,
+                [str(user["telegram_user_id"]), *terminal_parameters],
+            ).fetchall()
+            for row in rows[1:]:
+                db.execute(
+                    """
+                    UPDATE bankr_llm_purchases
+                    SET state = ?,
+                        error_code = ?,
+                        error_message = ?,
+                        updated_at = ?
+                    WHERE purchase_id = ?
+                    """,
+                    (
+                        "EXPIRED",
+                        "duplicate_active_purchase",
+                        "Superseded by a newer active purchase during startup repair.",
+                        now,
+                        str(row["purchase_id"]),
+                    ),
+                )
+
+    def _get_active_purchase_row(
+        self,
+        db: sqlite3.Connection,
+        telegram_user_id: str,
+    ) -> sqlite3.Row | None:
+        placeholders = ",".join("?" for _ in self.TERMINAL_STATES)
+        parameters = [str(telegram_user_id), *sorted(self.TERMINAL_STATES)]
+        return db.execute(
+            f"""
+            SELECT *
+            FROM bankr_llm_purchases
+            WHERE telegram_user_id = ?
+              AND state NOT IN ({placeholders})
+            ORDER BY created_at DESC, purchase_id DESC
+            LIMIT 1
+            """,
+            parameters,
+        ).fetchone()
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(str(self.path), timeout=5.0)
@@ -915,7 +993,7 @@ class BankrLlmPurchaseService:
             expires_at=int(self._now()) + self.otp_ttl_seconds,
         )
         if state == "AWAITING_OTP":
-            self.bankr.send_otp(email_value)
+            self.bankr.send_otp(str(purchase["email"]))
         return self._safe_purchase_response(purchase)
 
     def accept_terms(self, telegram_user_id: str) -> dict[str, Any]:
@@ -963,15 +1041,20 @@ class BankrLlmPurchaseService:
             return self._expire_purchase(purchase)
         if purchase["state"] == "AWAITING_TERMS":
             return self._safe_purchase_response(purchase)
-        if purchase["state"] != "AWAITING_OTP":
+        if purchase["state"] not in {"AWAITING_OTP", "BANKR_KEY_CREATED"}:
             return self._safe_purchase_response(purchase)
 
         wallet_status = self.wallet_service.wallet_status(user_id)
         if not wallet_status.get("ok"):
+            failure_state = (
+                "FAILED_BEFORE_TRANSFER"
+                if purchase["state"] == "AWAITING_OTP"
+                else purchase["state"]
+            )
             self.store.transition(
                 purchase["purchaseId"],
-                expected_state="AWAITING_OTP",
-                new_state="FAILED_BEFORE_TRANSFER",
+                expected_state=purchase["state"],
+                new_state=failure_state,
                 fields={
                     "errorCode": "wallet_unavailable",
                     "errorMessage": wallet_status.get(
@@ -984,31 +1067,71 @@ class BankrLlmPurchaseService:
             return self._safe_purchase_response(latest)
         source_wallet = self._wallet_address(wallet_status)
 
-        try:
-            identity = self.bankr.verify_and_create_key(
-                email=purchase["email"],
-                code=str(code),
-                key_name=f"Sign402-{purchase['purchaseId'][:8]}",
-                accept_terms=True,
-            )
-        except BankrLlmError as exc:
-            if exc.code == "invalid_otp":
-                return self._record_invalid_otp(purchase)
-            raise
-
-        bankr_wallet = self._require_evm_address(identity.get("evmAddress"))
-        api_key = str(identity.get("apiKey") or "")
-        if not api_key.startswith("bk_"):
+        saved_bankr_wallet = str(purchase.get("bankrWalletAddress") or "")
+        saved_key_fingerprint = str(purchase.get("apiKeyFingerprint") or "")
+        if saved_bankr_wallet and saved_key_fingerprint:
+            bankr_wallet = self._require_evm_address(saved_bankr_wallet)
+            if purchase["state"] == "AWAITING_OTP":
+                transitioned = self.store.transition(
+                    purchase["purchaseId"],
+                    expected_state="AWAITING_OTP",
+                    new_state="BANKR_KEY_CREATED",
+                )
+                purchase = self.store.get_purchase(purchase["purchaseId"]) or purchase
+                if not transitioned:
+                    return self._safe_purchase_response(purchase)
+        elif saved_bankr_wallet or saved_key_fingerprint:
             raise BankrLlmError(
                 "bankr_key_creation_ambiguous",
                 "Bankr API key creation result is unclear. Please check status before retrying.",
             )
-        self.store.save_bankr_identity(
-            purchase["purchaseId"],
-            bankr_wallet_address=bankr_wallet,
-            api_key=api_key,
-        )
-        purchase = self.store.get_purchase(purchase["purchaseId"]) or purchase
+        else:
+            transitioned = self.store.transition(
+                purchase["purchaseId"],
+                expected_state="AWAITING_OTP",
+                new_state="CREATING_BANKR_KEY",
+            )
+            purchase = self.store.get_purchase(purchase["purchaseId"]) or purchase
+            if not transitioned:
+                return self._safe_purchase_response(purchase)
+            try:
+                identity = self.bankr.verify_and_create_key(
+                    email=purchase["email"],
+                    code=str(code),
+                    key_name=f"Sign402-{purchase['purchaseId'][:8]}",
+                    accept_terms=True,
+                )
+            except BankrLlmError as exc:
+                if exc.code == "invalid_otp":
+                    return self._record_invalid_otp(
+                        purchase,
+                        expected_state="CREATING_BANKR_KEY",
+                    )
+                return self._mark_key_creation_uncertain(purchase, exc)
+
+            try:
+                bankr_wallet = self._require_evm_address(identity.get("evmAddress"))
+                api_key = str(identity.get("apiKey") or "")
+                if not api_key.startswith("bk_"):
+                    raise BankrLlmError(
+                        "bankr_key_creation_ambiguous",
+                        "Bankr API key creation result is unclear. Please check status before retrying.",
+                    )
+            except BankrLlmError as exc:
+                return self._mark_key_creation_uncertain(purchase, exc)
+            self.store.save_bankr_identity(
+                purchase["purchaseId"],
+                bankr_wallet_address=bankr_wallet,
+                api_key=api_key,
+            )
+            transitioned = self.store.transition(
+                purchase["purchaseId"],
+                expected_state="CREATING_BANKR_KEY",
+                new_state="BANKR_KEY_CREATED",
+            )
+            purchase = self.store.get_purchase(purchase["purchaseId"]) or purchase
+            if not transitioned:
+                return self._safe_purchase_response(purchase)
 
         pricing = self.pricer.price_for_usdc(purchase["amountUsd"])
         singit_atomic = str(pricing.get("requiredSingitAtomic") or "")
@@ -1039,12 +1162,14 @@ class BankrLlmPurchaseService:
         ).hexdigest()
         transitioned = self.store.transition(
             purchase["purchaseId"],
-            expected_state="AWAITING_OTP",
+            expected_state="BANKR_KEY_CREATED",
             new_state="AWAITING_IMESSAGE_APPROVAL",
             fields={
                 "sourceWalletAddress": source_wallet,
                 "singitAmountAtomic": singit_atomic,
                 "commitmentHash": commitment_hash,
+                "errorCode": "",
+                "errorMessage": "",
             },
         )
         purchase = self.store.get_purchase(purchase["purchaseId"]) or purchase
@@ -1108,12 +1233,34 @@ class BankrLlmPurchaseService:
         loaded = self.store.get_purchase(purchase["purchaseId"]) or dict(purchase)
         return self._safe_purchase_response(loaded)
 
-    def _record_invalid_otp(self, purchase: Mapping[str, Any]) -> dict[str, Any]:
+    def _mark_key_creation_uncertain(
+        self,
+        purchase: Mapping[str, Any],
+        error: BankrLlmError,
+    ) -> dict[str, Any]:
+        self.store.transition(
+            purchase["purchaseId"],
+            expected_state="CREATING_BANKR_KEY",
+            new_state="BANKR_KEY_CREATION_UNCERTAIN",
+            fields={
+                "errorCode": error.code,
+                "errorMessage": error.user_message,
+            },
+        )
+        loaded = self.store.get_purchase(purchase["purchaseId"]) or dict(purchase)
+        return self._safe_purchase_response(loaded)
+
+    def _record_invalid_otp(
+        self,
+        purchase: Mapping[str, Any],
+        *,
+        expected_state: str = "AWAITING_OTP",
+    ) -> dict[str, Any]:
         attempts = self._otp_attempts(purchase) + 1
         if attempts >= self.max_otp_attempts:
             self.store.transition(
                 purchase["purchaseId"],
-                expected_state="AWAITING_OTP",
+                expected_state=expected_state,
                 new_state="EXPIRED",
                 fields={
                     "otpAttempts": attempts,
@@ -1124,7 +1271,7 @@ class BankrLlmPurchaseService:
         else:
             self.store.transition(
                 purchase["purchaseId"],
-                expected_state="AWAITING_OTP",
+                expected_state=expected_state,
                 new_state="AWAITING_OTP",
                 fields={"otpAttempts": attempts},
             )
@@ -1148,7 +1295,8 @@ class BankrLlmPurchaseService:
     def _safe_purchase_response(self, purchase: Mapping[str, Any]) -> dict[str, Any]:
         state = str(purchase.get("state") or "")
         result = {
-            "ok": state not in {"REJECTED", "EXPIRED", "FAILED_BEFORE_TRANSFER"},
+            "ok": state not in {"REJECTED", "EXPIRED", "FAILED_BEFORE_TRANSFER"}
+            and not bool(purchase.get("errorCode")),
             "purchaseId": purchase.get("purchaseId"),
             "state": state,
             "amountUsd": purchase.get("amountUsd"),
@@ -1171,6 +1319,11 @@ class BankrLlmPurchaseService:
 
     def _telegram_text(self, response: Mapping[str, Any]) -> str:
         state = response.get("state")
+        if response.get("errorCode") == "wallet_unavailable":
+            return str(
+                response.get("errorMessage")
+                or "Wallet service is temporarily unavailable. Please try again."
+            )
         if state == "AWAITING_TERMS":
             return (
                 "Review Bankr LLM purchase terms, then send /llm_terms accept "
@@ -1178,6 +1331,14 @@ class BankrLlmPurchaseService:
             )
         if state == "AWAITING_OTP":
             return "Verification code sent. Reply with the six-digit OTP."
+        if state == "CREATING_BANKR_KEY":
+            return "Bankr key creation is already in progress. Please wait."
+        if state == "BANKR_KEY_CREATION_UNCERTAIN":
+            return (
+                "Bankr key creation is unclear. Contact the operator before retrying."
+            )
+        if state == "BANKR_KEY_CREATED":
+            return "Bankr key is ready. Continue with iMessage approval."
         if state == "AWAITING_IMESSAGE_APPROVAL":
             return "iMessage approval is pending. Reply there to continue."
         if state == "AWAITING_TRANSFER":

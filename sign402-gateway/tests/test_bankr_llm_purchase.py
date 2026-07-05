@@ -4,9 +4,12 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
+import time
 import traceback
 import unittest
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
@@ -968,6 +971,63 @@ class BankrLlmStoreTests(unittest.TestCase):
         self.assertEqual(loaded["purchaseId"], active["purchaseId"])
         self.assertEqual(loaded["email"], "new@example.com")
 
+    def test_create_purchase_reuses_existing_active_purchase_across_store_instances(self):
+        first = self.store.create_purchase(
+            telegram_user_id="123",
+            email="first@example.com",
+            amount_usd="10",
+            state="AWAITING_TERMS",
+            expires_at=2000,
+        )
+        second_store = BankrLlmStore(self.path, master_key=self.key)
+
+        second = second_store.create_purchase(
+            telegram_user_id="123",
+            email="second@example.com",
+            amount_usd="20",
+            state="AWAITING_TERMS",
+            expires_at=3000,
+        )
+
+        self.assertEqual(second["purchaseId"], first["purchaseId"])
+        self.assertEqual(second["email"], "first@example.com")
+        self.assertEqual(
+            second_store.get_active_purchase("123")["purchaseId"],
+            first["purchaseId"],
+        )
+
+    def test_initialization_repairs_legacy_duplicate_active_purchases(self):
+        with self._connect() as db:
+            db.execute("DROP INDEX bankr_llm_one_active_purchase_per_user")
+            db.execute(
+                """
+                INSERT INTO bankr_llm_purchases (
+                    purchase_id, telegram_user_id, email, amount_usd, state,
+                    expires_at, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("old", "123", "old@example.com", "5", "AWAITING_OTP", 2000, 1, 1),
+            )
+            db.execute(
+                """
+                INSERT INTO bankr_llm_purchases (
+                    purchase_id, telegram_user_id, email, amount_usd, state,
+                    expires_at, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("new", "123", "new@example.com", "10", "AWAITING_TERMS", 3000, 2, 2),
+            )
+
+        repaired_store = BankrLlmStore(self.path, master_key=self.key)
+
+        active = repaired_store.get_active_purchase("123")
+        old = repaired_store.get_purchase("old")
+        self.assertEqual(active["purchaseId"], "new")
+        self.assertEqual(old["state"], "EXPIRED")
+        self.assertEqual(old["errorCode"], "duplicate_active_purchase")
+
     def test_get_active_purchase_ignores_spec_terminal_states(self):
         for state in (
             "COMPLETE",
@@ -1075,10 +1135,15 @@ class BankrLlmStoreTests(unittest.TestCase):
             ).fetchall()
         return [row["event_type"] for row in rows]
 
+    @contextmanager
     def _connect(self):
         db = sqlite3.connect(str(self.path), timeout=5.0)
         db.row_factory = sqlite3.Row
-        return db
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
 
 
 class FakeBankrForPurchase:
@@ -1230,6 +1295,245 @@ class BankrLlmPurchaseServiceAuthTests(unittest.TestCase):
         self.assertEqual(repeated["purchaseId"], result["purchaseId"])
         self.assertEqual(self.bankr.created_key_count, 1)
         self.assertEqual(self.approval.calls[0]["action_type"], "sign402_bankr_llm")
+
+    def test_verify_retry_after_pricing_failure_reuses_saved_bankr_key(self):
+        self.approval.result = {"ok": False, "status": "rejected"}
+        should_fail = True
+
+        def fail_once(user_id, metadata):
+            nonlocal should_fail
+            if should_fail:
+                should_fail = False
+                raise BankrLlmError("limit_exceeded", "Spend limit failed.")
+            self.enforced_spends.append(
+                {"telegramUserId": user_id, "metadata": dict(metadata)}
+            )
+
+        self.service.enforce_spend = fail_once
+        self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        self.service.accept_terms("123")
+
+        with self.assertRaises(BankrLlmError):
+            self.service.verify_otp(telegram_user_id="123", code="123456")
+        result = self.service.verify_otp(telegram_user_id="123", code="123456")
+
+        self.assertEqual(result["state"], "REJECTED")
+        self.assertEqual(self.bankr.created_key_count, 1)
+        self.assertEqual(len(self.approval.calls), 1)
+
+    def test_concurrent_verify_creates_only_one_bankr_key(self):
+        self.approval.result = {"ok": False, "status": "rejected"}
+        original_verify = self.bankr.verify_and_create_key
+        start = threading.Barrier(2)
+
+        def slow_verify(**kwargs):
+            time.sleep(0.05)
+            return original_verify(**kwargs)
+
+        self.bankr.verify_and_create_key = slow_verify
+        self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        self.service.accept_terms("123")
+        results = []
+        errors = []
+
+        def verify():
+            try:
+                start.wait(timeout=2)
+                results.append(
+                    self.service.verify_otp(
+                        telegram_user_id="123",
+                        code="123456",
+                    )
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=verify) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(self.bankr.created_key_count, 1)
+        self.assertEqual(len(self.approval.calls), 1)
+        self.assertEqual(
+            {result["purchaseId"] for result in results},
+            {results[0]["purchaseId"]},
+        )
+        self.assertIn("REJECTED", {result["state"] for result in results})
+
+    def test_ambiguous_key_creation_blocks_automatic_retry(self):
+        def ambiguous_key_creation(**kwargs):
+            self.bankr.created_key_count += 1
+            raise BankrLlmError(
+                "bankr_key_creation_ambiguous",
+                "Bankr API key creation result is unclear.",
+            )
+
+        self.bankr.verify_and_create_key = ambiguous_key_creation
+        started = self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        self.service.accept_terms("123")
+
+        result = self.service.verify_otp(telegram_user_id="123", code="123456")
+        repeated_start = self.service.start(
+            telegram_user_id="123",
+            email="other@example.com",
+            amount_usd="20",
+        )
+        repeated_verify = self.service.verify_otp(
+            telegram_user_id="123",
+            code="123456",
+        )
+
+        self.assertEqual(result["state"], "BANKR_KEY_CREATION_UNCERTAIN")
+        self.assertEqual(repeated_start["purchaseId"], started["purchaseId"])
+        self.assertEqual(repeated_verify["purchaseId"], started["purchaseId"])
+        self.assertEqual(self.bankr.created_key_count, 1)
+        self.assertEqual(self.approval.calls, [])
+
+    def test_malformed_key_creation_response_enters_uncertain_state(self):
+        def malformed_key_creation(**kwargs):
+            self.bankr.created_key_count += 1
+            return {"evmAddress": "not-an-address", "apiKey": API_KEY}
+
+        self.bankr.verify_and_create_key = malformed_key_creation
+        self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        self.service.accept_terms("123")
+
+        result = self.service.verify_otp(telegram_user_id="123", code="123456")
+
+        self.assertEqual(result["state"], "BANKR_KEY_CREATION_UNCERTAIN")
+        self.assertEqual(result["errorCode"], "wallet_unavailable")
+        self.assertEqual(self.bankr.created_key_count, 1)
+        self.assertEqual(self.approval.calls, [])
+
+    def test_wallet_unavailable_after_saved_key_does_not_silently_succeed(self):
+        should_fail = True
+
+        def fail_once(user_id, metadata):
+            nonlocal should_fail
+            if should_fail:
+                should_fail = False
+                raise BankrLlmError("limit_exceeded", "Spend limit failed.")
+
+        self.service.enforce_spend = fail_once
+        self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        self.service.accept_terms("123")
+        with self.assertRaises(BankrLlmError):
+            self.service.verify_otp(telegram_user_id="123", code="123456")
+        self.wallet.result = {
+            "ok": False,
+            "telegramText": "Wallet provider unavailable.",
+        }
+
+        result = self.service.verify_otp(telegram_user_id="123", code="123456")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["state"], "BANKR_KEY_CREATED")
+        self.assertEqual(result["errorCode"], "wallet_unavailable")
+        self.assertIn("Wallet provider unavailable", result["errorMessage"])
+        self.assertIn("Wallet provider unavailable", result["telegramText"])
+        self.assertEqual(self.bankr.created_key_count, 1)
+        self.assertEqual(self.approval.calls, [])
+
+    def test_wallet_recovery_after_saved_key_clears_stale_error(self):
+        should_fail = True
+
+        def fail_once(user_id, metadata):
+            nonlocal should_fail
+            if should_fail:
+                should_fail = False
+                raise BankrLlmError("limit_exceeded", "Spend limit failed.")
+            self.enforced_spends.append(
+                {"telegramUserId": user_id, "metadata": dict(metadata)}
+            )
+
+        self.service.enforce_spend = fail_once
+        self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        self.service.accept_terms("123")
+        with self.assertRaises(BankrLlmError):
+            self.service.verify_otp(telegram_user_id="123", code="123456")
+        self.wallet.result = {
+            "ok": False,
+            "telegramText": "Wallet provider unavailable.",
+        }
+        unavailable = self.service.verify_otp(
+            telegram_user_id="123",
+            code="123456",
+        )
+        self.wallet.result = {
+            "ok": True,
+            "wallet": {"address": "0x2222222222222222222222222222222222222222"},
+        }
+        self.approval.result = {"ok": True, "status": "approved"}
+
+        recovered = self.service.verify_otp(telegram_user_id="123", code="123456")
+
+        self.assertFalse(unavailable["ok"])
+        self.assertTrue(recovered["ok"])
+        self.assertEqual(recovered["state"], "AWAITING_TRANSFER")
+        self.assertNotIn("errorCode", recovered)
+        self.assertIn("Approved", recovered["telegramText"])
+        self.assertEqual(self.bankr.created_key_count, 1)
+
+    def test_cas_failure_after_saving_key_stops_before_spend_checks(self):
+        original_save = self.store.save_bankr_identity
+
+        def save_and_expire(purchase_id, *, bankr_wallet_address, api_key):
+            original_save(
+                purchase_id,
+                bankr_wallet_address=bankr_wallet_address,
+                api_key=api_key,
+            )
+            self.store.transition(
+                purchase_id,
+                expected_state="CREATING_BANKR_KEY",
+                new_state="EXPIRED",
+                fields={
+                    "errorCode": "operator_expired",
+                    "errorMessage": "Expired by operator.",
+                },
+            )
+
+        self.store.save_bankr_identity = save_and_expire
+        self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        self.service.accept_terms("123")
+
+        result = self.service.verify_otp(telegram_user_id="123", code="123456")
+
+        self.assertEqual(result["state"], "EXPIRED")
+        self.assertEqual(self.enforced_spends, [])
+        self.assertEqual(self.approval.calls, [])
 
     def test_verify_uses_canonical_commitment_and_safe_approval_context(self):
         self.approval.result = {"ok": False, "status": "rejected"}
