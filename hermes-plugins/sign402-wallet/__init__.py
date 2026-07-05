@@ -6,9 +6,11 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Callable
+from decimal import Decimal, InvalidOperation
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -49,6 +51,9 @@ _TELEGRAM_PAID_TOOL_STARTED_MESSAGE = (
 _TELEGRAM_BITREFILL_STARTED_MESSAGE = (
     "Bitrefill purchase started. Approve it in iMessage; I'll post the result here."
 )
+_TELEGRAM_LLM_STARTED_MESSAGE = (
+    "Bankr LLM purchase started. Approve it in iMessage; I'll post the result here."
+)
 _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "start", "description": "Set up your Sign402 wallet"},
     {"command": "wallet", "description": "Show your Base wallet"},
@@ -57,6 +62,10 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "limits", "description": "Show or set spending limits"},
     {"command": "connect_imessage", "description": "Link iMessage approvals"},
     {"command": "bitrefill", "description": "Buy Bitrefill with SINGIT"},
+    {"command": "llm_buy", "description": "Buy Bankr LLM credits"},
+    {"command": "llm_terms", "description": "Accept Bankr LLM terms"},
+    {"command": "llm_code", "description": "Verify Bankr email code"},
+    {"command": "llm_credits", "description": "Show Bankr LLM credits"},
 )
 _COMMANDS = {
     "wallet": ("create-wallet", "Show your Base agent wallet"),
@@ -71,6 +80,10 @@ _IMESSAGE_COMMANDS = {
 }
 _LIMITS_USAGE = "Usage: /limits 0.005 0.05 or /set_limits 0.005 0.05"
 _BITREFILL_USAGE = "Usage: /bitrefill <productId> <packageId> [country]"
+_LLM_BUY_USAGE = "Usage: /llm_buy <usd> <email>"
+_LLM_TERMS_USAGE = "Usage: /llm_terms accept"
+_LLM_CODE_USAGE = "Usage: /llm_code <six-digit code>"
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 _client_factory: Callable[[], GatewayClient] = GatewayClient.from_env
 _telegram_api_opener: Callable[..., object] = urlopen
@@ -228,6 +241,41 @@ def _build_bitrefill_handler():
     return handler
 
 
+def _build_llm_handler(operation: str):
+    async def handler(raw_args: str) -> str:
+        identity = consume_gateway_identity()
+        if identity is None:
+            return _TELEGRAM_ONLY_MESSAGE
+        parsed = _llm_operation_payload(operation, raw_args)
+        if parsed is None:
+            return _llm_usage(operation)
+        try:
+            client = _client_factory()
+            result = await asyncio.to_thread(
+                client.execute_llm,
+                operation,
+                identity,
+                payload=parsed,
+                user_access_token=_user_access_token(client, identity),
+            )
+            return _llm_result_text(result, reveal_api_key=operation == "verify")
+        except GatewayClientError as exc:
+            return exc.user_message
+        except Exception as exc:
+            logger.warning(
+                "Unexpected Sign402 Bankr LLM plugin failure operation=%s error=%s",
+                operation,
+                type(exc).__name__,
+            )
+            return _UNEXPECTED_ERROR_MESSAGE
+
+    return handler
+
+
+def _build_llm_code_handler():
+    return _build_llm_handler("verify")
+
+
 def _start_text(wallet_text: str) -> str:
     return (
         "Welcome to Sign402.\n\n"
@@ -334,6 +382,39 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
             text = result.get("telegramText")
             if not isinstance(text, str) or not text.strip():
                 text = _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
+        elif command in {"llm-buy", "llm-terms", "llm-credits"}:
+            operation = {
+                "llm-buy": "start",
+                "llm-terms": "accept-terms",
+                "llm-credits": "credits",
+            }[command]
+            payload = _llm_operation_payload(operation, args)
+            if payload is None:
+                _send_fixed_reply(gateway, source, _llm_usage(operation))
+                return dict(_SKIP_RESULT)
+            result = client.execute_llm(
+                operation,
+                identity,
+                payload=payload,
+                user_access_token=_user_access_token(client, identity),
+            )
+            text = _llm_result_text(result)
+        elif command == "llm-code":
+            payload = _llm_operation_payload("verify", args)
+            if payload is None:
+                _send_fixed_reply(gateway, source, _LLM_CODE_USAGE)
+                return dict(_SKIP_RESULT)
+            _send_fixed_reply(gateway, source, _TELEGRAM_LLM_STARTED_MESSAGE)
+            _run_in_background(
+                lambda: _execute_telegram_llm_request(
+                    operation="verify",
+                    payload=payload,
+                    identity=identity,
+                    source=source,
+                    gateway=gateway,
+                )
+            )
+            return dict(_SKIP_RESULT)
         elif command == "bitrefill":
             parsed = _parse_bitrefill_args(args)
             if parsed is None:
@@ -461,6 +542,38 @@ def _execute_telegram_bitrefill_request(
     except Exception as exc:
         logger.warning(
             "Unexpected Sign402 Telegram Bitrefill failure error=%s",
+            type(exc).__name__,
+        )
+        _send_fixed_reply(gateway, source, _UNEXPECTED_ERROR_MESSAGE)
+
+
+def _execute_telegram_llm_request(
+    *,
+    operation: str,
+    payload: dict[str, str],
+    identity: TelegramIdentity,
+    source,
+    gateway,
+) -> None:
+    try:
+        client = _client_factory()
+        result = client.execute_llm(
+            operation,
+            identity,
+            payload=payload,
+            user_access_token=_user_access_token(client, identity),
+        )
+        _send_fixed_reply(
+            gateway,
+            source,
+            _llm_result_text(result, reveal_api_key=operation == "verify"),
+        )
+    except GatewayClientError as exc:
+        _send_fixed_reply(gateway, source, exc.user_message)
+    except Exception as exc:
+        logger.warning(
+            "Unexpected Sign402 Bankr LLM background failure operation=%s error=%s",
+            operation,
             type(exc).__name__,
         )
         _send_fixed_reply(gateway, source, _UNEXPECTED_ERROR_MESSAGE)
@@ -770,6 +883,10 @@ def _telegram_public_command(event, source) -> str | None:
         "set-limits",
         "connect-imessage",
         "bitrefill",
+        "llm-buy",
+        "llm-terms",
+        "llm-code",
+        "llm-credits",
     }:
         return normalized
     return None
@@ -800,6 +917,71 @@ def _parse_bitrefill_args(raw_args: str) -> tuple[str, str, str] | None:
         return None
     country = args[2].upper() if len(args) >= 3 else "US"
     return (args[0], args[1], country)
+
+
+def _parse_llm_buy_args(raw_args: str) -> tuple[str, str] | None:
+    args = str(raw_args or "").strip().split()
+    if len(args) != 2:
+        return None
+    amount_text, email = args
+    try:
+        amount = Decimal(amount_text)
+    except (InvalidOperation, ValueError):
+        return None
+    if (
+        not amount.is_finite()
+        or amount < Decimal("1")
+        or amount > Decimal("1000")
+        or amount != amount.quantize(Decimal("0.01"))
+        or _EMAIL_RE.fullmatch(email) is None
+    ):
+        return None
+    return amount_text, email
+
+
+def _llm_operation_payload(
+    operation: str,
+    raw_args: str,
+) -> dict[str, str] | None:
+    if operation == "start":
+        parsed = _parse_llm_buy_args(raw_args)
+        if parsed is None:
+            return None
+        amount, email = parsed
+        return {"amountUsd": amount, "email": email}
+    if operation == "accept-terms":
+        return {} if str(raw_args or "").strip().lower() == "accept" else None
+    if operation == "verify":
+        code = str(raw_args or "").strip()
+        return {"code": code} if re.fullmatch(r"\d{6}", code) else None
+    if operation == "credits":
+        return {} if not str(raw_args or "").strip() else None
+    return None
+
+
+def _llm_usage(operation: str) -> str:
+    return {
+        "start": _LLM_BUY_USAGE,
+        "accept-terms": _LLM_TERMS_USAGE,
+        "verify": _LLM_CODE_USAGE,
+        "credits": "Usage: /llm_credits",
+    }.get(operation, _UNEXPECTED_ERROR_MESSAGE)
+
+
+def _llm_result_text(
+    result: dict,
+    *,
+    reveal_api_key: bool = False,
+) -> str:
+    text = result.get("telegramText")
+    if not isinstance(text, str) or not text.strip():
+        raise GatewayClientError(_UNEXPECTED_ERROR_MESSAGE)
+    rendered = text.strip()
+    if reveal_api_key:
+        api_key = result.get("apiKey")
+        if isinstance(api_key, str) and api_key.startswith("bk_"):
+            rendered = f"{rendered}\n\nAPI key:\n{api_key}"
+    return rendered
 
 
 _NON_PURCHASE_MARKERS = (
@@ -860,6 +1042,26 @@ def register(ctx) -> None:
         "bitrefill",
         handler=_build_bitrefill_handler(),
         description="Buy Bitrefill with SINGIT",
+    )
+    ctx.register_command(
+        "llm-buy",
+        handler=_build_llm_handler("start"),
+        description="Buy Bankr LLM credits with SINGIT",
+    )
+    ctx.register_command(
+        "llm-terms",
+        handler=_build_llm_handler("accept-terms"),
+        description="Accept Bankr LLM purchase terms",
+    )
+    ctx.register_command(
+        "llm-code",
+        handler=_build_llm_code_handler(),
+        description="Verify the Bankr email code",
+    )
+    ctx.register_command(
+        "llm-credits",
+        handler=_build_llm_handler("credits"),
+        description="Show Bankr LLM credit balance",
     )
     for command, (operation, description) in _IMESSAGE_COMMANDS.items():
         ctx.register_command(

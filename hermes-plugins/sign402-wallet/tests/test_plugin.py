@@ -1,6 +1,8 @@
 import asyncio
 import importlib.util
+import io
 import json
+import logging
 import sys
 import unittest
 from dataclasses import dataclass
@@ -93,6 +95,8 @@ class FakeClient:
         self.create_wallet_calls = []
         self.limits_calls = []
         self.limits_result = "Current spending limits."
+        self.llm_calls = []
+        self.llm_results = {}
 
     def create_wallet(self, identity):
         self.create_wallet_calls.append(identity.user_id)
@@ -152,6 +156,30 @@ class FakeClient:
         if self.error:
             raise self.error
         return self.limits_result
+
+    def execute_llm(
+        self,
+        operation,
+        identity,
+        *,
+        payload=None,
+        user_access_token,
+    ):
+        self.llm_calls.append(
+            {
+                "operation": operation,
+                "user_id": identity.user_id,
+                "username": identity.username,
+                "payload": dict(payload or {}),
+                "user_access_token": user_access_token,
+            }
+        )
+        if self.error:
+            raise self.error
+        return self.llm_results.get(
+            operation,
+            {"ok": True, "telegramText": "Bankr LLM request complete."},
+        )
 
 
 class FakeAdapter:
@@ -230,6 +258,10 @@ class PluginRegistrationTests(unittest.TestCase):
                 "set-limits",
                 "connect-imessage",
                 "bitrefill",
+                "llm-buy",
+                "llm-terms",
+                "llm-code",
+                "llm-credits",
             },
         )
         for command in context.commands.values():
@@ -703,6 +735,170 @@ class PluginRegistrationTests(unittest.TestCase):
         )
         self.assertEqual(client.limits_calls, [])
         self.assertIn("Usage", gateway.adapters["telegram"].sent[0][1])
+
+    def test_parse_llm_buy_args(self):
+        plugin = load_plugin()
+
+        self.assertEqual(
+            plugin._parse_llm_buy_args("10 user@example.com"),
+            ("10", "user@example.com"),
+        )
+        self.assertIsNone(plugin._parse_llm_buy_args("10"))
+        self.assertIsNone(plugin._parse_llm_buy_args("0.5 user@example.com"))
+        self.assertIsNone(plugin._parse_llm_buy_args("10 not-an-email"))
+
+    def test_llm_buy_and_terms_use_trusted_identity(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.llm_results["start"] = {
+            "ok": True,
+            "telegramText": "Review Bankr terms.",
+        }
+        client.llm_results["accept-terms"] = {
+            "ok": True,
+            "telegramText": "Verification code sent.",
+        }
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        buy_result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "/llm_buy 10 user@example.com",
+                "1045618308",
+                username="AlpskyKnedlik",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
+        )
+        terms_result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "/llm_terms accept",
+                "1045618308",
+                username="AlpskyKnedlik",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(buy_result, plugin._SKIP_RESULT)
+        self.assertEqual(terms_result, plugin._SKIP_RESULT)
+        self.assertEqual(
+            client.llm_calls,
+            [
+                {
+                    "operation": "start",
+                    "user_id": "1045618308",
+                    "username": "AlpskyKnedlik",
+                    "payload": {
+                        "amountUsd": "10",
+                        "email": "user@example.com",
+                    },
+                    "user_access_token": "user-access-token",
+                },
+                {
+                    "operation": "accept-terms",
+                    "user_id": "1045618308",
+                    "username": "AlpskyKnedlik",
+                    "payload": {},
+                    "user_access_token": "user-access-token",
+                },
+            ],
+        )
+
+    def test_llm_code_runs_in_background_without_logging_otp(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        api_key = "bk_" + "secret_result"
+        client.llm_results["verify"] = {
+            "ok": True,
+            "state": "COMPLETE",
+            "apiKey": api_key,
+            "telegramText": "Bankr LLM purchase complete for $10.",
+        }
+        callbacks = []
+        plugin._client_factory = lambda: client
+        plugin._background_runner = callbacks.append
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+        log_output = io.StringIO()
+        log_handler = logging.StreamHandler(log_output)
+        plugin.logger.addHandler(log_handler)
+        plugin.logger.setLevel(logging.WARNING)
+        try:
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "/llm_code 123456",
+                    "1045618308",
+                    username="AlpskyKnedlik",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+            self.assertEqual(result, plugin._SKIP_RESULT)
+            self.assertEqual(client.llm_calls, [])
+            self.assertEqual(
+                gateway.adapters["telegram"].sent,
+                [("telegram-chat", plugin._TELEGRAM_LLM_STARTED_MESSAGE)],
+            )
+
+            callbacks[-1]()
+        finally:
+            plugin.logger.removeHandler(log_handler)
+
+        self.assertEqual(
+            client.llm_calls,
+            [
+                {
+                    "operation": "verify",
+                    "user_id": "1045618308",
+                    "username": "AlpskyKnedlik",
+                    "payload": {"code": "123456"},
+                    "user_access_token": "user-access-token",
+                }
+            ],
+        )
+        self.assertNotIn("123456", log_output.getvalue())
+        final_text = gateway.adapters["telegram"].sent[-1][1]
+        self.assertIn("Bankr LLM purchase complete", final_text)
+        self.assertIn(api_key, final_text)
+
+    def test_llm_credits_returns_balance_without_revealing_key(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.llm_results["credits"] = {
+            "ok": True,
+            "telegramText": "Bankr LLM credits: $9.00. Key fingerprint: abc123.",
+        }
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "/llm_credits",
+                "1045618308",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(client.llm_calls[0]["operation"], "credits")
+        self.assertEqual(
+            gateway.adapters["telegram"].sent[-1],
+            (
+                "telegram-chat",
+                "Bankr LLM credits: $9.00. Key fingerprint: abc123.",
+            ),
+        )
 
     def test_telegram_buy_crypto_news_text_is_consumed_before_llm(self):
         plugin = load_plugin()

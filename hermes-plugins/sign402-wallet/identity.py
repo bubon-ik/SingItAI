@@ -14,6 +14,10 @@ _TELEGRAM_COMMANDS = frozenset(
         "limits",
         "set-limits",
         "connect-imessage",
+        "llm-buy",
+        "llm-terms",
+        "llm-code",
+        "llm-credits",
     }
 )
 
