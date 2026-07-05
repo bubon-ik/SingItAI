@@ -98,7 +98,7 @@ The generated key has the minimum capabilities required for this flow:
   "tokenLaunchApiEnabled": false,
   "llmGatewayEnabled": true,
   "allowedIps": [],
-  "allowedRecipients": []
+  "allowedRecipients": {}
 }
 ```
 

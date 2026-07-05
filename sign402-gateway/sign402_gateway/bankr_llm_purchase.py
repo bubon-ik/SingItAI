@@ -39,7 +39,7 @@ KEY_CAPABILITIES: dict[str, Any] = {
     "tokenLaunchApiEnabled": False,
     "llmGatewayEnabled": True,
     "allowedIps": [],
-    "allowedRecipients": [],
+    "allowedRecipients": {},
 }
 
 
@@ -47,7 +47,7 @@ def _key_capabilities() -> dict[str, Any]:
     return {
         **KEY_CAPABILITIES,
         "allowedIps": [],
-        "allowedRecipients": [],
+        "allowedRecipients": {},
     }
 
 

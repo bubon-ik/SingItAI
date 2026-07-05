@@ -215,7 +215,7 @@ class BankrIdentityClientTests(unittest.TestCase):
                     "tokenLaunchApiEnabled": False,
                     "llmGatewayEnabled": True,
                     "allowedIps": [],
-                    "allowedRecipients": [],
+                    "allowedRecipients": {},
                 }
             ),
         ]
@@ -268,7 +268,7 @@ class BankrIdentityClientTests(unittest.TestCase):
                 "tokenLaunchApiEnabled": False,
                 "llmGatewayEnabled": True,
                 "allowedIps": [],
-                "allowedRecipients": [],
+                "allowedRecipients": {},
             },
         )
         self.assertEqual(
@@ -287,7 +287,7 @@ class BankrIdentityClientTests(unittest.TestCase):
                         "tokenLaunchApiEnabled": False,
                         "llmGatewayEnabled": True,
                         "allowedIps": [],
-                        "allowedRecipients": [],
+                        "allowedRecipients": {},
                     },
                 },
             },

@@ -92,7 +92,7 @@ class BankrIdentityClientTests(unittest.TestCase):
                 "tokenLaunchApiEnabled": False,
                 "llmGatewayEnabled": True,
                 "allowedIps": [],
-                "allowedRecipients": [],
+                "allowedRecipients": {},
             },
         )
         self.assertEqual(result["apiKey"], "bk_secret")
