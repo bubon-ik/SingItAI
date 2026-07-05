@@ -1150,6 +1150,10 @@ class FakeBankrForPurchase:
     def __init__(self):
         self.sent_otps = []
         self.created_key_count = 0
+        self.topups = []
+        self.credits_calls = []
+        self.topup_error = None
+        self.credits_result = {"credits": "10.00", "currency": "USD"}
 
     def send_otp(self, email):
         self.sent_otps.append(email)
@@ -1167,21 +1171,57 @@ class FakeBankrForPurchase:
             "key": {"id": "key-1", "name": key_name, "llmGatewayEnabled": True},
         }
 
+    def top_up(self, *, api_key, amount_usd, source_token, chain="base"):
+        self.topups.append(
+            {
+                "api_key": api_key,
+                "amount_usd": amount_usd,
+                "source_token": source_token,
+                "chain": chain,
+            }
+        )
+        if self.topup_error is not None:
+            error = self.topup_error
+            self.topup_error = None
+            raise error
+        return {"success": True, "credits": {"balanceUsd": str(amount_usd)}}
+
     def credits(self, *, api_key):
-        return {"credits": "10.00", "currency": "USD"}
+        self.credits_calls.append({"api_key": api_key})
+        return dict(self.credits_result)
 
 
 class FakeWalletServiceForPurchase:
     def __init__(self):
         self.calls = []
+        self.balance_calls = []
+        self.decrypt_calls = []
+        self.events = []
+        self.private_key = "0xUSER_PRIVATE_KEY"
         self.result = {
             "ok": True,
             "wallet": {"address": "0x2222222222222222222222222222222222222222"},
         }
+        self.balance_result = {
+            "ok": True,
+            "balanceUnavailable": False,
+            "balances": {"SINGIT": "100"},
+        }
 
     def wallet_status(self, telegram_user_id):
         self.calls.append(telegram_user_id)
+        self.events.append("wallet_status")
         return self.result
+
+    def wallet_balance(self, telegram_user_id):
+        self.balance_calls.append(telegram_user_id)
+        self.events.append("wallet_balance")
+        return self.balance_result
+
+    def decrypt_private_key_for_future_signing(self, telegram_user_id):
+        self.decrypt_calls.append(telegram_user_id)
+        self.events.append("decrypt")
+        return self.private_key
 
 
 class FakePricerForPurchase:
@@ -1219,6 +1259,23 @@ class FakeApprovalServiceForPurchase:
                 "context_lines": list(context_lines),
             }
         )
+        return dict(self.result)
+
+
+class FakeTransferForPurchase:
+    def __init__(self):
+        self.calls = []
+        self.events = None
+        self.result = {
+            "ok": True,
+            "txId": "0xTRANSFER",
+            "transactionHash": "0xTRANSFER",
+        }
+
+    def transfer_token(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        if self.events is not None:
+            self.events.append("transfer")
         return dict(self.result)
 
 
@@ -1659,6 +1716,263 @@ class BankrLlmPurchaseServiceAuthTests(unittest.TestCase):
         self.assertEqual(result["state"], "AWAITING_TRANSFER")
         self.assertEqual(result["credits"], {"credits": "10.00", "currency": "USD"})
         self.assertNotIn(API_KEY, repr(result))
+
+
+class BankrLlmPurchasePaymentTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.now_value = 1700000000
+        self.store = BankrLlmStore(
+            Path(self.tempdir.name) / "bankr-llm.db",
+            master_key=Fernet.generate_key().decode("ascii"),
+        )
+        self.bankr = FakeBankrForPurchase()
+        self.wallet = FakeWalletServiceForPurchase()
+        self.pricer = FakePricerForPurchase()
+        self.approval = FakeApprovalServiceForPurchase()
+        self.approval.result = {"ok": True, "status": "approved"}
+        self.transfer = FakeTransferForPurchase()
+        self.transfer.events = self.wallet.events
+        self.enforced_spends = []
+        self.recorded_spends = []
+        self.service = BankrLlmPurchaseService(
+            store=self.store,
+            bankr=self.bankr,
+            wallet_service=self.wallet,
+            pricer=self.pricer,
+            approval_service=self.approval,
+            transfer_client=self.transfer,
+            enforce_spend=self._enforce_spend,
+            record_spend=lambda user_id, purchase, metadata: self.recorded_spends.append(
+                {
+                    "telegramUserId": user_id,
+                    "purchase": dict(purchase),
+                    "metadata": dict(metadata),
+                }
+            ),
+            singit_token_address="0x3333333333333333333333333333333333333333",
+            now=lambda: self.now_value,
+        )
+
+    def tearDown(self):
+        self.tempdir.cleanup()
+
+    def test_approved_purchase_transfers_user_singit_then_tops_up(self):
+        result = self.complete_purchase()
+
+        self.assertEqual(result["state"], "COMPLETE")
+        self.assertEqual(result["apiKey"], API_KEY)
+        self.assertEqual(self.transfer.calls[0]["private_key"], "0xUSER_PRIVATE_KEY")
+        self.assertEqual(self.transfer.calls[0]["to_address"], EVM_ADDRESS)
+        self.assertEqual(
+            self.transfer.calls[0]["token_address"],
+            "0x3333333333333333333333333333333333333333",
+        )
+        self.assertEqual(
+            self.transfer.calls[0]["amount"],
+            "25",
+        )
+        self.assertEqual(self.bankr.topups[0]["api_key"], API_KEY)
+        self.assertEqual(self.bankr.topups[0]["amount_usd"], "10")
+        self.assertEqual(self.bankr.topups[0]["source_token"], "SINGIT")
+        self.assertEqual(len(self.recorded_spends), 1)
+        self.assertEqual(self.recorded_spends[0]["telegramUserId"], "123")
+        self.assertIn("10", result["telegramText"])
+
+    def test_repeated_completion_does_not_transfer_twice_or_reveal_key(self):
+        first = self.complete_purchase()
+        second = self.service.resume(first["purchaseId"])
+
+        self.assertEqual(first["state"], "COMPLETE")
+        self.assertEqual(second["state"], "COMPLETE")
+        self.assertEqual(len(self.transfer.calls), 1)
+        self.assertEqual(len(self.bankr.topups), 1)
+        self.assertNotIn("apiKey", second)
+
+    def test_topup_timeout_after_transfer_requires_reconciliation_without_second_transfer(self):
+        self.bankr.topup_error = BankrLlmError(
+            "bankr_topup_ambiguous",
+            "Bankr LLM credit top-up result is unclear. Do not retry automatically.",
+        )
+
+        result = self.complete_purchase()
+        resumed = self.service.resume(result["purchaseId"])
+
+        self.assertEqual(result["state"], "RECONCILIATION_REQUIRED")
+        self.assertEqual(resumed["state"], "RECONCILIATION_REQUIRED")
+        self.assertEqual(len(self.transfer.calls), 1)
+        self.assertEqual(len(self.bankr.topups), 1)
+        loaded = self.store.get_purchase(result["purchaseId"])
+        self.assertEqual(loaded["transferHash"], "0xTRANSFER")
+        self.assertNotIn("apiKey", result)
+
+    def test_reconciliation_marks_complete_when_expected_credits_are_present(self):
+        result = self.complete_purchase(reconcile_required=True)
+        self.bankr.credits_result = {"credits": "10.00", "currency": "USD"}
+
+        reconciled = self.service.reconcile(result["purchaseId"])
+
+        self.assertEqual(reconciled["state"], "COMPLETE")
+        self.assertEqual(self.bankr.credits_calls[0]["api_key"], API_KEY)
+        self.assertEqual(len(self.transfer.calls), 1)
+        self.assertEqual(len(self.bankr.topups), 1)
+        self.assertEqual(reconciled["apiKey"], API_KEY)
+        self.assertNotIn("apiKey", self.service.resume(result["purchaseId"]))
+
+    def test_reconciliation_retries_only_bankr_topup_when_credits_are_missing(self):
+        result = self.complete_purchase(reconcile_required=True)
+        self.bankr.credits_result = {"credits": "0.00", "currency": "USD"}
+
+        reconciled = self.service.reconcile(result["purchaseId"])
+
+        self.assertEqual(reconciled["state"], "COMPLETE")
+        self.assertEqual(len(self.transfer.calls), 1)
+        self.assertEqual(len(self.bankr.topups), 2)
+        self.assertEqual(self.bankr.topups[1]["api_key"], API_KEY)
+        self.assertEqual(self.bankr.topups[1]["source_token"], "SINGIT")
+        self.assertEqual(len(self.recorded_spends), 1)
+        self.assertEqual(reconciled["apiKey"], API_KEY)
+        self.assertNotIn("apiKey", self.service.resume(result["purchaseId"]))
+
+    def test_resume_reprices_before_transfer_and_rejects_above_approved_max(self):
+        awaiting = self.approved_purchase()
+        self.pricer.result = {
+            "requiredSingit": "26",
+            "requiredSingitAtomic": "26000000000000000000",
+            "expectedUsdc": "11.00",
+        }
+
+        result = self.service.resume(awaiting["purchaseId"])
+
+        self.assertEqual(result["state"], "FAILED_BEFORE_TRANSFER")
+        self.assertEqual(result["errorCode"], "price_exceeds_approved_max")
+        self.assertEqual(self.transfer.calls, [])
+        self.assertEqual(self.wallet.decrypt_calls, [])
+
+    def test_resume_reruns_limits_and_balance_immediately_before_transfer(self):
+        awaiting = self.approved_purchase()
+
+        result = self.service.resume(awaiting["purchaseId"])
+
+        self.assertEqual(result["state"], "COMPLETE")
+        self.assertEqual(len(self.enforced_spends), 2)
+        self.assertEqual(self.wallet.balance_calls, ["123"])
+        self.assertLess(
+            self.wallet.events.index("wallet_balance"),
+            self.wallet.events.index("decrypt"),
+        )
+        self.assertLess(
+            self.wallet.events.index("decrypt"),
+            self.wallet.events.index("transfer"),
+        )
+
+    def test_resume_holds_when_managed_wallet_balance_is_too_low(self):
+        awaiting = self.approved_purchase()
+        self.wallet.balance_result = {
+            "ok": True,
+            "balanceUnavailable": False,
+            "balances": {"SINGIT": "24.99"},
+        }
+
+        result = self.service.resume(awaiting["purchaseId"])
+
+        self.assertEqual(result["state"], "FAILED_BEFORE_TRANSFER")
+        self.assertEqual(result["errorCode"], "insufficient_singit_balance")
+        self.assertEqual(self.transfer.calls, [])
+        self.assertEqual(self.wallet.decrypt_calls, [])
+
+    def test_resume_transferring_without_persisted_hash_never_retransfers(self):
+        awaiting = self.approved_purchase()
+        transitioned = self.store.transition(
+            awaiting["purchaseId"],
+            expected_state="AWAITING_TRANSFER",
+            new_state="TRANSFERRING_SINGIT",
+        )
+
+        result = self.service.resume(awaiting["purchaseId"])
+
+        self.assertTrue(transitioned)
+        self.assertEqual(result["state"], "RECONCILIATION_REQUIRED")
+        self.assertEqual(result["errorCode"], "transfer_ambiguous")
+        self.assertEqual(self.transfer.calls, [])
+        self.assertEqual(self.bankr.topups, [])
+
+    def test_generic_pre_transfer_failure_does_not_require_reconciliation(self):
+        awaiting = self.approved_purchase()
+
+        def fail_before_transfer(_user_id, _metadata):
+            raise RuntimeError("local limit store failed")
+
+        self.service.enforce_spend = fail_before_transfer
+
+        result = self.service.resume(awaiting["purchaseId"])
+
+        self.assertEqual(result["state"], "FAILED_BEFORE_TRANSFER")
+        self.assertEqual(result["errorCode"], "pre_transfer_failed")
+        self.assertEqual(self.transfer.calls, [])
+        self.assertEqual(self.wallet.decrypt_calls, [])
+        self.assertNotIn("local limit store failed", repr(result))
+
+    def test_failed_transfer_hash_persistence_never_starts_topup(self):
+        awaiting = self.approved_purchase()
+        original_transition = self.store.transition
+        refused_once = False
+
+        def refuse_transfer_checkpoint(
+            purchase_id,
+            *,
+            expected_state,
+            new_state,
+            fields=None,
+        ):
+            nonlocal refused_once
+            if (
+                not refused_once
+                and expected_state == "TRANSFERRING_SINGIT"
+                and new_state == "TOPPING_UP_BANKR"
+            ):
+                refused_once = True
+                return False
+            return original_transition(
+                purchase_id,
+                expected_state=expected_state,
+                new_state=new_state,
+                fields=fields,
+            )
+
+        self.store.transition = refuse_transfer_checkpoint
+
+        result = self.service.resume(awaiting["purchaseId"])
+
+        self.assertTrue(refused_once)
+        self.assertEqual(len(self.transfer.calls), 1)
+        self.assertEqual(self.bankr.topups, [])
+        self.assertEqual(result["state"], "RECONCILIATION_REQUIRED")
+        self.assertEqual(result["transferHash"], "0xTRANSFER")
+
+    def complete_purchase(self, *, reconcile_required=False):
+        awaiting = self.approved_purchase()
+        if reconcile_required:
+            self.bankr.topup_error = BankrLlmError(
+                "bankr_topup_ambiguous",
+                "Bankr LLM credit top-up result is unclear. Do not retry automatically.",
+            )
+        return self.service.resume(awaiting["purchaseId"])
+
+    def approved_purchase(self):
+        self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        self.service.accept_terms("123")
+        return self.service.verify_otp(telegram_user_id="123", code="123456")
+
+    def _enforce_spend(self, user_id, metadata):
+        self.enforced_spends.append(
+            {"telegramUserId": user_id, "metadata": dict(metadata)}
+        )
+        self.wallet.events.append("enforce_spend")
 
 
 if __name__ == "__main__":

@@ -1184,6 +1184,75 @@ class BankrLlmPurchaseService:
         )
         return self._apply_approval_result(purchase, approval)
 
+    def resume(self, purchase_id: str) -> dict[str, Any]:
+        purchase = self._purchase_by_id(purchase_id)
+        state = str(purchase.get("state") or "")
+        if state == "AWAITING_TRANSFER":
+            transitioned = self.store.transition(
+                purchase["purchaseId"],
+                expected_state="AWAITING_TRANSFER",
+                new_state="TRANSFERRING_SINGIT",
+            )
+            purchase = self.store.get_purchase(purchase["purchaseId"]) or purchase
+            if not transitioned:
+                return self._safe_purchase_response(purchase)
+            return self._execute_transfer(purchase)
+        if state == "TRANSFERRING_SINGIT":
+            if purchase.get("transferHash"):
+                return self._top_up_from_funded_wallet(purchase)
+            return self._hold_for_transfer_reconciliation(
+                purchase,
+                expected_state="TRANSFERRING_SINGIT",
+            )
+        if state == "TOPPING_UP_BANKR":
+            return self._top_up_from_funded_wallet(purchase)
+        return self._safe_purchase_response(purchase)
+
+    def reconcile(self, purchase_id: str) -> dict[str, Any]:
+        purchase = self._purchase_by_id(purchase_id)
+        state = str(purchase.get("state") or "")
+        if state == "COMPLETE":
+            return self._safe_purchase_response(purchase)
+        if state not in {
+            "RECONCILIATION_REQUIRED",
+            "TOPPING_UP_BANKR",
+            "TRANSFERRING_SINGIT",
+        }:
+            return self._safe_purchase_response(purchase)
+        if not purchase.get("transferHash"):
+            return self._safe_purchase_response(purchase)
+
+        api_key = self.store.decrypt_api_key(purchase)
+        try:
+            credits = self.bankr.credits(api_key=api_key)
+        except BankrLlmError as exc:
+            self.store.transition(
+                purchase["purchaseId"],
+                expected_state=state,
+                new_state="RECONCILIATION_REQUIRED",
+                fields={
+                    "errorCode": exc.code,
+                    "errorMessage": exc.user_message,
+                },
+            )
+            loaded = self.store.get_purchase(purchase["purchaseId"]) or purchase
+            return self._safe_purchase_response(loaded)
+
+        if self._credits_cover_purchase(credits, purchase):
+            return self._complete_purchase(
+                purchase,
+                expected_state=state,
+                api_key=api_key,
+                reveal_api_key=True,
+                credits=credits,
+            )
+        return self._top_up_from_funded_wallet(
+            purchase,
+            api_key=api_key,
+            expected_state=state,
+            reveal_api_key=True,
+        )
+
     def credits(self, telegram_user_id: str) -> dict[str, Any]:
         user_id = self._require_user_id(telegram_user_id)
         purchase = self.store.get_active_purchase(user_id)
@@ -1201,6 +1270,288 @@ class BankrLlmPurchaseService:
         result = self._safe_purchase_response(purchase)
         result["credits"] = credits
         return result
+
+    def _purchase_by_id(self, purchase_id: str) -> dict[str, Any]:
+        purchase = self.store.get_purchase(str(purchase_id or ""))
+        if purchase is None:
+            raise BankrLlmError(
+                "purchase_not_found",
+                "Bankr LLM purchase was not found.",
+            )
+        return purchase
+
+    def _execute_transfer(self, purchase: Mapping[str, Any]) -> dict[str, Any]:
+        user_id = str(purchase["telegramUserId"])
+        try:
+            pricing = self.pricer.price_for_usdc(purchase["amountUsd"])
+            fresh_atomic = self._pricing_atomic(pricing)
+            fresh_amount = self._pricing_transfer_amount(
+                pricing,
+                expected_atomic=fresh_atomic,
+            )
+            approved_atomic = self._positive_int(purchase.get("singitAmountAtomic"))
+            if fresh_atomic > approved_atomic:
+                return self._fail_before_transfer(
+                    purchase,
+                    expected_state="TRANSFERRING_SINGIT",
+                    code="price_exceeds_approved_max",
+                    message="Fresh SINGIT pricing exceeds the approved maximum spend.",
+                )
+
+            wallet_status = self.wallet_service.wallet_status(user_id)
+            if not wallet_status.get("ok"):
+                return self._fail_before_transfer(
+                    purchase,
+                    expected_state="TRANSFERRING_SINGIT",
+                    code="wallet_unavailable",
+                    message=str(
+                        wallet_status.get(
+                            "telegramText",
+                            "No Base agent wallet is available.",
+                        )
+                    ),
+                )
+            source_wallet = self._wallet_address(wallet_status)
+            approved_source = self._require_evm_address(
+                purchase.get("sourceWalletAddress")
+            )
+            if source_wallet.lower() != approved_source.lower():
+                return self._fail_before_transfer(
+                    purchase,
+                    expected_state="TRANSFERRING_SINGIT",
+                    code="source_wallet_changed",
+                    message="The managed wallet changed after approval. Restart the purchase.",
+                )
+
+            spend_context = {
+                "purchaseId": purchase["purchaseId"],
+                "amountUsd": purchase["amountUsd"],
+                "singitAmountAtomic": str(fresh_atomic),
+                "singitTokenAddress": self.singit_token_address,
+                "sourceWalletAddress": source_wallet,
+                "asset": self.singit_token_address,
+                "network": "base",
+                "amountAtomic": str(fresh_atomic),
+                "purpose": "bankr_llm_topup",
+            }
+            self.enforce_spend(user_id, spend_context)
+            balance_error = self._balance_error(user_id, fresh_atomic)
+            if balance_error is not None:
+                return self._fail_before_transfer(
+                    purchase,
+                    expected_state="TRANSFERRING_SINGIT",
+                    code=balance_error[0],
+                    message=balance_error[1],
+                )
+
+            private_key = self.wallet_service.decrypt_private_key_for_future_signing(
+                user_id
+            )
+        except BankrLlmError as exc:
+            return self._fail_before_transfer(
+                purchase,
+                expected_state="TRANSFERRING_SINGIT",
+                code=exc.code,
+                message=exc.user_message,
+            )
+        except Exception:
+            return self._fail_before_transfer(
+                purchase,
+                expected_state="TRANSFERRING_SINGIT",
+                code="pre_transfer_failed",
+                message="The purchase could not be prepared for transfer. No funds moved.",
+            )
+
+        try:
+            transfer = self.transfer_client.transfer_token(
+                private_key=private_key,
+                to_address=self._require_evm_address(purchase["bankrWalletAddress"]),
+                token_address=self.singit_token_address,
+                amount=fresh_amount,
+                chain="base",
+            )
+            transfer_hash = self._transfer_hash(transfer)
+        except Exception:
+            return self._hold_for_transfer_reconciliation(
+                purchase,
+                expected_state="TRANSFERRING_SINGIT",
+            )
+
+        transitioned = self.store.transition(
+            purchase["purchaseId"],
+            expected_state="TRANSFERRING_SINGIT",
+            new_state="TOPPING_UP_BANKR",
+            fields={
+                "singitAmountAtomic": str(fresh_atomic),
+                "transferHash": transfer_hash,
+                "errorCode": "",
+                "errorMessage": "",
+            },
+        )
+        loaded = self.store.get_purchase(purchase["purchaseId"]) or purchase
+        if transitioned:
+            return self._top_up_from_funded_wallet(loaded)
+        if (
+            loaded.get("state") == "TOPPING_UP_BANKR"
+            and loaded.get("transferHash") == transfer_hash
+        ):
+            return self._top_up_from_funded_wallet(loaded)
+        if loaded.get("state") == "TRANSFERRING_SINGIT":
+            return self._hold_for_transfer_reconciliation(
+                loaded,
+                expected_state="TRANSFERRING_SINGIT",
+                transfer_hash=transfer_hash,
+                singit_amount_atomic=str(fresh_atomic),
+            )
+        return self._safe_purchase_response(loaded)
+
+    def _hold_for_transfer_reconciliation(
+        self,
+        purchase: Mapping[str, Any],
+        *,
+        expected_state: str,
+        transfer_hash: str | None = None,
+        singit_amount_atomic: str | None = None,
+    ) -> dict[str, Any]:
+        fields = {
+            "errorCode": "transfer_ambiguous",
+            "errorMessage": (
+                "SINGIT transfer result is unclear. Reconciliation is required."
+            ),
+        }
+        if transfer_hash:
+            fields["transferHash"] = transfer_hash
+        if singit_amount_atomic:
+            fields["singitAmountAtomic"] = singit_amount_atomic
+        self.store.transition(
+            purchase["purchaseId"],
+            expected_state=expected_state,
+            new_state="RECONCILIATION_REQUIRED",
+            fields=fields,
+        )
+        loaded = self.store.get_purchase(purchase["purchaseId"]) or purchase
+        return self._safe_purchase_response(loaded)
+
+    def _top_up_from_funded_wallet(
+        self,
+        purchase: Mapping[str, Any],
+        *,
+        api_key: str | None = None,
+        expected_state: str | None = None,
+        reveal_api_key: bool = True,
+    ) -> dict[str, Any]:
+        state = str(expected_state or purchase.get("state") or "")
+        key = api_key if api_key is not None else self.store.decrypt_api_key(purchase)
+        try:
+            topup = self.bankr.top_up(
+                api_key=key,
+                amount_usd=str(purchase["amountUsd"]),
+                source_token="SINGIT",
+                chain="base",
+            )
+        except BankrLlmError as exc:
+            self.store.transition(
+                purchase["purchaseId"],
+                expected_state=state,
+                new_state="RECONCILIATION_REQUIRED",
+                fields={
+                    "errorCode": exc.code,
+                    "errorMessage": exc.user_message,
+                },
+            )
+            loaded = self.store.get_purchase(purchase["purchaseId"]) or purchase
+            return self._safe_purchase_response(loaded)
+        except Exception:
+            self.store.transition(
+                purchase["purchaseId"],
+                expected_state=state,
+                new_state="RECONCILIATION_REQUIRED",
+                fields={
+                    "errorCode": "bankr_topup_ambiguous",
+                    "errorMessage": "Bankr LLM credit top-up result is unclear. Do not retry automatically.",
+                },
+            )
+            loaded = self.store.get_purchase(purchase["purchaseId"]) or purchase
+            return self._safe_purchase_response(loaded)
+
+        return self._complete_purchase(
+            purchase,
+            expected_state=state,
+            api_key=key,
+            reveal_api_key=reveal_api_key,
+            topup=topup,
+        )
+
+    def _complete_purchase(
+        self,
+        purchase: Mapping[str, Any],
+        *,
+        expected_state: str,
+        api_key: str,
+        reveal_api_key: bool,
+        topup: Mapping[str, Any] | None = None,
+        credits: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        fields: dict[str, Any] = {
+            "errorCode": "",
+            "errorMessage": "",
+        }
+        if topup is not None:
+            fields["topupResultJson"] = json.dumps(
+                dict(topup),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        if credits is not None:
+            fields["creditsJson"] = json.dumps(
+                dict(credits),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        transitioned = self.store.transition(
+            purchase["purchaseId"],
+            expected_state=expected_state,
+            new_state="COMPLETE",
+            fields=fields,
+        )
+        loaded = self.store.get_purchase(purchase["purchaseId"]) or purchase
+        if transitioned:
+            self.record_spend(
+                str(loaded["telegramUserId"]),
+                loaded,
+                {
+                    "amountUsd": str(loaded["amountUsd"]),
+                    "singitAmountAtomic": str(loaded.get("singitAmountAtomic") or ""),
+                    "amountAtomic": str(loaded.get("singitAmountAtomic") or ""),
+                    "transferHash": str(loaded.get("transferHash") or ""),
+                    "asset": self.singit_token_address,
+                    "network": "base",
+                },
+            )
+        result = self._safe_purchase_response(loaded)
+        if transitioned and reveal_api_key:
+            result["apiKey"] = api_key
+        return result
+
+    def _fail_before_transfer(
+        self,
+        purchase: Mapping[str, Any],
+        *,
+        expected_state: str,
+        code: str,
+        message: str,
+    ) -> dict[str, Any]:
+        self.store.transition(
+            purchase["purchaseId"],
+            expected_state=expected_state,
+            new_state="FAILED_BEFORE_TRANSFER",
+            fields={
+                "errorCode": code,
+                "errorMessage": message,
+            },
+        )
+        loaded = self.store.get_purchase(purchase["purchaseId"]) or purchase
+        return self._safe_purchase_response(loaded)
 
     def _apply_approval_result(
         self,
@@ -1309,6 +1660,7 @@ class BankrLlmPurchaseService:
             "bankrWalletAddress",
             "apiKeyFingerprint",
             "approvalRequestId",
+            "transferHash",
             "errorCode",
             "errorMessage",
         ):
@@ -1344,6 +1696,20 @@ class BankrLlmPurchaseService:
         if state == "AWAITING_TRANSFER":
             return (
                 "Approved. This purchase is waiting for SINGIT funding."
+            )
+        if state == "TRANSFERRING_SINGIT":
+            return "SINGIT transfer is in progress."
+        if state == "TOPPING_UP_BANKR":
+            return "SINGIT transfer is confirmed. Bankr LLM credits are topping up."
+        if state == "RECONCILIATION_REQUIRED":
+            return (
+                "SINGIT transfer status needs reconciliation before the Bankr key "
+                "can be revealed."
+            )
+        if state == "COMPLETE":
+            return (
+                f"Bankr LLM purchase complete for ${response.get('amountUsd')}. "
+                "Store the API key securely."
             )
         if state == "REJECTED":
             return "The Bankr LLM purchase was rejected. No funds moved."
@@ -1385,6 +1751,148 @@ class BankrLlmPurchaseService:
             f"Key fingerprint: {commitment['apiKeyFingerprint']}",
             f"Expires at: {commitment['expiresAt']}",
         ]
+
+    @staticmethod
+    def _pricing_atomic(pricing: Mapping[str, Any]) -> int:
+        singit_atomic = str(pricing.get("requiredSingitAtomic") or "")
+        if not singit_atomic.isdigit() or int(singit_atomic) <= 0:
+            raise BankrLlmError(
+                "invalid_pricing",
+                "SINGIT pricing is unavailable. Please try again.",
+            )
+        return int(singit_atomic)
+
+    @staticmethod
+    def _pricing_transfer_amount(
+        pricing: Mapping[str, Any],
+        *,
+        expected_atomic: int,
+    ) -> str:
+        try:
+            amount = Decimal(str(pricing.get("requiredSingit") or ""))
+        except (InvalidOperation, ValueError):
+            amount = Decimal(0)
+        atomic = amount * Decimal("1000000000000000000")
+        if (
+            not amount.is_finite()
+            or amount <= 0
+            or atomic != atomic.to_integral_value()
+            or int(atomic) != expected_atomic
+        ):
+            raise BankrLlmError(
+                "invalid_pricing",
+                "SINGIT pricing is unavailable. Please try again.",
+            )
+        return format(amount, "f")
+
+    @staticmethod
+    def _positive_int(value: Any) -> int:
+        text = str(value or "")
+        if not text.isdigit() or int(text) <= 0:
+            raise BankrLlmError(
+                "invalid_purchase_state",
+                "Bankr LLM purchase is missing approved SINGIT pricing.",
+            )
+        return int(text)
+
+    def _balance_error(
+        self,
+        telegram_user_id: str,
+        required_atomic: int,
+    ) -> tuple[str, str] | None:
+        wallet_balance = getattr(self.wallet_service, "wallet_balance", None)
+        if not callable(wallet_balance):
+            return None
+        balance = wallet_balance(telegram_user_id)
+        if not isinstance(balance, Mapping) or not balance.get("ok"):
+            return (
+                "wallet_balance_unavailable",
+                "Managed wallet balance is unavailable. Try again before transfer.",
+            )
+        if balance.get("balanceUnavailable"):
+            return (
+                "wallet_balance_unavailable",
+                "Managed wallet balance is unavailable. Try again before transfer.",
+            )
+        balances = balance.get("balances")
+        if not isinstance(balances, Mapping):
+            return (
+                "wallet_balance_unavailable",
+                "Managed wallet balance is unavailable. Try again before transfer.",
+            )
+        available = self._singit_balance_atomic(balances)
+        if available < required_atomic:
+            return (
+                "insufficient_singit_balance",
+                "Managed wallet does not have enough SINGIT for this purchase.",
+            )
+        return None
+
+    @staticmethod
+    def _singit_balance_atomic(balances: Mapping[str, Any]) -> int:
+        value = None
+        for key, balance in balances.items():
+            if str(key).lower() == "singit":
+                value = balance
+                break
+        if value is None:
+            return 0
+        try:
+            amount = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return 0
+        if not amount.is_finite() or amount < 0:
+            return 0
+        return int(amount * Decimal("1000000000000000000"))
+
+    @staticmethod
+    def _transfer_hash(transfer: Mapping[str, Any]) -> str:
+        tx_hash = str(
+            transfer.get("txId")
+            or transfer.get("transactionHash")
+            or transfer.get("hash")
+            or ""
+        ).strip()
+        if not tx_hash:
+            raise BankrLlmError(
+                "transfer_ambiguous",
+                "SINGIT transfer result is unclear. Reconciliation is required.",
+            )
+        return tx_hash
+
+    @staticmethod
+    def _credits_cover_purchase(
+        credits: Mapping[str, Any],
+        purchase: Mapping[str, Any],
+    ) -> bool:
+        balance = BankrLlmPurchaseService._credits_usd_balance(credits)
+        if balance is None:
+            return False
+        try:
+            expected = Decimal(str(purchase.get("amountUsd") or ""))
+        except (InvalidOperation, ValueError):
+            return False
+        return balance >= expected
+
+    @staticmethod
+    def _credits_usd_balance(credits: Mapping[str, Any]) -> Decimal | None:
+        candidates = [
+            credits.get("credits"),
+            credits.get("balanceUsd"),
+        ]
+        nested = credits.get("credits")
+        if isinstance(nested, Mapping):
+            candidates.append(nested.get("balanceUsd"))
+        for candidate in candidates:
+            if isinstance(candidate, bool) or candidate is None:
+                continue
+            try:
+                amount = Decimal(str(candidate))
+            except (InvalidOperation, ValueError):
+                continue
+            if amount.is_finite() and amount >= 0:
+                return amount
+        return None
 
     def _latest_purchase_for_user(self, telegram_user_id: str) -> dict[str, Any] | None:
         with self.store.lock, self.store._database() as db:
