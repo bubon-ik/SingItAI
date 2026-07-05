@@ -846,11 +846,13 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 },
                 status=503,
             )
-        except Exception:
+        except Exception as exc:
             self._send_json(
                 {
                     "ok": False,
                     "error": "bankr_llm_request_failed",
+                    "errorType": type(exc).__name__,
+                    "detail": _redact_error_detail(str(exc)),
                     "telegramText": "Bankr LLM request failed. Please try again.",
                 },
                 status=500,
@@ -3890,6 +3892,18 @@ def _read_required_text(payload: dict[str, Any], key: str) -> str:
     if not value:
         raise ValueError(f"{key} is required")
     return value
+
+
+def _redact_error_detail(value: str) -> str:
+    text = str(value or "")
+    text = re.sub(r"bk_[A-Za-z0-9_-]+", "bk_[redacted]", text)
+    text = re.sub(
+        r"\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b",
+        "[jwt-redacted]",
+        text,
+    )
+    text = re.sub(r"\b[A-Za-z0-9_-]{32,}\b", "[token-redacted]", text)
+    return text[:500]
 
 
 class WalletApiAuthError(ValueError):

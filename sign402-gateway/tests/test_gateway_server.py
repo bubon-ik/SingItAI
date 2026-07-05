@@ -810,6 +810,30 @@ class GatewayServerTests(unittest.TestCase):
         )
         self.assertNotIn("raw provider", response)
 
+    def test_llm_route_returns_redacted_unexpected_error_detail(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "123"
+        server.bankr_llm_purchase_service.verify_otp.side_effect = ValueError(
+            "required SINGIT exceeds configured maximum for bk_private_key"
+        )
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/llm-key/verify",
+                {"telegramUserId": "123", "code": "123456"},
+                server=server,
+                headers=self.llm_auth_headers(),
+            )
+
+        response = self.response_text(handler)
+        body = self.response_json(handler)
+        self.assertIn("HTTP/1.0 500 Internal Server Error", response)
+        self.assertEqual(body["error"], "bankr_llm_request_failed")
+        self.assertEqual(body["errorType"], "ValueError")
+        self.assertIn("required SINGIT exceeds configured maximum", body["detail"])
+        self.assertNotIn("bk_private_key", response)
+        self.assertIn("bk_[redacted]", response)
+
     def test_health_lists_bankr_llm_purchase_routes(self):
         with patch("sys.stderr", io.StringIO()):
             handler = self.make_handler(
