@@ -1745,7 +1745,8 @@ class BankrLlmPurchaseServiceAuthTests(unittest.TestCase):
         commitment = {
             "purchaseId": started["purchaseId"],
             "amountUsd": "10.50",
-            "singitAmountAtomic": "25000000000000000000",
+            # Quoted 25 SINGIT plus the default 5% approval buffer.
+            "singitAmountAtomic": "26250000000000000000",
             "sourceWalletAddress": "0x2222222222222222222222222222222222222222",
             "bankrWalletAddress": EVM_ADDRESS,
             "apiKeyFingerprint": hashlib.sha256(API_KEY.encode("utf-8")).hexdigest()[
@@ -1884,6 +1885,7 @@ class BankrLlmPurchaseFactoryTests(unittest.TestCase):
                     ),
                     "SIGN402_BANKR_TOPUP_ATTEMPTS": "2",
                     "SIGN402_BANKR_TOPUP_RETRY_DELAY_SECONDS": "7.5",
+                    "SIGN402_BANKR_SINGIT_APPROVAL_BUFFER_PERCENT": "7",
                 },
                 wallet_service=wallet,
                 pricer=pricer,
@@ -1906,6 +1908,7 @@ class BankrLlmPurchaseFactoryTests(unittest.TestCase):
             )
             self.assertEqual(service.topup_attempts, 2)
             self.assertEqual(service.topup_retry_delay_seconds, 7.5)
+            self.assertEqual(service.singit_approval_buffer_percent, 7.0)
             self.assertIs(service.wallet_service, wallet)
             self.assertIs(service.pricer, pricer)
             self.assertIs(service.transfer_client, transfer)
@@ -2208,9 +2211,10 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
 
     def test_resume_reprices_before_transfer_and_rejects_above_approved_max(self):
         awaiting = self.approved_purchase()
+        # Above the approved max of 26.25 (quoted 25 + 5% buffer).
         self.pricer.result = {
-            "requiredSingit": "26",
-            "requiredSingitAtomic": "26000000000000000000",
+            "requiredSingit": "27",
+            "requiredSingitAtomic": "27000000000000000000",
             "expectedUsdc": "11.00",
         }
 
@@ -2220,6 +2224,20 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
         self.assertEqual(result["errorCode"], "price_exceeds_approved_max")
         self.assertEqual(self.transfer.calls, [])
         self.assertEqual(self.wallet.decrypt_calls, [])
+
+    def test_resume_tolerates_price_moves_within_approval_buffer(self):
+        awaiting = self.approved_purchase()
+        # Above the original quote of 25 but within the 5% buffer (26.25).
+        self.pricer.result = {
+            "requiredSingit": "26",
+            "requiredSingitAtomic": "26000000000000000000",
+            "expectedUsdc": "11.00",
+        }
+
+        result = self.service.resume(awaiting["purchaseId"])
+
+        self.assertEqual(result["state"], "COMPLETE")
+        self.assertEqual(self.transfer.calls[0]["amount"], "26")
 
     def test_resume_reruns_limits_and_balance_immediately_before_transfer(self):
         awaiting = self.approved_purchase()
@@ -2235,10 +2253,16 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
                 "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
             )
             self.assertEqual(enforced["metadata"]["network"], "base-mainnet")
-            self.assertEqual(
-                enforced["metadata"]["singitAmountAtomic"],
-                "25000000000000000000",
-            )
+        # Approval enforces the buffered max; the transfer enforces the
+        # fresh quoted amount.
+        self.assertEqual(
+            self.enforced_spends[0]["metadata"]["singitAmountAtomic"],
+            "26250000000000000000",
+        )
+        self.assertEqual(
+            self.enforced_spends[1]["metadata"]["singitAmountAtomic"],
+            "25000000000000000000",
+        )
         self.assertEqual(
             self.recorded_spends[0]["metadata"]["amountAtomic"],
             "10000000",

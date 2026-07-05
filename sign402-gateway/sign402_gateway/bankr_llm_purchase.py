@@ -11,7 +11,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from contextlib import contextmanager
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
@@ -1048,6 +1048,7 @@ class BankrLlmPurchaseService:
         topup_source_token: str = "SINGIT",
         topup_attempts: int = 3,
         topup_retry_delay_seconds: float = 5.0,
+        singit_approval_buffer_percent: float = 5.0,
         sleep: Callable[[float], None] = time.sleep,
     ):
         self.store = store
@@ -1065,6 +1066,7 @@ class BankrLlmPurchaseService:
         self.topup_source_token = str(topup_source_token)
         self.topup_attempts = int(topup_attempts)
         self.topup_retry_delay_seconds = float(topup_retry_delay_seconds)
+        self.singit_approval_buffer_percent = float(singit_approval_buffer_percent)
         self._sleep = sleep
 
     def start(
@@ -1256,16 +1258,22 @@ class BankrLlmPurchaseService:
                 "invalid_pricing",
                 "SINGIT pricing is unavailable. Please try again.",
             )
+        # Approve a slippage buffer above the current quote so the purchase
+        # survives small price moves between approval and transfer. The
+        # transfer itself always spends the fresh price, capped by this max.
+        approved_max_atomic = str(
+            self._approved_max_singit_atomic(int(singit_atomic))
+        )
         spend_context = self._spend_context(
             purchase,
-            singit_amount_atomic=singit_atomic,
+            singit_amount_atomic=approved_max_atomic,
             source_wallet_address=source_wallet,
         )
         self.enforce_spend(user_id, spend_context)
 
         commitment = self._commitment(
             purchase,
-            singit_amount_atomic=singit_atomic,
+            singit_amount_atomic=approved_max_atomic,
             source_wallet_address=source_wallet,
             bankr_wallet_address=bankr_wallet,
         )
@@ -1280,7 +1288,7 @@ class BankrLlmPurchaseService:
             new_state="AWAITING_IMESSAGE_APPROVAL",
             fields={
                 "sourceWalletAddress": source_wallet,
-                "singitAmountAtomic": singit_atomic,
+                "singitAmountAtomic": approved_max_atomic,
                 "commitmentHash": commitment_hash,
                 "errorCode": "",
                 "errorMessage": "",
@@ -1935,6 +1943,13 @@ class BankrLlmPurchaseService:
             )
         return str(int(atomic))
 
+    def _approved_max_singit_atomic(self, quoted_atomic: int) -> int:
+        percent = Decimal(str(self.singit_approval_buffer_percent))
+        buffered = (
+            Decimal(quoted_atomic) * (Decimal(100) + percent) / Decimal(100)
+        ).to_integral_value(rounding=ROUND_CEILING)
+        return int(buffered)
+
     @staticmethod
     def _pricing_atomic(pricing: Mapping[str, Any]) -> int:
         singit_atomic = str(pricing.get("requiredSingitAtomic") or "")
@@ -2214,6 +2229,12 @@ def build_bankr_llm_purchase_service_from_env(
         topup_retry_delay_seconds = float(
             str(values.get("SIGN402_BANKR_TOPUP_RETRY_DELAY_SECONDS") or "5")
         )
+        singit_approval_buffer_percent = float(
+            str(
+                values.get("SIGN402_BANKR_SINGIT_APPROVAL_BUFFER_PERCENT")
+                or "5"
+            )
+        )
     except ValueError as exc:
         raise BankrLlmError(
             "invalid_configuration",
@@ -2227,6 +2248,8 @@ def build_bankr_llm_purchase_service_from_env(
         or topup_attempts <= 0
         or not math.isfinite(topup_retry_delay_seconds)
         or topup_retry_delay_seconds < 0
+        or not math.isfinite(singit_approval_buffer_percent)
+        or not 0 <= singit_approval_buffer_percent <= 100
     ):
         raise BankrLlmError(
             "invalid_configuration",
@@ -2284,6 +2307,7 @@ def build_bankr_llm_purchase_service_from_env(
         topup_source_token=topup_source_token,
         topup_attempts=topup_attempts,
         topup_retry_delay_seconds=topup_retry_delay_seconds,
+        singit_approval_buffer_percent=singit_approval_buffer_percent,
     )
 
 
