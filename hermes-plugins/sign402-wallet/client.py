@@ -36,6 +36,12 @@ _BITREFILL_QUOTE_PATH = "/agent/quote-bitrefill"
 _BITREFILL_BUY_PATH = "/agent/buy-wallet-bitrefill"
 _PAID_TOOL_PATH = "/agent/buy-tool"
 _SPENDING_LIMITS_PATH = "/agent/spending-limits"
+_LLM_OPERATION_PATHS = {
+    "start": "/agent/llm-key/start",
+    "accept-terms": "/agent/llm-key/accept-terms",
+    "verify": "/agent/llm-key/verify",
+    "credits": "/agent/llm-credits",
+}
 _MAX_RESPONSE_BYTES = 64 * 1024
 _NOT_CONFIGURED = "Wallet service is not configured. Please contact the operator."
 _LOCALHOST_REQUIRED = "Wallet service must use a localhost gateway URL."
@@ -259,6 +265,32 @@ class GatewayClient:
             raise GatewayClientError(_INVALID_RESPONSE)
         return telegram_text.strip()
 
+    def execute_llm(
+        self,
+        operation: str,
+        identity: TelegramIdentity,
+        *,
+        payload: Mapping[str, Any] | None = None,
+        user_access_token: str,
+    ) -> dict[str, Any]:
+        path = _LLM_OPERATION_PATHS.get(operation)
+        if path is None:
+            raise GatewayClientError(_UNSUPPORTED)
+        user_token = str(user_access_token or "").strip()
+        if not user_token:
+            raise GatewayClientError(_AUTH_FAILED)
+
+        body = dict(payload or {})
+        body["telegramUserId"] = identity.user_id
+        return self._post(
+            path,
+            body,
+            token=self.api_token,
+            operation=f"llm-{operation}",
+            timeout=self.purchase_timeout,
+            user_token=user_token,
+        )
+
     def _post(
         self,
         path: str,
@@ -332,7 +364,9 @@ class GatewayClient:
         return result
 
     def _safe_http_error_message(self, exc: HTTPError, *, operation: str) -> str | None:
-        if operation not in {"quote-bitrefill", "buy-wallet-bitrefill"}:
+        is_bitrefill = operation in {"quote-bitrefill", "buy-wallet-bitrefill"}
+        is_llm = operation.startswith("llm-")
+        if not is_bitrefill and not is_llm:
             return None
         try:
             body = exc.read(self.max_response_bytes + 1)
@@ -345,6 +379,11 @@ class GatewayClient:
         except (UnicodeDecodeError, json.JSONDecodeError):
             return None
         if not isinstance(payload, dict):
+            return None
+        if is_llm:
+            telegram_text = payload.get("telegramText")
+            if isinstance(telegram_text, str) and telegram_text.strip():
+                return telegram_text.strip()
             return None
         error = str(payload.get("error") or "").strip()
         if not error:

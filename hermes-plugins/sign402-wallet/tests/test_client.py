@@ -357,6 +357,118 @@ class GatewayClientTests(unittest.TestCase):
             },
         )
 
+    def test_execute_llm_start_uses_user_token_and_purchase_timeout(self):
+        opener = RecordingOpener(
+            response=FakeResponse(
+                b'{"ok":true,"state":"AWAITING_TERMS","telegramText":"Review terms."}'
+            )
+        )
+        client = self.make_client(opener, purchase_timeout=240.0)
+
+        result = client.execute_llm(
+            "start",
+            TelegramIdentity(user_id="123"),
+            payload={"amountUsd": "10", "email": "user@example.com"},
+            user_access_token="user-token",
+        )
+
+        request, timeout = opener.requests[0]
+        self.assertEqual(result["state"], "AWAITING_TERMS")
+        self.assertEqual(
+            request.full_url,
+            "http://127.0.0.1:8099/agent/llm-key/start",
+        )
+        self.assertEqual(timeout, 240.0)
+        self.assertEqual(
+            request.get_header("Authorization"),
+            "Bearer wallet-token-secret-value",
+        )
+        self.assertEqual(
+            request.get_header("X-sign402-user-token"),
+            "user-token",
+        )
+        self.assertEqual(
+            json.loads(request.data),
+            {
+                "telegramUserId": "123",
+                "amountUsd": "10",
+                "email": "user@example.com",
+            },
+        )
+
+    def test_execute_llm_maps_all_operations(self):
+        cases = {
+            "start": "/agent/llm-key/start",
+            "accept-terms": "/agent/llm-key/accept-terms",
+            "verify": "/agent/llm-key/verify",
+            "credits": "/agent/llm-credits",
+        }
+
+        for operation, path in cases.items():
+            with self.subTest(operation=operation):
+                opener = RecordingOpener(
+                    response=FakeResponse(b'{"ok":true,"telegramText":"ok"}')
+                )
+                self.make_client(opener).execute_llm(
+                    operation,
+                    TelegramIdentity(user_id="123"),
+                    user_access_token="user-token",
+                )
+                self.assertEqual(
+                    opener.requests[0][0].full_url,
+                    f"http://127.0.0.1:8099{path}",
+                )
+
+    def test_execute_llm_requires_user_access_token(self):
+        opener = RecordingOpener(
+            response=FakeResponse(b'{"ok":true,"telegramText":"ok"}')
+        )
+
+        with self.assertRaises(GatewayClientError) as caught:
+            self.make_client(opener).execute_llm(
+                "credits",
+                TelegramIdentity(user_id="123"),
+                user_access_token="",
+            )
+
+        self.assertIn("authentication", caught.exception.user_message)
+        self.assertEqual(opener.requests, [])
+
+    def test_execute_llm_surfaces_only_gateway_telegram_text(self):
+        error_stream = io.BytesIO(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": "raw provider token response",
+                    "telegramText": "That verification code is invalid or expired.",
+                }
+            ).encode("utf-8")
+        )
+        opener = RecordingOpener(
+            error=HTTPError(
+                "http://127.0.0.1:8099/agent/llm-key/verify",
+                400,
+                "Bad Request",
+                {},
+                error_stream,
+            )
+        )
+
+        with self.assertRaises(GatewayClientError) as caught:
+            self.make_client(opener).execute_llm(
+                "verify",
+                TelegramIdentity(user_id="123"),
+                payload={"code": "000000"},
+                user_access_token="user-token",
+            )
+
+        self.assertEqual(
+            caught.exception.user_message,
+            "That verification code is invalid or expired.",
+        )
+        self.assertNotIn("raw provider", caught.exception.user_message)
+        self.assertTrue(error_stream.closed)
+
     def test_from_env_requires_gateway_url_and_token(self):
         with self.assertRaises(GatewayClientError) as missing_all:
             GatewayClient.from_env({})
