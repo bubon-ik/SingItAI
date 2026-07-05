@@ -717,12 +717,17 @@ class BankrIdentityClient:
 
         response = None
         http_status = None
+        http_error_body = None
         transport_failed = False
         try:
             response = self.opener(request, timeout=self.timeout)
             raw_body = response.read(MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as exc:
             http_status = exc.code
+            try:
+                http_error_body = exc.read(MAX_RESPONSE_BYTES + 1)
+            except Exception:
+                http_error_body = b""
             self._close_quietly(exc)
         except Exception:
             transport_failed = True
@@ -731,7 +736,7 @@ class BankrIdentityClient:
                 self._close_quietly(response)
 
         if http_status is not None:
-            self._raise_http_error(http_status, error_scope)
+            self._raise_http_error(http_status, error_scope, http_error_body)
         if transport_failed:
             self._raise_unavailable(error_scope)
         if (
@@ -900,7 +905,11 @@ class BankrIdentityClient:
         )
 
     @staticmethod
-    def _raise_http_error(status: int, error_scope: str) -> None:
+    def _raise_http_error(
+        status: int,
+        error_scope: str,
+        body: bytes | str | None = None,
+    ) -> None:
         if status == 429:
             raise BankrLlmError(
                 "rate_limited",
@@ -913,9 +922,11 @@ class BankrIdentityClient:
             )
         if error_scope == "key_creation":
             if 400 <= status < 500:
+                detail = BankrIdentityClient._redacted_upstream_detail(body)
+                suffix = f" HTTP {status}: {detail}" if detail else f" HTTP {status}."
                 raise BankrLlmError(
                     "bankr_key_creation_rejected",
-                    "Bankr rejected the API key creation request.",
+                    f"Bankr rejected the API key creation request.{suffix}",
                 )
             BankrIdentityClient._raise_unavailable(error_scope)
         if error_scope == "topup":
@@ -926,6 +937,58 @@ class BankrIdentityClient:
                 )
             BankrIdentityClient._raise_unavailable(error_scope)
         BankrIdentityClient._raise_unavailable(error_scope)
+
+    @staticmethod
+    def _redacted_upstream_detail(body: bytes | str | None) -> str:
+        if body is None:
+            return ""
+        if isinstance(body, bytes):
+            text = body[:4096].decode("utf-8", "replace")
+        else:
+            text = str(body)[:4096]
+        text = text.strip()
+        if not text:
+            return ""
+
+        def sanitize(value: Any) -> Any:
+            if isinstance(value, dict):
+                result = {}
+                for key, item in value.items():
+                    key_text = str(key)
+                    if key_text.lower() in {
+                        "apikey",
+                        "api_key",
+                        "identity_token",
+                        "token",
+                        "secret",
+                        "code",
+                        "email",
+                    }:
+                        result[key_text] = "[redacted]"
+                    else:
+                        result[key_text] = sanitize(item)
+                return result
+            if isinstance(value, list):
+                return [sanitize(item) for item in value[:10]]
+            if isinstance(value, str):
+                return BankrIdentityClient._redact_sensitive_text(value)
+            return value
+
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return BankrIdentityClient._redact_sensitive_text(text)[:500]
+        return json.dumps(sanitize(parsed), separators=(",", ":"))[:500]
+
+    @staticmethod
+    def _redact_sensitive_text(text: str) -> str:
+        redacted = re.sub(r"bk_[A-Za-z0-9_-]+", "bk_[redacted]", str(text))
+        redacted = re.sub(
+            r"\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b",
+            "[jwt-redacted]",
+            redacted,
+        )
+        return redacted
 
     @staticmethod
     def _raise_unavailable(error_scope: str) -> None:
@@ -1125,6 +1188,13 @@ class BankrLlmPurchaseService:
                     return self._record_invalid_otp(
                         purchase,
                         expected_state="CREATING_BANKR_KEY",
+                    )
+                if exc.code == "bankr_key_creation_rejected":
+                    return self._fail_before_transfer(
+                        purchase,
+                        expected_state="CREATING_BANKR_KEY",
+                        code=exc.code,
+                        message=exc.user_message,
                     )
                 return self._mark_key_creation_uncertain(purchase, exc)
 

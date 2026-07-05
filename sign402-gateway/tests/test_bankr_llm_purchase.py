@@ -563,6 +563,44 @@ class BankrIdentityClientTests(unittest.TestCase):
         self.assertNotIn(upstream_secret, rendered)
         self.assertNotIn(IDENTITY_TOKEN, rendered)
 
+    def test_key_creation_rejection_includes_redacted_upstream_detail(self):
+        error = http_error(
+            400,
+            {
+                "message": "llmGatewayEnabled is not allowed",
+                "apiKey": API_KEY,
+                "identity_token": IDENTITY_TOKEN,
+            },
+        )
+        responses = [
+            json_response({"privyAppId": "app-1", "privyClientId": "client-1"}),
+            json_response({"identity_token": IDENTITY_TOKEN}),
+            json_response(
+                {
+                    "evmAddress": EVM_ADDRESS,
+                    "hasAcceptedTerms": True,
+                }
+            ),
+            error,
+        ]
+        client = BankrIdentityClient(opener=QueueOpener(*responses))
+
+        with self.assertRaises(BankrLlmError) as raised:
+            client.verify_and_create_key(
+                email="user@example.com",
+                code="123456",
+                key_name="Sign402-123",
+                accept_terms=False,
+            )
+
+        self.assertEqual(raised.exception.code, "bankr_key_creation_rejected")
+        error_text = str(raised.exception)
+        self.assertIn("HTTP 400", error_text)
+        self.assertIn("llmGatewayEnabled is not allowed", error_text)
+        self.assertNotIn(API_KEY, error_text)
+        self.assertNotIn(IDENTITY_TOKEN, error_text)
+        self.assertTrue(error.tracked_body.closed)
+
     def test_rate_limit_error_is_stable_redacted_and_closed(self):
         error = http_error(429, {"secret": "private-upstream-body"})
         client = BankrIdentityClient(opener=QueueOpener(error))
@@ -1492,6 +1530,37 @@ class BankrLlmPurchaseServiceAuthTests(unittest.TestCase):
         self.assertEqual(repeated_start["purchaseId"], started["purchaseId"])
         self.assertEqual(repeated_verify["purchaseId"], started["purchaseId"])
         self.assertEqual(self.bankr.created_key_count, 1)
+        self.assertEqual(self.approval.calls, [])
+
+    def test_rejected_key_creation_fails_before_transfer_and_allows_new_purchase(self):
+        def rejected_key_creation(**kwargs):
+            self.bankr.created_key_count += 1
+            raise BankrLlmError(
+                "bankr_key_creation_rejected",
+                "Bankr rejected the API key creation request. HTTP 400: bad payload",
+            )
+
+        self.bankr.verify_and_create_key = rejected_key_creation
+        started = self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        self.service.accept_terms("123")
+
+        result = self.service.verify_otp(telegram_user_id="123", code="123456")
+        restarted = self.service.start(
+            telegram_user_id="123",
+            email="other@example.com",
+            amount_usd="20",
+        )
+
+        self.assertEqual(result["state"], "FAILED_BEFORE_TRANSFER")
+        self.assertEqual(result["errorCode"], "bankr_key_creation_rejected")
+        self.assertIn("HTTP 400: bad payload", result["errorMessage"])
+        self.assertNotEqual(restarted["purchaseId"], started["purchaseId"])
+        self.assertEqual(restarted["state"], "AWAITING_OTP")
+        self.assertEqual(self.bankr.sent_otps[-1], "other@example.com")
         self.assertEqual(self.approval.calls, [])
 
     def test_malformed_key_creation_response_enters_uncertain_state(self):
