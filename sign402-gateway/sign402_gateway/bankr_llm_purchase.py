@@ -20,6 +20,8 @@ from cryptography.fernet import Fernet, InvalidToken
 DEFAULT_BANKR_API_URL = "https://api.bankr.bot"
 DEFAULT_BANKR_LLM_URL = "https://llm.bankr.bot"
 DEFAULT_BANKR_LLM_STORE_PATH = Path.home() / ".sign402" / "bankr-llm.db"
+BASE_USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+BASE_MAINNET_NETWORK = "base-mainnet"
 PRIVY_AUTH_URL = "https://auth.privy.io/api/v1"
 MAX_RESPONSE_BYTES = 64 * 1024
 
@@ -1140,13 +1142,11 @@ class BankrLlmPurchaseService:
                 "invalid_pricing",
                 "SINGIT pricing is unavailable. Please try again.",
             )
-        spend_context = {
-            "purchaseId": purchase["purchaseId"],
-            "amountUsd": purchase["amountUsd"],
-            "singitAmountAtomic": singit_atomic,
-            "singitTokenAddress": self.singit_token_address,
-            "sourceWalletAddress": source_wallet,
-        }
+        spend_context = self._spend_context(
+            purchase,
+            singit_amount_atomic=singit_atomic,
+            source_wallet_address=source_wallet,
+        )
         self.enforce_spend(user_id, spend_context)
 
         commitment = self._commitment(
@@ -1323,17 +1323,11 @@ class BankrLlmPurchaseService:
                     message="The managed wallet changed after approval. Restart the purchase.",
                 )
 
-            spend_context = {
-                "purchaseId": purchase["purchaseId"],
-                "amountUsd": purchase["amountUsd"],
-                "singitAmountAtomic": str(fresh_atomic),
-                "singitTokenAddress": self.singit_token_address,
-                "sourceWalletAddress": source_wallet,
-                "asset": self.singit_token_address,
-                "network": "base",
-                "amountAtomic": str(fresh_atomic),
-                "purpose": "bankr_llm_topup",
-            }
+            spend_context = self._spend_context(
+                purchase,
+                singit_amount_atomic=str(fresh_atomic),
+                source_wallet_address=source_wallet,
+            )
             self.enforce_spend(user_id, spend_context)
             balance_error = self._balance_error(user_id, fresh_atomic)
             if balance_error is not None:
@@ -1516,16 +1510,21 @@ class BankrLlmPurchaseService:
         )
         loaded = self.store.get_purchase(purchase["purchaseId"]) or purchase
         if transitioned:
+            spend_context = self._spend_context(
+                loaded,
+                singit_amount_atomic=str(
+                    loaded.get("singitAmountAtomic") or ""
+                ),
+                source_wallet_address=str(
+                    loaded.get("sourceWalletAddress") or ""
+                ),
+            )
             self.record_spend(
                 str(loaded["telegramUserId"]),
                 loaded,
                 {
-                    "amountUsd": str(loaded["amountUsd"]),
-                    "singitAmountAtomic": str(loaded.get("singitAmountAtomic") or ""),
-                    "amountAtomic": str(loaded.get("singitAmountAtomic") or ""),
                     "transferHash": str(loaded.get("transferHash") or ""),
-                    "asset": self.singit_token_address,
-                    "network": "base",
+                    **spend_context,
                 },
             )
         result = self._safe_purchase_response(loaded)
@@ -1751,6 +1750,43 @@ class BankrLlmPurchaseService:
             f"Key fingerprint: {commitment['apiKeyFingerprint']}",
             f"Expires at: {commitment['expiresAt']}",
         ]
+
+    def _spend_context(
+        self,
+        purchase: Mapping[str, Any],
+        *,
+        singit_amount_atomic: str,
+        source_wallet_address: str,
+    ) -> dict[str, Any]:
+        return {
+            "purchaseId": str(purchase["purchaseId"]),
+            "amountUsd": str(purchase["amountUsd"]),
+            "amountAtomic": self._usd_atomic(purchase["amountUsd"]),
+            "asset": BASE_USDC_ADDRESS,
+            "network": BASE_MAINNET_NETWORK,
+            "singitAmountAtomic": str(singit_amount_atomic),
+            "singitTokenAddress": self.singit_token_address,
+            "sourceWalletAddress": str(source_wallet_address),
+            "purpose": "bankr_llm_topup",
+        }
+
+    @staticmethod
+    def _usd_atomic(value: Any) -> str:
+        try:
+            amount = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            amount = Decimal("NaN")
+        atomic = amount * Decimal("1000000")
+        if (
+            not amount.is_finite()
+            or amount <= 0
+            or atomic != atomic.to_integral_value()
+        ):
+            raise BankrLlmError(
+                "invalid_amount",
+                "Enter a USD amount from 1.00 to 1000.00.",
+            )
+        return str(int(atomic))
 
     @staticmethod
     def _pricing_atomic(pricing: Mapping[str, Any]) -> int:

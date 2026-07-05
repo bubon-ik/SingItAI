@@ -1856,6 +1856,29 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
 
         self.assertEqual(result["state"], "COMPLETE")
         self.assertEqual(len(self.enforced_spends), 2)
+        for enforced in self.enforced_spends:
+            self.assertEqual(enforced["metadata"]["amountAtomic"], "10000000")
+            self.assertEqual(
+                enforced["metadata"]["asset"],
+                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            )
+            self.assertEqual(enforced["metadata"]["network"], "base-mainnet")
+            self.assertEqual(
+                enforced["metadata"]["singitAmountAtomic"],
+                "25000000000000000000",
+            )
+        self.assertEqual(
+            self.recorded_spends[0]["metadata"]["amountAtomic"],
+            "10000000",
+        )
+        self.assertEqual(
+            self.recorded_spends[0]["metadata"]["asset"],
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        )
+        self.assertEqual(
+            self.recorded_spends[0]["metadata"]["network"],
+            "base-mainnet",
+        )
         self.assertEqual(self.wallet.balance_calls, ["123"])
         self.assertLess(
             self.wallet.events.index("wallet_balance"),
