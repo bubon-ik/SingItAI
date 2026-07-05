@@ -1156,8 +1156,6 @@ def _short_address(address: str) -> str:
 def _approval_message(*, wallet_address: str, commitment_hash: str) -> str:
     return "\n".join(
         [
-            "Sign402 approval request",
-            "",
             "Action: TEST APPROVAL",
             f"Wallet: {_short_address(wallet_address)}",
             "Funds: No funds will move",
@@ -1203,12 +1201,17 @@ def _purchase_approval_message(
     context_lines: list[str],
     commitment_hash: str,
 ) -> str:
+    expires_lines = [
+        line for line in context_lines if str(line).strip().lower().startswith("expires:")
+    ]
+    body_lines = [
+        line for line in context_lines if not str(line).strip().lower().startswith("expires:")
+    ]
+    expires_line = expires_lines[0] if expires_lines else "Expires: 2 minutes"
     return "\n".join(
         [
-            "Sign402 approval request",
-            "",
-            *context_lines,
-            "Expires: 2 minutes",
+            *body_lines,
+            expires_line,
             f"Hash: {commitment_hash[:8]}",
             "",
             "Reply YES or NO.",

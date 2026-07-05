@@ -161,15 +161,19 @@ class ImessageApprovalTests(unittest.TestCase):
                 "Action: BUY BITREFILL",
                 "Cost: 100 SINGIT",
                 "Resource: Bitrefill",
+                "Expires: 2 minutes",
             ],
         )
         pending = service.pending_for_photon_sender("+15551234567")
+        message = notifier.messages[0]["message"]
 
         self.assertTrue(created["ok"])
         self.assertEqual(created["approved"], True)
         self.assertEqual(created["approvedHash"], "a" * 64)
         self.assertFalse(pending["pending"])
-        self.assertIn("Hash: aaaaaaaa", notifier.messages[0]["message"])
+        self.assertNotIn("Sign402 approval request", message)
+        self.assertEqual(message.count("Expires:"), 1)
+        self.assertIn("Hash: aaaaaaaa", message)
         self.assertEqual(created["status"], "approved")
 
     def test_decision_with_matching_approval_id_is_approved(self):
