@@ -83,6 +83,7 @@ class FakeClient:
         self.calls = []
         self.imessage_results = {}
         self.imessage_calls = []
+        self.execute_tokens = []
         self.paid_tool_calls = []
         self.paid_tool_tokens = []
         self.paid_tool_result = "Crypto News unlocked."
@@ -99,8 +100,9 @@ class FakeClient:
             raise self.error
         return {"telegramText": self.result, "accessToken": self.access_token}
 
-    def execute(self, operation, identity):
+    def execute(self, operation, identity, *, user_access_token=None):
         self.calls.append((operation, identity))
+        self.execute_tokens.append((operation, user_access_token))
         if self.error:
             raise self.error
         return self.result
@@ -318,6 +320,26 @@ class PluginRegistrationTests(unittest.TestCase):
 
         self.assertIn("Telegram", result)
         self.assertEqual(client.calls, [])
+
+    def test_balance_command_sends_per_user_access_token(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "/balance",
+                user_id="1045618308",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertIn(("balance", "user-access-token"), client.execute_tokens)
 
     def test_gateway_error_returns_only_safe_user_message(self):
         plugin = load_plugin()

@@ -104,7 +104,13 @@ class GatewayClient:
             **kwargs,
         )
 
-    def execute(self, operation: str, identity: TelegramIdentity) -> str:
+    def execute(
+        self,
+        operation: str,
+        identity: TelegramIdentity,
+        *,
+        user_access_token: str | None = None,
+    ) -> str:
         path = _OPERATION_PATHS.get(operation)
         if path is None:
             raise GatewayClientError(_UNSUPPORTED)
@@ -112,7 +118,13 @@ class GatewayClient:
         payload = {"telegramUserId": identity.user_id}
         if identity.username:
             payload["telegramUsername"] = identity.username
-        result = self._post(path, payload, token=self.api_token, operation=operation)
+        result = self._post(
+            path,
+            payload,
+            token=self.api_token,
+            operation=operation,
+            user_token=user_access_token,
+        )
 
         telegram_text = result.get("telegramText")
         if not isinstance(telegram_text, str) or not telegram_text.strip():

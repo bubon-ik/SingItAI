@@ -91,7 +91,12 @@ def _build_handler(operation: str):
             return _TELEGRAM_ONLY_MESSAGE
         try:
             client = _client_factory()
-            return await asyncio.to_thread(client.execute, operation, identity)
+            # create-wallet is the bootstrap that issues the token; every other
+            # op authenticates as the specific user via their per-user token.
+            token = None if operation == "create-wallet" else _user_access_token(client, identity)
+            return await asyncio.to_thread(
+                client.execute, operation, identity, user_access_token=token
+            )
         except GatewayClientError as exc:
             return exc.user_message
         except Exception as exc:
@@ -297,7 +302,11 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
         elif command == "wallet":
             text = client.execute("create-wallet", identity)
         elif command == "balance":
-            text = client.execute("balance", identity)
+            text = client.execute(
+                "balance",
+                identity,
+                user_access_token=_user_access_token(client, identity),
+            )
         elif command in {"limits", "set-limits"}:
             parsed_limits = _parse_limit_args(command, args)
             if parsed_limits is None:
