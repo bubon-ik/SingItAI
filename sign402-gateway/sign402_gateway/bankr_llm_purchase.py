@@ -855,6 +855,450 @@ class BankrIdentityClient:
         )
 
 
+class BankrLlmPurchaseService:
+    def __init__(
+        self,
+        *,
+        store: BankrLlmStore,
+        bankr: BankrIdentityClient,
+        wallet_service: Any,
+        pricer: Any,
+        approval_service: Any,
+        transfer_client: Any,
+        enforce_spend: Callable[[str, dict[str, Any]], None],
+        record_spend: Callable[[str, dict[str, Any], dict[str, Any]], None],
+        singit_token_address: str,
+        now: Callable[[], float] = time.time,
+        otp_ttl_seconds: int = 600,
+        max_otp_attempts: int = 3,
+    ):
+        self.store = store
+        self.bankr = bankr
+        self.wallet_service = wallet_service
+        self.pricer = pricer
+        self.approval_service = approval_service
+        self.transfer_client = transfer_client
+        self.enforce_spend = enforce_spend
+        self.record_spend = record_spend
+        self.singit_token_address = str(singit_token_address)
+        self._now = now
+        self.otp_ttl_seconds = int(otp_ttl_seconds)
+        self.max_otp_attempts = int(max_otp_attempts)
+
+    def start(
+        self,
+        *,
+        telegram_user_id: str,
+        email: str,
+        amount_usd: str,
+    ) -> dict[str, Any]:
+        user_id = self._require_user_id(telegram_user_id)
+        email_value = BankrIdentityClient._validate_email(email)
+        amount_value = self._validate_amount(amount_usd)
+
+        active = self.store.get_active_purchase(user_id)
+        if active is not None:
+            if self._is_expired(active):
+                return self._expire_purchase(active)
+            return self._safe_purchase_response(active)
+
+        state = (
+            "AWAITING_OTP"
+            if self.store.has_accepted_terms(user_id)
+            else "AWAITING_TERMS"
+        )
+        purchase = self.store.create_purchase(
+            telegram_user_id=user_id,
+            email=email_value,
+            amount_usd=amount_value,
+            state=state,
+            expires_at=int(self._now()) + self.otp_ttl_seconds,
+        )
+        if state == "AWAITING_OTP":
+            self.bankr.send_otp(email_value)
+        return self._safe_purchase_response(purchase)
+
+    def accept_terms(self, telegram_user_id: str) -> dict[str, Any]:
+        user_id = self._require_user_id(telegram_user_id)
+        purchase = self.store.get_active_purchase(user_id)
+        if purchase is None:
+            return {
+                "ok": False,
+                "state": "NOT_STARTED",
+                "telegramText": "Start with /llm_buy before accepting terms.",
+            }
+        if self._is_expired(purchase):
+            return self._expire_purchase(purchase)
+
+        self.store.record_terms_acceptance(user_id, accepted_at=int(self._now()))
+        if purchase["state"] == "AWAITING_TERMS":
+            transitioned = self.store.transition(
+                purchase["purchaseId"],
+                expected_state="AWAITING_TERMS",
+                new_state="AWAITING_OTP",
+            )
+            purchase = self.store.get_purchase(purchase["purchaseId"]) or purchase
+            if transitioned:
+                self.bankr.send_otp(purchase["email"])
+        return self._safe_purchase_response(purchase)
+
+    def verify_otp(
+        self,
+        *,
+        telegram_user_id: str,
+        code: str,
+    ) -> dict[str, Any]:
+        user_id = self._require_user_id(telegram_user_id)
+        purchase = self.store.get_active_purchase(user_id)
+        if purchase is None:
+            latest = self._latest_purchase_for_user(user_id)
+            if latest is not None:
+                return self._safe_purchase_response(latest)
+            return {
+                "ok": False,
+                "state": "NOT_STARTED",
+                "telegramText": "Start with /llm_buy before entering an OTP.",
+            }
+        if self._is_expired(purchase):
+            return self._expire_purchase(purchase)
+        if purchase["state"] == "AWAITING_TERMS":
+            return self._safe_purchase_response(purchase)
+        if purchase["state"] != "AWAITING_OTP":
+            return self._safe_purchase_response(purchase)
+
+        wallet_status = self.wallet_service.wallet_status(user_id)
+        if not wallet_status.get("ok"):
+            self.store.transition(
+                purchase["purchaseId"],
+                expected_state="AWAITING_OTP",
+                new_state="FAILED_BEFORE_TRANSFER",
+                fields={
+                    "errorCode": "wallet_unavailable",
+                    "errorMessage": wallet_status.get(
+                        "telegramText",
+                        "No Base agent wallet is available.",
+                    ),
+                },
+            )
+            latest = self.store.get_purchase(purchase["purchaseId"]) or purchase
+            return self._safe_purchase_response(latest)
+        source_wallet = self._wallet_address(wallet_status)
+
+        try:
+            identity = self.bankr.verify_and_create_key(
+                email=purchase["email"],
+                code=str(code),
+                key_name=f"Sign402-{purchase['purchaseId'][:8]}",
+                accept_terms=True,
+            )
+        except BankrLlmError as exc:
+            if exc.code == "invalid_otp":
+                return self._record_invalid_otp(purchase)
+            raise
+
+        bankr_wallet = self._require_evm_address(identity.get("evmAddress"))
+        api_key = str(identity.get("apiKey") or "")
+        if not api_key.startswith("bk_"):
+            raise BankrLlmError(
+                "bankr_key_creation_ambiguous",
+                "Bankr API key creation result is unclear. Please check status before retrying.",
+            )
+        self.store.save_bankr_identity(
+            purchase["purchaseId"],
+            bankr_wallet_address=bankr_wallet,
+            api_key=api_key,
+        )
+        purchase = self.store.get_purchase(purchase["purchaseId"]) or purchase
+
+        pricing = self.pricer.price_for_usdc(purchase["amountUsd"])
+        singit_atomic = str(pricing.get("requiredSingitAtomic") or "")
+        if not singit_atomic.isdigit() or int(singit_atomic) <= 0:
+            raise BankrLlmError(
+                "invalid_pricing",
+                "SINGIT pricing is unavailable. Please try again.",
+            )
+        spend_context = {
+            "purchaseId": purchase["purchaseId"],
+            "amountUsd": purchase["amountUsd"],
+            "singitAmountAtomic": singit_atomic,
+            "singitTokenAddress": self.singit_token_address,
+            "sourceWalletAddress": source_wallet,
+        }
+        self.enforce_spend(user_id, spend_context)
+
+        commitment = self._commitment(
+            purchase,
+            singit_amount_atomic=singit_atomic,
+            source_wallet_address=source_wallet,
+            bankr_wallet_address=bankr_wallet,
+        )
+        commitment_hash = hashlib.sha256(
+            json.dumps(commitment, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        transitioned = self.store.transition(
+            purchase["purchaseId"],
+            expected_state="AWAITING_OTP",
+            new_state="AWAITING_IMESSAGE_APPROVAL",
+            fields={
+                "sourceWalletAddress": source_wallet,
+                "singitAmountAtomic": singit_atomic,
+                "commitmentHash": commitment_hash,
+            },
+        )
+        purchase = self.store.get_purchase(purchase["purchaseId"]) or purchase
+        if not transitioned:
+            return self._safe_purchase_response(purchase)
+
+        approval = self.approval_service.request_hash_approval(
+            telegram_user_id=user_id,
+            action_type="sign402_bankr_llm",
+            commitment_hash=commitment_hash,
+            context_lines=self._approval_context_lines(commitment, commitment_hash),
+        )
+        return self._apply_approval_result(purchase, approval)
+
+    def credits(self, telegram_user_id: str) -> dict[str, Any]:
+        user_id = self._require_user_id(telegram_user_id)
+        purchase = self.store.get_active_purchase(user_id)
+        if purchase is None:
+            purchase = self._latest_purchase_for_user(user_id)
+        if purchase is None:
+            return {
+                "ok": False,
+                "state": "NOT_STARTED",
+                "telegramText": "No Bankr LLM purchase was found.",
+            }
+        if not purchase.get("apiKeyFingerprint"):
+            return self._safe_purchase_response(purchase)
+        credits = self.bankr.credits(api_key=self.store.decrypt_api_key(purchase))
+        result = self._safe_purchase_response(purchase)
+        result["credits"] = credits
+        return result
+
+    def _apply_approval_result(
+        self,
+        purchase: Mapping[str, Any],
+        approval: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        status = str(approval.get("status") or "").lower()
+        approved = approval.get("approved") is True or status == "approved"
+        fields: dict[str, Any] = {}
+        approval_id = approval.get("approvalId")
+        if isinstance(approval_id, str) and approval_id:
+            fields["approvalRequestId"] = approval_id
+        if approved:
+            new_state = "AWAITING_TRANSFER"
+        elif status == "expired":
+            new_state = "EXPIRED"
+            fields["errorCode"] = "approval_expired"
+            fields["errorMessage"] = "The iMessage approval expired."
+        else:
+            new_state = "REJECTED"
+            fields["errorCode"] = "approval_rejected"
+            fields["errorMessage"] = "The iMessage approval was rejected."
+
+        self.store.transition(
+            purchase["purchaseId"],
+            expected_state="AWAITING_IMESSAGE_APPROVAL",
+            new_state=new_state,
+            fields=fields,
+        )
+        loaded = self.store.get_purchase(purchase["purchaseId"]) or dict(purchase)
+        return self._safe_purchase_response(loaded)
+
+    def _record_invalid_otp(self, purchase: Mapping[str, Any]) -> dict[str, Any]:
+        attempts = self._otp_attempts(purchase) + 1
+        if attempts >= self.max_otp_attempts:
+            self.store.transition(
+                purchase["purchaseId"],
+                expected_state="AWAITING_OTP",
+                new_state="EXPIRED",
+                fields={
+                    "otpAttempts": attempts,
+                    "errorCode": "invalid_otp",
+                    "errorMessage": "Too many invalid verification codes.",
+                },
+            )
+        else:
+            self.store.transition(
+                purchase["purchaseId"],
+                expected_state="AWAITING_OTP",
+                new_state="AWAITING_OTP",
+                fields={"otpAttempts": attempts},
+            )
+        loaded = self.store.get_purchase(purchase["purchaseId"]) or dict(purchase)
+        return self._safe_purchase_response(loaded)
+
+    def _expire_purchase(self, purchase: Mapping[str, Any]) -> dict[str, Any]:
+        if purchase["state"] not in BankrLlmStore.TERMINAL_STATES:
+            self.store.transition(
+                purchase["purchaseId"],
+                expected_state=purchase["state"],
+                new_state="EXPIRED",
+                fields={
+                    "errorCode": "expired",
+                    "errorMessage": "This Bankr LLM purchase expired.",
+                },
+            )
+            purchase = self.store.get_purchase(purchase["purchaseId"]) or purchase
+        return self._safe_purchase_response(purchase)
+
+    def _safe_purchase_response(self, purchase: Mapping[str, Any]) -> dict[str, Any]:
+        state = str(purchase.get("state") or "")
+        result = {
+            "ok": state not in {"REJECTED", "EXPIRED", "FAILED_BEFORE_TRANSFER"},
+            "purchaseId": purchase.get("purchaseId"),
+            "state": state,
+            "amountUsd": purchase.get("amountUsd"),
+            "expiresAt": purchase.get("expiresAt"),
+        }
+        for key in (
+            "commitmentHash",
+            "singitAmountAtomic",
+            "sourceWalletAddress",
+            "bankrWalletAddress",
+            "apiKeyFingerprint",
+            "approvalRequestId",
+            "errorCode",
+            "errorMessage",
+        ):
+            if purchase.get(key):
+                result[key] = purchase[key]
+        result["telegramText"] = self._telegram_text(result)
+        return result
+
+    def _telegram_text(self, response: Mapping[str, Any]) -> str:
+        state = response.get("state")
+        if state == "AWAITING_TERMS":
+            return (
+                "Review Bankr LLM purchase terms, then send /llm_terms accept "
+                "to email your verification code."
+            )
+        if state == "AWAITING_OTP":
+            return "Verification code sent. Reply with the six-digit OTP."
+        if state == "AWAITING_IMESSAGE_APPROVAL":
+            return "iMessage approval is pending. Reply there to continue."
+        if state == "AWAITING_TRANSFER":
+            return (
+                "Approved. This purchase is waiting for SINGIT funding."
+            )
+        if state == "REJECTED":
+            return "The Bankr LLM purchase was rejected. No funds moved."
+        if state == "EXPIRED":
+            return "This Bankr LLM purchase expired. No funds moved."
+        if state == "FAILED_BEFORE_TRANSFER":
+            return "This Bankr LLM purchase could not continue. No funds moved."
+        return "Bankr LLM purchase status is available."
+
+    def _commitment(
+        self,
+        purchase: Mapping[str, Any],
+        *,
+        singit_amount_atomic: str,
+        source_wallet_address: str,
+        bankr_wallet_address: str,
+    ) -> dict[str, Any]:
+        return {
+            "purchaseId": str(purchase["purchaseId"]),
+            "amountUsd": str(purchase["amountUsd"]),
+            "singitAmountAtomic": str(singit_amount_atomic),
+            "sourceWalletAddress": str(source_wallet_address),
+            "bankrWalletAddress": str(bankr_wallet_address),
+            "apiKeyFingerprint": str(purchase["apiKeyFingerprint"]),
+            "expiresAt": int(purchase["expiresAt"]),
+        }
+
+    def _approval_context_lines(
+        self,
+        commitment: Mapping[str, Any],
+        commitment_hash: str,
+    ) -> list[str]:
+        return [
+            f"Commitment hash: {commitment_hash}",
+            f"USD amount: {commitment['amountUsd']}",
+            f"SINGIT atomic max: {commitment['singitAmountAtomic']}",
+            f"Source wallet: {commitment['sourceWalletAddress']}",
+            f"Bankr wallet: {commitment['bankrWalletAddress']}",
+            f"Key fingerprint: {commitment['apiKeyFingerprint']}",
+            f"Expires at: {commitment['expiresAt']}",
+        ]
+
+    def _latest_purchase_for_user(self, telegram_user_id: str) -> dict[str, Any] | None:
+        with self.store.lock, self.store._database() as db:
+            row = db.execute(
+                """
+                SELECT *
+                FROM bankr_llm_purchases
+                WHERE telegram_user_id = ?
+                ORDER BY created_at DESC, purchase_id DESC
+                LIMIT 1
+                """,
+                (str(telegram_user_id),),
+            ).fetchone()
+        return _purchase_row_to_dict(row)
+
+    @staticmethod
+    def _otp_attempts(purchase: Mapping[str, Any]) -> int:
+        try:
+            return int(purchase.get("otpAttempts") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _is_expired(self, purchase: Mapping[str, Any]) -> bool:
+        return int(purchase.get("expiresAt") or 0) <= int(self._now())
+
+    @staticmethod
+    def _wallet_address(wallet_status: Mapping[str, Any]) -> str:
+        wallet = wallet_status.get("wallet")
+        if not isinstance(wallet, Mapping):
+            raise BankrLlmError(
+                "wallet_unavailable",
+                "No Base agent wallet is available.",
+            )
+        return BankrLlmPurchaseService._require_evm_address(wallet.get("address"))
+
+    @staticmethod
+    def _require_evm_address(value: Any) -> str:
+        address = str(value or "")
+        if EVM_ADDRESS_RE.fullmatch(address) is None:
+            raise BankrLlmError(
+                "wallet_unavailable",
+                "A valid Base wallet address is required.",
+            )
+        return address
+
+    @staticmethod
+    def _require_user_id(value: str) -> str:
+        user_id = str(value or "").strip()
+        if not user_id:
+            raise BankrLlmError(
+                "invalid_telegram_user",
+                "Telegram user is required.",
+            )
+        return user_id
+
+    @staticmethod
+    def _validate_amount(value: str) -> str:
+        text = str(value or "").strip()
+        try:
+            amount = Decimal(text)
+        except (InvalidOperation, ValueError):
+            amount = Decimal("NaN")
+        if (
+            not amount.is_finite()
+            or amount < Decimal("1")
+            or amount > Decimal("1000")
+            or amount != amount.quantize(Decimal("0.01"))
+        ):
+            raise BankrLlmError(
+                "invalid_amount",
+                "Enter a USD amount from 1.00 to 1000.00.",
+            )
+        return format(amount, "f")
+
+
 def _api_key_fingerprint(api_key: str) -> str:
     return hashlib.sha256(str(api_key).encode("utf-8")).hexdigest()[:12]
 

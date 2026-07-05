@@ -16,6 +16,7 @@ from cryptography.fernet import Fernet
 from sign402_gateway.bankr_llm_purchase import (
     BankrIdentityClient,
     BankrLlmError,
+    BankrLlmPurchaseService,
     BankrLlmStore,
 )
 
@@ -1078,6 +1079,282 @@ class BankrLlmStoreTests(unittest.TestCase):
         db = sqlite3.connect(str(self.path), timeout=5.0)
         db.row_factory = sqlite3.Row
         return db
+
+
+class FakeBankrForPurchase:
+    def __init__(self):
+        self.sent_otps = []
+        self.created_key_count = 0
+
+    def send_otp(self, email):
+        self.sent_otps.append(email)
+
+    def verify_and_create_key(self, *, email, code, key_name, accept_terms):
+        if code != "123456":
+            raise BankrLlmError(
+                "invalid_otp",
+                "That verification code is invalid or expired.",
+            )
+        self.created_key_count += 1
+        return {
+            "evmAddress": EVM_ADDRESS,
+            "apiKey": API_KEY,
+            "key": {"id": "key-1", "name": key_name, "llmGatewayEnabled": True},
+        }
+
+    def credits(self, *, api_key):
+        return {"credits": "10.00", "currency": "USD"}
+
+
+class FakeWalletServiceForPurchase:
+    def __init__(self):
+        self.calls = []
+        self.result = {
+            "ok": True,
+            "wallet": {"address": "0x2222222222222222222222222222222222222222"},
+        }
+
+    def wallet_status(self, telegram_user_id):
+        self.calls.append(telegram_user_id)
+        return self.result
+
+
+class FakePricerForPurchase:
+    def __init__(self):
+        self.calls = []
+        self.result = {
+            "requiredSingit": "25",
+            "requiredSingitAtomic": "25000000000000000000",
+            "expectedUsdc": "11.00",
+        }
+
+    def price_for_usdc(self, amount_usd):
+        self.calls.append(amount_usd)
+        return dict(self.result)
+
+
+class FakeApprovalServiceForPurchase:
+    def __init__(self):
+        self.calls = []
+        self.result = {"ok": False, "status": "expired"}
+
+    def request_hash_approval(
+        self,
+        *,
+        telegram_user_id,
+        action_type,
+        commitment_hash,
+        context_lines,
+    ):
+        self.calls.append(
+            {
+                "telegram_user_id": telegram_user_id,
+                "action_type": action_type,
+                "commitment_hash": commitment_hash,
+                "context_lines": list(context_lines),
+            }
+        )
+        return dict(self.result)
+
+
+class BankrLlmPurchaseServiceAuthTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.now_value = 1700000000
+        self.store = BankrLlmStore(
+            Path(self.tempdir.name) / "bankr-llm.db",
+            master_key=Fernet.generate_key().decode("ascii"),
+        )
+        self.bankr = FakeBankrForPurchase()
+        self.wallet = FakeWalletServiceForPurchase()
+        self.pricer = FakePricerForPurchase()
+        self.approval = FakeApprovalServiceForPurchase()
+        self.enforced_spends = []
+        self.recorded_spends = []
+        self.service = BankrLlmPurchaseService(
+            store=self.store,
+            bankr=self.bankr,
+            wallet_service=self.wallet,
+            pricer=self.pricer,
+            approval_service=self.approval,
+            transfer_client=object(),
+            enforce_spend=lambda user_id, metadata: self.enforced_spends.append(
+                {"telegramUserId": user_id, "metadata": dict(metadata)}
+            ),
+            record_spend=lambda user_id, purchase, metadata: self.recorded_spends.append(
+                {
+                    "telegramUserId": user_id,
+                    "purchase": dict(purchase),
+                    "metadata": dict(metadata),
+                }
+            ),
+            singit_token_address="0x3333333333333333333333333333333333333333",
+            now=lambda: self.now_value,
+        )
+
+    def tearDown(self):
+        self.tempdir.cleanup()
+
+    def test_start_requires_terms_before_sending_otp(self):
+        result = self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        self.assertEqual(result["state"], "AWAITING_TERMS")
+        self.assertEqual(self.bankr.sent_otps, [])
+        self.assertIn("/llm_terms accept", result["telegramText"])
+
+    def test_accept_terms_sends_otp(self):
+        self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        result = self.service.accept_terms("123")
+        self.assertEqual(result["state"], "AWAITING_OTP")
+        self.assertEqual(self.bankr.sent_otps, ["user@example.com"])
+
+    def test_verify_creates_one_key_and_requests_approval(self):
+        self.approval.result = {"ok": False, "status": "rejected"}
+        self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        self.service.accept_terms("123")
+        result = self.service.verify_otp(telegram_user_id="123", code="123456")
+        repeated = self.service.verify_otp(telegram_user_id="123", code="123456")
+
+        self.assertEqual(result["state"], "REJECTED")
+        self.assertEqual(repeated["purchaseId"], result["purchaseId"])
+        self.assertEqual(self.bankr.created_key_count, 1)
+        self.assertEqual(self.approval.calls[0]["action_type"], "sign402_bankr_llm")
+
+    def test_verify_uses_canonical_commitment_and_safe_approval_context(self):
+        self.approval.result = {"ok": False, "status": "rejected"}
+        started = self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10.50",
+        )
+        self.service.accept_terms("123")
+
+        result = self.service.verify_otp(telegram_user_id="123", code="123456")
+
+        loaded = self.store.get_purchase(started["purchaseId"])
+        commitment = {
+            "purchaseId": started["purchaseId"],
+            "amountUsd": "10.50",
+            "singitAmountAtomic": "25000000000000000000",
+            "sourceWalletAddress": "0x2222222222222222222222222222222222222222",
+            "bankrWalletAddress": EVM_ADDRESS,
+            "apiKeyFingerprint": hashlib.sha256(API_KEY.encode("utf-8")).hexdigest()[
+                :12
+            ],
+            "expiresAt": started["expiresAt"],
+        }
+        canonical = json.dumps(commitment, sort_keys=True, separators=(",", ":"))
+        expected_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+        self.assertEqual(result["commitmentHash"], expected_hash)
+        self.assertEqual(loaded["commitmentHash"], expected_hash)
+        self.assertEqual(self.approval.calls[0]["commitment_hash"], expected_hash)
+        rendered_context = "\n".join(self.approval.calls[0]["context_lines"])
+        self.assertIn(expected_hash, rendered_context)
+        self.assertIn("10.50", rendered_context)
+        self.assertNotIn(API_KEY, rendered_context)
+        self.assertNotIn("bk_", repr(result))
+
+    def test_invalid_otp_expires_after_three_attempts_without_creating_key(self):
+        self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        self.service.accept_terms("123")
+
+        first = self.service.verify_otp(telegram_user_id="123", code="000000")
+        second = self.service.verify_otp(telegram_user_id="123", code="000000")
+        third = self.service.verify_otp(telegram_user_id="123", code="000000")
+
+        self.assertEqual(first["state"], "AWAITING_OTP")
+        self.assertEqual(second["state"], "AWAITING_OTP")
+        self.assertEqual(third["state"], "EXPIRED")
+        self.assertEqual(self.bankr.created_key_count, 0)
+
+    def test_otp_expiration_blocks_verification(self):
+        self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        self.service.accept_terms("123")
+        self.now_value += 601
+
+        result = self.service.verify_otp(telegram_user_id="123", code="123456")
+
+        self.assertEqual(result["state"], "EXPIRED")
+        self.assertEqual(self.bankr.created_key_count, 0)
+
+    def test_start_validates_amount_and_reuses_active_purchase(self):
+        for amount in ("0.99", "1000.01", "NaN", "10.001"):
+            with self.subTest(amount=amount):
+                with self.assertRaises(BankrLlmError) as raised:
+                    self.service.start(
+                        telegram_user_id="123",
+                        email="user@example.com",
+                        amount_usd=amount,
+                    )
+                self.assertEqual(raised.exception.code, "invalid_amount")
+
+        first = self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        second = self.service.start(
+            telegram_user_id="123",
+            email="other@example.com",
+            amount_usd="20",
+        )
+
+        self.assertEqual(second["purchaseId"], first["purchaseId"])
+        self.assertEqual(second["state"], "AWAITING_TERMS")
+        self.assertEqual(self.bankr.sent_otps, [])
+
+    def test_approved_hash_moves_to_awaiting_transfer_without_revealing_key(self):
+        self.approval.result = {"ok": True, "status": "approved"}
+        self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        self.service.accept_terms("123")
+
+        result = self.service.verify_otp(telegram_user_id="123", code="123456")
+
+        self.assertEqual(result["state"], "AWAITING_TRANSFER")
+        self.assertIn("approved", result["telegramText"].lower())
+        self.assertNotIn(API_KEY, repr(result))
+        self.assertNotIn("bk_", repr(result))
+        self.assertEqual(self.recorded_spends, [])
+
+    def test_credits_reads_stored_key_without_returning_it(self):
+        self.approval.result = {"ok": True, "status": "approved"}
+        self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        self.service.accept_terms("123")
+        self.service.verify_otp(telegram_user_id="123", code="123456")
+
+        result = self.service.credits("123")
+
+        self.assertEqual(result["state"], "AWAITING_TRANSFER")
+        self.assertEqual(result["credits"], {"credits": "10.00", "currency": "USD"})
+        self.assertNotIn(API_KEY, repr(result))
 
 
 if __name__ == "__main__":
