@@ -819,11 +819,11 @@ class BankrIdentityClientTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "bankr_topup_rejected")
-        self.assertEqual(
-            raised.exception.user_message,
-            "Bankr rejected the LLM credit top-up.",
-        )
-        self.assertNotIn(API_KEY, str(raised.exception))
+        error_text = str(raised.exception)
+        self.assertIn("Bankr rejected the LLM credit top-up.", error_text)
+        self.assertIn("HTTP 400", error_text)
+        self.assertIn("bad key bk_[redacted]", error_text)
+        self.assertNotIn(API_KEY, error_text)
         self.assertTrue(error.tracked_body.closed)
 
     def test_top_up_5xx_or_transport_failure_is_ambiguous(self):
@@ -1207,6 +1207,7 @@ class FakeBankrForPurchase:
         self.topups = []
         self.credits_calls = []
         self.topup_error = None
+        self.persistent_topup_error = None
         self.credits_result = {"credits": "10.00", "currency": "USD"}
 
     def send_otp(self, email):
@@ -1234,6 +1235,8 @@ class FakeBankrForPurchase:
                 "chain": chain,
             }
         )
+        if self.persistent_topup_error is not None:
+            raise self.persistent_topup_error
         if self.topup_error is not None:
             error = self.topup_error
             self.topup_error = None
@@ -1842,6 +1845,11 @@ class BankrLlmPurchaseFactoryTests(unittest.TestCase):
                     "SIGN402_SINGIT_TOKEN_ADDRESS": (
                         "0x3333333333333333333333333333333333333333"
                     ),
+                    "SIGN402_BANKR_TOPUP_SOURCE_TOKEN": (
+                        "0xc2c1e0b7C401e6217193732272444D928646eba3"
+                    ),
+                    "SIGN402_BANKR_TOPUP_ATTEMPTS": "2",
+                    "SIGN402_BANKR_TOPUP_RETRY_DELAY_SECONDS": "7.5",
                 },
                 wallet_service=wallet,
                 pricer=pricer,
@@ -1858,6 +1866,12 @@ class BankrLlmPurchaseFactoryTests(unittest.TestCase):
             self.assertEqual(service.bankr.timeout, 12.0)
             self.assertEqual(service.otp_ttl_seconds, 420)
             self.assertEqual(service.max_otp_attempts, 4)
+            self.assertEqual(
+                service.topup_source_token,
+                "0xc2c1e0b7C401e6217193732272444D928646eba3",
+            )
+            self.assertEqual(service.topup_attempts, 2)
+            self.assertEqual(service.topup_retry_delay_seconds, 7.5)
             self.assertIs(service.wallet_service, wallet)
             self.assertIs(service.pricer, pricer)
             self.assertIs(service.transfer_client, transfer)
@@ -1925,6 +1939,7 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
         self.transfer.events = self.wallet.events
         self.enforced_spends = []
         self.recorded_spends = []
+        self.sleeps = []
         self.service = BankrLlmPurchaseService(
             store=self.store,
             bankr=self.bankr,
@@ -1942,6 +1957,7 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
             ),
             singit_token_address="0x3333333333333333333333333333333333333333",
             now=lambda: self.now_value,
+            sleep=self.sleeps.append,
         )
 
     def tearDown(self):
@@ -2008,6 +2024,77 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
         self.assertEqual(len(self.bankr.topups), 1)
         self.assertEqual(reconciled["apiKey"], API_KEY)
         self.assertNotIn("apiKey", self.service.resume(result["purchaseId"]))
+
+    def test_topup_rejection_is_retried_with_backoff_before_reconciliation(self):
+        self.bankr.topup_error = BankrLlmError(
+            "bankr_topup_rejected",
+            "Bankr rejected the LLM credit top-up. HTTP 400: transient",
+        )
+
+        result = self.complete_purchase()
+
+        self.assertEqual(result["state"], "COMPLETE")
+        self.assertEqual(len(self.transfer.calls), 1)
+        self.assertEqual(len(self.bankr.topups), 2)
+        self.assertEqual(self.sleeps, [5.0])
+
+    def test_topup_rejection_exhausts_retries_then_requires_reconciliation(self):
+        self.bankr.persistent_topup_error = BankrLlmError(
+            "bankr_topup_rejected",
+            "Bankr rejected the LLM credit top-up. HTTP 400: unsupported token",
+        )
+
+        result = self.complete_purchase()
+
+        self.assertEqual(result["state"], "RECONCILIATION_REQUIRED")
+        self.assertEqual(result["errorCode"], "bankr_topup_rejected")
+        self.assertIn("unsupported token", result["errorMessage"])
+        self.assertEqual(len(self.transfer.calls), 1)
+        self.assertEqual(len(self.bankr.topups), 3)
+        self.assertEqual(self.sleeps, [5.0, 10.0])
+
+    def test_ambiguous_topup_error_is_never_retried(self):
+        result = self.complete_purchase(reconcile_required=True)
+
+        self.assertEqual(result["state"], "RECONCILIATION_REQUIRED")
+        self.assertEqual(len(self.bankr.topups), 1)
+        self.assertEqual(self.sleeps, [])
+
+    def test_topup_uses_configured_source_token(self):
+        self.service.topup_source_token = (
+            "0xc2c1e0b7C401e6217193732272444D928646eba3"
+        )
+
+        result = self.complete_purchase()
+
+        self.assertEqual(result["state"], "COMPLETE")
+        self.assertEqual(
+            self.bankr.topups[0]["source_token"],
+            "0xc2c1e0b7C401e6217193732272444D928646eba3",
+        )
+
+    def test_reconcile_rejects_purchase_owned_by_another_user(self):
+        result = self.complete_purchase(reconcile_required=True)
+
+        with self.assertRaises(BankrLlmError) as raised:
+            self.service.reconcile(
+                result["purchaseId"],
+                telegram_user_id="999",
+            )
+
+        self.assertEqual(raised.exception.code, "purchase_not_found")
+        self.assertEqual(self.bankr.credits_calls, [])
+
+    def test_reconcile_accepts_matching_owner(self):
+        result = self.complete_purchase(reconcile_required=True)
+
+        reconciled = self.service.reconcile(
+            result["purchaseId"],
+            telegram_user_id="123",
+        )
+
+        self.assertEqual(reconciled["state"], "COMPLETE")
+        self.assertEqual(reconciled["apiKey"], API_KEY)
 
     def test_reconciliation_retries_only_bankr_topup_when_credits_are_missing(self):
         result = self.complete_purchase(reconcile_required=True)

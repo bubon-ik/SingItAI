@@ -756,6 +756,47 @@ class GatewayServerTests(unittest.TestCase):
         )
         server.bankr_llm_purchase_service.resume.assert_called_once_with("purchase-1")
 
+    def test_llm_key_reconcile_requires_per_user_token(self):
+        server = DummyServer()
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/llm-key/reconcile",
+                {"telegramUserId": "123", "purchaseId": "purchase-1"},
+                server=server,
+                headers=self.wallet_auth_headers(),
+            )
+
+        self.assertIn("HTTP/1.0 401 Unauthorized", self.response_text(handler))
+        server.bankr_llm_purchase_service.reconcile.assert_not_called()
+
+    def test_llm_key_reconcile_dispatches_authenticated_user(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "123"
+        server.bankr_llm_purchase_service.reconcile.return_value = {
+            "ok": True,
+            "purchaseId": "purchase-1",
+            "state": "COMPLETE",
+            "apiKey": "bk_return_once",
+            "telegramText": "Bankr LLM purchase complete.",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/llm-key/reconcile",
+                {"telegramUserId": "123", "purchaseId": "purchase-1"},
+                server=server,
+                headers=self.llm_auth_headers(),
+            )
+
+        body = self.response_json(handler)
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(handler))
+        self.assertEqual(body["apiKey"], "bk_return_once")
+        server.bankr_llm_purchase_service.reconcile.assert_called_once_with(
+            "purchase-1",
+            telegram_user_id="123",
+        )
+
     def test_llm_credits_dispatches_authenticated_user(self):
         server = DummyServer()
         server.user_wallet_service.resolve_telegram_user_id.return_value = "123"
@@ -846,6 +887,7 @@ class GatewayServerTests(unittest.TestCase):
         self.assertIn("/agent/llm-key/start", endpoints)
         self.assertIn("/agent/llm-key/accept-terms", endpoints)
         self.assertIn("/agent/llm-key/verify", endpoints)
+        self.assertIn("/agent/llm-key/reconcile", endpoints)
         self.assertIn("/agent/llm-credits", endpoints)
 
     def test_agent_create_wallet_requires_telegram_user_id(self):

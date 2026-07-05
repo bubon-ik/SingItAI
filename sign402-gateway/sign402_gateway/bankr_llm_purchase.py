@@ -931,9 +931,11 @@ class BankrIdentityClient:
             BankrIdentityClient._raise_unavailable(error_scope)
         if error_scope == "topup":
             if 400 <= status < 500:
+                detail = BankrIdentityClient._redacted_upstream_detail(body)
+                suffix = f" HTTP {status}: {detail}" if detail else f" HTTP {status}."
                 raise BankrLlmError(
                     "bankr_topup_rejected",
-                    "Bankr rejected the LLM credit top-up.",
+                    f"Bankr rejected the LLM credit top-up.{suffix}",
                 )
             BankrIdentityClient._raise_unavailable(error_scope)
         BankrIdentityClient._raise_unavailable(error_scope)
@@ -1029,6 +1031,10 @@ class BankrLlmPurchaseService:
         now: Callable[[], float] = time.time,
         otp_ttl_seconds: int = 600,
         max_otp_attempts: int = 3,
+        topup_source_token: str = "SINGIT",
+        topup_attempts: int = 3,
+        topup_retry_delay_seconds: float = 5.0,
+        sleep: Callable[[float], None] = time.sleep,
     ):
         self.store = store
         self.bankr = bankr
@@ -1042,6 +1048,10 @@ class BankrLlmPurchaseService:
         self._now = now
         self.otp_ttl_seconds = int(otp_ttl_seconds)
         self.max_otp_attempts = int(max_otp_attempts)
+        self.topup_source_token = str(topup_source_token)
+        self.topup_attempts = int(topup_attempts)
+        self.topup_retry_delay_seconds = float(topup_retry_delay_seconds)
+        self._sleep = sleep
 
     def start(
         self,
@@ -1295,8 +1305,20 @@ class BankrLlmPurchaseService:
             return self._top_up_from_funded_wallet(purchase)
         return self._safe_purchase_response(purchase)
 
-    def reconcile(self, purchase_id: str) -> dict[str, Any]:
+    def reconcile(
+        self,
+        purchase_id: str,
+        *,
+        telegram_user_id: str | None = None,
+    ) -> dict[str, Any]:
         purchase = self._purchase_by_id(purchase_id)
+        if telegram_user_id is not None and str(
+            purchase.get("telegramUserId")
+        ) != str(telegram_user_id):
+            raise BankrLlmError(
+                "purchase_not_found",
+                "Bankr LLM purchase was not found.",
+            )
         state = str(purchase.get("state") or "")
         if state == "COMPLETE":
             return self._safe_purchase_response(purchase)
@@ -1524,11 +1546,9 @@ class BankrLlmPurchaseService:
         state = str(expected_state or purchase.get("state") or "")
         key = api_key if api_key is not None else self.store.decrypt_api_key(purchase)
         try:
-            topup = self.bankr.top_up(
+            topup = self._top_up_with_retries(
                 api_key=key,
                 amount_usd=str(purchase["amountUsd"]),
-                source_token="SINGIT",
-                chain="base",
             )
         except BankrLlmError as exc:
             self.store.transition(
@@ -1562,6 +1582,29 @@ class BankrLlmPurchaseService:
             reveal_api_key=reveal_api_key,
             topup=topup,
         )
+
+    def _top_up_with_retries(
+        self,
+        *,
+        api_key: str,
+        amount_usd: str,
+    ) -> dict[str, Any]:
+        attempt = 1
+        while True:
+            try:
+                return self.bankr.top_up(
+                    api_key=api_key,
+                    amount_usd=amount_usd,
+                    source_token=self.topup_source_token,
+                    chain="base",
+                )
+            except BankrLlmError as exc:
+                # Retry only definitive 4xx rejections: Bankr did not charge, so
+                # a repeat is safe. Ambiguous results must never auto-retry.
+                if exc.code != "bankr_topup_rejected" or attempt >= self.topup_attempts:
+                    raise
+                self._sleep(self.topup_retry_delay_seconds * attempt)
+                attempt += 1
 
     def _complete_purchase(
         self,
@@ -2124,6 +2167,12 @@ def build_bankr_llm_purchase_service_from_env(
         max_otp_attempts = int(
             str(values.get("SIGN402_BANKR_MAX_OTP_ATTEMPTS") or "3")
         )
+        topup_attempts = int(
+            str(values.get("SIGN402_BANKR_TOPUP_ATTEMPTS") or "3")
+        )
+        topup_retry_delay_seconds = float(
+            str(values.get("SIGN402_BANKR_TOPUP_RETRY_DELAY_SECONDS") or "5")
+        )
     except ValueError as exc:
         raise BankrLlmError(
             "invalid_configuration",
@@ -2134,10 +2183,22 @@ def build_bankr_llm_purchase_service_from_env(
         or timeout <= 0
         or otp_ttl_seconds <= 0
         or max_otp_attempts <= 0
+        or topup_attempts <= 0
+        or not math.isfinite(topup_retry_delay_seconds)
+        or topup_retry_delay_seconds < 0
     ):
         raise BankrLlmError(
             "invalid_configuration",
             "Bankr LLM timeout and OTP settings must be positive.",
+        )
+
+    topup_source_token = str(
+        values.get("SIGN402_BANKR_TOPUP_SOURCE_TOKEN") or "SINGIT"
+    ).strip()
+    if not topup_source_token:
+        raise BankrLlmError(
+            "invalid_configuration",
+            "SIGN402_BANKR_TOPUP_SOURCE_TOKEN must not be blank.",
         )
 
     singit_token_address = str(
@@ -2178,6 +2239,9 @@ def build_bankr_llm_purchase_service_from_env(
         singit_token_address=singit_token_address,
         otp_ttl_seconds=otp_ttl_seconds,
         max_otp_attempts=max_otp_attempts,
+        topup_source_token=topup_source_token,
+        topup_attempts=topup_attempts,
+        topup_retry_delay_seconds=topup_retry_delay_seconds,
     )
 
 

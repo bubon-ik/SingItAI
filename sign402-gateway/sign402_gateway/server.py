@@ -426,6 +426,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                         "/agent/llm-key/start",
                         "/agent/llm-key/accept-terms",
                         "/agent/llm-key/verify",
+                        "/agent/llm-key/reconcile",
                         "/agent/llm-credits",
                         "/agent/imessage/pairing",
                         "/agent/imessage/link",
@@ -520,6 +521,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if path == "/agent/llm-key/verify":
             self._handle_agent_llm_key_verify()
+            return
+        if path == "/agent/llm-key/reconcile":
+            self._handle_agent_llm_key_reconcile()
             return
         if path == "/agent/llm-credits":
             self._handle_agent_llm_credits()
@@ -792,6 +796,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
     def _handle_agent_llm_key_verify(self) -> None:
         self._handle_agent_llm_purchase("verify")
 
+    def _handle_agent_llm_key_reconcile(self) -> None:
+        self._handle_agent_llm_purchase("reconcile")
+
     def _handle_agent_llm_credits(self) -> None:
         self._handle_agent_llm_purchase("credits")
 
@@ -819,6 +826,11 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 )
                 if result.get("state") == "AWAITING_TRANSFER":
                     result = service.resume(str(result.get("purchaseId") or ""))
+            elif operation == "reconcile":
+                result = service.reconcile(
+                    _read_required_text(payload, "purchaseId"),
+                    telegram_user_id=user_id,
+                )
             elif operation == "credits":
                 result = service.credits(user_id)
             else:
