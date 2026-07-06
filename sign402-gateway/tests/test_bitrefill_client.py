@@ -46,15 +46,15 @@ class BitrefillClientTests(unittest.TestCase):
 
         products = client.list_products(
             country="cz,uS",
-            category="restaurants,GIFT_CARD",
-            start=1,
+            category="restaurants,REFILL",
+            start=0,
             limit=1,
             include_test_products=True,
         )
 
         self.assertEqual(
             [product["productId"] for product in products],
-            ["test-gift-card-code"],
+            ["test-phone-refill"],
         )
         self.assertEqual(
             client.list_products(
@@ -65,6 +65,24 @@ class BitrefillClientTests(unittest.TestCase):
                 include_test_products=False,
             ),
             [],
+        )
+
+    def test_test_catalog_list_accepts_official_giftcard_category_alias(self):
+        products = TestBitrefillClient().list_products(
+            country="US",
+            category="giftcard",
+            start=0,
+            limit=10,
+            include_test_products=True,
+        )
+
+        self.assertEqual(
+            [product["productId"] for product in products],
+            ["test-gift-card-link", "test-gift-card-code"],
+        )
+        self.assertEqual(
+            {product["category"] for product in products},
+            {"gift_card"},
         )
 
     def test_test_catalog_searches_multiple_product_types(self):

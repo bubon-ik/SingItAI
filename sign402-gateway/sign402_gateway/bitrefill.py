@@ -117,7 +117,9 @@ class TestBitrefillClient:
             value.strip().casefold() for value in str(country).split(",") if value.strip()
         }
         category_filters = {
-            value.strip().casefold() for value in str(category).split(",") if value.strip()
+            "gift_card" if value.strip().casefold() == "giftcard" else value.strip().casefold()
+            for value in str(category).split(",")
+            if value.strip()
         }
         matches = [
             deepcopy(product)
