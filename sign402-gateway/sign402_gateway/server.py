@@ -413,6 +413,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                         "/agent/inspect-llm-credits-topup",
                         "/agent/top-up-llm-credits",
                         "/agent/search-bitrefill",
+                        "/agent/list-bitrefill-products",
                         "/agent/get-bitrefill-product",
                         "/agent/quote-bitrefill",
                         "/agent/buy-bitrefill",
@@ -482,6 +483,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if path == "/agent/search-bitrefill":
             self._handle_agent_search_bitrefill()
+            return
+        if path == "/agent/list-bitrefill-products":
+            self._handle_agent_list_bitrefill_products()
             return
         if path == "/agent/get-bitrefill-product":
             self._handle_agent_get_bitrefill_product()
@@ -1239,6 +1243,14 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=400)
 
+    def _handle_agent_list_bitrefill_products(self) -> None:
+        try:
+            payload = self._read_json()
+            result = self.server.bitrefill_catalog_service(payload)
+            self._send_json(result)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
     def _handle_agent_get_bitrefill_product(self) -> None:
         try:
             payload = self._read_json()
@@ -1482,6 +1494,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         bankr_llm_topup_inspector: Callable[[dict[str, Any], str], dict[str, Any]],
         bankr_llm_topup: Callable[[dict[str, Any]], dict[str, Any]],
         bitrefill_search_service: Callable[[dict[str, Any]], dict[str, Any]],
+        bitrefill_catalog_service: Callable[[dict[str, Any]], dict[str, Any]],
         bitrefill_product_details_service: Callable[[dict[str, Any]], dict[str, Any]],
         bitrefill_quote_service: Callable[[dict[str, Any]], dict[str, Any]],
         bitrefill_purchase_runner: Callable[[dict[str, Any]], dict[str, Any]],
@@ -1509,6 +1522,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         self.bankr_llm_topup_inspector = bankr_llm_topup_inspector
         self.bankr_llm_topup = bankr_llm_topup
         self.bitrefill_search_service = bitrefill_search_service
+        self.bitrefill_catalog_service = bitrefill_catalog_service
         self.bitrefill_product_details_service = bitrefill_product_details_service
         self.bitrefill_quote_service = bitrefill_quote_service
         self.bitrefill_purchase_runner = bitrefill_purchase_runner
@@ -1789,6 +1803,7 @@ def build_server(
     imessage_approval_store_path: Path = DEFAULT_IMESSAGE_APPROVAL_STORE_PATH,
 ) -> Sign402GatewayServer:
     from .bitrefill_runner import (
+        BitrefillCatalogService,
         BitrefillFulfillmentRunner,
         BitrefillProductDetailsService,
         BitrefillPurchaseRunner,
@@ -1826,6 +1841,7 @@ def build_server(
     bitrefill_client = build_bitrefill_client_from_env()
     real_rate_pricer = build_real_rate_pricer_from_env()
     bitrefill_search_service = BitrefillSearchService(bitrefill_client=bitrefill_client)
+    bitrefill_catalog_service = BitrefillCatalogService(bitrefill_client=bitrefill_client)
     bitrefill_product_details_service = BitrefillProductDetailsService(
         bitrefill_client=bitrefill_client
     )
@@ -1921,6 +1937,7 @@ def build_server(
         bankr_llm_topup_inspector=bankr_llm_topup_inspector,
         bankr_llm_topup=bankr_llm_topup,
         bitrefill_search_service=bitrefill_search_service,
+        bitrefill_catalog_service=bitrefill_catalog_service,
         bitrefill_product_details_service=bitrefill_product_details_service,
         bitrefill_quote_service=bitrefill_quote_service,
         bitrefill_purchase_runner=bitrefill_purchase_runner,

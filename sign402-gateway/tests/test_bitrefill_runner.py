@@ -6,6 +6,8 @@ from unittest.mock import ANY, Mock
 
 from sign402_gateway.bitrefill import TestBitrefillClient
 from sign402_gateway.bitrefill_runner import (
+    BITREFILL_BROWSE_CATEGORIES,
+    BitrefillCatalogService,
     BitrefillFulfillmentRunner,
     BitrefillProductDetailsService,
     BitrefillPurchaseRunner,
@@ -106,6 +108,79 @@ class FakeUserFundingRunner:
 
 
 class BitrefillRunnerTests(unittest.TestCase):
+    def test_catalog_service_maps_filters_and_returns_page_metadata(self):
+        products = [{"productId": f"product-{index}"} for index in range(9)]
+        client = Mock()
+        client.list_products.return_value = products
+        service = BitrefillCatalogService(bitrefill_client=client)
+
+        page = service(
+            {
+                "country": "CZ",
+                "category": "Food",
+                "start": 8,
+                "limit": 8,
+                "includeInternational": True,
+                "includeTestProducts": False,
+            }
+        )
+
+        client.list_products.assert_called_once_with(
+            country="CZ,XI",
+            category="food,restaurants,food-delivery,groceries",
+            start=8,
+            limit=9,
+            include_test_products=False,
+        )
+        self.assertEqual(
+            page,
+            {
+                "ok": True,
+                "products": products[:8],
+                "start": 8,
+                "limit": 8,
+                "hasPrevious": True,
+                "hasNext": True,
+            },
+        )
+
+    def test_catalog_service_maps_all_supported_categories(self):
+        self.assertEqual(
+            BITREFILL_BROWSE_CATEGORIES,
+            {
+                "all": "",
+                "shopping": "retail,ecommerce,gifts,giftcard,electronics,apparel",
+                "food": "food,restaurants,food-delivery,groceries",
+                "games": "games",
+                "mobile": "refill,phone,data,bundles",
+                "travel": "travel,flights,experiences",
+                "entertainment": "entertainment,streaming,music",
+            },
+        )
+
+    def test_catalog_service_validates_country_category_and_pagination(self):
+        service = BitrefillCatalogService(bitrefill_client=Mock())
+        invalid_payloads = [
+            ({"country": "C"}, "country"),
+            ({"country": "ČZ"}, "country"),
+            ({"country": "CZ1"}, "country"),
+            ({"country": "CZ", "category": "unknown"}, "category"),
+            ({"country": "CZ", "start": -1}, "start"),
+            ({"country": "CZ", "limit": 0}, "limit"),
+            ({"country": "CZ", "limit": 21}, "limit"),
+            ({"country": "CZ", "start": True}, "start"),
+            ({"country": "CZ", "limit": False}, "limit"),
+        ]
+
+        for overrides, error in invalid_payloads:
+            payload = {"country": "CZ", "category": "all", "start": 0, "limit": 8}
+            payload.update(overrides)
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(ValueError, error):
+                    service(payload)
+
+        service.bitrefill_client.list_products.assert_not_called()
+
     def test_catalog_services_search_and_return_product_details(self):
         client = TestBitrefillClient()
 

@@ -98,6 +98,7 @@ class DummyServer:
     bankr_llm_topup = Mock()
 
     def __init__(self):
+        self.bitrefill_catalog_service = Mock()
         self.user_wallet_service = Mock()
         self.user_wallet_api_token = "test-wallet-token"
         self.bankr_llm_purchase_service = Mock()
@@ -946,6 +947,7 @@ class GatewayServerTests(unittest.TestCase):
         self.assertIn("/agent/llm-key/verify", endpoints)
         self.assertIn("/agent/llm-key/reconcile", endpoints)
         self.assertIn("/agent/llm-credits", endpoints)
+        self.assertIn("/agent/list-bitrefill-products", endpoints)
 
     def test_agent_create_wallet_requires_telegram_user_id(self):
         server = DummyServer()
@@ -3325,6 +3327,56 @@ class GatewayServerTests(unittest.TestCase):
         self.assertIn("HTTP/1.0 200 OK", response)
         self.assertIn('"productId": "test-phone-refill"', response)
         server.bitrefill_search_service.assert_called_once_with(payload)
+
+    def test_agent_list_bitrefill_products_uses_catalog_service(self):
+        server = DummyServer()
+        server.bitrefill_catalog_service.return_value = {
+            "ok": True,
+            "products": [{"productId": "product-1"}],
+            "start": 8,
+            "limit": 8,
+            "hasPrevious": True,
+            "hasNext": False,
+        }
+        payload = {
+            "country": "CZ",
+            "category": "Food",
+            "start": 8,
+            "limit": 8,
+            "includeInternational": True,
+            "includeTestProducts": False,
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/list-bitrefill-products",
+                payload,
+                server=server,
+            )
+
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(handler))
+        self.assertEqual(
+            self.response_json(handler),
+            server.bitrefill_catalog_service.return_value,
+        )
+        server.bitrefill_catalog_service.assert_called_once_with(payload)
+
+    def test_agent_list_bitrefill_products_returns_400_for_service_error(self):
+        server = DummyServer()
+        server.bitrefill_catalog_service.side_effect = ValueError("country is invalid")
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/list-bitrefill-products",
+                {"country": "C"},
+                server=server,
+            )
+
+        self.assertIn("HTTP/1.0 400 Bad Request", self.response_text(handler))
+        self.assertEqual(
+            self.response_json(handler),
+            {"ok": False, "error": "country is invalid"},
+        )
 
     def test_agent_get_bitrefill_product_uses_details_service(self):
         server = DummyServer()

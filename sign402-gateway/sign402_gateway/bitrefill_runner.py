@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import re
 import secrets
 from copy import deepcopy
 from typing import Any, Callable
@@ -14,6 +15,17 @@ from .bitrefill_quote import (
     now_epoch,
 )
 from .commerce_store import BitrefillCommerceStore
+
+
+BITREFILL_BROWSE_CATEGORIES = {
+    "all": "",
+    "shopping": "retail,ecommerce,gifts,giftcard,electronics,apparel",
+    "food": "food,restaurants,food-delivery,groceries",
+    "games": "games",
+    "mobile": "refill,phone,data,bundles",
+    "travel": "travel,flights,experiences",
+    "entertainment": "entertainment,streaming,music",
+}
 
 
 def _fulfillment_token_matches(metadata: dict[str, Any], fulfillment_token: str | None) -> bool:
@@ -93,6 +105,53 @@ class BitrefillSearchService:
             include_test_products=bool(payload.get("includeTestProducts", False)),
         )
         return {"ok": True, "products": products}
+
+
+class BitrefillCatalogService:
+    def __init__(self, *, bitrefill_client: BitrefillClient):
+        self.bitrefill_client = bitrefill_client
+
+    def __call__(self, payload: dict[str, Any]) -> dict[str, Any]:
+        country = str(payload.get("country", ""))
+        if re.fullmatch(r"[A-Za-z]{2}", country) is None:
+            raise ValueError("country must be exactly two ASCII letters")
+        country = country.upper()
+
+        category = str(payload.get("category", "all")).casefold()
+        if category not in BITREFILL_BROWSE_CATEGORIES:
+            raise ValueError("category is not supported")
+
+        start = payload.get("start", 0)
+        if isinstance(start, bool) or not isinstance(start, int) or start < 0:
+            raise ValueError("start must be an integer greater than or equal to 0")
+
+        limit = payload.get("limit", 8)
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 20
+        ):
+            raise ValueError("limit must be an integer from 1 to 20")
+
+        country_filter = country
+        if bool(payload.get("includeInternational", False)) and country != "XI":
+            country_filter = f"{country},XI"
+
+        products = self.bitrefill_client.list_products(
+            country=country_filter,
+            category=BITREFILL_BROWSE_CATEGORIES[category],
+            start=start,
+            limit=limit + 1,
+            include_test_products=bool(payload.get("includeTestProducts", False)),
+        )
+        return {
+            "ok": True,
+            "products": products[:limit],
+            "start": start,
+            "limit": limit,
+            "hasPrevious": start > 0,
+            "hasNext": len(products) > limit,
+        }
 
 
 class BitrefillProductDetailsService:
