@@ -3252,6 +3252,7 @@ class UserWalletTokenTransferClient:
         token_address: str,
         amount: str,
         chain: str = "base",
+        decimals: int = 18,
     ) -> dict[str, Any]:
         script = self.service_dir / "src" / "index.mjs"
         if not script.exists():
@@ -3271,6 +3272,8 @@ class UserWalletTokenTransferClient:
             str(amount),
             "--chain",
             str(chain),
+            "--decimals",
+            str(int(decimals)),
         ]
         env = dict(os.environ)
         env["SIGN402_EVM_PRIVATE_KEY"] = str(private_key).strip()
@@ -3297,6 +3300,48 @@ class UserWalletTokenTransferClient:
             raise ValueError("user wallet token transfer returned non-object JSON")
         tx_id = payload.get("transactionHash") or payload.get("txId")
         return {**payload, "txId": str(tx_id) if tx_id else None}
+
+    def _run_read_only(self, args: list[str]) -> dict[str, Any]:
+        script = self.service_dir / "src" / "index.mjs"
+        if not script.exists():
+            raise ValueError(f"CDP x402 service script not found: {script}")
+        result = self.runner(
+            ["node", str(script), *args],
+            cwd=str(self.service_dir),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=self.timeout,
+        )
+        if result.returncode != 0:
+            raise ValueError(
+                result.stderr.strip() or result.stdout.strip() or "token read failed"
+            )
+        payload = json.loads(result.stdout)
+        if not isinstance(payload, dict) or payload.get("ok") is not True:
+            raise ValueError("token read returned an invalid payload")
+        return payload
+
+    def token_info(self, token_address: str, *, chain: str = "base") -> dict[str, Any]:
+        return self._run_read_only(
+            ["token-info", "--token", str(token_address), "--chain", str(chain)]
+        )
+
+    def token_balance(
+        self, token_address: str, owner: str, *, chain: str = "base"
+    ) -> str:
+        payload = self._run_read_only(
+            [
+                "token-balance",
+                "--token",
+                str(token_address),
+                "--owner",
+                str(owner),
+                "--chain",
+                str(chain),
+            ]
+        )
+        return str(payload.get("balanceAtomic") or "0")
 
 
 class UserWalletTransferToCdpFundingRunner:

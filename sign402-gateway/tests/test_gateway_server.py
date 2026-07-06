@@ -2363,6 +2363,58 @@ class GatewayServerTests(unittest.TestCase):
         self.assertNotIn("0xSECRET", args)
         self.assertEqual(kwargs["env"]["SIGN402_EVM_PRIVATE_KEY"], "0xSECRET")
 
+    def test_user_wallet_token_transfer_client_passes_decimals(self):
+        recorded = {}
+
+        def runner(command, **kwargs):
+            recorded["command"] = command
+            return subprocess.CompletedProcess(
+                command, 0, stdout='{"ok": true, "transactionHash": "0xabc"}', stderr=""
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service_dir = Path(tmpdir)
+            script = service_dir / "src" / "index.mjs"
+            script.parent.mkdir(parents=True)
+            script.write_text("// test", encoding="utf-8")
+            client = UserWalletTokenTransferClient(service_dir, runner=runner)
+            client.transfer_token(
+                private_key="0xkey",
+                to_address="0x" + "1" * 40,
+                token_address="0x" + "2" * 40,
+                amount="1.5",
+                decimals=6,
+            )
+        self.assertIn("--decimals", recorded["command"])
+        self.assertEqual(
+            recorded["command"][recorded["command"].index("--decimals") + 1], "6"
+        )
+
+    def test_user_wallet_token_transfer_client_reads_token_info_and_balance(self):
+        recorded = []
+
+        def runner(command, **kwargs):
+            recorded.append(command)
+            if "token-info" in command:
+                body = '{"ok": true, "symbol": "USDC", "decimals": 6}'
+            else:
+                body = '{"ok": true, "balanceAtomic": "123"}'
+            return subprocess.CompletedProcess(command, 0, stdout=body, stderr="")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service_dir = Path(tmpdir)
+            script = service_dir / "src" / "index.mjs"
+            script.parent.mkdir(parents=True)
+            script.write_text("// test", encoding="utf-8")
+            client = UserWalletTokenTransferClient(service_dir, runner=runner)
+            info = client.token_info("0x" + "2" * 40)
+            balance = client.token_balance("0x" + "2" * 40, "0x" + "3" * 40)
+        self.assertEqual(info["symbol"], "USDC")
+        self.assertEqual(info["decimals"], 6)
+        self.assertEqual(balance, "123")
+        self.assertIn("token-info", recorded[0])
+        self.assertIn("token-balance", recorded[1])
+
     def test_user_wallet_transfer_to_cdp_funding_runner_debits_user_wallet(self):
         wallet_service = Mock(
             **{
