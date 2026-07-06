@@ -85,10 +85,27 @@ _TELEGRAM_BUTTON_COMMANDS = {
 _BITREFILL_DEFAULT_COUNTRY = "CZ"
 _BITREFILL_MAX_SEARCH_RESULTS = 5
 _BITREFILL_MAX_PACKAGES = 8
+_BITREFILL_CATALOG_PAGE_SIZE = 8
 _BITREFILL_MENU_BUTTONS = (
-    ("Search Products", "Change Country"),
+    ("Browse Catalog", "Search Products"),
+    ("Change Country",),
     ("Back",),
 )
+_BITREFILL_CATEGORY_BUTTONS = (
+    ("All", "Shopping"),
+    ("Food", "Games"),
+    ("Mobile", "Travel"),
+    ("Entertainment", "Back"),
+)
+_BITREFILL_CATEGORY_VALUES = {
+    "all": "all",
+    "shopping": "shopping",
+    "food": "food",
+    "games": "games",
+    "mobile": "mobile",
+    "travel": "travel",
+    "entertainment": "entertainment",
+}
 _BITREFILL_COUNTRY_BUTTONS = (
     ("CZ", "US", "DE"),
     ("PL", "UA", "GB"),
@@ -537,18 +554,28 @@ def _handle_telegram_bitrefill_wizard_message(*, event, source, gateway):
     if not text:
         return None
     normalized = _normalize_button_text(text)
+    stage = str(session.get("stage") or "")
     if normalized == "back":
-        _BITREFILL_SESSIONS.pop(user_id, None)
-        _send_fixed_reply(
-            gateway,
-            source,
-            "Back to Sign402 main menu.",
-            reply_markup=_telegram_main_menu_reply_markup(),
-        )
+        if stage in {"select-category", "select-product"} and session.get("source") == "catalog":
+            if stage == "select-product":
+                _send_bitrefill_category_prompt(identity=identity, source=source, gateway=gateway)
+            else:
+                _open_bitrefill_menu(identity=identity, source=source, gateway=gateway)
+        else:
+            _BITREFILL_SESSIONS.pop(user_id, None)
+            _send_fixed_reply(
+                gateway,
+                source,
+                "Back to Sign402 main menu.",
+                reply_markup=_telegram_main_menu_reply_markup(),
+            )
         return dict(_SKIP_RESULT)
     if normalized == "change country":
         _BITREFILL_SESSIONS[user_id] = {"stage": "awaiting-country"}
         _send_bitrefill_country_prompt(gateway, source)
+        return dict(_SKIP_RESULT)
+    if normalized == "browse catalog":
+        _send_bitrefill_category_prompt(identity=identity, source=source, gateway=gateway)
         return dict(_SKIP_RESULT)
     if normalized == "search products":
         country = _bitrefill_country(user_id)
@@ -561,7 +588,6 @@ def _handle_telegram_bitrefill_wizard_message(*, event, source, gateway):
         )
         return dict(_SKIP_RESULT)
 
-    stage = str(session.get("stage") or "")
     try:
         if stage == "awaiting-country":
             return _handle_bitrefill_country_input(
@@ -577,7 +603,22 @@ def _handle_telegram_bitrefill_wizard_message(*, event, source, gateway):
                 source=source,
                 gateway=gateway,
             )
+        if stage == "select-category":
+            return _handle_bitrefill_category_input(
+                identity=identity,
+                text=text,
+                source=source,
+                gateway=gateway,
+            )
         if stage == "select-product":
+            if session.get("source") == "catalog":
+                if normalized in {"next", "previous"}:
+                    return _handle_bitrefill_catalog_pagination(
+                        identity=identity,
+                        direction=normalized,
+                        source=source,
+                        gateway=gateway,
+                    )
             return _handle_bitrefill_product_choice(
                 identity=identity,
                 text=text,
@@ -628,7 +669,7 @@ def _bitrefill_menu_text(country: str) -> str:
     return (
         "Bitrefill\n\n"
         f"Country: {country}\n"
-        "Search Products to find gift cards, topups, games, travel, and more."
+        "Browse Catalog to explore products, or Search Products if you know what you want."
     )
 
 
@@ -642,6 +683,21 @@ def _send_bitrefill_country_prompt(gateway, source) -> None:
         source,
         "Send a two-letter country code, like CZ, US, DE, PL, UA.",
         reply_markup=_reply_keyboard(_BITREFILL_COUNTRY_BUTTONS),
+    )
+
+
+def _send_bitrefill_category_prompt(*, identity: TelegramIdentity, source, gateway) -> None:
+    country = _bitrefill_country(str(identity.user_id))
+    _BITREFILL_SESSIONS[str(identity.user_id)] = {
+        "stage": "select-category",
+        "source": "catalog",
+        "country": country,
+    }
+    _send_fixed_reply(
+        gateway,
+        source,
+        f"Choose a Bitrefill category for {country}.\n\nProducts from {country} and international catalog are included.",
+        reply_markup=_reply_keyboard(_BITREFILL_CATEGORY_BUTTONS),
     )
 
 
@@ -704,6 +760,112 @@ def _handle_bitrefill_search_input(*, identity: TelegramIdentity, query: str, so
         source,
         _format_bitrefill_search_results(clean_query, country, limited),
         reply_markup=_numbered_reply_keyboard(len(limited)),
+    )
+    return dict(_SKIP_RESULT)
+
+
+def _handle_bitrefill_category_input(*, identity: TelegramIdentity, text: str, source, gateway):
+    normalized = _normalize_button_text(text)
+    category = _BITREFILL_CATEGORY_VALUES.get(normalized)
+    if category is None:
+        _send_fixed_reply(
+            gateway,
+            source,
+            "Choose a category from the buttons.",
+            reply_markup=_reply_keyboard(_BITREFILL_CATEGORY_BUTTONS),
+        )
+        return dict(_SKIP_RESULT)
+    return _send_bitrefill_catalog_page(
+        identity=identity,
+        category=category,
+        start=0,
+        source=source,
+        gateway=gateway,
+    )
+
+
+def _handle_bitrefill_catalog_pagination(
+    *,
+    identity: TelegramIdentity,
+    direction: str,
+    source,
+    gateway,
+):
+    session = _BITREFILL_SESSIONS.get(str(identity.user_id), {})
+    category = str(session.get("category") or "all")
+    start = int(session.get("start") or 0)
+    if direction == "next":
+        if not session.get("hasNext"):
+            _send_fixed_reply(gateway, source, "There is no next page.")
+            return dict(_SKIP_RESULT)
+        start += _BITREFILL_CATALOG_PAGE_SIZE
+    else:
+        if not session.get("hasPrevious"):
+            _send_fixed_reply(gateway, source, "There is no previous page.")
+            return dict(_SKIP_RESULT)
+        start = max(0, start - _BITREFILL_CATALOG_PAGE_SIZE)
+    return _send_bitrefill_catalog_page(
+        identity=identity,
+        category=category,
+        start=start,
+        source=source,
+        gateway=gateway,
+    )
+
+
+def _send_bitrefill_catalog_page(
+    *,
+    identity: TelegramIdentity,
+    category: str,
+    start: int,
+    source,
+    gateway,
+):
+    country = _bitrefill_country(str(identity.user_id))
+    client = _client_factory()
+    result = client.list_bitrefill_products(
+        country=country,
+        category=category,
+        start=start,
+        limit=_BITREFILL_CATALOG_PAGE_SIZE,
+        include_international=True,
+        include_test_products=False,
+    )
+    products = _normalize_bitrefill_products(result.get("products"))
+    has_previous = bool(result.get("hasPrevious"))
+    has_next = bool(result.get("hasNext"))
+    if not products:
+        _BITREFILL_SESSIONS[str(identity.user_id)] = {
+            "stage": "select-category",
+            "source": "catalog",
+            "country": country,
+        }
+        _send_fixed_reply(
+            gateway,
+            source,
+            "No products found in this category. Choose another category.",
+            reply_markup=_reply_keyboard(_BITREFILL_CATEGORY_BUTTONS),
+        )
+        return dict(_SKIP_RESULT)
+    _BITREFILL_SESSIONS[str(identity.user_id)] = {
+        "stage": "select-product",
+        "source": "catalog",
+        "country": country,
+        "category": category,
+        "start": start,
+        "hasPrevious": has_previous,
+        "hasNext": has_next,
+        "products": products,
+    }
+    _send_fixed_reply(
+        gateway,
+        source,
+        _format_bitrefill_catalog_page(country, category, start, products),
+        reply_markup=_bitrefill_catalog_reply_keyboard(
+            len(products),
+            has_previous=has_previous,
+            has_next=has_next,
+        ),
     )
     return dict(_SKIP_RESULT)
 
@@ -900,6 +1062,25 @@ def _format_bitrefill_search_results(query: str, country: str, products: list[di
     return "\n".join(lines)
 
 
+def _format_bitrefill_catalog_page(
+    country: str,
+    category: str,
+    start: int,
+    products: list[dict],
+) -> str:
+    category_title = category.replace("-", " ").title()
+    page = (start // _BITREFILL_CATALOG_PAGE_SIZE) + 1
+    lines = [f"{category_title} products in {country} + international:", f"Page {page}"]
+    for index, product in enumerate(products, start=1):
+        name = str(product.get("name") or "Unknown product").strip()
+        product_country = str(product.get("country") or "").strip().upper()
+        suffix = f" ({product_country})" if product_country and product_country != country else ""
+        lines.append(f"{index}. {name}{suffix}")
+    lines.append("")
+    lines.append("Reply with a number.")
+    return "\n".join(lines)
+
+
 def _format_bitrefill_packages(product: dict, packages: list[dict]) -> str:
     name = str(product.get("name") or "this product").strip()
     currency = str(product.get("currency") or "").strip().upper()
@@ -934,6 +1115,27 @@ def _numbered_reply_keyboard(count: int) -> dict:
     for offset in range(0, len(numbers), 3):
         rows.append(tuple(numbers[offset : offset + 3]))
     rows.append(("Search Products", "Back"))
+    return _reply_keyboard(tuple(rows))
+
+
+def _bitrefill_catalog_reply_keyboard(
+    count: int,
+    *,
+    has_previous: bool,
+    has_next: bool,
+) -> dict:
+    rows: list[tuple[str, ...]] = []
+    numbers = [str(index) for index in range(1, count + 1)]
+    for offset in range(0, len(numbers), 4):
+        rows.append(tuple(numbers[offset : offset + 4]))
+    navigation = []
+    if has_previous:
+        navigation.append("Previous")
+    if has_next:
+        navigation.append("Next")
+    if navigation:
+        rows.append(tuple(navigation))
+    rows.append(("Back",))
     return _reply_keyboard(tuple(rows))
 
 

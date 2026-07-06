@@ -92,6 +92,7 @@ class FakeClient:
         self.bitrefill_calls = []
         self.bitrefill_result = "Bitrefill delivered."
         self.bitrefill_search_calls = []
+        self.bitrefill_list_calls = []
         self.bitrefill_product_calls = []
         self.bitrefill_search_result = {
             "ok": True,
@@ -103,6 +104,21 @@ class FakeClient:
                     "category": "gift_card",
                 }
             ],
+        }
+        self.bitrefill_list_result = {
+            "ok": True,
+            "products": [
+                {
+                    "productId": "wolt-cz",
+                    "name": "Wolt Czech Republic",
+                    "country": "CZ",
+                    "category": "food",
+                }
+            ],
+            "start": 0,
+            "limit": 8,
+            "hasPrevious": False,
+            "hasNext": False,
         }
         self.bitrefill_product_result = {
             "ok": True,
@@ -178,6 +194,30 @@ class FakeClient:
         if self.error:
             raise self.error
         return self.bitrefill_search_result
+
+    def list_bitrefill_products(
+        self,
+        *,
+        country,
+        category,
+        start,
+        limit,
+        include_international=True,
+        include_test_products=False,
+    ):
+        self.bitrefill_list_calls.append(
+            (
+                country,
+                category,
+                start,
+                limit,
+                include_international,
+                include_test_products,
+            )
+        )
+        if self.error:
+            raise self.error
+        return self.bitrefill_list_result
 
     def get_bitrefill_product(self, *, product_id, country):
         self.bitrefill_product_calls.append((product_id, country))
@@ -808,6 +848,131 @@ class PluginRegistrationTests(unittest.TestCase):
                     "user-access-token",
                 )
             ],
+        )
+
+    def test_bitrefill_catalog_browses_categories_pages_and_buys(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        first_page = [
+            {
+                "productId": f"food-{index}",
+                "name": f"Food Product {index}",
+                "country": "CZ" if index < 8 else "XI",
+                "category": "food",
+            }
+            for index in range(1, 9)
+        ]
+        second_page = [
+            {
+                "productId": "wolt-cz",
+                "name": "Wolt Czech Republic",
+                "country": "CZ",
+                "category": "food",
+            }
+        ]
+
+        def list_products(**kwargs):
+            client.bitrefill_list_calls.append(
+                (
+                    kwargs["country"],
+                    kwargs["category"],
+                    kwargs["start"],
+                    kwargs["limit"],
+                    kwargs["include_international"],
+                    kwargs["include_test_products"],
+                )
+            )
+            if kwargs["start"] == 0:
+                return {
+                    "ok": True,
+                    "products": first_page,
+                    "start": 0,
+                    "limit": 8,
+                    "hasPrevious": False,
+                    "hasNext": True,
+                }
+            return {
+                "ok": True,
+                "products": second_page,
+                "start": 8,
+                "limit": 8,
+                "hasPrevious": True,
+                "hasNext": False,
+            }
+
+        client.list_bitrefill_products = list_products
+        client.bitrefill_product_result = {
+            "ok": True,
+            "productId": "wolt-cz",
+            "name": "Wolt Czech Republic",
+            "country": "CZ",
+            "currency": "CZK",
+            "requiredRecipientFields": [],
+            "packages": [
+                {"packageId": "wolt-cz<&>500", "value": "500", "priceUsd": "20.88"}
+            ],
+        }
+        plugin._client_factory = lambda: client
+        plugin._background_runner = lambda callback: callback()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        def dispatch(text):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    text,
+                    "1045618308",
+                    username="AlpskyKnedlik",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(dispatch("Buy Bitrefill"), plugin._SKIP_RESULT)
+        self.assertEqual(dispatch("Browse Catalog"), plugin._SKIP_RESULT)
+        self.assertIn("Choose a Bitrefill category", gateway.adapters["telegram"].sent[-1][1])
+
+        self.assertEqual(dispatch("Food"), plugin._SKIP_RESULT)
+        self.assertEqual(
+            client.bitrefill_list_calls[-1],
+            ("CZ", "food", 0, 8, True, False),
+        )
+        self.assertIn("Food Product 1", gateway.adapters["telegram"].sent[-1][1])
+        self.assertIn(
+            [{"text": "Next"}],
+            plugin._bitrefill_catalog_reply_keyboard(
+                8,
+                has_previous=False,
+                has_next=True,
+            )["keyboard"],
+        )
+
+        self.assertEqual(dispatch("Next"), plugin._SKIP_RESULT)
+        self.assertEqual(
+            client.bitrefill_list_calls[-1],
+            ("CZ", "food", 8, 8, True, False),
+        )
+        self.assertIn("Wolt Czech Republic", gateway.adapters["telegram"].sent[-1][1])
+
+        self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
+        self.assertEqual(client.bitrefill_product_calls[-1], ("wolt-cz", "CZ"))
+        self.assertIn("Choose amount for Wolt Czech Republic", gateway.adapters["telegram"].sent[-1][1])
+        self.assertIn("500 CZK", gateway.adapters["telegram"].sent[-1][1])
+
+        self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
+        self.assertEqual(
+            client.bitrefill_calls[-1],
+            (
+                "1045618308",
+                "AlpskyKnedlik",
+                "wolt-cz",
+                "wolt-cz<&>500",
+                "CZ",
+                {},
+                "user-access-token",
+            ),
         )
 
     def test_bitrefill_wizard_collects_required_recipient(self):

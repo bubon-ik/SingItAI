@@ -346,6 +346,45 @@ class GatewayClientTests(unittest.TestCase):
             },
         )
 
+    def test_list_bitrefill_products_posts_catalog_payload(self):
+        opener = RecordingOpener(
+            response=FakeResponse(
+                b'{"ok":true,"products":[],"start":8,"limit":8,"hasNext":false}'
+            )
+        )
+
+        result = self.make_client(opener).list_bitrefill_products(
+            country="cz",
+            category="food",
+            start=8,
+            limit=8,
+            include_international=True,
+            include_test_products=False,
+        )
+
+        request, timeout = opener.requests[0]
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            request.full_url,
+            "http://127.0.0.1:8099/agent/list-bitrefill-products",
+        )
+        self.assertEqual(timeout, 180.0)
+        self.assertEqual(
+            request.get_header("Authorization"),
+            "Bearer wallet-token-secret-value",
+        )
+        self.assertEqual(
+            json.loads(request.data),
+            {
+                "country": "CZ",
+                "category": "food",
+                "start": 8,
+                "limit": 8,
+                "includeInternational": True,
+                "includeTestProducts": False,
+            },
+        )
+
     def test_get_bitrefill_product_posts_country_product_id(self):
         opener = RecordingOpener(
             response=FakeResponse(b'{"ok":true,"productId":"amazon-cz"}')

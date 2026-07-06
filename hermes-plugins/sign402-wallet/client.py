@@ -35,6 +35,7 @@ _IMESSAGE_OPERATION_PATHS = {
 _BITREFILL_QUOTE_PATH = "/agent/quote-bitrefill"
 _BITREFILL_BUY_PATH = "/agent/buy-wallet-bitrefill"
 _BITREFILL_SEARCH_PATH = "/agent/search-bitrefill"
+_BITREFILL_LIST_PATH = "/agent/list-bitrefill-products"
 _BITREFILL_PRODUCT_PATH = "/agent/get-bitrefill-product"
 _PAID_TOOL_PATH = "/agent/buy-tool"
 _SPENDING_LIMITS_PATH = "/agent/spending-limits"
@@ -259,6 +260,32 @@ class GatewayClient:
             payload,
             token=self.api_token,
             operation="search-bitrefill",
+            timeout=self.purchase_timeout,
+        )
+
+    def list_bitrefill_products(
+        self,
+        *,
+        country: str,
+        category: str,
+        start: int,
+        limit: int,
+        include_international: bool = True,
+        include_test_products: bool = False,
+    ) -> dict[str, Any]:
+        payload = {
+            "country": str(country or "US").strip().upper(),
+            "category": str(category or "all").strip().lower(),
+            "start": int(start),
+            "limit": int(limit),
+            "includeInternational": bool(include_international),
+            "includeTestProducts": bool(include_test_products),
+        }
+        return self._post(
+            _BITREFILL_LIST_PATH,
+            payload,
+            token=self.api_token,
+            operation="list-bitrefill-products",
             timeout=self.purchase_timeout,
         )
 
