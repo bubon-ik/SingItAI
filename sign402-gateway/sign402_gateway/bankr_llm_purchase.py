@@ -24,6 +24,13 @@ DEFAULT_BANKR_LLM_STORE_PATH = Path.home() / ".sign402" / "bankr-llm.db"
 BASE_USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 BASE_MAINNET_NETWORK = "base-mainnet"
 DEFAULT_SINGIT_TOKEN_ADDRESS = "0xc2c1e0b7C401e6217193732272444D928646eba3"
+BASE_MAINNET_PAYMENT_TOKENS: dict[str, tuple[str, int]] = {
+    "USDC": ("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 6),
+    "USDT": ("0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2", 6),
+    "WETH": ("0x4200000000000000000000000000000000000006", 18),
+    "CBBTC": ("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf", 8),
+}
+STABLE_PAYMENT_TOKEN_SYMBOLS = frozenset({"USDC", "USDT"})
 PRIVY_AUTH_URL = "https://auth.privy.io/api/v1"
 DEFAULT_PRIVY_BROWSER_ORIGIN = "https://bankr.bot"
 MAX_RESPONSE_BYTES = 64 * 1024
@@ -1098,10 +1105,14 @@ class BankrLlmPurchaseService:
         telegram_user_id: str,
         email: str,
         amount_usd: str,
+        payment_token: str = "",
     ) -> dict[str, Any]:
         user_id = self._require_user_id(telegram_user_id)
         email_value = BankrIdentityClient._validate_email(email)
         amount_value = self._validate_amount(amount_usd)
+        token_address, token_symbol, token_decimals = self._resolve_payment_token(
+            payment_token
+        )
 
         active = self.store.get_active_purchase(user_id)
         if active is not None:
@@ -1120,6 +1131,9 @@ class BankrLlmPurchaseService:
             amount_usd=amount_value,
             state=state,
             expires_at=int(self._now()) + self.otp_ttl_seconds,
+            payment_token_address=token_address,
+            payment_token_symbol=token_symbol,
+            payment_token_decimals=str(token_decimals),
         )
         if state == "AWAITING_OTP":
             self.bankr.send_otp(str(purchase["email"]))
@@ -2214,6 +2228,60 @@ class BankrLlmPurchaseService:
                 "A valid Base wallet address is required.",
             )
         return address
+
+    def _resolve_payment_token(self, raw: Any) -> tuple[str, str, int]:
+        text = str(raw or "").strip()
+        if not text or text.upper() == "SINGIT":
+            return self.singit_token_address, "SINGIT", 18
+        known = BASE_MAINNET_PAYMENT_TOKENS.get(text.upper())
+        if known is not None:
+            return known[0], text.upper(), known[1]
+        if EVM_ADDRESS_RE.fullmatch(text) is None:
+            supported = ", ".join(["SINGIT", *sorted(BASE_MAINNET_PAYMENT_TOKENS)])
+            raise BankrLlmError(
+                "invalid_payment_token",
+                f"Unknown payment token. Use one of {supported}, "
+                "or pass the token contract address.",
+            )
+        token_info = getattr(self.transfer_client, "token_info", None)
+        if not callable(token_info):
+            raise BankrLlmError(
+                "invalid_payment_token",
+                "Custom token addresses are not supported right now.",
+            )
+        try:
+            metadata = token_info(text)
+            symbol = str(metadata.get("symbol") or "").strip() or "TOKEN"
+            decimals = int(metadata.get("decimals"))
+        except BankrLlmError:
+            raise
+        except Exception:
+            raise BankrLlmError(
+                "invalid_payment_token",
+                "The token contract could not be read on Base. "
+                "Check the address and try again.",
+            )
+        if not 0 <= decimals <= 36:
+            raise BankrLlmError(
+                "invalid_payment_token",
+                "The token contract reports unsupported decimals.",
+            )
+        return text, symbol, decimals
+
+    def _payment_token(self, purchase: Mapping[str, Any]) -> tuple[str, str, int]:
+        address = str(purchase.get("paymentTokenAddress") or "").strip()
+        if not address:
+            return self.singit_token_address, "SINGIT", 18
+        symbol = str(purchase.get("paymentTokenSymbol") or "").strip() or "TOKEN"
+        try:
+            decimals = int(str(purchase.get("paymentTokenDecimals") or "18"))
+        except ValueError:
+            decimals = 18
+        return address, symbol, decimals
+
+    def _payment_token_is_stable(self, purchase: Mapping[str, Any]) -> bool:
+        _, symbol, _ = self._payment_token(purchase)
+        return symbol.upper() in STABLE_PAYMENT_TOKEN_SYMBOLS
 
     @staticmethod
     def _require_user_id(value: str) -> str:

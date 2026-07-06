@@ -816,6 +816,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                     telegram_user_id=user_id,
                     amount_usd=_read_required_text(payload, "amountUsd"),
                     email=_read_required_text(payload, "email"),
+                    payment_token=str(payload.get("paymentToken") or ""),
                 )
             elif operation == "accept-terms":
                 result = service.accept_terms(user_id)

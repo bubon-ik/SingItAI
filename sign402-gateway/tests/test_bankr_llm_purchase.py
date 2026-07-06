@@ -1391,12 +1391,26 @@ class FakeTransferForPurchase:
             "txId": "0xTRANSFER",
             "transactionHash": "0xTRANSFER",
         }
+        self.token_info_result = {"ok": True, "symbol": "CUSTOM", "decimals": 8}
+        self.token_info_calls = []
+        self.token_balance_result = "999999999999999999999999"
+        self.token_balance_calls = []
 
     def transfer_token(self, **kwargs):
         self.calls.append(dict(kwargs))
         if self.events is not None:
             self.events.append("transfer")
         return dict(self.result)
+
+    def token_info(self, token_address, *, chain="base"):
+        self.token_info_calls.append(token_address)
+        if isinstance(self.token_info_result, Exception):
+            raise self.token_info_result
+        return dict(self.token_info_result)
+
+    def token_balance(self, token_address, owner, *, chain="base"):
+        self.token_balance_calls.append((token_address, owner))
+        return self.token_balance_result
 
 
 class BankrLlmPurchaseServiceAuthTests(unittest.TestCase):
@@ -2059,6 +2073,72 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
 
     def tearDown(self):
         self.tempdir.cleanup()
+
+    def test_start_resolves_known_symbol_payment_token(self):
+        result = self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+            payment_token="usdc",
+        )
+        loaded = self.store.get_purchase(result["purchaseId"])
+        self.assertEqual(
+            loaded["paymentTokenAddress"],
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        )
+        self.assertEqual(loaded["paymentTokenSymbol"], "USDC")
+        self.assertEqual(loaded["paymentTokenDecimals"], "6")
+        self.assertEqual(self.transfer.token_info_calls, [])
+
+    def test_start_resolves_contract_address_via_token_info(self):
+        custom = "0x" + "a" * 40
+        result = self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+            payment_token=custom,
+        )
+        loaded = self.store.get_purchase(result["purchaseId"])
+        self.assertEqual(loaded["paymentTokenAddress"], custom)
+        self.assertEqual(loaded["paymentTokenSymbol"], "CUSTOM")
+        self.assertEqual(loaded["paymentTokenDecimals"], "8")
+        self.assertEqual(self.transfer.token_info_calls, [custom])
+
+    def test_start_rejects_unknown_symbol_with_supported_list(self):
+        with self.assertRaises(BankrLlmError) as raised:
+            self.service.start(
+                telegram_user_id="123",
+                email="user@example.com",
+                amount_usd="10",
+                payment_token="DOGE",
+            )
+        self.assertEqual(raised.exception.code, "invalid_payment_token")
+        self.assertIn("USDC", raised.exception.user_message)
+
+    def test_start_rejects_unreadable_token_contract(self):
+        self.transfer.token_info_result = RuntimeError("no contract")
+        with self.assertRaises(BankrLlmError) as raised:
+            self.service.start(
+                telegram_user_id="123",
+                email="user@example.com",
+                amount_usd="10",
+                payment_token="0x" + "b" * 40,
+            )
+        self.assertEqual(raised.exception.code, "invalid_payment_token")
+
+    def test_start_without_token_defaults_to_singit(self):
+        result = self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        loaded = self.store.get_purchase(result["purchaseId"])
+        self.assertEqual(
+            loaded["paymentTokenAddress"],
+            "0x3333333333333333333333333333333333333333",
+        )
+        self.assertEqual(loaded["paymentTokenSymbol"], "SINGIT")
+        self.assertEqual(loaded["paymentTokenDecimals"], "18")
 
     def test_approved_purchase_transfers_user_singit_then_tops_up(self):
         result = self.complete_purchase()

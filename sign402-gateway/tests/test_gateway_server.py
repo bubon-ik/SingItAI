@@ -701,6 +701,37 @@ class GatewayServerTests(unittest.TestCase):
             telegram_user_id="123",
             amount_usd="10",
             email="user@example.com",
+            payment_token="",
+        )
+
+    def test_llm_key_start_dispatches_payment_token(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "123"
+        server.bankr_llm_purchase_service.start.return_value = {
+            "ok": True,
+            "state": "AWAITING_TERMS",
+            "telegramText": "Review terms.",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/llm-key/start",
+                {
+                    "telegramUserId": "123",
+                    "amountUsd": "10",
+                    "email": "user@example.com",
+                    "paymentToken": "USDC",
+                },
+                server=server,
+                headers=self.llm_auth_headers(),
+            )
+
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(handler))
+        server.bankr_llm_purchase_service.start.assert_called_once_with(
+            telegram_user_id="123",
+            amount_usd="10",
+            email="user@example.com",
+            payment_token="USDC",
         )
 
     def test_llm_key_accept_terms_dispatches_authenticated_user(self):
