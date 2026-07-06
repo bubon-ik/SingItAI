@@ -319,6 +319,55 @@ class GatewayClientTests(unittest.TestCase):
             "Bitrefill request failed: unknown Bitrefill package",
         )
 
+    def test_search_bitrefill_products_posts_country_query(self):
+        opener = RecordingOpener(
+            response=FakeResponse(b'{"ok":true,"products":[]}')
+        )
+
+        result = self.make_client(opener).search_bitrefill_products(
+            query="amazon",
+            country="cz",
+            include_test_products=False,
+        )
+
+        request, timeout = opener.requests[0]
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            request.full_url,
+            "http://127.0.0.1:8099/agent/search-bitrefill",
+        )
+        self.assertEqual(timeout, 180.0)
+        self.assertEqual(
+            json.loads(request.data),
+            {
+                "query": "amazon",
+                "country": "CZ",
+                "includeTestProducts": False,
+            },
+        )
+
+    def test_get_bitrefill_product_posts_country_product_id(self):
+        opener = RecordingOpener(
+            response=FakeResponse(b'{"ok":true,"productId":"amazon-cz"}')
+        )
+
+        result = self.make_client(opener).get_bitrefill_product(
+            product_id="amazon-cz",
+            country="cz",
+        )
+
+        request, timeout = opener.requests[0]
+        self.assertEqual(result["productId"], "amazon-cz")
+        self.assertEqual(
+            request.full_url,
+            "http://127.0.0.1:8099/agent/get-bitrefill-product",
+        )
+        self.assertEqual(timeout, 180.0)
+        self.assertEqual(
+            json.loads(request.data),
+            {"productId": "amazon-cz", "country": "CZ"},
+        )
+
     def test_execute_spending_limits_shows_current_limits(self):
         opener = RecordingOpener(
             response=FakeResponse(b'{"telegramText":"Current spending limits."}')

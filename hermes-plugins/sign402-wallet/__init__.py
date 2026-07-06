@@ -82,6 +82,18 @@ _TELEGRAM_BUTTON_COMMANDS = {
     "last purchase": "last-purchase",
     "help": "help",
 }
+_BITREFILL_DEFAULT_COUNTRY = "CZ"
+_BITREFILL_MAX_SEARCH_RESULTS = 5
+_BITREFILL_MAX_PACKAGES = 8
+_BITREFILL_MENU_BUTTONS = (
+    ("Search Products", "Change Country"),
+    ("Back",),
+)
+_BITREFILL_COUNTRY_BUTTONS = (
+    ("CZ", "US", "DE"),
+    ("PL", "UA", "GB"),
+    ("Other", "Back"),
+)
 _COMMANDS = {
     "wallet": ("create-wallet", "Show your Base agent wallet"),
     "balance": ("balance", "Show your managed Base wallet balance"),
@@ -104,6 +116,8 @@ _client_factory: Callable[[], GatewayClient] = GatewayClient.from_env
 _telegram_api_opener: Callable[..., object] = urlopen
 _background_runner: Callable[[Callable[[], None]], None]
 _sleep: Callable[[float], None] = time.sleep
+_BITREFILL_USER_COUNTRIES: dict[str, str] = {}
+_BITREFILL_SESSIONS: dict[str, dict] = {}
 
 
 def _default_background_runner(callback: Callable[[], None]) -> None:
@@ -339,6 +353,14 @@ def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
             gateway=gateway,
         )
 
+    bitrefill_wizard_result = _handle_telegram_bitrefill_wizard_message(
+        event=event,
+        source=source,
+        gateway=gateway,
+    )
+    if bitrefill_wizard_result:
+        return bitrefill_wizard_result
+
     telegram_tool = _telegram_paid_tool_intent(event, source)
     if telegram_tool:
         return _handle_telegram_paid_tool_request(
@@ -460,10 +482,12 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
             )
             return dict(_SKIP_RESULT)
         elif command == "bitrefill":
-            client = _client_factory()
             parsed = _parse_bitrefill_args(args)
             if parsed is None:
-                _send_fixed_reply(gateway, source, _BITREFILL_USAGE)
+                if str(args or "").strip():
+                    _send_fixed_reply(gateway, source, _BITREFILL_USAGE)
+                else:
+                    _open_bitrefill_menu(identity=identity, source=source, gateway=gateway)
                 return dict(_SKIP_RESULT)
             product_id, package_id, country = parsed
             _send_fixed_reply(gateway, source, _TELEGRAM_BITREFILL_STARTED_MESSAGE)
@@ -498,6 +522,414 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
         )
         _send_fixed_reply(gateway, source, _UNEXPECTED_ERROR_MESSAGE)
         return dict(_SKIP_RESULT)
+
+
+def _handle_telegram_bitrefill_wizard_message(*, event, source, gateway):
+    identity = _identity_from_telegram_source(source)
+    if identity is None:
+        return None
+    user_id = str(identity.user_id)
+    session = _BITREFILL_SESSIONS.get(user_id)
+    if not session:
+        return None
+
+    text = str(getattr(event, "text", "") or "").strip()
+    if not text:
+        return None
+    normalized = _normalize_button_text(text)
+    if normalized == "back":
+        _BITREFILL_SESSIONS.pop(user_id, None)
+        _send_fixed_reply(
+            gateway,
+            source,
+            "Back to Sign402 main menu.",
+            reply_markup=_telegram_main_menu_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+    if normalized == "change country":
+        _BITREFILL_SESSIONS[user_id] = {"stage": "awaiting-country"}
+        _send_bitrefill_country_prompt(gateway, source)
+        return dict(_SKIP_RESULT)
+    if normalized == "search products":
+        country = _bitrefill_country(user_id)
+        _BITREFILL_SESSIONS[user_id] = {"stage": "awaiting-search", "country": country}
+        _send_fixed_reply(
+            gateway,
+            source,
+            f"What do you want to buy in {country}?\n\nExample: amazon, playstation, mobile",
+            reply_markup=_reply_keyboard((("Change Country", "Back"),)),
+        )
+        return dict(_SKIP_RESULT)
+
+    stage = str(session.get("stage") or "")
+    try:
+        if stage == "awaiting-country":
+            return _handle_bitrefill_country_input(
+                identity=identity,
+                text=text,
+                source=source,
+                gateway=gateway,
+            )
+        if stage == "awaiting-search":
+            return _handle_bitrefill_search_input(
+                identity=identity,
+                query=text,
+                source=source,
+                gateway=gateway,
+            )
+        if stage == "select-product":
+            return _handle_bitrefill_product_choice(
+                identity=identity,
+                text=text,
+                source=source,
+                gateway=gateway,
+            )
+        if stage == "select-package":
+            return _handle_bitrefill_package_choice(
+                identity=identity,
+                text=text,
+                source=source,
+                gateway=gateway,
+            )
+        if stage == "awaiting-recipient":
+            return _handle_bitrefill_recipient_input(
+                identity=identity,
+                text=text,
+                source=source,
+                gateway=gateway,
+            )
+    except GatewayClientError as exc:
+        _send_fixed_reply(gateway, source, exc.user_message)
+        return dict(_SKIP_RESULT)
+    except Exception as exc:
+        logger.warning(
+            "Unexpected Sign402 Bitrefill wizard failure stage=%s error=%s",
+            stage,
+            type(exc).__name__,
+        )
+        _send_fixed_reply(gateway, source, _UNEXPECTED_ERROR_MESSAGE)
+        return dict(_SKIP_RESULT)
+    return None
+
+
+def _open_bitrefill_menu(*, identity: TelegramIdentity, source, gateway) -> None:
+    user_id = str(identity.user_id)
+    country = _bitrefill_country(user_id)
+    _BITREFILL_SESSIONS[user_id] = {"stage": "menu", "country": country}
+    _send_fixed_reply(
+        gateway,
+        source,
+        _bitrefill_menu_text(country),
+        reply_markup=_reply_keyboard(_BITREFILL_MENU_BUTTONS),
+    )
+
+
+def _bitrefill_menu_text(country: str) -> str:
+    return (
+        "Bitrefill\n\n"
+        f"Country: {country}\n"
+        "Search Products to find gift cards, topups, games, travel, and more."
+    )
+
+
+def _bitrefill_country(user_id: str) -> str:
+    return _BITREFILL_USER_COUNTRIES.get(str(user_id), _BITREFILL_DEFAULT_COUNTRY)
+
+
+def _send_bitrefill_country_prompt(gateway, source) -> None:
+    _send_fixed_reply(
+        gateway,
+        source,
+        "Send a two-letter country code, like CZ, US, DE, PL, UA.",
+        reply_markup=_reply_keyboard(_BITREFILL_COUNTRY_BUTTONS),
+    )
+
+
+def _handle_bitrefill_country_input(*, identity: TelegramIdentity, text: str, source, gateway):
+    raw_country = str(text or "").strip().upper()
+    if raw_country == "OTHER":
+        _send_bitrefill_country_prompt(gateway, source)
+        return dict(_SKIP_RESULT)
+    if not re.fullmatch(r"[A-Z]{2}", raw_country):
+        _send_fixed_reply(
+            gateway,
+            source,
+            "Please send a two-letter country code, for example CZ or US.",
+            reply_markup=_reply_keyboard(_BITREFILL_COUNTRY_BUTTONS),
+        )
+        return dict(_SKIP_RESULT)
+    _BITREFILL_USER_COUNTRIES[str(identity.user_id)] = raw_country
+    _open_bitrefill_menu(identity=identity, source=source, gateway=gateway)
+    return dict(_SKIP_RESULT)
+
+
+def _handle_bitrefill_search_input(*, identity: TelegramIdentity, query: str, source, gateway):
+    country = _bitrefill_country(str(identity.user_id))
+    clean_query = str(query or "").strip()
+    if len(clean_query) < 2:
+        _send_fixed_reply(
+            gateway,
+            source,
+            f"What do you want to buy in {country}?\n\nType at least 2 characters.",
+            reply_markup=_reply_keyboard((("Change Country", "Back"),)),
+        )
+        return dict(_SKIP_RESULT)
+    client = _client_factory()
+    result = client.search_bitrefill_products(
+        query=clean_query,
+        country=country,
+        include_test_products=False,
+    )
+    products = _normalize_bitrefill_products(result.get("products"))
+    if not products:
+        _BITREFILL_SESSIONS[str(identity.user_id)] = {
+            "stage": "awaiting-search",
+            "country": country,
+        }
+        _send_fixed_reply(
+            gateway,
+            source,
+            f"No Bitrefill products found for \"{clean_query}\" in {country}.\n\nTry another search.",
+            reply_markup=_reply_keyboard((("Change Country", "Back"),)),
+        )
+        return dict(_SKIP_RESULT)
+    limited = products[:_BITREFILL_MAX_SEARCH_RESULTS]
+    _BITREFILL_SESSIONS[str(identity.user_id)] = {
+        "stage": "select-product",
+        "country": country,
+        "products": limited,
+    }
+    _send_fixed_reply(
+        gateway,
+        source,
+        _format_bitrefill_search_results(clean_query, country, limited),
+        reply_markup=_numbered_reply_keyboard(len(limited)),
+    )
+    return dict(_SKIP_RESULT)
+
+
+def _handle_bitrefill_product_choice(*, identity: TelegramIdentity, text: str, source, gateway):
+    session = _BITREFILL_SESSIONS.get(str(identity.user_id), {})
+    products = session.get("products") if isinstance(session.get("products"), list) else []
+    index = _parse_choice_index(text, len(products))
+    if index is None:
+        _send_fixed_reply(
+            gateway,
+            source,
+            "Reply with a product number from the list.",
+            reply_markup=_numbered_reply_keyboard(len(products)),
+        )
+        return dict(_SKIP_RESULT)
+    country = str(session.get("country") or _bitrefill_country(str(identity.user_id)))
+    product = products[index]
+    product_id = str(product.get("productId") or product.get("id") or "").strip()
+    client = _client_factory()
+    details = client.get_bitrefill_product(product_id=product_id, country=country)
+    packages = _normalize_bitrefill_packages(details.get("packages"))
+    if not packages:
+        _send_fixed_reply(
+            gateway,
+            source,
+            "This Bitrefill product has no available packages right now. Try another product.",
+            reply_markup=_reply_keyboard((("Search Products", "Back"),)),
+        )
+        return dict(_SKIP_RESULT)
+    limited_packages = packages[:_BITREFILL_MAX_PACKAGES]
+    _BITREFILL_SESSIONS[str(identity.user_id)] = {
+        "stage": "select-package",
+        "country": country,
+        "product": details,
+        "packages": limited_packages,
+    }
+    _send_fixed_reply(
+        gateway,
+        source,
+        _format_bitrefill_packages(details, limited_packages),
+        reply_markup=_numbered_reply_keyboard(len(limited_packages)),
+    )
+    return dict(_SKIP_RESULT)
+
+
+def _handle_bitrefill_package_choice(*, identity: TelegramIdentity, text: str, source, gateway):
+    session = _BITREFILL_SESSIONS.get(str(identity.user_id), {})
+    packages = session.get("packages") if isinstance(session.get("packages"), list) else []
+    index = _parse_choice_index(text, len(packages))
+    if index is None:
+        _send_fixed_reply(
+            gateway,
+            source,
+            "Reply with an amount number from the list.",
+            reply_markup=_numbered_reply_keyboard(len(packages)),
+        )
+        return dict(_SKIP_RESULT)
+    product = session.get("product") if isinstance(session.get("product"), dict) else {}
+    package = packages[index]
+    country = str(session.get("country") or _bitrefill_country(str(identity.user_id)))
+    required_fields = [
+        str(field).strip()
+        for field in product.get("requiredRecipientFields", [])
+        if str(field).strip()
+    ]
+    if required_fields:
+        _BITREFILL_SESSIONS[str(identity.user_id)] = {
+            "stage": "awaiting-recipient",
+            "country": country,
+            "product": product,
+            "package": package,
+            "recipientFields": required_fields,
+            "recipient": {},
+        }
+        _send_fixed_reply(
+            gateway,
+            source,
+            f"Send {required_fields[0]} for {product.get('name') or 'this product'}.",
+            reply_markup=_reply_keyboard((("Back",),)),
+        )
+        return dict(_SKIP_RESULT)
+    _start_bitrefill_purchase_from_wizard(
+        identity=identity,
+        product=product,
+        package=package,
+        country=country,
+        recipient={},
+        source=source,
+        gateway=gateway,
+    )
+    return dict(_SKIP_RESULT)
+
+
+def _handle_bitrefill_recipient_input(*, identity: TelegramIdentity, text: str, source, gateway):
+    user_id = str(identity.user_id)
+    session = _BITREFILL_SESSIONS.get(user_id, {})
+    fields = session.get("recipientFields") if isinstance(session.get("recipientFields"), list) else []
+    recipient = dict(session.get("recipient") or {})
+    missing = [field for field in fields if field not in recipient]
+    if not missing:
+        _send_fixed_reply(gateway, source, "Recipient is already complete.")
+        return dict(_SKIP_RESULT)
+    field = missing[0]
+    value = str(text or "").strip()
+    if not value:
+        _send_fixed_reply(gateway, source, f"Send {field} to continue.")
+        return dict(_SKIP_RESULT)
+    recipient[field] = value
+    remaining = [candidate for candidate in fields if candidate not in recipient]
+    if remaining:
+        session["recipient"] = recipient
+        _BITREFILL_SESSIONS[user_id] = session
+        _send_fixed_reply(gateway, source, f"Send {remaining[0]} to continue.")
+        return dict(_SKIP_RESULT)
+    product = session.get("product") if isinstance(session.get("product"), dict) else {}
+    package = session.get("package") if isinstance(session.get("package"), dict) else {}
+    country = str(session.get("country") or _bitrefill_country(user_id))
+    _start_bitrefill_purchase_from_wizard(
+        identity=identity,
+        product=product,
+        package=package,
+        country=country,
+        recipient=recipient,
+        source=source,
+        gateway=gateway,
+    )
+    return dict(_SKIP_RESULT)
+
+
+def _start_bitrefill_purchase_from_wizard(
+    *,
+    identity: TelegramIdentity,
+    product: dict,
+    package: dict,
+    country: str,
+    recipient: dict,
+    source,
+    gateway,
+) -> None:
+    product_id = str(product.get("productId") or product.get("id") or "").strip()
+    package_id = str(package.get("packageId") or package.get("id") or "").strip()
+    _BITREFILL_SESSIONS.pop(str(identity.user_id), None)
+    _send_fixed_reply(gateway, source, _TELEGRAM_BITREFILL_STARTED_MESSAGE)
+    _run_in_background(
+        lambda: _execute_telegram_bitrefill_request(
+            product_id=product_id,
+            package_id=package_id,
+            country=country,
+            recipient=recipient,
+            identity=identity,
+            source=source,
+            gateway=gateway,
+        )
+    )
+
+
+def _normalize_bitrefill_products(raw_products) -> list[dict]:
+    if not isinstance(raw_products, list):
+        return []
+    products: list[dict] = []
+    for product in raw_products:
+        if not isinstance(product, dict):
+            continue
+        product_id = str(product.get("productId") or product.get("id") or "").strip()
+        name = str(product.get("name") or "").strip()
+        if product_id and name:
+            products.append(product)
+    return products
+
+
+def _normalize_bitrefill_packages(raw_packages) -> list[dict]:
+    if not isinstance(raw_packages, list):
+        return []
+    packages: list[dict] = []
+    for package in raw_packages:
+        if not isinstance(package, dict):
+            continue
+        package_id = str(package.get("packageId") or package.get("id") or "").strip()
+        if package_id:
+            packages.append(package)
+    return packages
+
+
+def _format_bitrefill_search_results(query: str, country: str, products: list[dict]) -> str:
+    lines = [f"Found products for \"{query}\" in {country}:"]
+    for index, product in enumerate(products, start=1):
+        name = str(product.get("name") or "Unknown product").strip()
+        category = str(product.get("category") or product.get("productType") or "").strip()
+        suffix = f" - {category}" if category else ""
+        lines.append(f"{index}. {name}{suffix}")
+    lines.append("")
+    lines.append("Reply with a number.")
+    return "\n".join(lines)
+
+
+def _format_bitrefill_packages(product: dict, packages: list[dict]) -> str:
+    name = str(product.get("name") or "this product").strip()
+    lines = [f"Choose amount for {name}:"]
+    for index, package in enumerate(packages, start=1):
+        value = str(package.get("value") or package.get("packageId") or "").strip()
+        price_usd = str(package.get("priceUsd") or "").strip()
+        suffix = f" (${price_usd})" if price_usd else ""
+        lines.append(f"{index}. {value}{suffix}")
+    lines.append("")
+    lines.append("Reply with a number.")
+    return "\n".join(lines)
+
+
+def _parse_choice_index(text: str, max_count: int) -> int | None:
+    value = str(text or "").strip()
+    if not value.isdecimal():
+        return None
+    index = int(value) - 1
+    if index < 0 or index >= max_count:
+        return None
+    return index
+
+
+def _numbered_reply_keyboard(count: int) -> dict:
+    rows: list[tuple[str, ...]] = []
+    numbers = [str(index) for index in range(1, count + 1)]
+    for offset in range(0, len(numbers), 3):
+        rows.append(tuple(numbers[offset : offset + 3]))
+    rows.append(("Search Products", "Back"))
+    return _reply_keyboard(tuple(rows))
 
 
 def _handle_telegram_paid_tool_request(*, tool: str, source, gateway):
@@ -571,6 +1003,7 @@ def _execute_telegram_bitrefill_request(
     product_id: str,
     package_id: str,
     country: str,
+    recipient: dict | None = None,
     identity: TelegramIdentity,
     source,
     gateway,
@@ -583,7 +1016,7 @@ def _execute_telegram_bitrefill_request(
             product_id=product_id,
             package_id=package_id,
             country=country,
-            recipient={},
+            recipient=dict(recipient or {}),
             user_access_token=token,
         )
         _send_fixed_reply(gateway, source, text)
@@ -734,9 +1167,9 @@ def _send_telegram_reply_direct(
     try:
         for chunk in _telegram_message_chunks(text):
             payload_fields = {
-                    "chat_id": chat_id,
-                    "text": chunk,
-                    "disable_web_page_preview": "true",
+                "chat_id": chat_id,
+                "text": chunk,
+                "disable_web_page_preview": "true",
             }
             if reply_markup is not None:
                 payload_fields["reply_markup"] = json.dumps(
@@ -772,15 +1205,23 @@ def _send_telegram_reply_direct(
 
 
 def _telegram_main_menu_reply_markup() -> dict:
+    return _reply_keyboard(_TELEGRAM_MAIN_MENU_BUTTONS, placeholder="Choose a Sign402 action")
+
+
+def _reply_keyboard(
+    rows: tuple[tuple[str, ...], ...],
+    *,
+    placeholder: str = "Choose an action",
+) -> dict:
     return {
         "keyboard": [
             [{"text": label} for label in row]
-            for row in _TELEGRAM_MAIN_MENU_BUTTONS
+            for row in rows
         ],
         "resize_keyboard": True,
         "is_persistent": True,
         "one_time_keyboard": False,
-        "input_field_placeholder": "Choose a Sign402 action",
+        "input_field_placeholder": placeholder,
     }
 
 

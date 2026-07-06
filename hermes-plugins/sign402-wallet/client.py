@@ -34,6 +34,8 @@ _IMESSAGE_OPERATION_PATHS = {
 }
 _BITREFILL_QUOTE_PATH = "/agent/quote-bitrefill"
 _BITREFILL_BUY_PATH = "/agent/buy-wallet-bitrefill"
+_BITREFILL_SEARCH_PATH = "/agent/search-bitrefill"
+_BITREFILL_PRODUCT_PATH = "/agent/get-bitrefill-product"
 _PAID_TOOL_PATH = "/agent/buy-tool"
 _SPENDING_LIMITS_PATH = "/agent/spending-limits"
 _LLM_OPERATION_PATHS = {
@@ -239,6 +241,39 @@ class GatewayClient:
         if not isinstance(telegram_text, str) or not telegram_text.strip():
             raise GatewayClientError(_INVALID_RESPONSE)
         return telegram_text.strip()
+
+    def search_bitrefill_products(
+        self,
+        *,
+        query: str,
+        country: str,
+        include_test_products: bool = False,
+    ) -> dict[str, Any]:
+        payload = {
+            "query": str(query or "").strip(),
+            "country": str(country or "US").strip().upper(),
+            "includeTestProducts": bool(include_test_products),
+        }
+        return self._post(
+            _BITREFILL_SEARCH_PATH,
+            payload,
+            token=self.api_token,
+            operation="search-bitrefill",
+            timeout=self.purchase_timeout,
+        )
+
+    def get_bitrefill_product(self, *, product_id: str, country: str) -> dict[str, Any]:
+        payload = {
+            "productId": str(product_id or "").strip(),
+            "country": str(country or "US").strip().upper(),
+        }
+        return self._post(
+            _BITREFILL_PRODUCT_PATH,
+            payload,
+            token=self.api_token,
+            operation="get-bitrefill-product",
+            timeout=self.purchase_timeout,
+        )
 
     def execute_spending_limits(
         self,

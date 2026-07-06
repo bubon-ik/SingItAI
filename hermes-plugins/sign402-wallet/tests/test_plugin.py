@@ -91,6 +91,30 @@ class FakeClient:
         self.paid_tool_result = "Crypto News unlocked."
         self.bitrefill_calls = []
         self.bitrefill_result = "Bitrefill delivered."
+        self.bitrefill_search_calls = []
+        self.bitrefill_product_calls = []
+        self.bitrefill_search_result = {
+            "ok": True,
+            "products": [
+                {
+                    "productId": "amazon-cz",
+                    "name": "Amazon Czech Republic",
+                    "country": "CZ",
+                    "category": "gift_card",
+                }
+            ],
+        }
+        self.bitrefill_product_result = {
+            "ok": True,
+            "productId": "amazon-cz",
+            "name": "Amazon Czech Republic",
+            "country": "CZ",
+            "requiredRecipientFields": [],
+            "packages": [
+                {"packageId": "amazon-cz-10", "value": "10", "priceUsd": "10.00"},
+                {"packageId": "amazon-cz-25", "value": "25", "priceUsd": "25.00"},
+            ],
+        }
         self.access_token = "user-access-token"
         self.create_wallet_calls = []
         self.limits_calls = []
@@ -148,6 +172,18 @@ class FakeClient:
         if self.error:
             raise self.error
         return self.bitrefill_result
+
+    def search_bitrefill_products(self, *, query, country, include_test_products=False):
+        self.bitrefill_search_calls.append((query, country, include_test_products))
+        if self.error:
+            raise self.error
+        return self.bitrefill_search_result
+
+    def get_bitrefill_product(self, *, product_id, country):
+        self.bitrefill_product_calls.append((product_id, country))
+        if self.error:
+            raise self.error
+        return self.bitrefill_product_result
 
     def execute_spending_limits(self, identity, *, max_per_tx_usdc=None, daily_cap_usdc=None):
         self.limits_calls.append(
@@ -706,6 +742,132 @@ class PluginRegistrationTests(unittest.TestCase):
                     "user-access-token",
                 )
             ],
+        )
+
+    def test_bitrefill_button_opens_country_aware_search_flow(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        plugin._client_factory = lambda: client
+        plugin._background_runner = lambda callback: callback()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        def dispatch(text):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    text,
+                    "1045618308",
+                    username="AlpskyKnedlik",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(dispatch("Buy Bitrefill"), plugin._SKIP_RESULT)
+        self.assertIn("Country: CZ", gateway.adapters["telegram"].sent[-1][1])
+        self.assertIn("Search Products", gateway.adapters["telegram"].sent[-1][1])
+
+        self.assertEqual(dispatch("Change Country"), plugin._SKIP_RESULT)
+        self.assertIn("Send a two-letter country code", gateway.adapters["telegram"].sent[-1][1])
+
+        self.assertEqual(dispatch("DE"), plugin._SKIP_RESULT)
+        self.assertIn("Country: DE", gateway.adapters["telegram"].sent[-1][1])
+
+        self.assertEqual(dispatch("Search Products"), plugin._SKIP_RESULT)
+        self.assertIn("What do you want to buy in DE?", gateway.adapters["telegram"].sent[-1][1])
+
+        self.assertEqual(dispatch("amazon"), plugin._SKIP_RESULT)
+        self.assertEqual(client.bitrefill_search_calls, [("amazon", "DE", False)])
+        self.assertIn("1. Amazon Czech Republic", gateway.adapters["telegram"].sent[-1][1])
+
+        self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
+        self.assertEqual(client.bitrefill_product_calls, [("amazon-cz", "DE")])
+        self.assertIn("Choose amount for Amazon Czech Republic", gateway.adapters["telegram"].sent[-1][1])
+        self.assertIn("1. 10", gateway.adapters["telegram"].sent[-1][1])
+
+        self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
+        self.assertEqual(
+            gateway.adapters["telegram"].sent[-2:],
+            [
+                ("telegram-chat", "Bitrefill purchase started. Approve it in iMessage; I'll post the result here."),
+                ("telegram-chat", "Bitrefill delivered."),
+            ],
+        )
+        self.assertEqual(
+            client.bitrefill_calls,
+            [
+                (
+                    "1045618308",
+                    "AlpskyKnedlik",
+                    "amazon-cz",
+                    "amazon-cz-10",
+                    "DE",
+                    {},
+                    "user-access-token",
+                )
+            ],
+        )
+
+    def test_bitrefill_wizard_collects_required_recipient(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.bitrefill_product_result = {
+            "ok": True,
+            "productId": "mobile-topup",
+            "name": "Mobile Topup",
+            "country": "CZ",
+            "requiredRecipientFields": ["phone"],
+            "packages": [
+                {"packageId": "mobile-5", "value": "5", "priceUsd": "5.00"},
+            ],
+        }
+        client.bitrefill_search_result = {
+            "ok": True,
+            "products": [
+                {"productId": "mobile-topup", "name": "Mobile Topup", "country": "CZ"}
+            ],
+        }
+        plugin._client_factory = lambda: client
+        plugin._background_runner = lambda callback: callback()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        def dispatch(text):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    text,
+                    "1045618308",
+                    username="AlpskyKnedlik",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        dispatch("Buy Bitrefill")
+        dispatch("Search Products")
+        dispatch("mobile")
+        dispatch("1")
+        dispatch("1")
+
+        self.assertIn("Send phone", gateway.adapters["telegram"].sent[-1][1])
+
+        dispatch("+420777111222")
+
+        self.assertEqual(
+            client.bitrefill_calls[-1],
+            (
+                "1045618308",
+                "AlpskyKnedlik",
+                "mobile-topup",
+                "mobile-5",
+                "CZ",
+                {"phone": "+420777111222"},
+                "user-access-token",
+            ),
         )
 
     def test_connect_imessage_is_answered_in_pre_dispatch(self):
