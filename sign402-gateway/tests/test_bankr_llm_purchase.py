@@ -964,6 +964,35 @@ class BankrLlmStoreTests(unittest.TestCase):
             hashlib.sha256(b"bk_secret").hexdigest()[:12],
         )
 
+    def test_purchase_rows_carry_payment_token_fields(self):
+        purchase = self.store.create_purchase(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+            state="AWAITING_OTP",
+            expires_at=1700000600,
+            payment_token_address="0x" + "9" * 40,
+            payment_token_symbol="WETH",
+            payment_token_decimals="18",
+        )
+        loaded = self.store.get_purchase(purchase["purchaseId"])
+        self.assertEqual(loaded["paymentTokenAddress"], "0x" + "9" * 40)
+        self.assertEqual(loaded["paymentTokenSymbol"], "WETH")
+        self.assertEqual(loaded["paymentTokenDecimals"], "18")
+
+    def test_legacy_purchase_rows_default_to_blank_payment_token(self):
+        purchase = self.store.create_purchase(
+            telegram_user_id="124",
+            email="user@example.com",
+            amount_usd="10",
+            state="AWAITING_OTP",
+            expires_at=1700000600,
+        )
+        loaded = self.store.get_purchase(purchase["purchaseId"])
+        self.assertEqual(loaded["paymentTokenAddress"], "")
+        self.assertEqual(loaded["paymentTokenSymbol"], "")
+        self.assertEqual(loaded["paymentTokenDecimals"], "")
+
     def test_compare_and_set_rejects_duplicate_transfer_transition(self):
         purchase = self.store.create_purchase(
             telegram_user_id="123",

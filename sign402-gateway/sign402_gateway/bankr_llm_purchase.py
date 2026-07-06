@@ -94,6 +94,9 @@ class BankrLlmStore:
         "topupResultJson": "topup_result_json",
         "creditsJson": "credits_json",
         "baselineCreditsUsd": "baseline_credits_usd",
+        "paymentTokenAddress": "payment_token_address",
+        "paymentTokenSymbol": "payment_token_symbol",
+        "paymentTokenDecimals": "payment_token_decimals",
         "errorCode": "error_code",
         "errorMessage": "error_message",
         "otpAttempts": "otp_attempts",
@@ -122,6 +125,9 @@ class BankrLlmStore:
         amount_usd: str,
         state: str,
         expires_at: int,
+        payment_token_address: str = "",
+        payment_token_symbol: str = "",
+        payment_token_decimals: str = "",
     ) -> dict[str, Any]:
         now = int(time.time())
         purchase_id = uuid.uuid4().hex
@@ -136,9 +142,10 @@ class BankrLlmStore:
                         """
                         INSERT INTO bankr_llm_purchases (
                             purchase_id, telegram_user_id, email, amount_usd, state,
-                            expires_at, created_at, updated_at
+                            expires_at, payment_token_address, payment_token_symbol,
+                            payment_token_decimals, created_at, updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             purchase_id,
@@ -147,6 +154,9 @@ class BankrLlmStore:
                             str(amount_usd),
                             str(state),
                             int(expires_at),
+                            str(payment_token_address),
+                            str(payment_token_symbol),
+                            str(payment_token_decimals),
                             now,
                             now,
                         ),
@@ -382,6 +392,9 @@ class BankrLlmStore:
                     topup_result_json TEXT NOT NULL DEFAULT '',
                     credits_json TEXT NOT NULL DEFAULT '',
                     baseline_credits_usd TEXT NOT NULL DEFAULT '',
+                    payment_token_address TEXT NOT NULL DEFAULT '',
+                    payment_token_symbol TEXT NOT NULL DEFAULT '',
+                    payment_token_decimals TEXT NOT NULL DEFAULT '',
                     error_code TEXT NOT NULL DEFAULT '',
                     error_message TEXT NOT NULL DEFAULT '',
                     otp_attempts TEXT NOT NULL DEFAULT '',
@@ -396,11 +409,17 @@ class BankrLlmStore:
                     "PRAGMA table_info(bankr_llm_purchases)"
                 ).fetchall()
             }
-            if "baseline_credits_usd" not in existing_columns:
-                db.execute(
-                    "ALTER TABLE bankr_llm_purchases "
-                    "ADD COLUMN baseline_credits_usd TEXT NOT NULL DEFAULT ''"
-                )
+            for column in (
+                "baseline_credits_usd",
+                "payment_token_address",
+                "payment_token_symbol",
+                "payment_token_decimals",
+            ):
+                if column not in existing_columns:
+                    db.execute(
+                        f"ALTER TABLE bankr_llm_purchases "
+                        f"ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                    )
             db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS bankr_llm_users (
@@ -2403,6 +2422,9 @@ def _purchase_row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
         "topup_result_json": "topupResultJson",
         "credits_json": "creditsJson",
         "baseline_credits_usd": "baselineCreditsUsd",
+        "payment_token_address": "paymentTokenAddress",
+        "payment_token_symbol": "paymentTokenSymbol",
+        "payment_token_decimals": "paymentTokenDecimals",
         "error_code": "errorCode",
         "error_message": "errorMessage",
         "otp_attempts": "otpAttempts",
