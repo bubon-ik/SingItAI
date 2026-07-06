@@ -75,6 +75,18 @@ async function main() {
     return;
   }
 
+  if (command === "token-info") {
+    const result = await readTokenInfo(options);
+    writeJson(result);
+    return;
+  }
+
+  if (command === "token-balance") {
+    const result = await readTokenBalance(options);
+    writeJson(result);
+    return;
+  }
+
   if (command === "serve-seller") {
     await serveSeller();
     return;
@@ -155,7 +167,10 @@ async function getSwapPrice(options) {
   const account = await getCdpAccount();
   const fromToken = requiredOption(options, "from-token");
   const toToken = requiredOption(options, "to-token");
-  const fromAmount = singitAmountToAtomic(requiredOption(options, "amount"));
+  const fromAmount = humanTokenAmountToAtomic(
+    requiredOption(options, "amount"),
+    Number(options.decimals || "18"),
+  );
   const network = networkName(options.chain || "base");
   const price = await cdp.evm.getSwapPrice({
     network,
@@ -233,6 +248,38 @@ async function transferUsdc(options) {
   };
 }
 
+function basePublicClient(chainName) {
+  const chain = viemChain(chainName || "base");
+  const rpcUrl =
+    process.env.SIGN402_BASE_RPC_URL ||
+    process.env.BASE_RPC_URL ||
+    chain.rpcUrls.default.http[0];
+  return createPublicClient({ chain, transport: http(rpcUrl) });
+}
+
+async function readTokenInfo(options) {
+  const token = requiredOption(options, "token");
+  const publicClient = basePublicClient(options.chain);
+  const [symbol, decimals] = await Promise.all([
+    publicClient.readContract({ address: token, abi: erc20Abi, functionName: "symbol" }),
+    publicClient.readContract({ address: token, abi: erc20Abi, functionName: "decimals" }),
+  ]);
+  return { ok: true, token, symbol: String(symbol), decimals: Number(decimals) };
+}
+
+async function readTokenBalance(options) {
+  const token = requiredOption(options, "token");
+  const owner = requiredOption(options, "owner");
+  const publicClient = basePublicClient(options.chain);
+  const balance = await publicClient.readContract({
+    address: token,
+    abi: erc20Abi,
+    functionName: "balanceOf",
+    args: [owner],
+  });
+  return { ok: true, token, owner, balanceAtomic: balance.toString() };
+}
+
 async function transferTokenFromUserWallet(options) {
   const privateKey = requiredEnv("SIGN402_EVM_PRIVATE_KEY");
   const account = privateKeyToAccount(privateKey);
@@ -250,10 +297,7 @@ async function transferTokenFromUserWallet(options) {
     chain,
     transport,
   });
-  const publicClient = createPublicClient({
-    chain,
-    transport,
-  });
+  const publicClient = basePublicClient(options.chain);
 
   const transactionHash = await walletClient.writeContract({
     address: token,
