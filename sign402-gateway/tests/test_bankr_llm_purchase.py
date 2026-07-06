@@ -2126,6 +2126,38 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "invalid_payment_token")
 
+    def test_start_rejects_token_with_out_of_range_or_bool_decimals(self):
+        for bad in (37, -1, True, None):
+            with self.subTest(decimals=bad):
+                self.transfer.token_info_result = {
+                    "ok": True,
+                    "symbol": "X",
+                    "decimals": bad,
+                }
+                with self.assertRaises(BankrLlmError) as raised:
+                    self.service.start(
+                        telegram_user_id="123",
+                        email="user@example.com",
+                        amount_usd="10",
+                        payment_token="0x" + "c" * 40,
+                    )
+                self.assertEqual(raised.exception.code, "invalid_payment_token")
+
+    def test_start_sanitizes_hostile_token_symbol(self):
+        self.transfer.token_info_result = {
+            "ok": True,
+            "symbol": "  `EVIL*_[symbol]()` with junk that is very long indeed ",
+            "decimals": 8,
+        }
+        result = self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+            payment_token="0x" + "d" * 40,
+        )
+        loaded = self.store.get_purchase(result["purchaseId"])
+        self.assertRegex(loaded["paymentTokenSymbol"], r"^[A-Za-z0-9._-]{1,16}$")
+
     def test_start_without_token_defaults_to_singit(self):
         result = self.service.start(
             telegram_user_id="123",

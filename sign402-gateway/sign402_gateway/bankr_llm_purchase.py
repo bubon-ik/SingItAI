@@ -2251,8 +2251,12 @@ class BankrLlmPurchaseService:
             )
         try:
             metadata = token_info(text)
-            symbol = str(metadata.get("symbol") or "").strip() or "TOKEN"
-            decimals = int(metadata.get("decimals"))
+            symbol = str(metadata.get("symbol") or "").strip()
+            symbol = re.sub(r"[^A-Za-z0-9._-]", "", symbol)[:16] or "TOKEN"
+            raw_decimals = metadata.get("decimals")
+            if isinstance(raw_decimals, bool):
+                raise ValueError("decimals must be an integer")
+            decimals = int(raw_decimals)
         except BankrLlmError:
             raise
         except Exception:
