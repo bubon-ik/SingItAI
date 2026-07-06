@@ -870,6 +870,25 @@ class PluginRegistrationTests(unittest.TestCase):
             ),
         )
 
+    def test_bitrefill_amount_list_uses_product_currency_for_non_usd_products(self):
+        plugin = load_plugin()
+
+        text = plugin._format_bitrefill_packages(
+            {
+                "name": "Wolt Czech Republic",
+                "currency": "CZK",
+            },
+            [
+                {"packageId": "wolt-cz<&>1200", "value": "1200", "priceUsd": "89796.00"},
+                {"packageId": "wolt-cz<&>500", "value": "500", "priceUsd": "37415.00"},
+            ],
+        )
+
+        self.assertIn("1. 1200 CZK", text)
+        self.assertIn("2. 500 CZK", text)
+        self.assertNotIn("$89796.00", text)
+        self.assertNotIn("$37415.00", text)
+
     def test_connect_imessage_is_answered_in_pre_dispatch(self):
         plugin = load_plugin()
         context = FakeContext()

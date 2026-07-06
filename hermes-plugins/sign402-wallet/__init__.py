@@ -902,12 +902,17 @@ def _format_bitrefill_search_results(query: str, country: str, products: list[di
 
 def _format_bitrefill_packages(product: dict, packages: list[dict]) -> str:
     name = str(product.get("name") or "this product").strip()
+    currency = str(product.get("currency") or "").strip().upper()
     lines = [f"Choose amount for {name}:"]
     for index, package in enumerate(packages, start=1):
         value = str(package.get("value") or package.get("packageId") or "").strip()
         price_usd = str(package.get("priceUsd") or "").strip()
-        suffix = f" (${price_usd})" if price_usd else ""
-        lines.append(f"{index}. {value}{suffix}")
+        if currency and currency != "USD":
+            amount = f"{value} {currency}"
+        else:
+            suffix = f" (${price_usd})" if price_usd else ""
+            amount = f"{value}{suffix}"
+        lines.append(f"{index}. {amount}")
     lines.append("")
     lines.append("Reply with a number.")
     return "\n".join(lines)
