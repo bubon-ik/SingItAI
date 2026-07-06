@@ -133,8 +133,16 @@ class BitrefillCatalogService:
         ):
             raise ValueError("limit must be an integer from 1 to 20")
 
+        include_international = payload.get("includeInternational", False)
+        if not isinstance(include_international, bool):
+            raise ValueError("includeInternational must be a boolean")
+
+        include_test_products = payload.get("includeTestProducts", False)
+        if not isinstance(include_test_products, bool):
+            raise ValueError("includeTestProducts must be a boolean")
+
         country_filter = country
-        if bool(payload.get("includeInternational", False)) and country != "XI":
+        if include_international and country != "XI":
             country_filter = f"{country},XI"
 
         products = self.bitrefill_client.list_products(
@@ -142,7 +150,7 @@ class BitrefillCatalogService:
             category=BITREFILL_BROWSE_CATEGORIES[category],
             start=start,
             limit=limit + 1,
-            include_test_products=bool(payload.get("includeTestProducts", False)),
+            include_test_products=include_test_products,
         )
         return {
             "ok": True,

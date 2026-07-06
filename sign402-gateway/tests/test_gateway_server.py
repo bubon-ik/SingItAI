@@ -947,6 +947,16 @@ class GatewayServerTests(unittest.TestCase):
         self.assertIn("/agent/llm-key/verify", endpoints)
         self.assertIn("/agent/llm-key/reconcile", endpoints)
         self.assertIn("/agent/llm-credits", endpoints)
+
+    def test_health_lists_bitrefill_catalog_route(self):
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/health",
+                method="GET",
+                server=DummyServer(),
+            )
+
+        endpoints = self.response_json(handler)["endpoints"]
         self.assertIn("/agent/list-bitrefill-products", endpoints)
 
     def test_agent_create_wallet_requires_telegram_user_id(self):

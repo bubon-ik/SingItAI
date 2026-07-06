@@ -181,6 +181,26 @@ class BitrefillRunnerTests(unittest.TestCase):
 
         service.bitrefill_client.list_products.assert_not_called()
 
+    def test_catalog_service_rejects_non_boolean_flags(self):
+        client = Mock()
+        client.list_products.return_value = []
+        service = BitrefillCatalogService(bitrefill_client=client)
+
+        for flag in ("includeInternational", "includeTestProducts"):
+            for value in ("false", 0):
+                payload = {
+                    "country": "CZ",
+                    "category": "all",
+                    "start": 0,
+                    "limit": 8,
+                    flag: value,
+                }
+                with self.subTest(flag=flag, value=value):
+                    with self.assertRaisesRegex(ValueError, flag):
+                        service(payload)
+
+        client.list_products.assert_not_called()
+
     def test_catalog_services_search_and_return_product_details(self):
         client = TestBitrefillClient()
 
