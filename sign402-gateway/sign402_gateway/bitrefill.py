@@ -10,6 +10,17 @@ from typing import Any, Callable, Protocol
 
 
 class BitrefillClient(Protocol):
+    def list_products(
+        self,
+        *,
+        country: str,
+        category: str,
+        start: int,
+        limit: int,
+        include_test_products: bool,
+    ) -> list[dict[str, Any]]:
+        ...
+
     def search_products(
         self,
         *,
@@ -90,6 +101,37 @@ TEST_PRODUCTS: dict[str, dict[str, Any]] = {
 
 class TestBitrefillClient:
     __test__ = False
+
+    def list_products(
+        self,
+        *,
+        country: str,
+        category: str,
+        start: int,
+        limit: int,
+        include_test_products: bool,
+    ) -> list[dict[str, Any]]:
+        if not include_test_products:
+            return []
+        country_filters = {
+            value.strip().casefold() for value in str(country).split(",") if value.strip()
+        }
+        category_filters = {
+            value.strip().casefold() for value in str(category).split(",") if value.strip()
+        }
+        matches = [
+            deepcopy(product)
+            for product in TEST_PRODUCTS.values()
+            if (
+                not country_filters
+                or str(product["country"]).casefold() in country_filters
+            )
+            and (
+                not category_filters
+                or str(product["category"]).casefold() in category_filters
+            )
+        ]
+        return matches[start : start + limit]
 
     def search_products(
         self,
@@ -238,6 +280,29 @@ class LiveBitrefillClient:
         self.invoice_poll_interval_seconds = float(invoice_poll_interval_seconds)
         self.sleeper = sleeper or time.sleep
         self._request_json = request_json or self._default_request_json
+
+    def list_products(
+        self,
+        *,
+        country: str,
+        category: str,
+        start: int,
+        limit: int,
+        include_test_products: bool,
+    ) -> list[dict[str, Any]]:
+        payload = self._request_json(
+            "GET",
+            "/products",
+            query={
+                "country": str(country).strip(),
+                "category": str(category).strip(),
+                "start": str(start),
+                "limit": str(limit),
+                "include_test_products": "true" if include_test_products else "false",
+            },
+            body=None,
+        )
+        return [self._normalize_product(raw) for raw in payload.get("data", [])]
 
     def search_products(
         self,

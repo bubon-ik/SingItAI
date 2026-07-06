@@ -41,6 +41,32 @@ class FakeTreasuryClient:
 
 
 class BitrefillClientTests(unittest.TestCase):
+    def test_test_catalog_list_filters_country_and_category_then_slices(self):
+        client = TestBitrefillClient()
+
+        products = client.list_products(
+            country="cz,uS",
+            category="restaurants,GIFT_CARD",
+            start=1,
+            limit=1,
+            include_test_products=True,
+        )
+
+        self.assertEqual(
+            [product["productId"] for product in products],
+            ["test-gift-card-code"],
+        )
+        self.assertEqual(
+            client.list_products(
+                country="US",
+                category="gift_card",
+                start=0,
+                limit=10,
+                include_test_products=False,
+            ),
+            [],
+        )
+
     def test_test_catalog_searches_multiple_product_types(self):
         client = TestBitrefillClient()
 
@@ -168,6 +194,59 @@ class BitrefillClientTests(unittest.TestCase):
                 },
                 "body": None,
             },
+        )
+
+    def test_live_catalog_list_requests_page_and_normalizes_products(self):
+        transport = FakeBitrefillTransport(
+            [
+                {
+                    "data": [
+                        {
+                            "id": "restaurant-card-cz",
+                            "name": "Restaurant Card",
+                            "country_code": "CZ",
+                            "currency": "CZK",
+                            "recipient_type": "none",
+                            "packages": [
+                                {
+                                    "id": "restaurant-card-cz<&>500",
+                                    "value": "500",
+                                    "price": 500,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ]
+        )
+        client = LiveBitrefillClient(api_key="key_123", request_json=transport)
+
+        products = client.list_products(
+            country="CZ,XI",
+            category="food,restaurants",
+            start=8,
+            limit=9,
+            include_test_products=False,
+        )
+
+        self.assertEqual(products[0]["productId"], "restaurant-card-cz")
+        self.assertEqual(products[0]["country"], "CZ")
+        self.assertEqual(
+            transport.calls,
+            [
+                {
+                    "method": "GET",
+                    "path": "/products",
+                    "query": {
+                        "country": "CZ,XI",
+                        "category": "food,restaurants",
+                        "start": "8",
+                        "limit": "9",
+                        "include_test_products": "false",
+                    },
+                    "body": None,
+                }
+            ],
         )
 
     def test_live_usd_range_exposes_minimum_face_value(self):
