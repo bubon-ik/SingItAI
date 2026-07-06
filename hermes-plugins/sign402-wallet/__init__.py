@@ -56,15 +56,14 @@ _TELEGRAM_LLM_STARTED_MESSAGE = (
 )
 _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "start", "description": "Set up your Sign402 wallet"},
-    {"command": "wallet", "description": "Show your Base wallet"},
+    {"command": "help", "description": "Show Sign402 commands"},
+    {"command": "wallet", "description": "Show or create your Base wallet"},
     {"command": "balance", "description": "Show wallet balances"},
-    {"command": "last_purchase", "description": "Show your latest purchase"},
-    {"command": "limits", "description": "Show or set spending limits"},
     {"command": "connect_imessage", "description": "Link iMessage approvals"},
+    {"command": "limits", "description": "Show or set spending limits"},
     {"command": "bitrefill", "description": "Buy Bitrefill with SINGIT"},
+    {"command": "last_purchase", "description": "Reveal latest purchase"},
     {"command": "llm_buy", "description": "Buy Bankr LLM credits"},
-    {"command": "llm_terms", "description": "Accept Bankr LLM terms"},
-    {"command": "llm_code", "description": "Verify Bankr email code"},
     {"command": "llm_credits", "description": "Show Bankr LLM credits"},
 )
 _COMMANDS = {
@@ -289,6 +288,27 @@ def _start_text(wallet_text: str) -> str:
     )
 
 
+def _help_text() -> str:
+    return (
+        "Sign402 commands\n\n"
+        "/wallet - Create or show your Base wallet\n"
+        "/balance - Show ETH, USDC, and SINGIT balances\n"
+        "/connect_imessage - Link iMessage approvals\n"
+        "/limits - View or set spending limits\n"
+        "/bitrefill <product> <amount> <country> - Buy Bitrefill with SINGIT\n"
+        "/last_purchase - Reveal your latest purchase\n"
+        "/llm_buy <usd> <email> - Buy Bankr LLM credits\n"
+        "/llm_credits - Show Bankr LLM credits"
+    )
+
+
+def _build_help_handler():
+    async def handler(_raw_args: str) -> str:
+        return _help_text()
+
+    return handler
+
+
 def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
     """Capture trusted identities and consume Photon approval messages."""
 
@@ -345,19 +365,24 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
         _send_fixed_reply(gateway, source, _TELEGRAM_ONLY_MESSAGE)
         return dict(_SKIP_RESULT)
     try:
-        client = _client_factory()
         if command == "start":
+            client = _client_factory()
             wallet_text = client.execute("create-wallet", identity)
             text = _start_text(wallet_text)
+        elif command == "help":
+            text = _help_text()
         elif command == "wallet":
+            client = _client_factory()
             text = client.execute("create-wallet", identity)
         elif command == "balance":
+            client = _client_factory()
             text = client.execute(
                 "balance",
                 identity,
                 user_access_token=_user_access_token(client, identity),
             )
         elif command == "last-purchase":
+            client = _client_factory()
             text = client.execute(
                 "last-purchase",
                 identity,
@@ -368,6 +393,7 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
             if parsed_limits is None:
                 text = _LIMITS_USAGE
             else:
+                client = _client_factory()
                 max_per_tx_usdc, daily_cap_usdc = parsed_limits
                 text = client.execute_spending_limits(
                     identity,
@@ -375,6 +401,7 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
                     daily_cap_usdc=daily_cap_usdc,
                 )
         elif command == "connect-imessage":
+            client = _client_factory()
             result = client.execute_imessage(
                 "connect-imessage",
                 {"telegramUserId": identity.user_id},
@@ -383,6 +410,7 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
             if not isinstance(text, str) or not text.strip():
                 text = _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
         elif command in {"llm-buy", "llm-terms", "llm-credits"}:
+            client = _client_factory()
             operation = {
                 "llm-buy": "start",
                 "llm-terms": "accept-terms",
@@ -416,6 +444,7 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
             )
             return dict(_SKIP_RESULT)
         elif command == "bitrefill":
+            client = _client_factory()
             parsed = _parse_bitrefill_args(args)
             if parsed is None:
                 _send_fixed_reply(gateway, source, _BITREFILL_USAGE)
@@ -876,6 +905,7 @@ def _telegram_public_command(event, source) -> str | None:
     normalized = command.strip().lower().replace("_", "-")
     if normalized in {
         "start",
+        "help",
         "wallet",
         "balance",
         "last-purchase",
@@ -1027,6 +1057,11 @@ def register(ctx) -> None:
         "start",
         handler=_build_start_handler(),
         description="Start Sign402 wallet onboarding",
+    )
+    ctx.register_command(
+        "help",
+        handler=_build_help_handler(),
+        description="Show Sign402 commands",
     )
     for command, (operation, description) in _COMMANDS.items():
         ctx.register_command(

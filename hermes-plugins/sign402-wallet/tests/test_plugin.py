@@ -251,6 +251,7 @@ class PluginRegistrationTests(unittest.TestCase):
             set(context.commands),
             {
                 "start",
+                "help",
                 "wallet",
                 "balance",
                 "last-purchase",
@@ -308,6 +309,32 @@ class PluginRegistrationTests(unittest.TestCase):
             json.loads(private_payload["scope"][0]),
             {"type": "all_private_chats"},
         )
+
+    def test_public_telegram_command_menu_is_pilot_facing(self):
+        plugin = load_plugin()
+
+        commands = [item["command"] for item in plugin._TELEGRAM_PUBLIC_COMMAND_MENU]
+
+        self.assertEqual(
+            commands,
+            [
+                "start",
+                "help",
+                "wallet",
+                "balance",
+                "connect_imessage",
+                "limits",
+                "bitrefill",
+                "last_purchase",
+                "llm_buy",
+                "llm_credits",
+            ],
+        )
+        self.assertNotIn("create_wallet", commands)
+        self.assertNotIn("set_limits", commands)
+        self.assertNotIn("test_approval", commands)
+        self.assertNotIn("llm_terms", commands)
+        self.assertNotIn("llm_code", commands)
 
     def test_command_uses_bound_identity_and_ignores_raw_arguments(self):
         plugin = load_plugin()
@@ -538,6 +565,35 @@ class PluginRegistrationTests(unittest.TestCase):
         )
         self.assertEqual(client.calls[0][0], "create-wallet")
         self.assertIn("Welcome to Sign402.", gateway.adapters["telegram"].sent[0][1])
+
+    def test_help_is_answered_with_pilot_commands(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "/help",
+                "1045618308",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        text = gateway.adapters["telegram"].sent[0][1]
+        self.assertIn("Sign402 commands", text)
+        self.assertIn("/wallet", text)
+        self.assertIn("/connect_imessage", text)
+        self.assertIn("/bitrefill", text)
+        self.assertIn("/llm_buy", text)
+        self.assertNotIn("/llm_terms", text)
+        self.assertNotIn("/llm_code", text)
 
     def test_bitrefill_command_quotes_and_buys_with_trusted_identity(self):
         plugin = load_plugin()
