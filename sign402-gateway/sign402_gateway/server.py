@@ -3317,7 +3317,10 @@ class UserWalletTokenTransferClient:
             raise ValueError(
                 result.stderr.strip() or result.stdout.strip() or "token read failed"
             )
-        payload = json.loads(result.stdout)
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise ValueError("token read returned non-JSON output") from exc
         if not isinstance(payload, dict) or payload.get("ok") is not True:
             raise ValueError("token read returned an invalid payload")
         return payload
