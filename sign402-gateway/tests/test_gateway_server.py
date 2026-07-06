@@ -504,6 +504,32 @@ class GatewayServerTests(unittest.TestCase):
         self.assertEqual(run.call_args_list[2].args[0][2], "transfer-usdc")
         self.assertIn("--to", run.call_args_list[2].args[0])
 
+    def test_cdp_wallet_client_quote_passes_custom_decimals(self):
+        price_completed = subprocess_completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "fromAmount": "150000000000",
+                    "toAmount": "134576",
+                    "minToAmount": "133237",
+                    "liquidityAvailable": True,
+                }
+            )
+        )
+        with patch("subprocess.run", side_effect=[price_completed]) as run:
+            client = CdpWalletClient(service_dir=Path("/tmp/cdp"))
+            client.quote(
+                from_token="0xCUSTOM",
+                to_token="USDC",
+                amount="150000",
+                chain="base",
+                decimals=8,
+            )
+
+        command = run.call_args_list[0].args[0]
+        self.assertIn("--decimals", command)
+        self.assertEqual(command[command.index("--decimals") + 1], "8")
+
     def test_real_rate_pricer_env_builder_requires_max_singit(self):
         with self.assertRaisesRegex(ValueError, "SIGN402_MAX_SINGIT_PER_BITREFILL_ORDER"):
             build_real_rate_pricer_from_env(

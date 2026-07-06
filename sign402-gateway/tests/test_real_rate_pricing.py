@@ -8,9 +8,19 @@ class LinearQuoteClient:
     def __init__(self, rate: Decimal):
         self.rate = rate
         self.amounts = []
+        self.calls = []
 
-    def quote(self, *, from_token, to_token, amount, chain):
+    def quote(self, *, from_token, to_token, amount, chain, decimals=18):
         self.amounts.append(Decimal(str(amount)))
+        self.calls.append(
+            {
+                "from_token": from_token,
+                "to_token": to_token,
+                "amount": amount,
+                "chain": chain,
+                "decimals": decimals,
+            }
+        )
         out = Decimal(str(amount)) * self.rate
         return {
             "ok": True,
@@ -27,9 +37,18 @@ class MinAmountQuoteClient(LinearQuoteClient):
         super().__init__(rate)
         self.minimum = minimum
 
-    def quote(self, *, from_token, to_token, amount, chain):
+    def quote(self, *, from_token, to_token, amount, chain, decimals=18):
         parsed = Decimal(str(amount))
         self.amounts.append(parsed)
+        self.calls.append(
+            {
+                "from_token": from_token,
+                "to_token": to_token,
+                "amount": amount,
+                "chain": chain,
+                "decimals": decimals,
+            }
+        )
         if parsed < self.minimum:
             raise ValueError("Quote failed: API error (500): No quote available")
         out = parsed * self.rate
@@ -48,10 +67,19 @@ class SparseQuoteClient(LinearQuoteClient):
         super().__init__(rate)
         self.failing_amounts = failing_amounts
 
-    def quote(self, *, from_token, to_token, amount, chain):
+    def quote(self, *, from_token, to_token, amount, chain, decimals=18):
         parsed = Decimal(str(amount))
         if parsed in self.failing_amounts:
             self.amounts.append(parsed)
+            self.calls.append(
+                {
+                    "from_token": from_token,
+                    "to_token": to_token,
+                    "amount": amount,
+                    "chain": chain,
+                    "decimals": decimals,
+                }
+            )
             raise ValueError(
                 "Quote failed: API error (500): An error has occurred. Please try again later."
             )
@@ -60,6 +88,7 @@ class SparseQuoteClient(LinearQuoteClient):
             to_token=to_token,
             amount=amount,
             chain=chain,
+            decimals=decimals,
         )
 
 
@@ -70,9 +99,18 @@ class WalletApiMinAmountQuoteClient(LinearQuoteClient):
         super().__init__(rate)
         self.minimum = minimum
 
-    def quote(self, *, from_token, to_token, amount, chain):
+    def quote(self, *, from_token, to_token, amount, chain, decimals=18):
         parsed = Decimal(str(amount))
         self.amounts.append(parsed)
+        self.calls.append(
+            {
+                "from_token": from_token,
+                "to_token": to_token,
+                "amount": amount,
+                "chain": chain,
+                "decimals": decimals,
+            }
+        )
         if parsed < self.minimum:
             raise ValueError("Bankr Wallet API error 500: Internal Server Error")
         out = parsed * self.rate
@@ -87,8 +125,17 @@ class WalletApiMinAmountQuoteClient(LinearQuoteClient):
 
 
 class WalletApiAuthErrorQuoteClient(LinearQuoteClient):
-    def quote(self, *, from_token, to_token, amount, chain):
+    def quote(self, *, from_token, to_token, amount, chain, decimals=18):
         self.amounts.append(Decimal(str(amount)))
+        self.calls.append(
+            {
+                "from_token": from_token,
+                "to_token": to_token,
+                "amount": amount,
+                "chain": chain,
+                "decimals": decimals,
+            }
+        )
         raise ValueError("Bankr Wallet API error 401: unauthorized")
 
 
@@ -157,6 +204,43 @@ class RealRatePricingTests(unittest.TestCase):
         self.assertGreaterEqual(Decimal(result["expectedUsdc"]), Decimal("0.11"))
         self.assertLessEqual(Decimal(result["requiredSingit"]), Decimal("11.01"))
         self.assertEqual(result["requiredSingitAtomic"], "11000000000000000000")
+
+    def test_price_for_usdc_accepts_per_call_token_and_decimals(self):
+        client = LinearQuoteClient(Decimal("0.01"))
+        pricer = RealRateSingitPricer(
+            quote_client=client,
+            from_token="0xSINGIT",
+            to_token="USDC",
+            chain="base",
+            buffer_bps=1000,
+            max_singit="10000",
+        )
+
+        result = pricer.price_for_usdc("10", from_token="0xCUSTOM", decimals=8)
+
+        self.assertTrue(all(c["from_token"] == "0xCUSTOM" for c in client.calls))
+        self.assertTrue(all(c["decimals"] == 8 for c in client.calls))
+        self.assertEqual(
+            result["requiredSingitAtomic"],
+            str(int(Decimal(result["requiredSingit"]) * Decimal(10) ** 8)),
+        )
+        self.assertEqual(result["fromToken"], "0xCUSTOM")
+
+    def test_price_for_usdc_defaults_to_constructor_token_and_18_decimals(self):
+        client = LinearQuoteClient(Decimal("0.01"))
+        pricer = RealRateSingitPricer(
+            quote_client=client,
+            from_token="0xSINGIT",
+            to_token="USDC",
+            chain="base",
+            buffer_bps=1000,
+            max_singit="10000",
+        )
+
+        result = pricer.price_for_usdc("10")
+
+        self.assertTrue(all(c["from_token"] == "0xSINGIT" for c in client.calls))
+        self.assertTrue(all(c["decimals"] == 18 for c in client.calls))
 
     def test_rejects_when_required_singit_exceeds_cap(self):
         client = LinearQuoteClient(Decimal("0.000001"))

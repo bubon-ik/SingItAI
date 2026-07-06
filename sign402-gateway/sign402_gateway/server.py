@@ -2753,6 +2753,7 @@ class CdpWalletClient:
         to_token: str,
         amount: str,
         chain: str = "base",
+        decimals: int = 18,
     ) -> dict[str, Any]:
         payload = self._run(
             [
@@ -2765,6 +2766,8 @@ class CdpWalletClient:
                 str(amount),
                 "--chain",
                 str(chain),
+                "--decimals",
+                str(int(decimals)),
             ]
         )
         return {

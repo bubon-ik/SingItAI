@@ -29,7 +29,15 @@ class RealRateSingitPricer:
         self.search_iterations = int(search_iterations)
         self._quote_cache: dict[str, dict[str, Any]] = {}
 
-    def price_for_usdc(self, target_usdc: str) -> dict[str, Any]:
+    def price_for_usdc(
+        self,
+        target_usdc: str,
+        *,
+        from_token: str | None = None,
+        decimals: int | None = None,
+    ) -> dict[str, Any]:
+        token = str(from_token or self.from_token)
+        token_decimals = int(decimals) if decimals is not None else SINGIT_DECIMALS
         self._quote_cache = {}
         target = Decimal(str(target_usdc))
         if target <= 0:
@@ -42,7 +50,7 @@ class RealRateSingitPricer:
         )
         low = Decimal("0")
         high = Decimal("1")
-        high_quote = self._quote_or_none(high)
+        high_quote = self._quote_or_none(high, token, token_decimals)
         while high_quote is None or Decimal(high_quote["toAmount"]) < buffered_target:
             low = high
             high = self._next_high_amount(
@@ -52,12 +60,12 @@ class RealRateSingitPricer:
             )
             if high > self.max_singit:
                 raise ValueError("required SINGIT exceeds configured maximum")
-            high_quote = self._quote_or_none(high)
+            high_quote = self._quote_or_none(high, token, token_decimals)
 
         best_amount = high
         for _ in range(max(1, self.search_iterations)):
             mid = (low + high) / 2
-            quote = self._quote_or_none(mid)
+            quote = self._quote_or_none(mid, token, token_decimals)
             if quote is None:
                 low = mid
                 continue
@@ -73,8 +81,10 @@ class RealRateSingitPricer:
         rounded_singit = self._minimize_integer_amount(
             amount=rounded_singit,
             buffered_target=buffered_target,
+            token=token,
+            token_decimals=token_decimals,
         )
-        final_quote = self._quote(rounded_singit)
+        final_quote = self._quote(rounded_singit, token, token_decimals)
         if Decimal(final_quote["toAmount"]) < buffered_target:
             raise ValueError("Bankr quote did not meet target USDC after rounding")
 
@@ -84,37 +94,41 @@ class RealRateSingitPricer:
             "bufferedTargetUsdc": format(buffered_target, "f"),
             "requiredSingit": format_decimal(rounded_singit),
             "requiredSingitAtomic": str(
-                int(rounded_singit * (Decimal(10) ** SINGIT_DECIMALS))
+                int(rounded_singit * (Decimal(10) ** token_decimals))
             ),
             "expectedUsdc": final_quote["toAmount"],
             "minUsdc": final_quote.get("minToAmount", final_quote["toAmount"]),
-            "fromToken": self.from_token,
+            "fromToken": token,
             "toToken": self.to_token,
             "chain": self.chain,
             "quote": final_quote,
         }
 
-    def _quote(self, amount: Decimal) -> dict[str, Any]:
+    def _quote(self, amount: Decimal, token: str, token_decimals: int) -> dict[str, Any]:
         # Within one price_for_usdc call the search re-visits some amounts
         # (e.g. the final confirmation re-quotes the converged size); memoize
         # by the exact amount string sent to the client to avoid duplicate
         # Bankr round-trips on this blocking pricing path.
-        key = format_decimal(amount)
+        amount_key = format_decimal(amount)
+        key = f"{token}:{token_decimals}:{amount_key}"
         cached = self._quote_cache.get(key)
         if cached is not None:
             return cached
         result = self.quote_client.quote(
-            from_token=self.from_token,
+            from_token=token,
             to_token=self.to_token,
-            amount=key,
+            amount=amount_key,
             chain=self.chain,
+            decimals=token_decimals,
         )
         self._quote_cache[key] = result
         return result
 
-    def _quote_or_none(self, amount: Decimal) -> dict[str, Any] | None:
+    def _quote_or_none(
+        self, amount: Decimal, token: str, token_decimals: int
+    ) -> dict[str, Any] | None:
         try:
-            return self._quote(amount)
+            return self._quote(amount, token, token_decimals)
         except Exception as exc:
             if _is_skippable_quote_error(str(exc)):
                 return None
@@ -140,11 +154,18 @@ class RealRateSingitPricer:
         ).quantize(Decimal("1"), rounding=ROUND_CEILING)
         return max(doubled, estimated)
 
-    def _minimize_integer_amount(self, *, amount: Decimal, buffered_target: Decimal) -> Decimal:
+    def _minimize_integer_amount(
+        self,
+        *,
+        amount: Decimal,
+        buffered_target: Decimal,
+        token: str,
+        token_decimals: int,
+    ) -> Decimal:
         if amount <= 1:
             return amount
         previous = amount - 1
-        quote = self._quote_or_none(previous)
+        quote = self._quote_or_none(previous, token, token_decimals)
         if quote is not None and Decimal(quote["toAmount"]) >= buffered_target:
             return previous
         return amount

@@ -108,6 +108,7 @@ class BankrWalletApiClient:
         to_token: str,
         amount: str,
         chain: str = "base",
+        decimals: int = 18,
     ) -> dict[str, Any]:
         payload = self._post_json(
             "/wallet/swap-quote",
@@ -230,6 +231,7 @@ class BankrSwapClient:
         to_token: str,
         amount: str,
         chain: str = "base",
+        decimals: int = 18,
     ) -> dict[str, Any]:
         command = self._command(
             from_token=from_token,
