@@ -741,11 +741,53 @@ class PluginRegistrationTests(unittest.TestCase):
 
         self.assertEqual(
             plugin._parse_llm_buy_args("10 user@example.com"),
-            ("10", "user@example.com"),
+            ("10", "user@example.com", ""),
         )
         self.assertIsNone(plugin._parse_llm_buy_args("10"))
         self.assertIsNone(plugin._parse_llm_buy_args("0.5 user@example.com"))
         self.assertIsNone(plugin._parse_llm_buy_args("10 not-an-email"))
+        self.assertIsNone(plugin._parse_llm_buy_args("10 user@example.com bad-token!"))
+
+    def test_llm_buy_accepts_optional_token_symbol(self):
+        plugin = load_plugin()
+
+        payload = plugin._llm_operation_payload(
+            "start", "1 user@example.com USDC"
+        )
+
+        self.assertEqual(
+            payload,
+            {
+                "amountUsd": "1",
+                "email": "user@example.com",
+                "paymentToken": "USDC",
+            },
+        )
+
+    def test_llm_buy_accepts_token_address(self):
+        plugin = load_plugin()
+        token = "0x" + "a" * 40
+
+        payload = plugin._llm_operation_payload(
+            "start", f"1 user@example.com {token}"
+        )
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["paymentToken"], token)
+
+    def test_llm_buy_without_token_omits_payment_token(self):
+        plugin = load_plugin()
+
+        payload = plugin._llm_operation_payload("start", "1 user@example.com")
+
+        self.assertEqual(payload, {"amountUsd": "1", "email": "user@example.com"})
+
+    def test_llm_buy_rejects_four_args(self):
+        plugin = load_plugin()
+
+        self.assertIsNone(
+            plugin._llm_operation_payload("start", "1 user@example.com USDC extra")
+        )
 
     def test_llm_buy_and_terms_use_trusted_identity(self):
         plugin = load_plugin()

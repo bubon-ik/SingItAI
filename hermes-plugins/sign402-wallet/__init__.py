@@ -80,7 +80,7 @@ _IMESSAGE_COMMANDS = {
 }
 _LIMITS_USAGE = "Usage: /limits 0.005 0.05 or /set_limits 0.005 0.05"
 _BITREFILL_USAGE = "Usage: /bitrefill <productId> <packageId> [country]"
-_LLM_BUY_USAGE = "Usage: /llm_buy <usd> <email>"
+_LLM_BUY_USAGE = "Usage: /llm_buy <usd> <email> [token]"
 _LLM_TERMS_USAGE = "Usage: /llm_terms accept"
 _LLM_CODE_USAGE = "Usage: /llm_code <six-digit code>"
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -919,11 +919,14 @@ def _parse_bitrefill_args(raw_args: str) -> tuple[str, str, str] | None:
     return (args[0], args[1], country)
 
 
-def _parse_llm_buy_args(raw_args: str) -> tuple[str, str] | None:
+def _parse_llm_buy_args(raw_args: str) -> tuple[str, str, str] | None:
     args = str(raw_args or "").strip().split()
-    if len(args) != 2:
+    if len(args) not in {2, 3}:
         return None
-    amount_text, email = args
+    amount_text, email = args[0], args[1]
+    token = args[2] if len(args) == 3 else ""
+    if token and not re.fullmatch(r"[A-Za-z0-9]{2,12}|0x[a-fA-F0-9]{40}", token):
+        return None
     try:
         amount = Decimal(amount_text)
     except (InvalidOperation, ValueError):
@@ -936,7 +939,7 @@ def _parse_llm_buy_args(raw_args: str) -> tuple[str, str] | None:
         or _EMAIL_RE.fullmatch(email) is None
     ):
         return None
-    return amount_text, email
+    return amount_text, email, token
 
 
 def _llm_operation_payload(
@@ -947,8 +950,11 @@ def _llm_operation_payload(
         parsed = _parse_llm_buy_args(raw_args)
         if parsed is None:
             return None
-        amount, email = parsed
-        return {"amountUsd": amount, "email": email}
+        amount, email, token = parsed
+        payload = {"amountUsd": amount, "email": email}
+        if token:
+            payload["paymentToken"] = token
+        return payload
     if operation == "accept-terms":
         return {} if str(raw_args or "").strip().lower() == "accept" else None
     if operation == "verify":
