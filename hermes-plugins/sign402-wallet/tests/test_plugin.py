@@ -595,6 +595,72 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertNotIn("/llm_terms", text)
         self.assertNotIn("/llm_code", text)
 
+    def test_reply_keyboard_labels_are_treated_as_commands(self):
+        plugin = load_plugin()
+        self.assertEqual(
+            plugin._telegram_public_command(
+                FakeEvent("Wallet", "1045618308"),
+                FakeEvent("Wallet", "1045618308").source,
+            ),
+            "wallet",
+        )
+        self.assertEqual(
+            plugin._telegram_public_command(
+                FakeEvent("Buy LLM Credits", "1045618308"),
+                FakeEvent("Buy LLM Credits", "1045618308").source,
+            ),
+            "llm-buy",
+        )
+        self.assertEqual(
+            plugin._telegram_public_command(
+                FakeEvent("Connect iMessage", "1045618308"),
+                FakeEvent("Connect iMessage", "1045618308").source,
+            ),
+            "connect-imessage",
+        )
+
+    def test_help_direct_reply_includes_reply_keyboard(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+        requests = []
+
+        def fake_opener(request, timeout):
+            requests.append((request, timeout))
+            return FakeTelegramResponse()
+
+        plugin._telegram_api_opener = fake_opener
+
+        with patch.dict(plugin.os.environ, {"TELEGRAM_BOT_TOKEN": "telegram-token"}):
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "/help",
+                    "1045618308",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(
+            result,
+            {"action": "skip", "reason": "sign402-imessage-handled"},
+        )
+        self.assertEqual(gateway.adapters["telegram"].sent, [])
+        payload = parse_qs(requests[0][0].data.decode("utf-8"))
+        reply_markup = json.loads(payload["reply_markup"][0])
+        self.assertTrue(reply_markup["resize_keyboard"])
+        self.assertEqual(
+            reply_markup["keyboard"],
+            [
+                [{"text": "Wallet"}, {"text": "Balance"}],
+                [{"text": "Connect iMessage"}, {"text": "Limits"}],
+                [{"text": "Buy Bitrefill"}, {"text": "Buy LLM Credits"}],
+                [{"text": "Last Purchase"}, {"text": "Help"}],
+            ],
+        )
+
     def test_bitrefill_command_quotes_and_buys_with_trusted_identity(self):
         plugin = load_plugin()
         context = FakeContext()

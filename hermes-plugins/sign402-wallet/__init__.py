@@ -66,6 +66,22 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "llm_buy", "description": "Buy Bankr LLM credits"},
     {"command": "llm_credits", "description": "Show Bankr LLM credits"},
 )
+_TELEGRAM_MAIN_MENU_BUTTONS = (
+    ("Wallet", "Balance"),
+    ("Connect iMessage", "Limits"),
+    ("Buy Bitrefill", "Buy LLM Credits"),
+    ("Last Purchase", "Help"),
+)
+_TELEGRAM_BUTTON_COMMANDS = {
+    "wallet": "wallet",
+    "balance": "balance",
+    "connect imessage": "connect-imessage",
+    "limits": "limits",
+    "buy bitrefill": "bitrefill",
+    "buy llm credits": "llm-buy",
+    "last purchase": "last-purchase",
+    "help": "help",
+}
 _COMMANDS = {
     "wallet": ("create-wallet", "Show your Base agent wallet"),
     "balance": ("balance", "Show your managed Base wallet balance"),
@@ -464,7 +480,12 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
             return dict(_SKIP_RESULT)
         else:
             return None
-        _send_fixed_reply(gateway, source, text)
+        _send_fixed_reply(
+            gateway,
+            source,
+            text,
+            reply_markup=_telegram_main_menu_reply_markup(),
+        )
         return dict(_SKIP_RESULT)
     except GatewayClientError as exc:
         _send_fixed_reply(gateway, source, exc.user_message)
@@ -669,8 +690,12 @@ def _imessage_text(result: dict) -> str:
     return _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
 
 
-def _send_fixed_reply(gateway, source, text: str) -> None:
-    if _is_telegram_source(source) and _send_telegram_reply_direct(source, text):
+def _send_fixed_reply(gateway, source, text: str, *, reply_markup: dict | None = None) -> None:
+    if _is_telegram_source(source) and _send_telegram_reply_direct(
+        source,
+        text,
+        reply_markup=reply_markup,
+    ):
         return
     if gateway is None:
         return
@@ -695,7 +720,12 @@ def _send_fixed_reply(gateway, source, text: str) -> None:
         task.add_done_callback(_log_send_task_failure)
 
 
-def _send_telegram_reply_direct(source, text: str) -> bool:
+def _send_telegram_reply_direct(
+    source,
+    text: str,
+    *,
+    reply_markup: dict | None = None,
+) -> bool:
     token = _telegram_bot_token()
     chat_id = str(getattr(source, "chat_id", "") or getattr(source, "user_id", "") or "")
     if not token or not chat_id:
@@ -703,13 +733,17 @@ def _send_telegram_reply_direct(source, text: str) -> bool:
 
     try:
         for chunk in _telegram_message_chunks(text):
-            payload = urlencode(
-                {
+            payload_fields = {
                     "chat_id": chat_id,
                     "text": chunk,
                     "disable_web_page_preview": "true",
-                }
-            ).encode("utf-8")
+            }
+            if reply_markup is not None:
+                payload_fields["reply_markup"] = json.dumps(
+                    reply_markup,
+                    separators=(",", ":"),
+                )
+            payload = urlencode(payload_fields).encode("utf-8")
             request = Request(
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 data=payload,
@@ -735,6 +769,19 @@ def _send_telegram_reply_direct(source, text: str) -> bool:
             type(exc).__name__,
         )
         return False
+
+
+def _telegram_main_menu_reply_markup() -> dict:
+    return {
+        "keyboard": [
+            [{"text": label} for label in row]
+            for row in _TELEGRAM_MAIN_MENU_BUTTONS
+        ],
+        "resize_keyboard": True,
+        "is_persistent": True,
+        "one_time_keyboard": False,
+        "input_field_placeholder": "Choose a Sign402 action",
+    }
 
 
 def _schedule_telegram_public_command_menu_refresh() -> None:
@@ -899,9 +946,13 @@ def _telegram_public_command(event, source) -> str | None:
     if not _is_telegram_source(source):
         return None
     text = str(getattr(event, "text", "") or "").strip()
-    if not text.startswith("/"):
-        return None
-    command = text[1:].split(maxsplit=1)[0].split("@", maxsplit=1)[0]
+    if text.startswith("/"):
+        command = text[1:].split(maxsplit=1)[0].split("@", maxsplit=1)[0]
+    else:
+        button_command = _TELEGRAM_BUTTON_COMMANDS.get(_normalize_button_text(text))
+        if button_command is None:
+            return None
+        command = button_command
     normalized = command.strip().lower().replace("_", "-")
     if normalized in {
         "start",
@@ -920,6 +971,10 @@ def _telegram_public_command(event, source) -> str | None:
     }:
         return normalized
     return None
+
+
+def _normalize_button_text(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip().lower().replace("_", " "))
 
 
 def _telegram_command_args(event) -> str:
