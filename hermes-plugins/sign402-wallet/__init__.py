@@ -1074,11 +1074,21 @@ def _format_bitrefill_catalog_page(
     for index, product in enumerate(products, start=1):
         name = str(product.get("name") or "Unknown product").strip()
         product_country = str(product.get("country") or "").strip().upper()
-        suffix = f" ({product_country})" if product_country and product_country != country else ""
+        suffix = _bitrefill_product_country_suffix(name, product_country, country)
         lines.append(f"{index}. {name}{suffix}")
     lines.append("")
     lines.append("Reply with a number.")
     return "\n".join(lines)
+
+
+def _bitrefill_product_country_suffix(name: str, product_country: str, user_country: str) -> str:
+    if not product_country or product_country == user_country:
+        return ""
+    if product_country == "XI":
+        if "international" in str(name or "").casefold():
+            return ""
+        return " (Global)"
+    return f" ({product_country})"
 
 
 def _format_bitrefill_packages(product: dict, packages: list[dict]) -> str:

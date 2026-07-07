@@ -1054,6 +1054,26 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertNotIn("$89796.00", text)
         self.assertNotIn("$37415.00", text)
 
+    def test_bitrefill_catalog_displays_international_country_as_global(self):
+        plugin = load_plugin()
+
+        text = plugin._format_bitrefill_catalog_page(
+            "CZ",
+            "all",
+            0,
+            [
+                {"name": "Viber", "country": "XI"},
+                {"name": "NordVPN International", "country": "XI"},
+                {"name": "Zalando Czech Republic", "country": "CZ"},
+            ],
+        )
+
+        self.assertIn("1. Viber (Global)", text)
+        self.assertIn("2. NordVPN International", text)
+        self.assertNotIn("NordVPN International (Global)", text)
+        self.assertIn("3. Zalando Czech Republic", text)
+        self.assertNotIn("(XI)", text)
+
     def test_connect_imessage_is_answered_in_pre_dispatch(self):
         plugin = load_plugin()
         context = FakeContext()
