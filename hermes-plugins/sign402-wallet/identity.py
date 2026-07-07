@@ -13,6 +13,7 @@ _TELEGRAM_COMMANDS = frozenset(
         "balance",
         "limits",
         "set-limits",
+        "withdraw",
         "connect-imessage",
         "llm-buy",
         "llm-terms",

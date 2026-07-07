@@ -105,6 +105,7 @@ class DummyServer:
         self.imessage_approval_service = Mock()
         self.imessage_approval_api_token = "test-photon-token"
         self.user_x402_buyer = Mock()
+        self.user_token_transfer_client = Mock()
         self.user_spend_limit_store = Mock()
         self.user_spend_limit_store.limit_settings.return_value = {
             "maxPerTxAtomic": 10000,
@@ -665,6 +666,108 @@ class GatewayServerTests(unittest.TestCase):
             "X-Sign402-User-Token": user_token,
         }
 
+    def test_withdraw_tokens_requires_per_user_token(self):
+        server = DummyServer()
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/withdraw/tokens",
+                {"telegramUserId": "123"},
+                server=server,
+                headers=self.wallet_auth_headers(),
+            )
+
+        self.assertIn("HTTP/1.0 401 Unauthorized", self.response_text(handler))
+        server.user_wallet_service.withdrawable_tokens.assert_not_called()
+
+    def test_withdraw_tokens_returns_authenticated_inventory(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "123"
+        server.user_wallet_service.withdrawable_tokens.return_value = {
+            "ok": True,
+            "wallet": {"address": "0xAc4aCb03cAdaFE1d68262cf94cD5E8B56d9bf45C"},
+            "tokens": [
+                {
+                    "symbol": "SINGIT",
+                    "contractAddress": DEFAULT_SINGIT_TOKEN_ADDRESS,
+                    "balance": "250",
+                    "decimals": 18,
+                    "verified": True,
+                }
+            ],
+            "telegramText": "Choose a token to withdraw:\n1. SINGIT: 250",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/withdraw/tokens",
+                {"telegramUserId": "123"},
+                server=server,
+                headers=self.llm_auth_headers(),
+            )
+
+        body = self.response_json(handler)
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(handler))
+        self.assertEqual(body["tokens"][0]["symbol"], "SINGIT")
+        server.user_wallet_service.withdrawable_tokens.assert_called_once_with("123")
+
+    def test_withdraw_uses_imessage_approval_before_token_transfer(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "123"
+        server.user_wallet_service.withdrawable_tokens.return_value = {
+            "ok": True,
+            "wallet": {"address": "0xAc4aCb03cAdaFE1d68262cf94cD5E8B56d9bf45C"},
+            "tokens": [
+                {
+                    "symbol": "SINGIT",
+                    "contractAddress": DEFAULT_SINGIT_TOKEN_ADDRESS,
+                    "balance": "250",
+                    "decimals": 18,
+                    "verified": True,
+                }
+            ],
+        }
+        server.user_wallet_service.decrypt_private_key_for_future_signing.return_value = (
+            "0xSECRET"
+        )
+        server.imessage_approval_service.request_hash_approval.return_value = {
+            "ok": True,
+            "status": "approved",
+            "commitmentHash": "a" * 64,
+        }
+        server.user_token_transfer_client.transfer_token.return_value = {
+            "ok": True,
+            "txId": "0x" + "b" * 64,
+            "transactionHash": "0x" + "b" * 64,
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/withdraw",
+                {
+                    "telegramUserId": "123",
+                    "tokenAddress": DEFAULT_SINGIT_TOKEN_ADDRESS,
+                    "amount": "100",
+                    "toAddress": "0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+                },
+                server=server,
+                headers=self.llm_auth_headers(),
+            )
+
+        body = self.response_json(handler)
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(handler))
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["txId"], "0x" + "b" * 64)
+        server.imessage_approval_service.request_hash_approval.assert_called_once()
+        server.user_token_transfer_client.transfer_token.assert_called_once_with(
+            private_key="0xSECRET",
+            to_address="0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+            token_address=DEFAULT_SINGIT_TOKEN_ADDRESS,
+            amount="100",
+            chain="base",
+            decimals=18,
+        )
+
     def test_llm_key_start_requires_per_user_token(self):
         server = DummyServer()
 
@@ -1080,6 +1183,7 @@ class GatewayServerTests(unittest.TestCase):
 
     def test_agent_wallet_status_uses_user_wallet_service(self):
         server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
         server.user_wallet_service.wallet_status.return_value = {
             "ok": False,
             "wallet": None,
@@ -1091,7 +1195,7 @@ class GatewayServerTests(unittest.TestCase):
                 "/agent/wallet",
                 {"userId": "1045618308"},
                 server=server,
-                headers=self.wallet_auth_headers(),
+                headers=self.llm_auth_headers(),
             )
 
         response = self.response_text(handler)
@@ -1101,6 +1205,7 @@ class GatewayServerTests(unittest.TestCase):
 
     def test_agent_wallet_balance_degrades_safely(self):
         server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
         server.user_wallet_service.wallet_balance.return_value = {
             "ok": True,
             "wallet": {
@@ -1118,7 +1223,7 @@ class GatewayServerTests(unittest.TestCase):
                 "/agent/wallet-balance",
                 {"telegram_user_id": "1045618308"},
                 server=server,
-                headers=self.wallet_auth_headers(),
+                headers=self.llm_auth_headers(),
             )
 
         response = self.response_text(handler)
@@ -1127,6 +1232,37 @@ class GatewayServerTests(unittest.TestCase):
         self.assertNotIn("private", response.lower())
         self.assertTrue(self.response_json(handler)["balanceUnavailable"])
         server.user_wallet_service.wallet_balance.assert_called_once_with("1045618308")
+
+    def test_user_scoped_endpoints_require_per_user_token(self):
+        cases = [
+            ("/agent/wallet", {"telegramUserId": "1045618308"}),
+            ("/agent/wallet-balance", {"telegramUserId": "1045618308"}),
+            ("/agent/last-purchase", {"telegramUserId": "1045618308"}),
+            (
+                "/agent/quote-bitrefill",
+                {
+                    "telegramUserId": "1045618308",
+                    "productId": "x",
+                    "packageId": "y",
+                },
+            ),
+            (
+                "/agent/buy-wallet-bitrefill",
+                {"telegramUserId": "1045618308", "quoteId": "q"},
+            ),
+        ]
+        for path, payload in cases:
+            with self.subTest(path=path):
+                with patch("sys.stderr", io.StringIO()):
+                    handler = self.make_handler(
+                        path,
+                        payload,
+                        server=DummyServer(),
+                        headers=self.wallet_auth_headers(),
+                    )
+                self.assertIn(
+                    "HTTP/1.0 401 Unauthorized", self.response_text(handler)
+                )
 
     def test_imessage_pairing_requires_photon_api_token(self):
         server = DummyServer()
@@ -1733,6 +1869,7 @@ class GatewayServerTests(unittest.TestCase):
 
     def test_agent_buy_tool_with_user_identity_uses_imessage_and_user_wallet(self):
         server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
         server.event_store = Mock()
         server.user_event_store = Mock()
         server.imessage_approval_service.request_purchase_approval.return_value = {
@@ -1783,7 +1920,7 @@ class GatewayServerTests(unittest.TestCase):
                     "/agent/buy-tool",
                     {"tool": "news", "telegramUserId": "1045618308"},
                     server=server,
-                    headers=self.wallet_auth_headers(),
+                    headers=self.llm_auth_headers(),
                 )
 
         response = self.response_text(handler)
@@ -1832,6 +1969,7 @@ class GatewayServerTests(unittest.TestCase):
 
     def test_agent_last_purchase_returns_users_own_event(self):
         server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
         server.user_event_store = Mock()
         server.user_event_store.read.return_value = {
             "ok": True,
@@ -1848,7 +1986,7 @@ class GatewayServerTests(unittest.TestCase):
                 "/agent/last-purchase",
                 {"telegramUserId": "1045618308"},
                 server=server,
-                headers=self.wallet_auth_headers(),
+                headers=self.llm_auth_headers(),
             )
 
         response = self.response_text(handler)
@@ -1863,6 +2001,7 @@ class GatewayServerTests(unittest.TestCase):
 
     def test_agent_last_purchase_reveals_users_bitrefill_code(self):
         server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
         server.user_event_store = Mock()
         server.user_event_store.read.return_value = {
             "ok": True,
@@ -1886,7 +2025,7 @@ class GatewayServerTests(unittest.TestCase):
                 "/agent/last-purchase",
                 {"telegramUserId": "1045618308"},
                 server=server,
-                headers=self.wallet_auth_headers(),
+                headers=self.llm_auth_headers(),
             )
 
         response = self.response_text(handler)
@@ -1905,6 +2044,7 @@ class GatewayServerTests(unittest.TestCase):
 
     def test_agent_last_purchase_isolated_per_user(self):
         server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
         server.user_event_store = Mock()
         # No purchase stored for this user id.
         server.user_event_store.read.return_value = None
@@ -1914,7 +2054,7 @@ class GatewayServerTests(unittest.TestCase):
                 "/agent/last-purchase",
                 {"telegramUserId": "1045618308"},
                 server=server,
-                headers=self.wallet_auth_headers(),
+                headers=self.llm_auth_headers(),
             )
 
         response = self.response_text(handler)
@@ -2003,6 +2143,7 @@ class GatewayServerTests(unittest.TestCase):
 
     def test_agent_buy_tool_for_user_rejects_amount_over_default_tx_cap(self):
         server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
         payment_requirements = {
             "scheme": "exact",
             "network": "base-mainnet",
@@ -2029,7 +2170,7 @@ class GatewayServerTests(unittest.TestCase):
                     "/agent/buy-tool",
                     {"tool": "news", "telegramUserId": "1045618308"},
                     server=server,
-                    headers=self.wallet_auth_headers(),
+                    headers=self.llm_auth_headers(),
                 )
 
         response = self.response_text(handler)
@@ -2043,6 +2184,7 @@ class GatewayServerTests(unittest.TestCase):
 
     def test_agent_buy_tool_for_user_rejects_amount_over_user_tx_limit(self):
         server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
         with tempfile.TemporaryDirectory() as tmpdir:
             server.user_spend_limit_store = UserSpendLimitStore(Path(tmpdir) / "limits.json")
             server.user_spend_limit_store.set_limit_settings(
@@ -2079,7 +2221,7 @@ class GatewayServerTests(unittest.TestCase):
                         "/agent/buy-tool",
                         {"tool": "news", "telegramUserId": "1045618308"},
                         server=server,
-                        headers=self.wallet_auth_headers(),
+                        headers=self.llm_auth_headers(),
                     )
 
         response = self.response_text(handler)
@@ -2093,6 +2235,7 @@ class GatewayServerTests(unittest.TestCase):
 
     def test_agent_buy_tool_for_user_allows_amount_over_default_under_user_limit(self):
         server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
         with tempfile.TemporaryDirectory() as tmpdir:
             server.user_spend_limit_store = UserSpendLimitStore(Path(tmpdir) / "limits.json")
             server.user_spend_limit_store.set_limit_settings(
@@ -2147,7 +2290,7 @@ class GatewayServerTests(unittest.TestCase):
                         "/agent/buy-tool",
                         {"tool": "news", "telegramUserId": "1045618308"},
                         server=server,
-                        headers=self.wallet_auth_headers(),
+                        headers=self.llm_auth_headers(),
                     )
 
         response = self.response_text(handler)
@@ -2158,6 +2301,7 @@ class GatewayServerTests(unittest.TestCase):
 
     def test_agent_buy_tool_for_user_rejects_amount_over_configured_tx_cap(self):
         server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
         payment_requirements = {
             "scheme": "exact",
             "network": "base-mainnet",
@@ -2187,7 +2331,7 @@ class GatewayServerTests(unittest.TestCase):
                     "/agent/buy-tool",
                     {"tool": "news", "telegramUserId": "1045618308"},
                     server=server,
-                    headers=self.wallet_auth_headers(),
+                    headers=self.llm_auth_headers(),
                 )
 
         response = self.response_text(handler)
@@ -2199,6 +2343,7 @@ class GatewayServerTests(unittest.TestCase):
 
     def test_agent_buy_tool_for_user_rejects_daily_cap_before_approval(self):
         server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
         server.user_spend_limit_store.spent_today_atomic.return_value = 99500
         server.imessage_approval_service.request_purchase_approval.return_value = {
             "ok": True,
@@ -2232,7 +2377,7 @@ class GatewayServerTests(unittest.TestCase):
                     "/agent/buy-tool",
                     {"tool": "news", "telegramUserId": "1045618308"},
                     server=server,
-                    headers=self.wallet_auth_headers(),
+                    headers=self.llm_auth_headers(),
                 )
 
         response = self.response_text(handler)
@@ -2251,6 +2396,7 @@ class GatewayServerTests(unittest.TestCase):
 
     def test_agent_buy_tool_for_user_rejects_without_imessage_link_before_signing(self):
         server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
         server.imessage_approval_service.request_purchase_approval.return_value = {
             "ok": False,
             "status": "imessage_not_linked",
@@ -2283,7 +2429,7 @@ class GatewayServerTests(unittest.TestCase):
                     "/agent/buy-tool",
                     {"tool": "news", "telegramUserId": "1045618308"},
                     server=server,
-                    headers=self.wallet_auth_headers(),
+                    headers=self.llm_auth_headers(),
                 )
 
         response = self.response_text(handler)

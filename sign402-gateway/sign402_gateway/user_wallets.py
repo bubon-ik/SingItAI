@@ -4,13 +4,18 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from cryptography.fernet import Fernet, InvalidToken
 from eth_account import Account
 
-from .base_balances import build_base_balance_provider_from_env
+from .base_balances import (
+    BASE_USDC_ADDRESS,
+    DEFAULT_SINGIT_TOKEN_ADDRESS,
+    build_base_balance_provider_from_env,
+)
 
 
 DEFAULT_USER_WALLET_STORE_PATH = Path.home() / ".sign402" / "user-wallets.db"
@@ -342,6 +347,59 @@ class ManagedBaseWalletService:
             response["unverifiedTokens"] = unverified_tokens
         return response
 
+    def withdrawable_tokens(self, telegram_user_id: str) -> dict[str, Any]:
+        user_id = _require_telegram_user_id(telegram_user_id)
+        wallet = self.store.get_wallet_by_telegram_user_id(user_id)
+        if wallet is None:
+            return {
+                "ok": False,
+                "wallet": None,
+                "balanceUnavailable": True,
+                "tokens": [],
+                "telegramText": (
+                    "No Base agent wallet yet. Send /create_wallet to create one."
+                ),
+            }
+
+        safe_wallet = _safe_wallet(wallet)
+        if self.balance_provider is None:
+            return {
+                "ok": True,
+                "wallet": safe_wallet,
+                "balanceUnavailable": True,
+                "tokens": [],
+                "telegramText": (
+                    f"Base agent wallet: {safe_wallet['address']}\n\n"
+                    "Token lookup is not configured yet."
+                ),
+            }
+
+        try:
+            provider_result = self.balance_provider(wallet["wallet_address"])
+            balances, unverified_tokens = _normalize_balance_provider_result(
+                provider_result
+            )
+        except Exception:
+            return {
+                "ok": True,
+                "wallet": safe_wallet,
+                "balanceUnavailable": True,
+                "tokens": [],
+                "telegramText": (
+                    f"Base agent wallet: {safe_wallet['address']}\n\n"
+                    "Token lookup is unavailable right now."
+                ),
+            }
+
+        tokens = _withdrawable_token_list(balances, unverified_tokens)
+        return {
+            "ok": True,
+            "wallet": safe_wallet,
+            "balanceUnavailable": False,
+            "tokens": tokens,
+            "telegramText": _withdrawable_tokens_text(tokens),
+        }
+
     def decrypt_private_key_for_future_signing(self, telegram_user_id: str) -> str:
         user_id = _require_telegram_user_id(telegram_user_id)
         wallet = self.store.get_wallet_by_telegram_user_id(user_id)
@@ -473,12 +531,84 @@ def _balance_text(
             symbol = str(token.get("symbol", "ERC20"))
             value = str(token.get("balance", "0"))
             contract = str(token.get("contractAddress", ""))
-            short_contract = (
-                f"{contract[:8]}...{contract[-4:]}"
-                if len(contract) >= 12
-                else contract
-            )
-            lines.append(f"- {symbol}: {value} ({short_contract})")
+            lines.append(f"- {symbol}: {value} ({_short_address(contract)})")
     lines.append("")
     lines.append("Spending is disabled until iMessage approval is configured.")
     return "\n".join(lines)
+
+
+def _withdrawable_token_list(
+    balances: dict[str, Any],
+    unverified_tokens: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    tokens: list[dict[str, Any]] = []
+    trusted = (
+        ("USDC", BASE_USDC_ADDRESS, 6),
+        ("SINGIT", DEFAULT_SINGIT_TOKEN_ADDRESS, 18),
+    )
+    for symbol, contract_address, decimals in trusted:
+        balance = str(balances.get(symbol, "0"))
+        if _positive_decimal(balance):
+            tokens.append(
+                {
+                    "symbol": symbol,
+                    "contractAddress": contract_address,
+                    "balance": balance,
+                    "decimals": decimals,
+                    "verified": True,
+                }
+            )
+
+    seen = {str(token["contractAddress"]).lower() for token in tokens}
+    for token in unverified_tokens or []:
+        contract_address = str(token.get("contractAddress", "") or "").strip()
+        if not contract_address or contract_address.lower() in seen:
+            continue
+        balance = str(token.get("balance", "0") or "0")
+        if not _positive_decimal(balance):
+            continue
+        decimals = token.get("decimals")
+        if isinstance(decimals, bool) or not isinstance(decimals, int):
+            continue
+        if decimals < 0 or decimals > 36:
+            continue
+        symbol = str(token.get("symbol", "ERC20") or "ERC20").strip()[:16] or "ERC20"
+        tokens.append(
+            {
+                "symbol": symbol,
+                "contractAddress": contract_address,
+                "balance": balance,
+                "decimals": decimals,
+                "verified": False,
+            }
+        )
+        seen.add(contract_address.lower())
+    return tokens
+
+
+def _withdrawable_tokens_text(tokens: list[dict[str, Any]]) -> str:
+    if not tokens:
+        return "No ERC-20 token balances are available to withdraw yet."
+    lines = ["Choose a token to withdraw:"]
+    for index, token in enumerate(tokens, start=1):
+        symbol = str(token.get("symbol") or "ERC20")
+        balance = str(token.get("balance") or "0")
+        line = f"{index}. {symbol}: {balance}"
+        if not token.get("verified"):
+            line += f" ({_short_address(str(token.get('contractAddress') or ''))})"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _positive_decimal(value: object) -> bool:
+    try:
+        return Decimal(str(value)) > 0
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def _short_address(address: str) -> str:
+    text = str(address or "")
+    if len(text) < 12:
+        return text
+    return f"{text[:8]}...{text[-4:]}"

@@ -137,6 +137,28 @@ class FakeClient:
         self.limits_result = "Current spending limits."
         self.llm_calls = []
         self.llm_results = {}
+        self.withdraw_tokens_calls = []
+        self.withdraw_calls = []
+        self.withdraw_tokens_result = {
+            "ok": True,
+            "tokens": [
+                {
+                    "symbol": "SINGIT",
+                    "contractAddress": "0xc2c1e0b7C401e6217193732272444D928646eba3",
+                    "balance": "250",
+                    "decimals": 18,
+                    "verified": True,
+                },
+                {
+                    "symbol": "OTHER",
+                    "contractAddress": "0x2222222222222222222222222222222222222222",
+                    "balance": "3",
+                    "decimals": 8,
+                    "verified": False,
+                },
+            ],
+        }
+        self.withdraw_result = "Withdrawal sent."
 
     def create_wallet(self, identity):
         self.create_wallet_calls.append(identity.user_id)
@@ -256,6 +278,34 @@ class FakeClient:
             operation,
             {"ok": True, "telegramText": "Bankr LLM request complete."},
         )
+
+    def withdraw_tokens(self, identity, *, user_access_token):
+        self.withdraw_tokens_calls.append((identity.user_id, user_access_token))
+        if self.error:
+            raise self.error
+        return self.withdraw_tokens_result
+
+    def execute_withdrawal(
+        self,
+        identity,
+        *,
+        token_address,
+        amount,
+        to_address,
+        user_access_token,
+    ):
+        self.withdraw_calls.append(
+            (
+                identity.user_id,
+                token_address,
+                amount,
+                to_address,
+                user_access_token,
+            )
+        )
+        if self.error:
+            raise self.error
+        return self.withdraw_result
 
 
 class FakeAdapter:
@@ -400,6 +450,7 @@ class PluginRegistrationTests(unittest.TestCase):
                 "balance",
                 "connect_imessage",
                 "limits",
+                "withdraw",
                 "bitrefill",
                 "last_purchase",
                 "llm_buy",
@@ -732,6 +783,7 @@ class PluginRegistrationTests(unittest.TestCase):
             [
                 [{"text": "Wallet"}, {"text": "Balance"}],
                 [{"text": "Connect iMessage"}, {"text": "Limits"}],
+                [{"text": "Withdraw"}],
                 [{"text": "Buy Bitrefill"}, {"text": "Buy LLM Credits"}],
                 [{"text": "Last Purchase"}, {"text": "Help"}],
             ],
@@ -845,6 +897,62 @@ class PluginRegistrationTests(unittest.TestCase):
                     "amazon-cz-10",
                     "DE",
                     {},
+                    "user-access-token",
+                )
+            ],
+        )
+
+    def test_withdraw_button_collects_token_amount_and_destination(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        plugin._client_factory = lambda: client
+        plugin._background_runner = lambda callback: callback()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        def dispatch(text):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    text,
+                    "1045618308",
+                    username="AlpskyKnedlik",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(dispatch("Withdraw"), plugin._SKIP_RESULT)
+        self.assertEqual(client.withdraw_tokens_calls, [("1045618308", "user-access-token")])
+        self.assertIn("Choose a token to withdraw", gateway.adapters["telegram"].sent[-1][1])
+        self.assertIn("1. SINGIT: 250", gateway.adapters["telegram"].sent[-1][1])
+
+        self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
+        self.assertIn("How much SINGIT", gateway.adapters["telegram"].sent[-1][1])
+
+        self.assertEqual(dispatch("100"), plugin._SKIP_RESULT)
+        self.assertIn("Send the Base address", gateway.adapters["telegram"].sent[-1][1])
+
+        self.assertEqual(
+            dispatch("0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd"),
+            plugin._SKIP_RESULT,
+        )
+        self.assertEqual(
+            gateway.adapters["telegram"].sent[-2:],
+            [
+                ("telegram-chat", "Withdrawal started. Approve it in iMessage; I'll post the result here."),
+                ("telegram-chat", "Withdrawal sent."),
+            ],
+        )
+        self.assertEqual(
+            client.withdraw_calls,
+            [
+                (
+                    "1045618308",
+                    "0xc2c1e0b7C401e6217193732272444D928646eba3",
+                    "100",
+                    "0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
                     "user-access-token",
                 )
             ],

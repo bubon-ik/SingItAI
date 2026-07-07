@@ -310,11 +310,13 @@ class AlchemyBaseBalanceProviderTests(unittest.TestCase):
                     "symbol": "AAA",
                     "contractAddress": token_a,
                     "balance": "3",
+                    "decimals": 18,
                 },
                 {
                     "symbol": "BADscript",
                     "contractAddress": token_b,
                     "balance": "1.25",
+                    "decimals": 6,
                 },
             ],
         )

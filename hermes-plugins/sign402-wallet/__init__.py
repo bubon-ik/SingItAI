@@ -54,6 +54,9 @@ _TELEGRAM_BITREFILL_STARTED_MESSAGE = (
 _TELEGRAM_LLM_STARTED_MESSAGE = (
     "Bankr LLM purchase started. Approve it in iMessage; I'll post the result here."
 )
+_TELEGRAM_WITHDRAW_STARTED_MESSAGE = (
+    "Withdrawal started. Approve it in iMessage; I'll post the result here."
+)
 _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "start", "description": "Set up your Sign402 wallet"},
     {"command": "help", "description": "Show Sign402 commands"},
@@ -61,6 +64,7 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "balance", "description": "Show wallet balances"},
     {"command": "connect_imessage", "description": "Link iMessage approvals"},
     {"command": "limits", "description": "Show or set spending limits"},
+    {"command": "withdraw", "description": "Withdraw ERC-20 tokens"},
     {"command": "bitrefill", "description": "Buy Bitrefill with SINGIT"},
     {"command": "last_purchase", "description": "Reveal latest purchase"},
     {"command": "llm_buy", "description": "Buy Bankr LLM credits"},
@@ -69,6 +73,7 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
 _TELEGRAM_MAIN_MENU_BUTTONS = (
     ("Wallet", "Balance"),
     ("Connect iMessage", "Limits"),
+    ("Withdraw",),
     ("Buy Bitrefill", "Buy LLM Credits"),
     ("Last Purchase", "Help"),
 )
@@ -77,6 +82,7 @@ _TELEGRAM_BUTTON_COMMANDS = {
     "balance": "balance",
     "connect imessage": "connect-imessage",
     "limits": "limits",
+    "withdraw": "withdraw",
     "buy bitrefill": "bitrefill",
     "buy llm credits": "llm-buy",
     "last purchase": "last-purchase",
@@ -135,6 +141,7 @@ _background_runner: Callable[[Callable[[], None]], None]
 _sleep: Callable[[float], None] = time.sleep
 _BITREFILL_USER_COUNTRIES: dict[str, str] = {}
 _BITREFILL_SESSIONS: dict[str, dict] = {}
+_WITHDRAW_SESSIONS: dict[str, dict] = {}
 
 
 def _default_background_runner(callback: Callable[[], None]) -> None:
@@ -370,6 +377,14 @@ def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
             gateway=gateway,
         )
 
+    withdraw_wizard_result = _handle_telegram_withdraw_wizard_message(
+        event=event,
+        source=source,
+        gateway=gateway,
+    )
+    if withdraw_wizard_result:
+        return withdraw_wizard_result
+
     bitrefill_wizard_result = _handle_telegram_bitrefill_wizard_message(
         event=event,
         source=source,
@@ -497,6 +512,9 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
                     gateway=gateway,
                 )
             )
+            return dict(_SKIP_RESULT)
+        elif command == "withdraw":
+            _open_withdraw_flow(identity=identity, source=source, gateway=gateway)
             return dict(_SKIP_RESULT)
         elif command == "bitrefill":
             parsed = _parse_bitrefill_args(args)
@@ -1166,6 +1184,122 @@ def _handle_telegram_paid_tool_request(*, tool: str, source, gateway):
     return dict(_SKIP_RESULT)
 
 
+def _open_withdraw_flow(*, identity: TelegramIdentity, source, gateway) -> None:
+    user_id = str(identity.user_id)
+    try:
+        client = _client_factory()
+        token = _user_access_token(client, identity)
+        result = client.withdraw_tokens(identity, user_access_token=token)
+    except GatewayClientError as exc:
+        _send_fixed_reply(gateway, source, exc.user_message)
+        return
+    except Exception as exc:
+        logger.warning("Unexpected Sign402 withdraw token lookup error=%s", type(exc).__name__)
+        _send_fixed_reply(gateway, source, _UNEXPECTED_ERROR_MESSAGE)
+        return
+
+    tokens = _normalize_withdraw_tokens(result.get("tokens") if isinstance(result, dict) else [])
+    if not tokens:
+        text = (
+            str(result.get("telegramText") or "").strip()
+            if isinstance(result, dict)
+            else ""
+        )
+        _send_fixed_reply(
+            gateway,
+            source,
+            text or "No ERC-20 token balances are available to withdraw yet.",
+            reply_markup=_telegram_main_menu_reply_markup(),
+        )
+        return
+
+    _WITHDRAW_SESSIONS[user_id] = {"step": "token", "tokens": tokens}
+    _send_fixed_reply(
+        gateway,
+        source,
+        _format_withdraw_tokens(tokens),
+        reply_markup=_withdraw_reply_keyboard(tokens),
+    )
+
+
+def _handle_telegram_withdraw_wizard_message(*, event, source, gateway):
+    identity = consume_gateway_identity() or _identity_from_telegram_source(source)
+    if identity is None:
+        return None
+    user_id = str(identity.user_id)
+    session = _WITHDRAW_SESSIONS.get(user_id)
+    if not session:
+        return None
+
+    text = str(getattr(event, "text", "") or "").strip()
+    if _normalize_button_text(text) == "back":
+        _WITHDRAW_SESSIONS.pop(user_id, None)
+        _send_fixed_reply(
+            gateway,
+            source,
+            "Withdrawal cancelled.",
+            reply_markup=_telegram_main_menu_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+
+    step = str(session.get("step") or "")
+    if step == "token":
+        tokens = _normalize_withdraw_tokens(session.get("tokens"))
+        try:
+            index = int(text)
+        except ValueError:
+            _send_fixed_reply(gateway, source, "Reply with a token number.")
+            return dict(_SKIP_RESULT)
+        if index < 1 or index > len(tokens):
+            _send_fixed_reply(gateway, source, "Reply with a valid token number.")
+            return dict(_SKIP_RESULT)
+        token = tokens[index - 1]
+        session.update({"step": "amount", "token": token})
+        _send_fixed_reply(
+            gateway,
+            source,
+            f"How much {token['symbol']} do you want to withdraw?\n"
+            f"Available: {token['balance']} {token['symbol']}",
+        )
+        return dict(_SKIP_RESULT)
+
+    if step == "amount":
+        token = session.get("token") if isinstance(session.get("token"), dict) else {}
+        amount = _parse_positive_decimal_text(text)
+        if amount is None:
+            _send_fixed_reply(gateway, source, "Send a positive amount.")
+            return dict(_SKIP_RESULT)
+        if Decimal(amount) > Decimal(str(token.get("balance") or "0")):
+            _send_fixed_reply(gateway, source, "Amount exceeds your token balance.")
+            return dict(_SKIP_RESULT)
+        session.update({"step": "address", "amount": amount})
+        _send_fixed_reply(gateway, source, "Send the Base address to receive the tokens.")
+        return dict(_SKIP_RESULT)
+
+    if step == "address":
+        if re.fullmatch(r"0x[a-fA-F0-9]{40}", text) is None:
+            _send_fixed_reply(gateway, source, "Send a valid Base address.")
+            return dict(_SKIP_RESULT)
+        token = session.get("token") if isinstance(session.get("token"), dict) else {}
+        amount = str(session.get("amount") or "")
+        _WITHDRAW_SESSIONS.pop(user_id, None)
+        _send_fixed_reply(gateway, source, _TELEGRAM_WITHDRAW_STARTED_MESSAGE)
+        _run_in_background(
+            lambda: _execute_telegram_withdraw_request(
+                token_address=str(token.get("contractAddress") or ""),
+                amount=amount,
+                to_address=text,
+                identity=identity,
+                source=source,
+                gateway=gateway,
+            )
+        )
+        return dict(_SKIP_RESULT)
+
+    _WITHDRAW_SESSIONS.pop(user_id, None)
+    return None
+
+
 _USER_ACCESS_TOKENS: dict[str, str] = {}
 
 
@@ -1192,6 +1326,76 @@ def _user_access_token(client, identity: TelegramIdentity) -> str | None:
     return None
 
 
+def _normalize_withdraw_tokens(raw_tokens) -> list[dict]:
+    tokens: list[dict] = []
+    if not isinstance(raw_tokens, list):
+        return tokens
+    for raw in raw_tokens:
+        if not isinstance(raw, dict):
+            continue
+        symbol = str(raw.get("symbol") or "ERC20").strip()[:16] or "ERC20"
+        contract = str(raw.get("contractAddress") or "").strip()
+        balance = str(raw.get("balance") or "0").strip()
+        decimals = raw.get("decimals")
+        if re.fullmatch(r"0x[a-fA-F0-9]{40}", contract) is None:
+            continue
+        if isinstance(decimals, bool) or not isinstance(decimals, int):
+            continue
+        if decimals < 0 or decimals > 36:
+            continue
+        if _parse_positive_decimal_text(balance) is None:
+            continue
+        tokens.append(
+            {
+                "symbol": symbol,
+                "contractAddress": contract,
+                "balance": balance,
+                "decimals": decimals,
+                "verified": bool(raw.get("verified")),
+            }
+        )
+    return tokens
+
+
+def _format_withdraw_tokens(tokens: list[dict]) -> str:
+    lines = ["Choose a token to withdraw:"]
+    for index, token in enumerate(tokens, start=1):
+        symbol = str(token.get("symbol") or "ERC20")
+        balance = str(token.get("balance") or "0")
+        line = f"{index}. {symbol}: {balance}"
+        if not token.get("verified"):
+            line += f" ({_short_address(str(token.get('contractAddress') or ''))})"
+        lines.append(line)
+    lines.append("")
+    lines.append("Reply with a number.")
+    return "\n".join(lines)
+
+
+def _withdraw_reply_keyboard(tokens: list[dict]) -> dict:
+    labels = [str(index) for index in range(1, min(len(tokens), 8) + 1)]
+    rows = [tuple(labels[index : index + 4]) for index in range(0, len(labels), 4)]
+    rows.append(("Back",))
+    return _reply_keyboard(rows, placeholder="Choose token")
+
+
+def _parse_positive_decimal_text(text: str) -> str | None:
+    value = str(text or "").strip().replace(",", ".")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation:
+        return None
+    if not parsed.is_finite() or parsed <= 0:
+        return None
+    return format(parsed, "f").rstrip("0").rstrip(".") if "." in format(parsed, "f") else format(parsed, "f")
+
+
+def _short_address(address: str) -> str:
+    text = str(address or "")
+    if len(text) < 12:
+        return text
+    return f"{text[:8]}...{text[-4:]}"
+
+
 def _execute_telegram_paid_tool_request(
     *,
     tool: str,
@@ -1210,6 +1414,36 @@ def _execute_telegram_paid_tool_request(
         logger.warning(
             "Unexpected Sign402 Telegram paid tool failure tool=%s error=%s",
             tool,
+            type(exc).__name__,
+        )
+        _send_fixed_reply(gateway, source, _UNEXPECTED_ERROR_MESSAGE)
+
+
+def _execute_telegram_withdraw_request(
+    *,
+    token_address: str,
+    amount: str,
+    to_address: str,
+    identity: TelegramIdentity,
+    source,
+    gateway,
+) -> None:
+    try:
+        client = _client_factory()
+        token = _user_access_token(client, identity)
+        text = client.execute_withdrawal(
+            identity,
+            token_address=token_address,
+            amount=amount,
+            to_address=to_address,
+            user_access_token=token,
+        )
+        _send_fixed_reply(gateway, source, text)
+    except GatewayClientError as exc:
+        _send_fixed_reply(gateway, source, exc.user_message)
+    except Exception as exc:
+        logger.warning(
+            "Unexpected Sign402 Telegram withdraw failure error=%s",
             type(exc).__name__,
         )
         _send_fixed_reply(gateway, source, _UNEXPECTED_ERROR_MESSAGE)
@@ -1620,6 +1854,7 @@ def _telegram_public_command(event, source) -> str | None:
         "last-purchase",
         "limits",
         "set-limits",
+        "withdraw",
         "connect-imessage",
         "bitrefill",
         "llm-buy",

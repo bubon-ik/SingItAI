@@ -424,6 +424,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                         "/agent/wallet-balance",
                         "/agent/last-purchase",
                         "/agent/spending-limits",
+                        "/agent/withdraw/tokens",
+                        "/agent/withdraw",
                         "/agent/llm-key/start",
                         "/agent/llm-key/accept-terms",
                         "/agent/llm-key/verify",
@@ -516,6 +518,12 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if path == "/agent/spending-limits":
             self._handle_agent_spending_limits()
+            return
+        if path == "/agent/withdraw/tokens":
+            self._handle_agent_withdraw_tokens()
+            return
+        if path == "/agent/withdraw":
+            self._handle_agent_withdraw()
             return
         if path == "/agent/llm-key/start":
             self._handle_agent_llm_key_start()
@@ -667,10 +675,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
 
     def _handle_agent_wallet(self) -> None:
         try:
-            _require_wallet_api_token(self)
             payload = self._read_json()
             result = self.server.user_wallet_service.wallet_status(
-                _authenticated_user_id(self, payload)
+                _require_authenticated_user(self, payload)
             )
             status = 200 if bool(result.get("ok")) else 404
             self._send_json(_without_private_key_material(result), status=status)
@@ -685,10 +692,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
 
     def _handle_agent_wallet_balance(self) -> None:
         try:
-            _require_wallet_api_token(self)
             payload = self._read_json()
             result = self.server.user_wallet_service.wallet_balance(
-                _authenticated_user_id(self, payload)
+                _require_authenticated_user(self, payload)
             )
             status = 200 if bool(result.get("ok")) else 404
             self._send_json(_without_private_key_material(result), status=status)
@@ -703,9 +709,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
 
     def _handle_agent_last_purchase(self) -> None:
         try:
-            _require_wallet_api_token(self)
             payload = self._read_json()
-            telegram_user_id = _authenticated_user_id(self, payload)
+            telegram_user_id = _require_authenticated_user(self, payload)
             event = self.server.user_event_store.read(telegram_user_id)
             if not isinstance(event, dict) or not event.get("ok"):
                 self._send_json(
@@ -790,6 +795,125 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=401)
         except Exception as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_withdraw_tokens(self) -> None:
+        try:
+            payload = self._read_json()
+            user_id = _require_authenticated_user(self, payload)
+            result = self.server.user_wallet_service.withdrawable_tokens(user_id)
+            status = 200 if bool(result.get("ok")) else 404
+            self._send_json(_without_private_key_material(result), status=status)
+        except WalletApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except WalletApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_withdraw(self) -> None:
+        try:
+            payload = self._read_json()
+            user_id = _require_authenticated_user(self, payload)
+            amount = _read_positive_amount(payload, "amount")
+            to_address = _read_evm_address(payload, "toAddress")
+            token_address = _read_evm_address(payload, "tokenAddress")
+            inventory = self.server.user_wallet_service.withdrawable_tokens(user_id)
+            token = _find_withdrawable_token(inventory, token_address)
+            if token is None:
+                raise ValueError("token is not available for withdrawal")
+            if Decimal(amount) > Decimal(str(token.get("balance") or "0")):
+                raise ValueError("withdraw amount exceeds token balance")
+
+            wallet = inventory.get("wallet") if isinstance(inventory, dict) else {}
+            from_address = str(wallet.get("address", "") if isinstance(wallet, dict) else "")
+            symbol = str(token.get("symbol") or "ERC20")
+            decimals = int(token.get("decimals"))
+            commitment = _withdraw_commitment(
+                telegram_user_id=user_id,
+                from_address=from_address,
+                to_address=to_address,
+                token=token,
+                amount=amount,
+            )
+            approval = self.server.imessage_approval_service.request_hash_approval(
+                telegram_user_id=user_id,
+                action_type="sign402_withdrawal",
+                commitment_hash=commitment["hash"],
+                context_lines=_withdraw_approval_context_lines(
+                    symbol=symbol,
+                    amount=amount,
+                    from_address=from_address,
+                    to_address=to_address,
+                ),
+            )
+            if not approval.get("ok") or approval.get("status") != "approved":
+                self._send_json(
+                    {
+                        "ok": False,
+                        "approval": approval,
+                        "telegramText": approval.get(
+                            "telegramText",
+                            "Withdrawal was not approved. No funds moved.",
+                        ),
+                    },
+                    status=400,
+                )
+                return
+
+            private_key = self.server.user_wallet_service.decrypt_private_key_for_future_signing(
+                user_id
+            )
+            transfer = self.server.user_token_transfer_client.transfer_token(
+                private_key=private_key,
+                to_address=to_address,
+                token_address=token_address,
+                amount=amount,
+                chain="base",
+                decimals=decimals,
+            )
+            tx_id = str(transfer.get("txId") or transfer.get("transactionHash") or "")
+            telegram_text = _withdraw_telegram_text(
+                symbol=symbol,
+                amount=amount,
+                to_address=to_address,
+                tx_id=tx_id,
+            )
+            self._send_json(
+                {
+                    "ok": True,
+                    "token": token,
+                    "amount": amount,
+                    "toAddress": to_address,
+                    "txId": tx_id,
+                    "commitmentHash": commitment["hash"],
+                    "approval": approval,
+                    "transfer": _without_private_key_material(transfer),
+                    "telegramText": telegram_text,
+                }
+            )
+        except WalletApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except WalletApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+        except WalletEncryptionError:
+            self._send_json(
+                {
+                    "ok": False,
+                    "error": "wallet_unavailable",
+                    "telegramText": "Wallet service is temporarily unavailable.",
+                },
+                status=503,
+            )
+        except Exception as exc:
+            self._send_json(
+                {
+                    "ok": False,
+                    "error": "withdraw_request_failed",
+                    "detail": _redact_error_detail(str(exc)),
+                    "telegramText": "Withdrawal failed. No funds moved.",
+                },
+                status=400,
+            )
 
     def _handle_agent_llm_key_start(self) -> None:
         self._handle_agent_llm_purchase("start")
@@ -1074,8 +1198,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         telegram_user_id: str,
     ) -> None:
         try:
-            _require_wallet_api_token(self)
-            user_id = _authenticated_user_id(self, {"telegramUserId": telegram_user_id})
+            user_id = _require_authenticated_user(
+                self, {"telegramUserId": telegram_user_id}
+            )
             payment_context = _tool_payment_context(tool, payload)
             request_body = tool.get("requestBody") if isinstance(tool.get("requestBody"), dict) else None
             raw_payment_required = fetch_x402_payment_required(
@@ -1219,8 +1344,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             user_id = ""
             if str(payload.get("telegramUserId", "") or "").strip():
-                _require_wallet_api_token(self)
-                user_id = _authenticated_user_id(self, payload)
+                user_id = _require_authenticated_user(self, payload)
                 payload = {**payload, "telegramUserId": user_id}
             result = self.server.bitrefill_quote_service(payload)
             if user_id and isinstance(result, dict) and result.get("priceUsd"):
@@ -1284,8 +1408,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             user_id = ""
             if str(payload.get("telegramUserId", "") or "").strip():
-                _require_wallet_api_token(self)
-                user_id = _authenticated_user_id(self, payload)
+                user_id = _require_authenticated_user(self, payload)
                 payload = {**payload, "telegramUserId": user_id}
             result = self.server.bitrefill_wallet_purchase_runner(payload)
             if result.get("ok"):
@@ -1506,6 +1629,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         user_wallet_api_token: str,
         user_spend_limit_store: "UserSpendLimitStore",
         bankr_llm_purchase_service,
+        user_token_transfer_client,
         imessage_approval_service,
         imessage_approval_api_token: str,
     ):
@@ -1534,6 +1658,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         self.user_wallet_api_token = user_wallet_api_token
         self.user_spend_limit_store = user_spend_limit_store
         self.bankr_llm_purchase_service = bankr_llm_purchase_service
+        self.user_token_transfer_client = user_token_transfer_client
         self.imessage_approval_service = imessage_approval_service
         self.imessage_approval_api_token = imessage_approval_api_token
         self.firefly_lock = threading.Lock()
@@ -1915,6 +2040,7 @@ def build_server(
     user_x402_buyer = UserWalletX402Buyer(
         base_payment_client=UserWalletBaseX402PaymentClient(cdp_x402_service_dir),
     )
+    user_token_transfer_client = UserWalletTokenTransferClient(cdp_x402_service_dir)
     agent_buy_probe = AgentBuyProbeRunner(
         firefly=firefly,
         payment_executor=payment_executor,
@@ -1954,6 +2080,7 @@ def build_server(
         user_wallet_api_token=os.getenv("SIGN402_WALLET_API_TOKEN", ""),
         user_spend_limit_store=user_spend_limit_store,
         bankr_llm_purchase_service=None,
+        user_token_transfer_client=user_token_transfer_client,
         imessage_approval_service=imessage_approval_service,
         imessage_approval_api_token=os.getenv("SIGN402_PHOTON_API_TOKEN", ""),
     )
@@ -1962,7 +2089,7 @@ def build_server(
         wallet_service=user_wallet_service,
         pricer=real_rate_pricer,
         approval_service=imessage_approval_service,
-        transfer_client=UserWalletTokenTransferClient(cdp_x402_service_dir),
+        transfer_client=user_token_transfer_client,
         enforce_spend=lambda user_id, requirement: _enforce_user_wallet_spend_limits(
             server,
             user_id,
@@ -3973,6 +4100,113 @@ def _read_required_text(payload: dict[str, Any], key: str) -> str:
     if not value:
         raise ValueError(f"{key} is required")
     return value
+
+
+def _read_evm_address(payload: dict[str, Any], key: str) -> str:
+    value = _read_required_text(payload, key)
+    if not re.fullmatch(r"0x[a-fA-F0-9]{40}", value):
+        raise ValueError(f"{key} must be a Base EVM address")
+    return value
+
+
+def _read_positive_amount(payload: dict[str, Any], key: str) -> str:
+    value = _read_required_text(payload, key)
+    try:
+        amount = Decimal(value)
+    except InvalidOperation as exc:
+        raise ValueError(f"{key} must be a positive number") from exc
+    if not amount.is_finite() or amount <= 0:
+        raise ValueError(f"{key} must be a positive number")
+    if amount.as_tuple().exponent < -36:
+        raise ValueError(f"{key} has too many decimal places")
+    return format_decimal(amount)
+
+
+def _find_withdrawable_token(
+    inventory: dict[str, Any],
+    token_address: str,
+) -> dict[str, Any] | None:
+    if not isinstance(inventory, dict) or inventory.get("ok") is not True:
+        return None
+    for token in inventory.get("tokens") or []:
+        if not isinstance(token, dict):
+            continue
+        contract = str(token.get("contractAddress") or "")
+        if contract.lower() != token_address.lower():
+            continue
+        decimals = token.get("decimals")
+        if isinstance(decimals, bool) or not isinstance(decimals, int):
+            return None
+        if decimals < 0 or decimals > 36:
+            return None
+        return token
+    return None
+
+
+def _withdraw_commitment(
+    *,
+    telegram_user_id: str,
+    from_address: str,
+    to_address: str,
+    token: dict[str, Any],
+    amount: str,
+) -> dict[str, str]:
+    canonical = {
+        "schemaVersion": 1,
+        "actionType": "sign402_withdrawal",
+        "telegramUserId": str(telegram_user_id),
+        "fromAddress": str(from_address),
+        "toAddress": str(to_address),
+        "tokenAddress": str(token.get("contractAddress") or ""),
+        "tokenSymbol": str(token.get("symbol") or "ERC20"),
+        "tokenDecimals": int(token.get("decimals")),
+        "amount": str(amount),
+        "network": "base-mainnet",
+        "nonce": secrets.token_hex(16),
+    }
+    canonical_json = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return {
+        "canonicalJson": canonical_json,
+        "hash": hashlib.sha256(canonical_json.encode("utf-8")).hexdigest(),
+    }
+
+
+def _withdraw_approval_context_lines(
+    *,
+    symbol: str,
+    amount: str,
+    from_address: str,
+    to_address: str,
+) -> list[str]:
+    return [
+        f"Action: WITHDRAW {symbol}",
+        f"Amount: {amount} {symbol}",
+        f"To: {_short_address(to_address)}",
+        f"From: {_short_address(from_address)}",
+        "Network: Base",
+    ]
+
+
+def _withdraw_telegram_text(
+    *,
+    symbol: str,
+    amount: str,
+    to_address: str,
+    tx_id: str,
+) -> str:
+    tx_url = _evm_transaction_url(tx_id, network="base-mainnet") if tx_id else ""
+    suffix = f"\nTx: {tx_url}" if tx_url else ""
+    return (
+        f"Withdrawal sent: {amount} {symbol} to {_short_address(to_address)}."
+        f"{suffix}"
+    )
+
+
+def _short_address(address: str) -> str:
+    text = str(address or "")
+    if len(text) < 12:
+        return text
+    return f"{text[:8]}...{text[-4:]}"
 
 
 def _redact_error_detail(value: str) -> str:

@@ -277,6 +277,43 @@ class UserWalletTests(unittest.TestCase):
             result["telegramText"].index("- USDC:"),
         )
 
+    def test_withdrawable_tokens_includes_trusted_and_discovered_erc20(self):
+        other_token = "0x" + "22" * 20
+
+        def balance_provider(_address: str):
+            return {
+                "balances": {
+                    "ETH": "0.001",
+                    "USDC": "12.5",
+                    "SINGIT": "250",
+                },
+                "unverifiedTokens": [
+                    {
+                        "symbol": "OTHER",
+                        "contractAddress": other_token,
+                        "balance": "3",
+                        "decimals": 8,
+                    }
+                ],
+            }
+
+        service, _store = self.make_service(balance_provider=balance_provider)
+        service.create_wallet("1045618308")
+
+        result = service.withdrawable_tokens("1045618308")
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["balanceUnavailable"])
+        symbols = [token["symbol"] for token in result["tokens"]]
+        self.assertEqual(symbols, ["USDC", "SINGIT", "OTHER"])
+        self.assertEqual(result["tokens"][0]["decimals"], 6)
+        self.assertEqual(result["tokens"][0]["balance"], "12.5")
+        self.assertEqual(result["tokens"][1]["decimals"], 18)
+        self.assertEqual(result["tokens"][2]["contractAddress"], other_token)
+        self.assertEqual(result["tokens"][2]["decimals"], 8)
+        self.assertNotIn("ETH", symbols)
+        self.assertIn("Choose a token to withdraw", result["telegramText"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -231,6 +231,53 @@ class GatewayClientTests(unittest.TestCase):
         self.assertEqual(request.full_url, "http://127.0.0.1:8099/agent/last-purchase")
         self.assertEqual(json.loads(request.data), {"telegramUserId": "1045618308"})
 
+    def test_withdraw_tokens_posts_user_token_endpoint(self):
+        opener = RecordingOpener(
+            response=FakeResponse(b'{"ok":true,"tokens":[{"symbol":"SINGIT"}]}')
+        )
+
+        result = self.make_client(opener).withdraw_tokens(
+            TelegramIdentity(user_id="1045618308"),
+            user_access_token="user-token",
+        )
+
+        request, _timeout = opener.requests[0]
+        self.assertEqual(result["tokens"][0]["symbol"], "SINGIT")
+        self.assertEqual(
+            request.full_url,
+            "http://127.0.0.1:8099/agent/withdraw/tokens",
+        )
+        self.assertEqual(request.get_header("X-sign402-user-token"), "user-token")
+        self.assertEqual(json.loads(request.data), {"telegramUserId": "1045618308"})
+
+    def test_execute_withdrawal_posts_user_token_endpoint(self):
+        opener = RecordingOpener(
+            response=FakeResponse(b'{"ok":true,"telegramText":"Withdrawal sent."}')
+        )
+
+        result = self.make_client(opener, purchase_timeout=180.0).execute_withdrawal(
+            TelegramIdentity(user_id="1045618308"),
+            token_address="0x" + "1" * 40,
+            amount="10",
+            to_address="0x" + "2" * 40,
+            user_access_token="user-token",
+        )
+
+        request, timeout = opener.requests[0]
+        self.assertEqual(result, "Withdrawal sent.")
+        self.assertEqual(timeout, 180.0)
+        self.assertEqual(request.full_url, "http://127.0.0.1:8099/agent/withdraw")
+        self.assertEqual(request.get_header("X-sign402-user-token"), "user-token")
+        self.assertEqual(
+            json.loads(request.data),
+            {
+                "telegramUserId": "1045618308",
+                "tokenAddress": "0x" + "1" * 40,
+                "amount": "10",
+                "toAddress": "0x" + "2" * 40,
+            },
+        )
+
     def test_execute_bitrefill_purchase_quotes_then_buys_with_user_token(self):
         responses = [
             FakeResponse(b'{"ok":true,"quoteId":"quote_1"}'),

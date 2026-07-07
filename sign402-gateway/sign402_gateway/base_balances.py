@@ -238,6 +238,7 @@ class AlchemyBaseBalanceProvider:
                     "symbol": symbol,
                     "contractAddress": contract,
                     "balance": format_atomic_amount(atomic_balance, decimals),
+                    "decimals": decimals,
                 }
             )
         return tokens

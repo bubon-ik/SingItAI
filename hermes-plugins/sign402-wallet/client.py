@@ -39,6 +39,8 @@ _BITREFILL_LIST_PATH = "/agent/list-bitrefill-products"
 _BITREFILL_PRODUCT_PATH = "/agent/get-bitrefill-product"
 _PAID_TOOL_PATH = "/agent/buy-tool"
 _SPENDING_LIMITS_PATH = "/agent/spending-limits"
+_WITHDRAW_TOKENS_PATH = "/agent/withdraw/tokens"
+_WITHDRAW_PATH = "/agent/withdraw"
 _LLM_OPERATION_PATHS = {
     "start": "/agent/llm-key/start",
     "accept-terms": "/agent/llm-key/accept-terms",
@@ -352,6 +354,53 @@ class GatewayClient:
             timeout=self.purchase_timeout,
             user_token=user_token,
         )
+
+    def withdraw_tokens(
+        self,
+        identity: TelegramIdentity,
+        *,
+        user_access_token: str,
+    ) -> dict[str, Any]:
+        user_token = str(user_access_token or "").strip()
+        if not user_token:
+            raise GatewayClientError(_AUTH_FAILED)
+        return self._post(
+            _WITHDRAW_TOKENS_PATH,
+            {"telegramUserId": identity.user_id},
+            token=self.api_token,
+            operation="withdraw-tokens",
+            user_token=user_token,
+        )
+
+    def execute_withdrawal(
+        self,
+        identity: TelegramIdentity,
+        *,
+        token_address: str,
+        amount: str,
+        to_address: str,
+        user_access_token: str,
+    ) -> str:
+        user_token = str(user_access_token or "").strip()
+        if not user_token:
+            raise GatewayClientError(_AUTH_FAILED)
+        result = self._post(
+            _WITHDRAW_PATH,
+            {
+                "telegramUserId": identity.user_id,
+                "tokenAddress": str(token_address or "").strip(),
+                "amount": str(amount or "").strip(),
+                "toAddress": str(to_address or "").strip(),
+            },
+            token=self.api_token,
+            operation="withdraw",
+            timeout=self.purchase_timeout,
+            user_token=user_token,
+        )
+        telegram_text = result.get("telegramText")
+        if not isinstance(telegram_text, str) or not telegram_text.strip():
+            raise GatewayClientError(_INVALID_RESPONSE)
+        return telegram_text.strip()
 
     def _post(
         self,
