@@ -149,7 +149,7 @@ class BitrefillRunnerTests(unittest.TestCase):
             BITREFILL_BROWSE_CATEGORIES,
             {
                 "all": "",
-                "shopping": "retail,ecommerce,gifts,giftcard,electronics,apparel",
+                "shopping": "retail,ecommerce,gifts,gift_card,electronics,apparel",
                 "food": "food,restaurants,food-delivery,groceries",
                 "games": "games",
                 "mobile": "refill,phone,data,bundles",
