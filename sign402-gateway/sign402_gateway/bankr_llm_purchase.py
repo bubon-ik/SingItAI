@@ -1288,19 +1288,17 @@ class BankrLlmPurchaseService:
             if not transitioned:
                 return self._safe_purchase_response(purchase)
 
-        pricing = self.pricer.price_for_usdc(purchase["amountUsd"])
-        singit_atomic = str(pricing.get("requiredSingitAtomic") or "")
-        if not singit_atomic.isdigit() or int(singit_atomic) <= 0:
-            raise BankrLlmError(
-                "invalid_pricing",
-                "SINGIT pricing is unavailable. Please try again.",
+        quoted_atomic, _ = self._payment_pricing(purchase)
+        if self._payment_token_is_stable(purchase):
+            # Stables transfer exactly amountUsd; no swap, no slippage risk.
+            approved_max_atomic = str(quoted_atomic)
+        else:
+            # Approve a slippage buffer above the current quote so the purchase
+            # survives small price moves between approval and transfer. The
+            # transfer itself always spends the fresh price, capped by this max.
+            approved_max_atomic = str(
+                self._approved_max_singit_atomic(quoted_atomic)
             )
-        # Approve a slippage buffer above the current quote so the purchase
-        # survives small price moves between approval and transfer. The
-        # transfer itself always spends the fresh price, capped by this max.
-        approved_max_atomic = str(
-            self._approved_max_singit_atomic(int(singit_atomic))
-        )
         spend_context = self._spend_context(
             purchase,
             singit_amount_atomic=approved_max_atomic,
@@ -1454,12 +1452,7 @@ class BankrLlmPurchaseService:
     def _execute_transfer(self, purchase: Mapping[str, Any]) -> dict[str, Any]:
         user_id = str(purchase["telegramUserId"])
         try:
-            pricing = self.pricer.price_for_usdc(purchase["amountUsd"])
-            fresh_atomic = self._pricing_atomic(pricing)
-            fresh_amount = self._pricing_transfer_amount(
-                pricing,
-                expected_atomic=fresh_atomic,
-            )
+            fresh_atomic, fresh_amount = self._payment_pricing(purchase)
             approved_atomic = self._positive_int(purchase.get("singitAmountAtomic"))
             if fresh_atomic > approved_atomic:
                 return self._fail_before_transfer(
@@ -1500,7 +1493,12 @@ class BankrLlmPurchaseService:
                 source_wallet_address=source_wallet,
             )
             self.enforce_spend(user_id, spend_context)
-            balance_error = self._balance_error(user_id, fresh_atomic)
+            balance_error = self._balance_error(
+                user_id,
+                fresh_atomic,
+                purchase,
+                source_wallet,
+            )
             if balance_error is not None:
                 return self._fail_before_transfer(
                     purchase,
@@ -1528,12 +1526,14 @@ class BankrLlmPurchaseService:
             )
 
         try:
+            token_address, _, token_decimals = self._payment_token(purchase)
             transfer = self.transfer_client.transfer_token(
                 private_key=private_key,
                 to_address=self._require_evm_address(purchase["bankrWalletAddress"]),
-                token_address=self.singit_token_address,
+                token_address=token_address,
                 amount=fresh_amount,
                 chain="base",
+                decimals=token_decimals,
             )
             transfer_hash = self._transfer_hash(transfer)
         except Exception:
@@ -1607,10 +1607,15 @@ class BankrLlmPurchaseService:
     ) -> dict[str, Any]:
         state = str(expected_state or purchase.get("state") or "")
         key = api_key if api_key is not None else self.store.decrypt_api_key(purchase)
+        token_address, token_symbol, _ = self._payment_token(purchase)
+        source_token = (
+            self.topup_source_token if token_symbol == "SINGIT" else token_address
+        )
         try:
             topup = self._top_up_with_retries(
                 api_key=key,
                 amount_usd=str(purchase["amountUsd"]),
+                source_token=source_token,
             )
         except BankrLlmError as exc:
             if exc.code == "bankr_topup_ambiguous":
@@ -1682,6 +1687,7 @@ class BankrLlmPurchaseService:
         *,
         api_key: str,
         amount_usd: str,
+        source_token: str,
     ) -> dict[str, Any]:
         attempt = 1
         while True:
@@ -1689,7 +1695,7 @@ class BankrLlmPurchaseService:
                 return self.bankr.top_up(
                     api_key=api_key,
                     amount_usd=amount_usd,
-                    source_token=self.topup_source_token,
+                    source_token=source_token,
                     chain="base",
                 )
             except BankrLlmError as exc:
@@ -1950,10 +1956,13 @@ class BankrLlmPurchaseService:
         source_wallet_address: str,
         bankr_wallet_address: str,
     ) -> dict[str, Any]:
+        token_address, token_symbol, _ = self._payment_token(purchase)
         return {
             "purchaseId": str(purchase["purchaseId"]),
             "amountUsd": str(purchase["amountUsd"]),
             "singitAmountAtomic": str(singit_amount_atomic),
+            "paymentTokenAddress": token_address,
+            "paymentTokenSymbol": token_symbol,
             "sourceWalletAddress": str(source_wallet_address),
             "bankrWalletAddress": str(bankr_wallet_address),
             "apiKeyFingerprint": str(purchase["apiKeyFingerprint"]),
@@ -1968,6 +1977,8 @@ class BankrLlmPurchaseService:
         return [
             f"Commitment hash: {commitment_hash}",
             f"USD amount: {commitment['amountUsd']}",
+            f"Payment token: {commitment.get('paymentTokenSymbol', 'SINGIT')} "
+            f"{commitment.get('paymentTokenAddress', '')}",
             f"SINGIT atomic max: {commitment['singitAmountAtomic']}",
             f"Source wallet: {commitment['sourceWalletAddress']}",
             f"Bankr wallet: {commitment['bankrWalletAddress']}",
@@ -1982,6 +1993,7 @@ class BankrLlmPurchaseService:
         singit_amount_atomic: str,
         source_wallet_address: str,
     ) -> dict[str, Any]:
+        token_address, _, _ = self._payment_token(purchase)
         return {
             "purchaseId": str(purchase["purchaseId"]),
             "amountUsd": str(purchase["amountUsd"]),
@@ -1989,7 +2001,7 @@ class BankrLlmPurchaseService:
             "asset": BASE_USDC_ADDRESS,
             "network": BASE_MAINNET_NETWORK,
             "singitAmountAtomic": str(singit_amount_atomic),
-            "singitTokenAddress": self.singit_token_address,
+            "singitTokenAddress": token_address,
             "sourceWalletAddress": str(source_wallet_address),
             "purpose": "bankr_llm_topup",
         }
@@ -2019,6 +2031,29 @@ class BankrLlmPurchaseService:
         ).to_integral_value(rounding=ROUND_CEILING)
         return int(buffered)
 
+    def _payment_pricing(self, purchase: Mapping[str, Any]) -> tuple[int, str]:
+        """Return (required_atomic, human_transfer_amount) for the purchase."""
+        address, symbol, decimals = self._payment_token(purchase)
+        if symbol.upper() in STABLE_PAYMENT_TOKEN_SYMBOLS:
+            # Bankr accepts stables directly: transfer exactly amountUsd,
+            # no swap quote required.
+            amount = Decimal(str(purchase["amountUsd"]))
+            atomic = int(amount * (Decimal(10) ** decimals))
+            if atomic <= 0:
+                raise BankrLlmError(
+                    "invalid_pricing",
+                    "Payment token pricing is unavailable. Please try again.",
+                )
+            return atomic, format(amount, "f")
+        pricing = self.pricer.price_for_usdc(
+            purchase["amountUsd"], from_token=address, decimals=decimals
+        )
+        atomic = self._pricing_atomic(pricing)
+        amount = self._pricing_transfer_amount(
+            pricing, expected_atomic=atomic, decimals=decimals
+        )
+        return atomic, amount
+
     @staticmethod
     def _pricing_atomic(pricing: Mapping[str, Any]) -> int:
         singit_atomic = str(pricing.get("requiredSingitAtomic") or "")
@@ -2034,12 +2069,13 @@ class BankrLlmPurchaseService:
         pricing: Mapping[str, Any],
         *,
         expected_atomic: int,
+        decimals: int = 18,
     ) -> str:
         try:
             amount = Decimal(str(pricing.get("requiredSingit") or ""))
         except (InvalidOperation, ValueError):
             amount = Decimal(0)
-        atomic = amount * Decimal("1000000000000000000")
+        atomic = amount * (Decimal(10) ** int(decimals))
         if (
             not amount.is_finite()
             or amount <= 0
@@ -2066,7 +2102,27 @@ class BankrLlmPurchaseService:
         self,
         telegram_user_id: str,
         required_atomic: int,
+        purchase: Mapping[str, Any],
+        owner_address: str,
     ) -> tuple[str, str] | None:
+        address, symbol, _ = self._payment_token(purchase)
+        if symbol != "SINGIT":
+            token_balance = getattr(self.transfer_client, "token_balance", None)
+            if not callable(token_balance):
+                return None
+            try:
+                available = int(str(token_balance(address, owner_address)))
+            except Exception:
+                return (
+                    "wallet_balance_unavailable",
+                    "Managed wallet balance is unavailable. Try again before transfer.",
+                )
+            if available < required_atomic:
+                return (
+                    "insufficient_token_balance",
+                    f"Managed wallet does not have enough {symbol} for this purchase.",
+                )
+            return None
         wallet_balance = getattr(self.wallet_service, "wallet_balance", None)
         if not callable(wallet_balance):
             return None

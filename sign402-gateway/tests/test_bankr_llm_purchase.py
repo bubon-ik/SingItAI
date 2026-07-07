@@ -10,6 +10,7 @@ import traceback
 import unittest
 import urllib.request
 from contextlib import contextmanager
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
@@ -1353,9 +1354,23 @@ class FakePricerForPurchase:
             "expectedUsdc": "11.00",
         }
 
-    def price_for_usdc(self, amount_usd):
-        self.calls.append(amount_usd)
-        return dict(self.result)
+    def price_for_usdc(self, amount_usd, *, from_token=None, decimals=None):
+        self.calls.append(
+            {
+                "amount_usd": amount_usd,
+                "from_token": from_token,
+                "decimals": decimals,
+            }
+        )
+        result = dict(self.result)
+        token_decimals = 18 if decimals is None else int(decimals)
+        result["requiredSingitAtomic"] = str(
+            int(
+                Decimal(str(result["requiredSingit"]))
+                * Decimal(10) ** token_decimals
+            )
+        )
+        return result
 
 
 class FakeApprovalServiceForPurchase:
@@ -1790,6 +1805,8 @@ class BankrLlmPurchaseServiceAuthTests(unittest.TestCase):
             "amountUsd": "10.50",
             # Quoted 25 SINGIT plus the default 5% approval buffer.
             "singitAmountAtomic": "26250000000000000000",
+            "paymentTokenAddress": "0x3333333333333333333333333333333333333333",
+            "paymentTokenSymbol": "SINGIT",
             "sourceWalletAddress": "0x2222222222222222222222222222222222222222",
             "bankrWalletAddress": EVM_ADDRESS,
             "apiKeyFingerprint": hashlib.sha256(API_KEY.encode("utf-8")).hexdigest()[
@@ -2157,6 +2174,85 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
         )
         loaded = self.store.get_purchase(result["purchaseId"])
         self.assertRegex(loaded["paymentTokenSymbol"], r"^[A-Za-z0-9._-]{1,16}$")
+
+    def approved_purchase_with_token(self, token):
+        self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+            payment_token=token,
+        )
+        self.service.accept_terms("123")
+        return self.service.verify_otp(telegram_user_id="123", code="123456")
+
+    def test_usdc_purchase_skips_quote_and_buffer_and_pays_exact_amount(self):
+        awaiting = self.approved_purchase_with_token("USDC")
+        result = self.service.resume(awaiting["purchaseId"])
+
+        self.assertEqual(result["state"], "COMPLETE")
+        self.assertEqual(self.pricer.calls, [])
+        transfer = self.transfer.calls[0]
+        self.assertEqual(transfer["amount"], "10")
+        self.assertEqual(
+            transfer["token_address"],
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        )
+        self.assertEqual(transfer["decimals"], 6)
+        loaded = self.store.get_purchase(result["purchaseId"])
+        self.assertEqual(loaded["singitAmountAtomic"], "10000000")
+        self.assertEqual(
+            self.bankr.topups[0]["source_token"],
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        )
+
+    def test_custom_token_purchase_quotes_with_token_and_decimals(self):
+        custom = "0x" + "a" * 40
+        awaiting = self.approved_purchase_with_token(custom)
+        result = self.service.resume(awaiting["purchaseId"])
+
+        self.assertEqual(result["state"], "COMPLETE")
+        self.assertEqual(self.pricer.calls[0]["from_token"], custom)
+        self.assertEqual(self.pricer.calls[0]["decimals"], 8)
+        self.assertEqual(self.transfer.calls[0]["token_address"], custom)
+        self.assertEqual(self.transfer.calls[0]["decimals"], 8)
+        self.assertEqual(self.bankr.topups[0]["source_token"], custom)
+
+    def test_custom_token_balance_checked_before_transfer(self):
+        custom = "0x" + "a" * 40
+        self.transfer.token_balance_result = "1"
+        awaiting = self.approved_purchase_with_token(custom)
+        result = self.service.resume(awaiting["purchaseId"])
+
+        self.assertEqual(result["state"], "FAILED_BEFORE_TRANSFER")
+        self.assertEqual(result["errorCode"], "insufficient_token_balance")
+        self.assertEqual(self.transfer.calls, [])
+
+    def test_approval_context_names_the_payment_token(self):
+        self.approval.result = {"ok": False, "status": "rejected"}
+        self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+            payment_token="USDC",
+        )
+        self.service.accept_terms("123")
+        self.service.verify_otp(telegram_user_id="123", code="123456")
+        rendered = "\n".join(self.approval.calls[0]["context_lines"])
+        self.assertIn("USDC", rendered)
+        self.assertIn("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", rendered)
+
+    def test_singit_purchase_still_uses_legacy_paths(self):
+        awaiting = self.approved_purchase()
+        result = self.service.resume(awaiting["purchaseId"])
+
+        self.assertEqual(result["state"], "COMPLETE")
+        self.assertEqual(
+            self.pricer.calls[0]["from_token"],
+            "0x3333333333333333333333333333333333333333",
+        )
+        self.assertEqual(self.pricer.calls[0]["decimals"], 18)
+        self.assertEqual(self.transfer.calls[0]["decimals"], 18)
+        self.assertEqual(self.bankr.topups[0]["source_token"], "SINGIT")
 
     def test_start_without_token_defaults_to_singit(self):
         result = self.service.start(
