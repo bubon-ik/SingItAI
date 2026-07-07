@@ -337,6 +337,35 @@ class BitrefillClientTests(unittest.TestCase):
         self.assertEqual(packages["0.1"]["priceUsd"], "0.10")
         self.assertEqual(packages["bitrefill-giftcard-usd<&>1"]["priceUsd"], "1.00")
 
+    def test_live_usd_fixed_packages_use_face_value_as_price(self):
+        transport = FakeBitrefillTransport(
+            [
+                {
+                    "data": {
+                        "id": "doordash-usa",
+                        "name": "DoorDash USA",
+                        "country_code": "US",
+                        "currency": "USD",
+                        "recipient_type": "none",
+                        "in_stock": True,
+                        "packages": [
+                            {
+                                "id": "doordash-usa<&>20",
+                                "value": "20",
+                                "price": 31988,
+                            }
+                        ],
+                    }
+                }
+            ]
+        )
+        client = LiveBitrefillClient(api_key="key_123", request_json=transport)
+
+        product = client.get_product_details(product_id="doordash-usa", country="US")
+
+        self.assertEqual(product["packages"][0]["value"], "20")
+        self.assertEqual(product["packages"][0]["priceUsd"], "20.00")
+
     def test_live_quote_requires_phone_for_phone_refill(self):
         transport = FakeBitrefillTransport(
             [

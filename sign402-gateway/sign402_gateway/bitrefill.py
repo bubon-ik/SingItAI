@@ -753,6 +753,8 @@ class LiveBitrefillClient:
                 value = package_id.rsplit("<&>", 1)[1]
             if is_usd_range and package.get("amount") is not None:
                 price = package["amount"]
+            elif currency == "USD" and _is_decimal_text(value):
+                price = value
             else:
                 price = package.get("price", value)
             normalized.append(
@@ -809,6 +811,14 @@ def _recipient_fields(recipient_type: str) -> list[str]:
 
 def _money(value: Any) -> str:
     return f"{Decimal(str(value)):.2f}"
+
+
+def _is_decimal_text(value: Any) -> bool:
+    try:
+        Decimal(str(value))
+    except Exception:
+        return False
+    return True
 
 
 def _payment_amount(value: Any, *, currency: str) -> str:
