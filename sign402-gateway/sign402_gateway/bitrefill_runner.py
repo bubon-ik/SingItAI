@@ -19,7 +19,7 @@ from .commerce_store import BitrefillCommerceStore
 
 BITREFILL_BROWSE_CATEGORIES = {
     "all": "",
-    "shopping": "retail,ecommerce,gifts,gift_card,electronics,apparel",
+    "shopping": "retail,ecommerce,gifts,electronics,apparel",
     "food": "food,restaurants,food-delivery,groceries",
     "games": "games",
     "mobile": "refill,phone,data,bundles",
