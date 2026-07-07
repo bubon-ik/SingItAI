@@ -292,16 +292,19 @@ class LiveBitrefillClient:
         limit: int,
         include_test_products: bool,
     ) -> list[dict[str, Any]]:
+        query = {
+            "country": str(country).strip(),
+            "start": str(start),
+            "limit": str(limit),
+            "include_test_products": "true" if include_test_products else "false",
+        }
+        category_text = str(category).strip()
+        if category_text:
+            query["category"] = category_text
         payload = self._request_json(
             "GET",
             "/products",
-            query={
-                "country": str(country).strip(),
-                "category": str(category).strip(),
-                "start": str(start),
-                "limit": str(limit),
-                "include_test_products": "true" if include_test_products else "false",
-            },
+            query=query,
             body=None,
         )
         return [self._normalize_product(raw) for raw in payload.get("data", [])]

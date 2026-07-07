@@ -267,6 +267,35 @@ class BitrefillClientTests(unittest.TestCase):
             ],
         )
 
+    def test_live_catalog_list_omits_empty_category_for_all_products(self):
+        transport = FakeBitrefillTransport([{"data": []}])
+        client = LiveBitrefillClient(api_key="key_123", request_json=transport)
+
+        client.list_products(
+            country="CZ,XI",
+            category="",
+            start=0,
+            limit=9,
+            include_test_products=False,
+        )
+
+        self.assertEqual(
+            transport.calls,
+            [
+                {
+                    "method": "GET",
+                    "path": "/products",
+                    "query": {
+                        "country": "CZ,XI",
+                        "start": "0",
+                        "limit": "9",
+                        "include_test_products": "false",
+                    },
+                    "body": None,
+                }
+            ],
+        )
+
     def test_live_usd_range_exposes_minimum_face_value(self):
         transport = FakeBitrefillTransport(
             [
