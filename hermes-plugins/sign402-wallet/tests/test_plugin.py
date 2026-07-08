@@ -634,6 +634,34 @@ class PluginRegistrationTests(unittest.TestCase):
             ],
         )
 
+    def test_connect_imessage_includes_public_imessage_line_when_configured(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.imessage_results["connect-imessage"] = {
+            "telegramText": "Send ABCDEFGH to iMessage"
+        }
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        with patch.dict(plugin.os.environ, {"SIGN402_IMESSAGE_PUBLIC_LINE": "+420123456789"}):
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "/connect_imessage",
+                    "1045618308",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        text = gateway.adapters["telegram"].sent[0][1]
+        self.assertIn("+420123456789", text)
+        self.assertIn("ABCDEFGH", text)
+        self.assertIn("send", text.lower())
+
     def test_start_creates_wallet_and_returns_onboarding_text(self):
         plugin = load_plugin()
         context = FakeContext()

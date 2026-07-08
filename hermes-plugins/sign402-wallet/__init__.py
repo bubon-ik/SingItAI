@@ -128,6 +128,11 @@ _IMESSAGE_COMMANDS = {
         "Link your iMessage number for Sign402 approvals",
     ),
 }
+_IMESSAGE_PUBLIC_LINE_ENV_NAMES = (
+    "SIGN402_IMESSAGE_PUBLIC_LINE",
+    "SIGN402_IMESSAGE_PUBLIC_NUMBER",
+    "PHOTON_PUBLIC_IMESSAGE_LINE",
+)
 _LIMITS_USAGE = "Usage: /limits 0.005 0.05 or /set_limits 0.005 0.05"
 _BITREFILL_USAGE = "Usage: /bitrefill <productId> <packageId> [country]"
 _LLM_BUY_USAGE = "Usage: /llm_buy <usd> <email> [token]"
@@ -192,7 +197,7 @@ def _build_imessage_handler(operation: str):
             )
             telegram_text = result.get("telegramText")
             if isinstance(telegram_text, str) and telegram_text.strip():
-                return telegram_text.strip()
+                return _telegram_imessage_pairing_text(telegram_text)
             return _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
         except GatewayClientError as exc:
             return exc.user_message
@@ -354,6 +359,28 @@ def _help_text() -> str:
         "/llm_buy <usd> <email> - Buy Bankr LLM credits\n"
         "/llm_credits - Show Bankr LLM credits"
     )
+
+
+def _telegram_imessage_pairing_text(raw_text: str) -> str:
+    text = str(raw_text or "").strip()
+    public_line = _imessage_public_line()
+    if not public_line or not text:
+        return text
+    if public_line in text:
+        return text
+    return (
+        "To link iMessage approvals, send the code below to the Sign402 iMessage line:\n"
+        f"{public_line}\n\n"
+        f"{text}"
+    )
+
+
+def _imessage_public_line() -> str:
+    for name in _IMESSAGE_PUBLIC_LINE_ENV_NAMES:
+        value = str(os.environ.get(name, "") or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _build_help_handler():
@@ -543,6 +570,8 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
             text = result.get("telegramText")
             if not isinstance(text, str) or not text.strip():
                 text = _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
+            else:
+                text = _telegram_imessage_pairing_text(text)
         elif command in {"llm-buy", "llm-terms", "llm-credits"}:
             client = _client_factory()
             operation = {

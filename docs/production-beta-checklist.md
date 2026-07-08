@@ -34,7 +34,12 @@ Edit `~/.hermes/.env`:
 
 ```env
 SIGN402_TELEGRAM_SIGN402_ONLY=1
+SIGN402_IMESSAGE_PUBLIC_LINE=<public Sign402 iMessage number or contact>
 ```
+
+`SIGN402_IMESSAGE_PUBLIC_LINE` is what new users will see after pressing
+`Connect iMessage`. Set it to the public Photon/iMessage line where users should
+send their pairing code.
 
 Then remove or empty the Telegram allowlist entry used during private testing.
 The exact key can vary by Hermes setup, so inspect first:
@@ -104,18 +109,20 @@ bot before:
 2. Confirm wallet is created and Base address is shown.
 3. Send `Balance`.
 4. Send `Connect iMessage`.
-5. Send the pairing code to the Photon iMessage line.
-6. Send `Limits` and set a low beta limit.
-7. Fund the wallet with a small amount of ETH for gas and SINGIT/USDC for tests.
-8. Buy a low-value Bitrefill product.
-9. Approve in iMessage.
-10. Use `Last Purchase` to reveal the code.
-11. Use `Withdraw` to return remaining ERC-20 funds.
+5. Confirm Telegram shows the public iMessage line and pairing code.
+6. Send the pairing code to that iMessage line.
+7. Send `Limits` and set a low beta limit.
+8. Fund the wallet with a small amount of ETH for gas and SINGIT/USDC for tests.
+9. Buy a low-value Bitrefill product.
+10. Approve in iMessage.
+11. Use `Last Purchase` to reveal the code.
+12. Use `Withdraw` to return remaining ERC-20 funds.
 
 ## Public Beta Guardrails
 
 - Keep default spending limits low.
 - Keep `SIGN402_TELEGRAM_SIGN402_ONLY=1` enabled.
+- Keep `SIGN402_IMESSAGE_PUBLIC_LINE` set before accepting new users.
 - Do not expose the Sign402 gateway port publicly.
 - Keep `SIGN402_GATEWAY_URL=http://127.0.0.1:8099` in the Hermes plugin env.
 - Keep `SIGN402_WALLET_MASTER_KEY` out of git, chat, prompts, and screenshots.

@@ -25,6 +25,7 @@ SIGN402_GATEWAY_URL=http://127.0.0.1:8099
 SIGN402_WALLET_API_TOKEN=<same value configured for sign402-gateway>
 SIGN402_PHOTON_API_TOKEN=<same value configured for sign402-gateway>
 SIGN402_TELEGRAM_SIGN402_ONLY=1
+SIGN402_IMESSAGE_PUBLIC_LINE=<public Sign402 iMessage number or contact>
 ```
 
 The Sign402 Gateway systemd environment also needs:
@@ -51,6 +52,9 @@ cannot send the bearer token to a remote host.
 ordinary Telegram text that is not a Sign402 command or wizard response and
 returns the Sign402 menu instead of letting the message fall through to the
 general Hermes LLM chat.
+
+`SIGN402_IMESSAGE_PUBLIC_LINE` is shown in the `/connect_imessage` response so
+new users know where to send their pairing code.
 
 ## Install
 
