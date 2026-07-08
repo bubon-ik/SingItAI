@@ -459,6 +459,8 @@ def _register_photon_shared_user(phone_number: str, identity: TelegramIdentity) 
         headers={
             "Authorization": f"Basic {basic}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "Sign402-Hermes/0.1",
         },
         method="POST",
     )

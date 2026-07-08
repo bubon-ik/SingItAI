@@ -767,6 +767,8 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertEqual(request.get_method(), "POST")
         self.assertEqual(timeout, plugin._PHOTON_API_TIMEOUT_SECONDS)
         self.assertIn("Basic ", request.headers["Authorization"])
+        self.assertEqual(request.headers["Accept"], "application/json")
+        self.assertEqual(request.headers["User-agent"], "Sign402-Hermes/0.1")
         self.assertEqual(
             json.loads(request.data.decode("utf-8")),
             {
