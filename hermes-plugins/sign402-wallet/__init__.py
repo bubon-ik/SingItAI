@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -133,6 +134,14 @@ _IMESSAGE_PUBLIC_LINE_ENV_NAMES = (
     "SIGN402_IMESSAGE_PUBLIC_NUMBER",
     "PHOTON_PUBLIC_IMESSAGE_LINE",
 )
+_PHOTON_PROJECT_ID_ENV_NAMES = ("PHOTON_PROJECT_ID", "SPECTRUM_PROJECT_ID")
+_PHOTON_PROJECT_SECRET_ENV_NAMES = ("PHOTON_PROJECT_SECRET", "SPECTRUM_PROJECT_SECRET")
+_PHOTON_AUTO_REGISTER_ENV_NAMES = (
+    "SIGN402_PHOTON_AUTO_REGISTER_USERS",
+    "PHOTON_AUTO_REGISTER_USERS",
+)
+_PHOTON_API_BASE_URL_ENV_NAMES = ("PHOTON_API_BASE_URL", "SPECTRUM_API_BASE_URL")
+_PHOTON_API_TIMEOUT_SECONDS = 15
 _LIMITS_USAGE = "Usage: /limits 0.005 0.05 or /set_limits 0.005 0.05"
 _BITREFILL_USAGE = "Usage: /bitrefill <productId> <packageId> [country]"
 _LLM_BUY_USAGE = "Usage: /llm_buy <usd> <email> [token]"
@@ -142,11 +151,13 @@ _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 _client_factory: Callable[[], GatewayClient] = GatewayClient.from_env
 _telegram_api_opener: Callable[..., object] = urlopen
+_photon_api_opener: Callable[..., object] = urlopen
 _background_runner: Callable[[Callable[[], None]], None]
 _sleep: Callable[[float], None] = time.sleep
 _BITREFILL_USER_COUNTRIES: dict[str, str] = {}
 _BITREFILL_SESSIONS: dict[str, dict] = {}
 _WITHDRAW_SESSIONS: dict[str, dict] = {}
+_IMESSAGE_CONNECT_SESSIONS: dict[str, dict] = {}
 
 
 def _default_background_runner(callback: Callable[[], None]) -> None:
@@ -383,6 +394,115 @@ def _imessage_public_line() -> str:
     return ""
 
 
+def _photon_auto_register_users_enabled() -> bool:
+    return any(_truthy_env(name) for name in _PHOTON_AUTO_REGISTER_ENV_NAMES)
+
+
+def _truthy_env(name: str) -> bool:
+    return str(os.environ.get(name, "") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _env_first(names: tuple[str, ...]) -> str:
+    for name in names:
+        value = str(os.environ.get(name, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _photon_api_base_url() -> str:
+    return _env_first(_PHOTON_API_BASE_URL_ENV_NAMES) or "https://spectrum.photon.codes"
+
+
+def _is_e164_phone_number(value: str) -> bool:
+    return re.fullmatch(r"\+[1-9]\d{6,14}", str(value or "").strip()) is not None
+
+
+def _imessage_phone_prompt() -> str:
+    public_line = _imessage_public_line()
+    target = f"\n\nSign402 iMessage line: {public_line}" if public_line else ""
+    return (
+        "Send your iMessage phone number in international format.\n"
+        "Example: +420773173967\n\n"
+        "Make sure iMessage starts new conversations from this phone number, not your Apple ID email."
+        f"{target}"
+    )
+
+
+def _register_photon_shared_user(phone_number: str, identity: TelegramIdentity) -> None:
+    project_id = _env_first(_PHOTON_PROJECT_ID_ENV_NAMES)
+    project_secret = _env_first(_PHOTON_PROJECT_SECRET_ENV_NAMES)
+    if not project_id or not project_secret:
+        raise GatewayClientError(
+            "iMessage registration is not configured. Please contact the operator."
+        )
+
+    payload = {
+        "type": "shared",
+        "phoneNumber": phone_number,
+    }
+    if identity.username:
+        payload["firstName"] = identity.username
+
+    basic = base64.b64encode(f"{project_id}:{project_secret}".encode("utf-8")).decode(
+        "ascii"
+    )
+    base_url = _photon_api_base_url().rstrip("/")
+    request = Request(
+        f"{base_url}/projects/{project_id}/users/",
+        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        headers={
+            "Authorization": f"Basic {basic}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        response = _photon_api_opener(request, timeout=_PHOTON_API_TIMEOUT_SECONDS)
+    except (HTTPError, TimeoutError, URLError, OSError) as exc:
+        raise GatewayClientError(
+            "Could not register this iMessage number. Please check the phone number and try again."
+        ) from exc
+    try:
+        body = response.read()
+    finally:
+        close = getattr(response, "close", None)
+        if callable(close):
+            close()
+    try:
+        parsed = json.loads(body.decode("utf-8") if isinstance(body, bytes) else body)
+    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError) as exc:
+        raise GatewayClientError(
+            "Could not register this iMessage number. Please try again."
+        ) from exc
+    if not isinstance(parsed, dict) or parsed.get("succeed") is not True:
+        raise GatewayClientError(
+            "Could not register this iMessage number. Please check the phone number and try again."
+        )
+
+
+def _connect_imessage_after_phone_registration(
+    *,
+    identity: TelegramIdentity,
+    phone_number: str,
+) -> str:
+    _register_photon_shared_user(phone_number, identity)
+    client = _client_factory()
+    result = client.execute_imessage(
+        "connect-imessage",
+        {"telegramUserId": identity.user_id},
+    )
+    text = result.get("telegramText")
+    if not isinstance(text, str) or not text.strip():
+        return _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
+    return _telegram_imessage_pairing_text(text)
+
+
 def _build_help_handler():
     async def handler(_raw_args: str) -> str:
         return _help_text()
@@ -403,6 +523,14 @@ def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
             source=source,
             gateway=gateway,
         )
+
+    imessage_registration_result = _handle_telegram_imessage_registration_message(
+        event=event,
+        source=source,
+        gateway=gateway,
+    )
+    if imessage_registration_result:
+        return imessage_registration_result
 
     withdraw_wizard_result = _handle_telegram_withdraw_wizard_message(
         event=event,
@@ -511,6 +639,7 @@ def _handle_telegram_global_navigation_message(*, event, source, gateway):
         return None
     _BITREFILL_SESSIONS.pop(str(identity.user_id), None)
     _WITHDRAW_SESSIONS.pop(str(identity.user_id), None)
+    _IMESSAGE_CONNECT_SESSIONS.pop(str(identity.user_id), None)
     _send_fixed_reply(
         gateway,
         source,
@@ -518,6 +647,61 @@ def _handle_telegram_global_navigation_message(*, event, source, gateway):
         reply_markup=_telegram_main_menu_reply_markup(),
     )
     return dict(_SKIP_RESULT)
+
+
+def _handle_telegram_imessage_registration_message(*, event, source, gateway):
+    identity = _identity_from_telegram_source(source)
+    if identity is None:
+        return None
+    user_id = str(identity.user_id)
+    session = _IMESSAGE_CONNECT_SESSIONS.get(user_id)
+    if not session or session.get("stage") != "awaiting-phone":
+        return None
+
+    text = str(getattr(event, "text", "") or "").strip()
+    if not text:
+        return None
+    if _normalize_button_text(text) == "back":
+        _IMESSAGE_CONNECT_SESSIONS.pop(user_id, None)
+        _send_fixed_reply(
+            gateway,
+            source,
+            "Back to Sign402 main menu.",
+            reply_markup=_telegram_main_menu_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+    if not _is_e164_phone_number(text):
+        _send_fixed_reply(
+            gateway,
+            source,
+            _imessage_phone_prompt(),
+            reply_markup=_reply_keyboard((("Back",),)),
+        )
+        return dict(_SKIP_RESULT)
+
+    try:
+        _IMESSAGE_CONNECT_SESSIONS.pop(user_id, None)
+        reply = _connect_imessage_after_phone_registration(
+            identity=identity,
+            phone_number=text,
+        )
+        _send_fixed_reply(
+            gateway,
+            source,
+            reply,
+            reply_markup=_telegram_main_menu_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+    except GatewayClientError as exc:
+        _send_fixed_reply(gateway, source, exc.user_message)
+        return dict(_SKIP_RESULT)
+    except Exception as exc:
+        logger.warning(
+            "Unexpected Sign402 iMessage registration failure error=%s",
+            type(exc).__name__,
+        )
+        _send_fixed_reply(gateway, source, _IMESSAGE_UNEXPECTED_ERROR_MESSAGE)
+        return dict(_SKIP_RESULT)
 
 
 def _handle_telegram_public_command_request(*, command: str, args: str = "", source, gateway):
@@ -562,16 +746,33 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
                     daily_cap_usdc=daily_cap_usdc,
                 )
         elif command == "connect-imessage":
-            client = _client_factory()
-            result = client.execute_imessage(
-                "connect-imessage",
-                {"telegramUserId": identity.user_id},
-            )
-            text = result.get("telegramText")
-            if not isinstance(text, str) or not text.strip():
-                text = _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
+            if _photon_auto_register_users_enabled():
+                phone_number = str(args or "").strip()
+                if phone_number:
+                    if not _is_e164_phone_number(phone_number):
+                        text = _imessage_phone_prompt()
+                    else:
+                        text = _connect_imessage_after_phone_registration(
+                            identity=identity,
+                            phone_number=phone_number,
+                        )
+                        _IMESSAGE_CONNECT_SESSIONS.pop(str(identity.user_id), None)
+                else:
+                    _IMESSAGE_CONNECT_SESSIONS[str(identity.user_id)] = {
+                        "stage": "awaiting-phone",
+                    }
+                    text = _imessage_phone_prompt()
             else:
-                text = _telegram_imessage_pairing_text(text)
+                client = _client_factory()
+                result = client.execute_imessage(
+                    "connect-imessage",
+                    {"telegramUserId": identity.user_id},
+                )
+                text = result.get("telegramText")
+                if not isinstance(text, str) or not text.strip():
+                    text = _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
+                else:
+                    text = _telegram_imessage_pairing_text(text)
         elif command in {"llm-buy", "llm-terms", "llm-credits"}:
             client = _client_factory()
             operation = {

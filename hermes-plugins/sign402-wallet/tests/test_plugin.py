@@ -327,6 +327,20 @@ class FakeTelegramResponse:
         self.closed = True
 
 
+class FakePhotonResponse:
+    def __init__(self):
+        self.closed = False
+
+    def read(self):
+        return (
+            b'{"succeed":true,"data":{"id":"user-1","type":"shared",'
+            b'"phoneNumber":"+420773173967"}}'
+        )
+
+    def close(self):
+        self.closed = True
+
+
 class FakePairingStore:
     def __init__(self):
         self.generated = []
@@ -661,6 +675,113 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertIn("+420123456789", text)
         self.assertIn("ABCDEFGH", text)
         self.assertIn("send", text.lower())
+
+    def test_connect_imessage_auto_register_prompts_for_phone(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        with patch.dict(
+            plugin.os.environ,
+            {
+                "SIGN402_PHOTON_AUTO_REGISTER_USERS": "1",
+                "SIGN402_IMESSAGE_PUBLIC_LINE": "+420111222333",
+            },
+        ):
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "Connect iMessage",
+                    "1045618308",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(client.imessage_calls, [])
+        text = gateway.adapters["telegram"].sent[0][1]
+        self.assertIn("phone number", text.lower())
+        self.assertIn("+420", text)
+        self.assertIn("iMessage", text)
+
+    def test_connect_imessage_auto_registers_phone_before_pairing(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.imessage_results["connect-imessage"] = {
+            "telegramText": "Send ABCDEFGH to iMessage"
+        }
+        plugin._client_factory = lambda: client
+        photon_requests = []
+
+        def fake_photon_opener(request, timeout):
+            photon_requests.append((request, timeout))
+            return FakePhotonResponse()
+
+        plugin._photon_api_opener = fake_photon_opener
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        with patch.dict(
+            plugin.os.environ,
+            {
+                "SIGN402_PHOTON_AUTO_REGISTER_USERS": "1",
+                "PHOTON_PROJECT_ID": "project-id",
+                "PHOTON_PROJECT_SECRET": "project-secret",
+                "PHOTON_API_BASE_URL": "https://spectrum.test",
+                "SIGN402_IMESSAGE_PUBLIC_LINE": "+420111222333",
+            },
+        ):
+            context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "Connect iMessage",
+                    "1045618308",
+                    username="AlpskyKnedlik",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "+420773173967",
+                    "1045618308",
+                    username="AlpskyKnedlik",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(len(photon_requests), 1)
+        request, timeout = photon_requests[0]
+        self.assertEqual(
+            request.full_url,
+            "https://spectrum.test/projects/project-id/users/",
+        )
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(timeout, plugin._PHOTON_API_TIMEOUT_SECONDS)
+        self.assertIn("Basic ", request.headers["Authorization"])
+        self.assertEqual(
+            json.loads(request.data.decode("utf-8")),
+            {
+                "type": "shared",
+                "phoneNumber": "+420773173967",
+                "firstName": "AlpskyKnedlik",
+            },
+        )
+        self.assertEqual(
+            client.imessage_calls,
+            [("connect-imessage", {"telegramUserId": "1045618308"})],
+        )
+        text = gateway.adapters["telegram"].sent[-1][1]
+        self.assertIn("+420111222333", text)
+        self.assertIn("ABCDEFGH", text)
 
     def test_start_creates_wallet_and_returns_onboarding_text(self):
         plugin = load_plugin()

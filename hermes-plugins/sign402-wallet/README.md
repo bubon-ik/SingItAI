@@ -26,6 +26,9 @@ SIGN402_WALLET_API_TOKEN=<same value configured for sign402-gateway>
 SIGN402_PHOTON_API_TOKEN=<same value configured for sign402-gateway>
 SIGN402_TELEGRAM_SIGN402_ONLY=1
 SIGN402_IMESSAGE_PUBLIC_LINE=<public Sign402 iMessage number or contact>
+SIGN402_PHOTON_AUTO_REGISTER_USERS=1
+PHOTON_PROJECT_ID=<Photon project id>
+PHOTON_PROJECT_SECRET=<Photon project secret>
 ```
 
 The Sign402 Gateway systemd environment also needs:
@@ -55,6 +58,12 @@ general Hermes LLM chat.
 
 `SIGN402_IMESSAGE_PUBLIC_LINE` is shown in the `/connect_imessage` response so
 new users know where to send their pairing code.
+
+`SIGN402_PHOTON_AUTO_REGISTER_USERS=1` makes `/connect_imessage` ask the
+Telegram user for their iMessage phone number, add that number to Photon
+Project Users through Spectrum API, then return the pairing code. Users do not
+need a Photon account, but on the shared Photon number pool they must send the
+pairing code from their phone-number iMessage handle, not an Apple ID email.
 
 ## Install
 
