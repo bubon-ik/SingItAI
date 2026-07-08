@@ -334,7 +334,7 @@ class FakePhotonResponse:
     def read(self):
         return (
             b'{"succeed":true,"data":{"id":"user-1","type":"shared",'
-            b'"phoneNumber":"+420773173967"}}'
+            b'"phoneNumber":"+420773173967","assignedPhoneNumber":"+16282647754"}}'
         )
 
     def close(self):
@@ -782,7 +782,8 @@ class PluginRegistrationTests(unittest.TestCase):
             [("connect-imessage", {"telegramUserId": "1045618308"})],
         )
         text = gateway.adapters["telegram"].sent[-1][1]
-        self.assertIn("+420111222333", text)
+        self.assertIn("+16282647754", text)
+        self.assertNotIn("+420111222333", text)
         self.assertIn("ABCDEFGH", text)
 
     def test_start_creates_wallet_and_returns_onboarding_text(self):

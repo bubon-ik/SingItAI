@@ -372,16 +372,16 @@ def _help_text() -> str:
     )
 
 
-def _telegram_imessage_pairing_text(raw_text: str) -> str:
+def _telegram_imessage_pairing_text(raw_text: str, *, public_line: str | None = None) -> str:
     text = str(raw_text or "").strip()
-    public_line = _imessage_public_line()
-    if not public_line or not text:
+    line = str(public_line or "").strip() or _imessage_public_line()
+    if not line or not text:
         return text
-    if public_line in text:
+    if line in text:
         return text
     return (
         "To link iMessage approvals, send the code below to the Sign402 iMessage line:\n"
-        f"{public_line}\n\n"
+        f"{line}\n\n"
         f"{text}"
     )
 
@@ -434,7 +434,7 @@ def _imessage_phone_prompt() -> str:
     )
 
 
-def _register_photon_shared_user(phone_number: str, identity: TelegramIdentity) -> None:
+def _register_photon_shared_user(phone_number: str, identity: TelegramIdentity) -> str:
     project_id = _env_first(_PHOTON_PROJECT_ID_ENV_NAMES)
     project_secret = _env_first(_PHOTON_PROJECT_SECRET_ENV_NAMES)
     if not project_id or not project_secret:
@@ -486,6 +486,12 @@ def _register_photon_shared_user(phone_number: str, identity: TelegramIdentity) 
         raise GatewayClientError(
             "Could not register this iMessage number. Please check the phone number and try again."
         )
+    data = parsed.get("data")
+    if isinstance(data, dict):
+        assigned_phone_number = str(data.get("assignedPhoneNumber") or "").strip()
+        if assigned_phone_number:
+            return assigned_phone_number
+    return ""
 
 
 def _connect_imessage_after_phone_registration(
@@ -493,7 +499,7 @@ def _connect_imessage_after_phone_registration(
     identity: TelegramIdentity,
     phone_number: str,
 ) -> str:
-    _register_photon_shared_user(phone_number, identity)
+    assigned_phone_number = _register_photon_shared_user(phone_number, identity)
     client = _client_factory()
     result = client.execute_imessage(
         "connect-imessage",
@@ -502,7 +508,7 @@ def _connect_imessage_after_phone_registration(
     text = result.get("telegramText")
     if not isinstance(text, str) or not text.strip():
         return _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
-    return _telegram_imessage_pairing_text(text)
+    return _telegram_imessage_pairing_text(text, public_line=assigned_phone_number)
 
 
 def _build_help_handler():
