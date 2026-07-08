@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from collections.abc import Mapping
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -499,4 +500,14 @@ class GatewayClient:
         error = str(payload.get("error") or "").strip()
         if not error:
             return None
+        live_max_match = re.search(
+            r"exceeds live Bitrefill max\s+(\$[0-9]+(?:\.[0-9]+)?)",
+            error,
+            flags=re.IGNORECASE,
+        )
+        if live_max_match:
+            return (
+                "This Bitrefill amount is above the current live purchase limit "
+                f"({live_max_match.group(1)}). Choose a smaller amount or another product."
+            )
         return f"Bitrefill request failed: {error}"

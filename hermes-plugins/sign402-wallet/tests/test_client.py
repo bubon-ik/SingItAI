@@ -366,6 +366,32 @@ class GatewayClientTests(unittest.TestCase):
             "Bitrefill request failed: unknown Bitrefill package",
         )
 
+    def test_execute_bitrefill_purchase_translates_live_max_errors(self):
+        error = HTTPError(
+            "http://127.0.0.1:8099/agent/quote-bitrefill",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(
+                b'{"ok":false,"error":"Bitrefill quote exceeds live Bitrefill max $5.00"}'
+            ),
+        )
+        opener = RecordingOpener(error=error)
+
+        with self.assertRaises(GatewayClientError) as raised:
+            self.make_client(opener).execute_bitrefill_purchase(
+                TelegramIdentity(user_id="1045618308"),
+                product_id="doordash-us",
+                package_id="15",
+                country="US",
+                user_access_token="user-token-1",
+            )
+
+        self.assertEqual(
+            raised.exception.user_message,
+            "This Bitrefill amount is above the current live purchase limit ($5.00). Choose a smaller amount or another product.",
+        )
+
     def test_search_bitrefill_products_posts_country_query(self):
         opener = RecordingOpener(
             response=FakeResponse(b'{"ok":true,"products":[]}')

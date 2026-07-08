@@ -902,6 +902,41 @@ class PluginRegistrationTests(unittest.TestCase):
             ],
         )
 
+    def test_bitrefill_back_after_failed_purchase_returns_to_main_menu(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        plugin._client_factory = lambda: client
+        plugin._background_runner = lambda callback: callback()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        def dispatch(text):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    text,
+                    "1045618308",
+                    username="AlpskyKnedlik",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        dispatch("Buy Bitrefill")
+        dispatch("Search Products")
+        dispatch("amazon")
+        dispatch("1")
+        client.error = plugin.GatewayClientError(
+            "This Bitrefill amount is above the current live purchase limit ($5.00). Choose a smaller amount or another product."
+        )
+
+        self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
+        self.assertIn("current live purchase limit", gateway.adapters["telegram"].sent[-1][1])
+
+        self.assertEqual(dispatch("Back"), plugin._SKIP_RESULT)
+        self.assertIn("Back to Sign402 main menu.", gateway.adapters["telegram"].sent[-1][1])
+
     def test_withdraw_button_collects_token_amount_and_destination(self):
         plugin = load_plugin()
         context = FakeContext()

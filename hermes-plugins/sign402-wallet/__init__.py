@@ -393,6 +393,14 @@ def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
     if bitrefill_wizard_result:
         return bitrefill_wizard_result
 
+    navigation_result = _handle_telegram_global_navigation_message(
+        event=event,
+        source=source,
+        gateway=gateway,
+    )
+    if navigation_result:
+        return navigation_result
+
     telegram_tool = _telegram_paid_tool_intent(event, source)
     if telegram_tool:
         return _handle_telegram_paid_tool_request(
@@ -427,6 +435,24 @@ def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
         )
 
     return None
+
+
+def _handle_telegram_global_navigation_message(*, event, source, gateway):
+    identity = _identity_from_telegram_source(source)
+    if identity is None:
+        return None
+    text = str(getattr(event, "text", "") or "").strip()
+    if _normalize_button_text(text) != "back":
+        return None
+    _BITREFILL_SESSIONS.pop(str(identity.user_id), None)
+    _WITHDRAW_SESSIONS.pop(str(identity.user_id), None)
+    _send_fixed_reply(
+        gateway,
+        source,
+        "Back to Sign402 main menu.",
+        reply_markup=_telegram_main_menu_reply_markup(),
+    )
+    return dict(_SKIP_RESULT)
 
 
 def _handle_telegram_public_command_request(*, command: str, args: str = "", source, gateway):
@@ -1472,7 +1498,12 @@ def _execute_telegram_bitrefill_request(
         )
         _send_fixed_reply(gateway, source, text)
     except GatewayClientError as exc:
-        _send_fixed_reply(gateway, source, exc.user_message)
+        _send_fixed_reply(
+            gateway,
+            source,
+            exc.user_message,
+            reply_markup=_telegram_main_menu_reply_markup(),
+        )
     except Exception as exc:
         logger.warning(
             "Unexpected Sign402 Telegram Bitrefill failure error=%s",
