@@ -43,6 +43,19 @@ Logs are written to:
 .demo-logs/
 ```
 
+## Backup Sign402 State
+
+Before opening the Telegram bot to public beta testers or changing production
+env files, take a local VPS backup:
+
+```bash
+cd ~/apps/sign402
+./scripts/backup-sign402-state.sh
+```
+
+The backup is written to `~/sign402-backups/<timestamp>/` and may contain
+wallet databases, API tokens, and the wallet master key. Keep it private.
+
 ## Hosted Hermes Telegram Wallet Plugin
 
 The VPS deployment can expose the managed Base wallet endpoints through

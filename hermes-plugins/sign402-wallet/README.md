@@ -24,6 +24,7 @@ The Hermes gateway process needs these values in `~/.hermes/.env`:
 SIGN402_GATEWAY_URL=http://127.0.0.1:8099
 SIGN402_WALLET_API_TOKEN=<same value configured for sign402-gateway>
 SIGN402_PHOTON_API_TOKEN=<same value configured for sign402-gateway>
+SIGN402_TELEGRAM_SIGN402_ONLY=1
 ```
 
 The Sign402 Gateway systemd environment also needs:
@@ -45,6 +46,11 @@ chmod 600 ~/.hermes/.env
 
 The plugin rejects non-loopback gateway URLs so a configuration mistake
 cannot send the bearer token to a remote host.
+
+`SIGN402_TELEGRAM_SIGN402_ONLY=1` is recommended for public beta. It catches
+ordinary Telegram text that is not a Sign402 command or wizard response and
+returns the Sign402 menu instead of letting the message fall through to the
+general Hermes LLM chat.
 
 ## Install
 
@@ -102,6 +108,12 @@ Expected behavior:
 
 No public domain, reverse proxy, or tunnel is required. Hermes and the
 Sign402 Gateway communicate over `127.0.0.1:8099`.
+
+## Public Beta
+
+Before removing the Telegram allowlist, make sure
+`SIGN402_TELEGRAM_SIGN402_ONLY=1` is set in `~/.hermes/.env`. Then follow
+`docs/production-beta-checklist.md` from the repository root.
 
 ## Diagnostics
 

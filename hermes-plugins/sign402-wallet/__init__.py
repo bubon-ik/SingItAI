@@ -409,6 +409,14 @@ def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
             gateway=gateway,
         )
 
+    sign402_only_result = _handle_telegram_sign402_only_fallback(
+        event=event,
+        source=source,
+        gateway=gateway,
+    )
+    if sign402_only_result:
+        return sign402_only_result
+
     if not _is_photon_source(event, source):
         return None
 
@@ -435,6 +443,36 @@ def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
         )
 
     return None
+
+
+def _handle_telegram_sign402_only_fallback(*, event, source, gateway):
+    if not _sign402_telegram_only_mode_enabled() or not _is_telegram_source(source):
+        return None
+    text = str(getattr(event, "text", "") or "").strip()
+    if not text:
+        return None
+    _send_fixed_reply(
+        gateway,
+        source,
+        _sign402_only_fallback_text(),
+        reply_markup=_telegram_main_menu_reply_markup(),
+    )
+    return dict(_SKIP_RESULT)
+
+
+def _sign402_telegram_only_mode_enabled() -> bool:
+    return str(os.environ.get("SIGN402_TELEGRAM_SIGN402_ONLY", "") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _sign402_only_fallback_text() -> str:
+    return (
+        "Use the Sign402 menu: Wallet, Balance, Buy Bitrefill, Limits, or Withdraw."
+    )
 
 
 def _handle_telegram_global_navigation_message(*, event, source, gateway):

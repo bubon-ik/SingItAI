@@ -789,6 +789,48 @@ class PluginRegistrationTests(unittest.TestCase):
             ],
         )
 
+    def test_sign402_only_mode_catches_unknown_telegram_text(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        with patch.dict(plugin.os.environ, {"SIGN402_TELEGRAM_SIGN402_ONLY": "1"}):
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "hello, what can you do?",
+                    "1045618308",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(len(gateway.adapters["telegram"].sent), 1)
+        text = gateway.adapters["telegram"].sent[0][1]
+        self.assertIn("Use the Sign402 menu", text)
+        self.assertIn("Wallet", text)
+
+    def test_unknown_telegram_text_falls_through_by_default(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "hello, what can you do?",
+                "1045618308",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(gateway.adapters["telegram"].sent, [])
+
     def test_bitrefill_command_quotes_and_buys_with_trusted_identity(self):
         plugin = load_plugin()
         context = FakeContext()
