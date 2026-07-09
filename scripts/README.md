@@ -56,6 +56,32 @@ cd ~/apps/sign402
 The backup is written to `~/sign402-backups/<timestamp>/` and may contain
 wallet databases, API tokens, and the wallet master key. Keep it private.
 
+## Sign402 Operator Diagnostics
+
+Use the local operator CLI on the VPS when a public tester gets stuck. It reads
+local state without printing private keys, encrypted values, or API tokens.
+
+```bash
+cd ~/apps/sign402
+python3 scripts/sign402-operator.py user --telegram-id 8538252718
+python3 scripts/sign402-operator.py find-imessage +420736255120
+python3 scripts/sign402-operator.py pending --telegram-id 8538252718
+python3 scripts/sign402-operator.py last-purchase --telegram-id 8538252718
+```
+
+To remove a broken iMessage link, use the authenticated localhost gateway
+endpoint through the CLI:
+
+```bash
+python3 scripts/sign402-operator.py unlink-imessage --telegram-id 8538252718
+# or
+python3 scripts/sign402-operator.py unlink-imessage --phone +420736255120
+```
+
+The unlink command needs `SIGN402_PHOTON_API_TOKEN` and
+`SIGN402_GATEWAY_URL` available from the environment or standard Sign402 env
+files.
+
 ## Hosted Hermes Telegram Wallet Plugin
 
 The VPS deployment can expose the managed Base wallet endpoints through
