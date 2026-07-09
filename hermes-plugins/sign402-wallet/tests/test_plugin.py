@@ -398,6 +398,7 @@ class PluginRegistrationTests(unittest.TestCase):
                 "limits",
                 "set-limits",
                 "connect-imessage",
+                "connect-whatsapp",
                 "bitrefill",
                 "llm-buy",
                 "llm-terms",
@@ -463,6 +464,7 @@ class PluginRegistrationTests(unittest.TestCase):
                 "wallet",
                 "balance",
                 "connect_imessage",
+                "connect_whatsapp",
                 "limits",
                 "withdraw",
                 "bitrefill",
@@ -606,6 +608,7 @@ class PluginRegistrationTests(unittest.TestCase):
         plugin.register(context)
 
         self.assertIn("connect-imessage", context.commands)
+        self.assertIn("connect-whatsapp", context.commands)
         self.assertNotIn("test-approval", context.commands)
         self.assertNotIn("buy-crypto-news", context.commands)
 
@@ -644,6 +647,42 @@ class PluginRegistrationTests(unittest.TestCase):
                 (
                     "connect-imessage",
                     {"telegramUserId": "1045618308"},
+                )
+            ],
+        )
+
+    def test_connect_whatsapp_uses_trusted_telegram_identity(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.imessage_results["connect-imessage"] = {
+            "telegramText": "Send ABCDEFGH to WhatsApp"
+        }
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "/connect_whatsapp telegramUserId=999",
+                "1045618308",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(
+            gateway.adapters["telegram"].sent,
+            [("telegram-chat", "Send ABCDEFGH to WhatsApp")],
+        )
+        self.assertEqual(
+            client.imessage_calls,
+            [
+                (
+                    "connect-imessage",
+                    {"telegramUserId": "1045618308", "channel": "whatsapp"},
                 )
             ],
         )
@@ -938,7 +977,8 @@ class PluginRegistrationTests(unittest.TestCase):
             reply_markup["keyboard"],
             [
                 [{"text": "Wallet"}, {"text": "Balance"}],
-                [{"text": "Connect iMessage"}, {"text": "Limits"}],
+                [{"text": "Connect iMessage"}, {"text": "Connect WhatsApp"}],
+                [{"text": "Limits"}],
                 [{"text": "Withdraw"}],
                 [{"text": "Buy Bitrefill"}, {"text": "Buy LLM Credits"}],
                 [{"text": "Last Purchase"}, {"text": "Help"}],
@@ -2029,6 +2069,42 @@ class PluginRegistrationTests(unittest.TestCase):
             ],
         )
         self.assertEqual(gateway.adapters[platform].sent, [("photon-chat", "iMessage linked.")])
+
+    def test_whatsapp_platform_pairing_code_is_consumed_before_llm(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.imessage_results["link"] = {
+            "ok": True,
+            "imessageText": "WhatsApp linked.",
+        }
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        platform = FakePlatform("whatsapp")
+        gateway = FakeGateway(adapter_key=platform)
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "4JTLV6XQ",
+                "+15551234567",
+                username="Photon User",
+                platform="whatsapp",
+                chat_id="whatsapp-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(
+            client.imessage_calls,
+            [
+                (
+                    "link",
+                    {"code": "4JTLV6XQ", "photonUserId": "+15551234567"},
+                )
+            ],
+        )
+        self.assertEqual(gateway.adapters[platform].sent, [("whatsapp-chat", "WhatsApp linked.")])
 
     def test_photon_yes_without_pending_passes_through_to_normal_chat(self):
         plugin = load_plugin()

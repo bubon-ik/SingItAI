@@ -15,6 +15,7 @@ _TELEGRAM_COMMANDS = frozenset(
         "set-limits",
         "withdraw",
         "connect-imessage",
+        "connect-whatsapp",
         "llm-buy",
         "llm-terms",
         "llm-code",

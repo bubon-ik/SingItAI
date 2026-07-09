@@ -64,6 +64,7 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "wallet", "description": "Show or create your Base wallet"},
     {"command": "balance", "description": "Show wallet balances"},
     {"command": "connect_imessage", "description": "Link iMessage approvals"},
+    {"command": "connect_whatsapp", "description": "Link WhatsApp approvals"},
     {"command": "limits", "description": "Show or set spending limits"},
     {"command": "withdraw", "description": "Withdraw ERC-20 tokens"},
     {"command": "bitrefill", "description": "Buy Bitrefill with SINGIT"},
@@ -73,7 +74,8 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
 )
 _TELEGRAM_MAIN_MENU_BUTTONS = (
     ("Wallet", "Balance"),
-    ("Connect iMessage", "Limits"),
+    ("Connect iMessage", "Connect WhatsApp"),
+    ("Limits",),
     ("Withdraw",),
     ("Buy Bitrefill", "Buy LLM Credits"),
     ("Last Purchase", "Help"),
@@ -82,6 +84,7 @@ _TELEGRAM_BUTTON_COMMANDS = {
     "wallet": "wallet",
     "balance": "balance",
     "connect imessage": "connect-imessage",
+    "connect whatsapp": "connect-whatsapp",
     "limits": "limits",
     "withdraw": "withdraw",
     "buy bitrefill": "bitrefill",
@@ -127,6 +130,10 @@ _IMESSAGE_COMMANDS = {
     "connect-imessage": (
         "connect-imessage",
         "Link your iMessage number for Sign402 approvals",
+    ),
+    "connect-whatsapp": (
+        "connect-whatsapp",
+        "Link your WhatsApp number for Sign402 approvals",
     ),
 }
 _IMESSAGE_PUBLIC_LINE_ENV_NAMES = (
@@ -202,14 +209,21 @@ def _build_imessage_handler(operation: str):
             return _TELEGRAM_ONLY_MESSAGE
         try:
             client = _client_factory()
+            channel = "whatsapp" if operation == "connect-whatsapp" else "imessage"
+            payload = {"telegramUserId": identity.user_id}
+            if channel != "imessage":
+                payload["channel"] = channel
             result = await asyncio.to_thread(
                 client.execute_imessage,
-                operation,
-                {"telegramUserId": identity.user_id},
+                "connect-imessage",
+                payload,
             )
             telegram_text = result.get("telegramText")
             if isinstance(telegram_text, str) and telegram_text.strip():
-                return _telegram_imessage_pairing_text(telegram_text)
+                return _telegram_imessage_pairing_text(
+                    telegram_text,
+                    channel=channel,
+                )
             return _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
         except GatewayClientError as exc:
             return exc.user_message
@@ -356,7 +370,7 @@ def _start_text(wallet_text: str, *, support_id: str = "") -> str:
         "Next steps:\n"
         "1. Wallet - fund this Base wallet with ETH for gas and USDC/SINGIT for payments.\n"
         "2. Balance - check ETH, USDC, and SINGIT.\n"
-        "3. Connect iMessage - link approvals from your phone number, not Apple ID email.\n"
+        "3. Connect iMessage or WhatsApp - link approvals from your phone number.\n"
         "4. Limits - review or set spending limits.\n"
         "5. Buy - use the buttons or send a request like: buy crypto news"
     )
@@ -368,6 +382,7 @@ def _help_text() -> str:
         "/wallet - Create or show your Base wallet\n"
         "/balance - Show ETH, USDC, and SINGIT balances\n"
         "/connect_imessage - Link iMessage approvals\n"
+        "/connect_whatsapp - Link WhatsApp approvals\n"
         "/limits - View or set spending limits\n"
         "/bitrefill <product> <amount> <country> - Buy Bitrefill with SINGIT\n"
         "/last_purchase - Reveal your latest purchase\n"
@@ -376,15 +391,21 @@ def _help_text() -> str:
     )
 
 
-def _telegram_imessage_pairing_text(raw_text: str, *, public_line: str | None = None) -> str:
+def _telegram_imessage_pairing_text(
+    raw_text: str,
+    *,
+    public_line: str | None = None,
+    channel: str = "imessage",
+) -> str:
     text = str(raw_text or "").strip()
     line = str(public_line or "").strip() or _imessage_public_line()
     if not line or not text:
         return text
     if line in text:
         return text
+    channel_label = _approval_channel_label(channel)
     return (
-        "To link iMessage approvals, send the code below to the Sign402 iMessage line:\n"
+        f"To link {channel_label} approvals, send the code below to the Sign402 {channel_label} line:\n"
         f"{line}\n\n"
         f"{text}"
     )
@@ -396,6 +417,10 @@ def _imessage_public_line() -> str:
         if value:
             return value
     return ""
+
+
+def _approval_channel_label(channel: str) -> str:
+    return "WhatsApp" if str(channel or "").strip().lower() == "whatsapp" else "iMessage"
 
 
 def _photon_auto_register_users_enabled() -> bool:
@@ -468,13 +493,19 @@ def _is_e164_phone_number(value: str) -> bool:
     return re.fullmatch(r"\+[1-9]\d{6,14}", str(value or "").strip()) is not None
 
 
-def _imessage_phone_prompt() -> str:
+def _imessage_phone_prompt(*, channel: str = "imessage") -> str:
     public_line = _imessage_public_line()
-    target = f"\n\nSign402 iMessage line: {public_line}" if public_line else ""
+    channel_label = _approval_channel_label(channel)
+    target = f"\n\nSign402 {channel_label} line: {public_line}" if public_line else ""
+    extra = (
+        "\n\nMake sure iMessage starts new conversations from this phone number, not your Apple ID email."
+        if channel_label == "iMessage"
+        else ""
+    )
     return (
-        "Send your iMessage phone number in international format.\n"
-        "Example: +420773173967\n\n"
-        "Make sure iMessage starts new conversations from this phone number, not your Apple ID email."
+        f"Send your {channel_label} phone number in international format.\n"
+        "Example: +420773173967"
+        f"{extra}"
         f"{target}"
     )
 
@@ -558,17 +589,25 @@ def _connect_imessage_after_phone_registration(
     *,
     identity: TelegramIdentity,
     phone_number: str,
+    channel: str = "imessage",
 ) -> str:
     assigned_phone_number = _register_photon_shared_user(phone_number, identity)
     client = _client_factory()
+    payload = {"telegramUserId": identity.user_id}
+    if channel != "imessage":
+        payload["channel"] = channel
     result = client.execute_imessage(
         "connect-imessage",
-        {"telegramUserId": identity.user_id},
+        payload,
     )
     text = result.get("telegramText")
     if not isinstance(text, str) or not text.strip():
         return _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
-    return _telegram_imessage_pairing_text(text, public_line=assigned_phone_number)
+    return _telegram_imessage_pairing_text(
+        text,
+        public_line=assigned_phone_number,
+        channel=channel,
+    )
 
 
 def _build_help_handler():
@@ -725,6 +764,7 @@ def _handle_telegram_imessage_registration_message(*, event, source, gateway):
     session = _IMESSAGE_CONNECT_SESSIONS.get(user_id)
     if not session or session.get("stage") != "awaiting-phone":
         return None
+    channel = str(session.get("channel") or "imessage")
 
     text = str(getattr(event, "text", "") or "").strip()
     if not text:
@@ -742,7 +782,7 @@ def _handle_telegram_imessage_registration_message(*, event, source, gateway):
         _send_fixed_reply(
             gateway,
             source,
-            _imessage_phone_prompt(),
+            _imessage_phone_prompt(channel=channel),
             reply_markup=_reply_keyboard((("Back",),)),
         )
         return dict(_SKIP_RESULT)
@@ -752,6 +792,7 @@ def _handle_telegram_imessage_registration_message(*, event, source, gateway):
         reply = _connect_imessage_after_phone_registration(
             identity=identity,
             phone_number=text,
+            channel=channel,
         )
         _send_fixed_reply(
             gateway,
@@ -813,34 +854,40 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
                     max_per_tx_usdc=max_per_tx_usdc,
                     daily_cap_usdc=daily_cap_usdc,
                 )
-        elif command == "connect-imessage":
+        elif command in {"connect-imessage", "connect-whatsapp"}:
+            channel = "whatsapp" if command == "connect-whatsapp" else "imessage"
             if _photon_auto_register_users_enabled():
                 phone_number = str(args or "").strip()
                 if phone_number:
                     if not _is_e164_phone_number(phone_number):
-                        text = _imessage_phone_prompt()
+                        text = _imessage_phone_prompt(channel=channel)
                     else:
                         text = _connect_imessage_after_phone_registration(
                             identity=identity,
                             phone_number=phone_number,
+                            channel=channel,
                         )
                         _IMESSAGE_CONNECT_SESSIONS.pop(str(identity.user_id), None)
                 else:
                     _IMESSAGE_CONNECT_SESSIONS[str(identity.user_id)] = {
                         "stage": "awaiting-phone",
+                        "channel": channel,
                     }
-                    text = _imessage_phone_prompt()
+                    text = _imessage_phone_prompt(channel=channel)
             else:
                 client = _client_factory()
+                payload = {"telegramUserId": identity.user_id}
+                if channel != "imessage":
+                    payload["channel"] = channel
                 result = client.execute_imessage(
                     "connect-imessage",
-                    {"telegramUserId": identity.user_id},
+                    payload,
                 )
                 text = result.get("telegramText")
                 if not isinstance(text, str) or not text.strip():
                     text = _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
                 else:
-                    text = _telegram_imessage_pairing_text(text)
+                    text = _telegram_imessage_pairing_text(text, channel=channel)
         elif command in {"llm-buy", "llm-terms", "llm-credits"}:
             client = _client_factory()
             operation = {
@@ -2151,12 +2198,19 @@ def _platform_name(source) -> str:
 
 def _is_photon_source(event, source) -> bool:
     platform_name = _platform_name(source)
-    if platform_name in {"photon", "imessage", "imessage via photon", "platforms/photon"}:
+    if platform_name in {
+        "photon",
+        "imessage",
+        "imessage via photon",
+        "platforms/photon",
+        "whatsapp",
+        "whatsapp via photon",
+    }:
         return True
     raw_message = getattr(event, "raw_message", None)
     if isinstance(raw_message, dict):
         raw_platform = str(raw_message.get("platform", "") or "").strip().lower()
-        return raw_platform in {"imessage", "photon"}
+        return raw_platform in {"imessage", "photon", "whatsapp"}
     return False
 
 
@@ -2225,6 +2279,7 @@ def _telegram_public_command(event, source) -> str | None:
         "set-limits",
         "withdraw",
         "connect-imessage",
+        "connect-whatsapp",
         "bitrefill",
         "llm-buy",
         "llm-terms",

@@ -1007,9 +1007,15 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         try:
             _require_imessage_approval_api_token(self)
             payload = self._read_json()
-            result = self.server.imessage_approval_service.create_pairing(
-                _read_telegram_user_id(payload)
-            )
+            user_id = _read_telegram_user_id(payload)
+            channel = _read_optional_text(payload, ("channel", "approvalChannel"))
+            if channel:
+                result = self.server.imessage_approval_service.create_pairing(
+                    user_id,
+                    channel=channel,
+                )
+            else:
+                result = self.server.imessage_approval_service.create_pairing(user_id)
             self._send_json(_without_private_key_material(result), status=200 if result.get("ok") else 400)
         except ImessageApprovalApiTokenNotConfiguredError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=503)

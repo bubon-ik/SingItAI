@@ -43,6 +43,7 @@ class ImessageApprovalStore:
                 CREATE TABLE IF NOT EXISTS imessage_pairings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     telegram_user_id TEXT NOT NULL,
+                    channel TEXT NOT NULL DEFAULT 'imessage',
                     code_digest TEXT NOT NULL UNIQUE,
                     status TEXT NOT NULL,
                     created_at INTEGER NOT NULL,
@@ -50,6 +51,12 @@ class ImessageApprovalStore:
                     consumed_at INTEGER
                 )
                 """
+            )
+            _ensure_column(
+                db,
+                "imessage_pairings",
+                "channel",
+                "TEXT NOT NULL DEFAULT 'imessage'",
             )
             db.execute(
                 """
@@ -60,6 +67,31 @@ class ImessageApprovalStore:
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
                 )
+                """
+            )
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS approval_channel_links (
+                    telegram_user_id TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    photon_digest TEXT NOT NULL,
+                    encrypted_photon_user_id TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (telegram_user_id, channel),
+                    UNIQUE (channel, photon_digest)
+                )
+                """
+            )
+            db.execute(
+                """
+                INSERT OR IGNORE INTO approval_channel_links (
+                    telegram_user_id, channel, photon_digest, encrypted_photon_user_id,
+                    created_at, updated_at
+                )
+                SELECT telegram_user_id, 'imessage', photon_digest,
+                       encrypted_photon_user_id, created_at, updated_at
+                FROM imessage_links
                 """
             )
             db.execute(
@@ -123,7 +155,13 @@ class HermesCliNotifier:
         self.runner = runner
         self.timeout = timeout
 
-    def send(self, *, photon_user_id: str, message: str) -> dict[str, object]:
+    def send(
+        self,
+        *,
+        photon_user_id: str,
+        message: str,
+        channel: str = "imessage",
+    ) -> dict[str, object]:
         if not self.hermes_cli:
             return {"ok": False, "error": "hermes_cli_not_configured"}
         home = str(Path(self.hermes_home).expanduser().parent)
@@ -206,8 +244,15 @@ class ImessageApprovalService:
         )
         self._fernet = _build_fernet(self.master_key)
 
-    def create_pairing(self, telegram_user_id: str) -> dict[str, Any]:
+    def create_pairing(
+        self,
+        telegram_user_id: str,
+        *,
+        channel: str = "imessage",
+    ) -> dict[str, Any]:
         user_id = _require_telegram_user_id(telegram_user_id)
+        approval_channel = _normalize_approval_channel(channel)
+        channel_label = _approval_channel_label(approval_channel)
         wallet_status = self.wallet_service.wallet_status(user_id)
         if not wallet_status.get("ok"):
             return {
@@ -226,33 +271,41 @@ class ImessageApprovalService:
                 """
                 UPDATE imessage_pairings
                 SET status = 'expired'
-                WHERE telegram_user_id = ? AND status = 'active'
+                WHERE telegram_user_id = ? AND channel = ? AND status = 'active'
                 """,
-                (user_id,),
+                (user_id, approval_channel),
             )
             db.execute(
                 """
                 INSERT INTO imessage_pairings (
-                    telegram_user_id, code_digest, status, created_at, expires_at
+                    telegram_user_id, channel, code_digest, status, created_at, expires_at
                 )
-                VALUES (?, ?, 'active', ?, ?)
+                VALUES (?, ?, ?, 'active', ?, ?)
                 """,
-                (user_id, code_digest, now, now + PAIRING_TTL_SECONDS),
+                (
+                    user_id,
+                    approval_channel,
+                    code_digest,
+                    now,
+                    now + PAIRING_TTL_SECONDS,
+                ),
             )
             self._record_audit(
                 db,
                 telegram_user_id=user_id,
                 event_type="pairing_created",
                 status="active",
+                metadata={"channel": approval_channel},
             )
         return {
             "ok": True,
             "code": code,
+            "channel": approval_channel,
             "expiresInSeconds": PAIRING_TTL_SECONDS,
             "telegramText": (
-                "Send this code to the Hermes iMessage line within 10 minutes:\n"
+                f"Send this code to the Hermes {channel_label} line within 10 minutes:\n"
                 f"{code}\n\n"
-                "After it is linked, approvals will happen in iMessage."
+                f"After it is linked, approvals can happen in {channel_label}."
             ),
         }
 
@@ -272,7 +325,7 @@ class ImessageApprovalService:
             self._expire_pairings(db, now)
             row = db.execute(
                 """
-                SELECT id, telegram_user_id
+                SELECT id, telegram_user_id, channel
                 FROM imessage_pairings
                 WHERE code_digest = ? AND status = 'active' AND expires_at > ?
                 """,
@@ -282,15 +335,28 @@ class ImessageApprovalService:
                 return _link_failed()
 
             user_id = str(row["telegram_user_id"])
+            approval_channel = _normalize_approval_channel(row["channel"])
+            channel_label = _approval_channel_label(approval_channel)
             existing_user = db.execute(
-                "SELECT telegram_user_id FROM imessage_links WHERE telegram_user_id = ?",
-                (user_id,),
+                """
+                SELECT telegram_user_id
+                FROM approval_channel_links
+                WHERE telegram_user_id = ? AND channel = ?
+                """,
+                (user_id, approval_channel),
             ).fetchone()
             existing_phone = db.execute(
-                "SELECT telegram_user_id FROM imessage_links WHERE photon_digest = ?",
+                """
+                SELECT telegram_user_id, channel
+                FROM approval_channel_links
+                WHERE photon_digest = ?
+                """,
                 (photon_digest,),
-            ).fetchone()
-            if existing_user is not None or existing_phone is not None:
+            ).fetchall()
+            phone_claimed_by_other_user = any(
+                str(row["telegram_user_id"]) != user_id for row in existing_phone
+            )
+            if existing_user is not None or phone_claimed_by_other_user:
                 db.execute(
                     """
                     UPDATE imessage_pairings
@@ -304,25 +370,54 @@ class ImessageApprovalService:
                     telegram_user_id=user_id,
                     event_type="pairing_rejected",
                     status="conflict",
+                    metadata={"channel": approval_channel},
                 )
                 return {
                     "ok": False,
                     "imessageText": (
-                        "This iMessage number is already linked. "
+                        f"This {channel_label} number is already linked. "
                         "Ask the operator to unlink it, then try again."
                     ),
                 }
 
             db.execute(
                 """
-                INSERT INTO imessage_links (
-                    telegram_user_id, photon_digest, encrypted_photon_user_id,
+                INSERT INTO approval_channel_links (
+                    telegram_user_id, channel, photon_digest, encrypted_photon_user_id,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(telegram_user_id, channel)
+                DO UPDATE SET
+                    photon_digest = excluded.photon_digest,
+                    encrypted_photon_user_id = excluded.encrypted_photon_user_id,
+                    updated_at = excluded.updated_at
                 """,
-                (user_id, photon_digest, encrypted_photon, now, now),
+                (
+                    user_id,
+                    approval_channel,
+                    photon_digest,
+                    encrypted_photon,
+                    now,
+                    now,
+                ),
             )
+            if approval_channel == "imessage":
+                db.execute(
+                    """
+                    INSERT INTO imessage_links (
+                        telegram_user_id, photon_digest, encrypted_photon_user_id,
+                        created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(telegram_user_id)
+                    DO UPDATE SET
+                        photon_digest = excluded.photon_digest,
+                        encrypted_photon_user_id = excluded.encrypted_photon_user_id,
+                        updated_at = excluded.updated_at
+                    """,
+                    (user_id, photon_digest, encrypted_photon, now, now),
+                )
             db.execute(
                 """
                 UPDATE imessage_pairings
@@ -336,12 +431,14 @@ class ImessageApprovalService:
                 telegram_user_id=user_id,
                 event_type="identity_linked",
                 status="linked",
+                metadata={"channel": approval_channel},
             )
         return {
             "ok": True,
             "telegramUserId": user_id,
+            "channel": approval_channel,
             "imessageText": (
-                "iMessage linked. Future Sign402 approvals will arrive here."
+                f"{channel_label} linked. Future Sign402 approvals can arrive here."
             ),
         }
 
@@ -371,29 +468,37 @@ class ImessageApprovalService:
             if user_id:
                 rows = db.execute(
                     """
-                    SELECT telegram_user_id
-                    FROM imessage_links
+                    SELECT telegram_user_id, channel
+                    FROM approval_channel_links
                     WHERE telegram_user_id = ?
                     """,
                     (user_id,),
                 ).fetchall()
                 removed = db.execute(
-                    "DELETE FROM imessage_links WHERE telegram_user_id = ?",
+                    "DELETE FROM approval_channel_links WHERE telegram_user_id = ?",
                     (user_id,),
                 ).rowcount
+                db.execute(
+                    "DELETE FROM imessage_links WHERE telegram_user_id = ?",
+                    (user_id,),
+                )
             else:
                 rows = db.execute(
                     """
-                    SELECT telegram_user_id
-                    FROM imessage_links
+                    SELECT telegram_user_id, channel
+                    FROM approval_channel_links
                     WHERE photon_digest = ?
                     """,
                     (photon_digest,),
                 ).fetchall()
                 removed = db.execute(
-                    "DELETE FROM imessage_links WHERE photon_digest = ?",
+                    "DELETE FROM approval_channel_links WHERE photon_digest = ?",
                     (photon_digest,),
                 ).rowcount
+                db.execute(
+                    "DELETE FROM imessage_links WHERE photon_digest = ?",
+                    (photon_digest,),
+                )
 
             for row in rows:
                 self._record_audit(
@@ -401,15 +506,16 @@ class ImessageApprovalService:
                     telegram_user_id=str(row["telegram_user_id"]),
                     event_type="identity_unlinked",
                     status="unlinked",
+                    metadata={"channel": str(row["channel"])},
                 )
 
         return {
             "ok": True,
             "removed": bool(removed),
             "telegramText": (
-                "iMessage approval link removed. Run /connect_imessage to link again."
+                "Approval channel link removed. Run /connect_imessage or /connect_whatsapp to link again."
                 if removed
-                else "No iMessage approval link was found."
+                else "No approval channel link was found."
             ),
         }
 
@@ -430,19 +536,12 @@ class ImessageApprovalService:
         now = self._now()
         with self.store.lock, self.store._database() as db:
             self._expire_approvals(db, now)
-            link = db.execute(
-                """
-                SELECT encrypted_photon_user_id
-                FROM imessage_links
-                WHERE telegram_user_id = ?
-                """,
-                (user_id,),
-            ).fetchone()
-            if link is None:
+            links = self._linked_approval_channels(db, user_id)
+            if not links:
                 return {
                     "ok": False,
                     "telegramText": (
-                        "iMessage is not linked yet. Send /connect_imessage first."
+                        "No approval channel is linked yet. Send /connect_imessage or /connect_whatsapp first."
                     ),
                 }
 
@@ -483,10 +582,6 @@ class ImessageApprovalService:
                 f"Wallet: {_short_address(wallet_address)}",
                 "Funds: No funds will move",
             ]
-            encrypted_photon = str(link["encrypted_photon_user_id"])
-            photon_user_id = self._fernet.decrypt(
-                encrypted_photon.encode("ascii")
-            ).decode("utf-8")
             message = _approval_message(
                 wallet_address=wallet_address,
                 commitment_hash=commitment_hash,
@@ -519,8 +614,9 @@ class ImessageApprovalService:
                 status="pending",
             )
 
-        delivery = self.notifier.send(photon_user_id=photon_user_id, message=message)
-        if not delivery.get("ok"):
+        deliveries = self._send_approval_to_channels(links=links, message=message)
+        delivered_channels = self._delivery_channels(deliveries)
+        if not delivered_channels:
             with self.store.lock, self.store._database() as db:
                 db.execute(
                     """
@@ -542,7 +638,7 @@ class ImessageApprovalService:
             return {
                 "ok": False,
                 "approvalId": approval_id,
-                "telegramText": "could not deliver the iMessage approval. No action was approved.",
+                "telegramText": "could not deliver the approval. No action was approved.",
             }
 
         with self.store.lock, self.store._database() as db:
@@ -554,13 +650,15 @@ class ImessageApprovalService:
                 action_type="sign402_test",
                 commitment_hash=commitment_hash,
                 status="pending",
+                metadata={"channels": delivered_channels},
             )
         return {
             "ok": True,
             "approvalId": approval_id,
             "commitmentHash": commitment_hash,
             "telegramText": (
-                "Test approval sent to iMessage. Reply YES or NO there."
+                f"Test approval sent to {_approval_channel_list_label(delivered_channels)}. "
+                "Reply YES or NO there."
             ),
         }
 
@@ -590,20 +688,13 @@ class ImessageApprovalService:
         now = self._now()
         with self.store.lock, self.store._database() as db:
             self._expire_approvals(db, now)
-            link = db.execute(
-                """
-                SELECT encrypted_photon_user_id
-                FROM imessage_links
-                WHERE telegram_user_id = ?
-                """,
-                (user_id,),
-            ).fetchone()
-            if link is None:
+            links = self._linked_approval_channels(db, user_id)
+            if not links:
                 return {
                     "ok": False,
                     "approved": False,
                     "telegramText": (
-                        "iMessage is not linked yet. Send /connect_imessage first."
+                        "No approval channel is linked yet. Send /connect_imessage or /connect_whatsapp first."
                     ),
                 }
 
@@ -637,10 +728,6 @@ class ImessageApprovalService:
             }
             canonical_json = _canonical_json(canonical)
             approval_id = secrets.token_urlsafe(18)
-            encrypted_photon = str(link["encrypted_photon_user_id"])
-            photon_user_id = self._fernet.decrypt(
-                encrypted_photon.encode("ascii")
-            ).decode("utf-8")
             message = _purchase_approval_message(
                 context_lines=[str(line) for line in context_lines],
                 commitment_hash=normalized_hash,
@@ -674,8 +761,9 @@ class ImessageApprovalService:
                 status="pending",
             )
 
-        delivery = self.notifier.send(photon_user_id=photon_user_id, message=message)
-        if not delivery.get("ok"):
+        deliveries = self._send_approval_to_channels(links=links, message=message)
+        delivered_channels = self._delivery_channels(deliveries)
+        if not delivered_channels:
             with self.store.lock, self.store._database() as db:
                 db.execute(
                     """
@@ -700,7 +788,7 @@ class ImessageApprovalService:
                 "approvalId": approval_id,
                 "approvedHash": "",
                 "commitmentHash": normalized_hash,
-                "telegramText": "could not deliver the iMessage approval. No action was approved.",
+                "telegramText": "could not deliver the approval. No action was approved.",
             }
 
         with self.store.lock, self.store._database() as db:
@@ -712,6 +800,7 @@ class ImessageApprovalService:
                 action_type=str(action_type or "sign402_external"),
                 commitment_hash=normalized_hash,
                 status="pending",
+                metadata={"channels": delivered_channels},
             )
         decision = self._wait_for_approval_decision(
             approval_id=approval_id,
@@ -753,20 +842,13 @@ class ImessageApprovalService:
         now = self._now()
         with self.store.lock, self.store._database() as db:
             self._expire_approvals(db, now)
-            link = db.execute(
-                """
-                SELECT encrypted_photon_user_id
-                FROM imessage_links
-                WHERE telegram_user_id = ?
-                """,
-                (user_id,),
-            ).fetchone()
-            if link is None:
+            links = self._linked_approval_channels(db, user_id)
+            if not links:
                 return {
                     "ok": False,
-                    "status": "imessage_not_linked",
+                    "status": "approval_channel_not_linked",
                     "telegramText": (
-                        "iMessage is not linked yet. Send /connect_imessage first."
+                        "No approval channel is linked yet. Send /connect_imessage or /connect_whatsapp first."
                     ),
                 }
 
@@ -812,10 +894,6 @@ class ImessageApprovalService:
                 resource_url=str(resource_url or ""),
                 payment_requirements=payment_requirements,
             )
-            encrypted_photon = str(link["encrypted_photon_user_id"])
-            photon_user_id = self._fernet.decrypt(
-                encrypted_photon.encode("ascii")
-            ).decode("utf-8")
             message = _purchase_approval_message(
                 context_lines=context_lines,
                 commitment_hash=commitment_hash,
@@ -849,8 +927,9 @@ class ImessageApprovalService:
                 metadata={"toolName": str(tool_name or ""), "resourceUrl": str(resource_url or "")},
             )
 
-        delivery = self.notifier.send(photon_user_id=photon_user_id, message=message)
-        if not delivery.get("ok"):
+        deliveries = self._send_approval_to_channels(links=links, message=message)
+        delivered_channels = self._delivery_channels(deliveries)
+        if not delivered_channels:
             with self.store.lock, self.store._database() as db:
                 db.execute(
                     """
@@ -874,7 +953,7 @@ class ImessageApprovalService:
                 "status": "delivery_failed",
                 "approvalId": approval_id,
                 "commitmentHash": commitment_hash,
-                "telegramText": "could not deliver the iMessage approval. No action was approved.",
+                "telegramText": "could not deliver the approval. No action was approved.",
             }
 
         with self.store.lock, self.store._database() as db:
@@ -886,6 +965,7 @@ class ImessageApprovalService:
                 action_type="sign402_purchase",
                 commitment_hash=commitment_hash,
                 status="pending",
+                metadata={"channels": delivered_channels},
             )
 
         return self._wait_for_approval_decision(
@@ -904,8 +984,11 @@ class ImessageApprovalService:
             link = db.execute(
                 """
                 SELECT telegram_user_id
-                FROM imessage_links
+                FROM approval_channel_links
                 WHERE photon_digest = ?
+                GROUP BY telegram_user_id
+                ORDER BY telegram_user_id ASC
+                LIMIT 1
                 """,
                 (photon_digest,),
             ).fetchone()
@@ -954,8 +1037,11 @@ class ImessageApprovalService:
             link = db.execute(
                 """
                 SELECT telegram_user_id
-                FROM imessage_links
+                FROM approval_channel_links
                 WHERE photon_digest = ?
+                GROUP BY telegram_user_id
+                ORDER BY telegram_user_id ASC
+                LIMIT 1
                 """,
                 (photon_digest,),
             ).fetchone()
@@ -1053,7 +1139,7 @@ class ImessageApprovalService:
                     "status": status,
                     "approvalId": approval_id,
                     "commitmentHash": commitment_hash,
-                    "telegramText": "Purchase was not approved in iMessage.",
+                    "telegramText": "Purchase was not approved.",
                 }
             if now >= expires_at:
                 break
@@ -1063,8 +1149,63 @@ class ImessageApprovalService:
             "status": "timeout",
             "approvalId": approval_id,
             "commitmentHash": commitment_hash,
-            "telegramText": "iMessage approval timed out. No funds were moved.",
+            "telegramText": "Approval timed out. No funds were moved.",
         }
+
+    def _linked_approval_channels(
+        self,
+        db: sqlite3.Connection,
+        telegram_user_id: str,
+    ) -> list[dict[str, str]]:
+        rows = db.execute(
+            """
+            SELECT channel, encrypted_photon_user_id
+            FROM approval_channel_links
+            WHERE telegram_user_id = ?
+            ORDER BY CASE channel WHEN 'imessage' THEN 0 WHEN 'whatsapp' THEN 1 ELSE 2 END,
+                     channel
+            """,
+            (str(telegram_user_id),),
+        ).fetchall()
+        links: list[dict[str, str]] = []
+        for row in rows:
+            channel = _normalize_approval_channel(row["channel"])
+            encrypted_photon = str(row["encrypted_photon_user_id"])
+            photon_user_id = self._fernet.decrypt(
+                encrypted_photon.encode("ascii")
+            ).decode("utf-8")
+            links.append({"channel": channel, "photonUserId": photon_user_id})
+        return links
+
+    def _send_approval_to_channels(
+        self,
+        *,
+        links: list[dict[str, str]],
+        message: str,
+    ) -> list[dict[str, Any]]:
+        deliveries: list[dict[str, Any]] = []
+        for link in links:
+            channel = _normalize_approval_channel(link["channel"])
+            result = self.notifier.send(
+                photon_user_id=str(link["photonUserId"]),
+                message=message,
+                channel=channel,
+            )
+            deliveries.append(
+                {
+                    "channel": channel,
+                    "photonUserId": str(link["photonUserId"]),
+                    "ok": bool(result.get("ok")),
+                }
+            )
+        return deliveries
+
+    def _delivery_channels(self, deliveries: list[dict[str, Any]]) -> list[str]:
+        return [
+            _normalize_approval_channel(str(delivery.get("channel") or ""))
+            for delivery in deliveries
+            if delivery.get("ok")
+        ]
 
     def _now(self) -> int:
         return int(self.now())
@@ -1187,6 +1328,20 @@ def normalize_e164(value: str) -> str:
     return candidate
 
 
+def _ensure_column(
+    db: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    existing = {
+        str(row["name"])
+        for row in db.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in existing:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def _build_fernet(master_key: str) -> Fernet:
     try:
         return Fernet(str(master_key or "").encode("ascii"))
@@ -1199,6 +1354,34 @@ def _require_telegram_user_id(telegram_user_id: str) -> str:
     if not user_id:
         raise ValueError("telegramUserId is required")
     return user_id
+
+
+def _normalize_approval_channel(channel: str) -> str:
+    normalized = str(channel or "imessage").strip().lower().replace("-", "_")
+    aliases = {
+        "ios": "imessage",
+        "i_message": "imessage",
+        "sms": "imessage",
+        "wa": "whatsapp",
+        "whats_app": "whatsapp",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in {"imessage", "whatsapp"}:
+        raise ValueError("approval channel must be imessage or whatsapp")
+    return normalized
+
+
+def _approval_channel_label(channel: str) -> str:
+    return "WhatsApp" if _normalize_approval_channel(channel) == "whatsapp" else "iMessage"
+
+
+def _approval_channel_list_label(channels: list[str]) -> str:
+    labels = [_approval_channel_label(channel) for channel in channels]
+    if not labels:
+        return "iMessage"
+    if len(labels) == 1:
+        return labels[0]
+    return ", ".join(labels[:-1]) + " and " + labels[-1]
 
 
 def _generate_pairing_code() -> str:
