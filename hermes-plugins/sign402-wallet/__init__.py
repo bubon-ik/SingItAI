@@ -236,7 +236,7 @@ def _build_start_handler():
                 "create-wallet",
                 identity,
             )
-            return _start_text(wallet_text)
+            return _start_text(wallet_text, support_id=identity.user_id)
         except GatewayClientError as exc:
             return exc.user_message
         except Exception as exc:
@@ -346,10 +346,13 @@ def _build_llm_code_handler():
     return _build_llm_handler("verify")
 
 
-def _start_text(wallet_text: str) -> str:
+def _start_text(wallet_text: str, *, support_id: str = "") -> str:
+    support = str(support_id or "").strip()
+    support_line = f"Support ID: {support}\n\n" if support else ""
     return (
         "Welcome to Sign402.\n\n"
         f"{wallet_text.strip()}\n\n"
+        f"{support_line}"
         "Next steps:\n"
         "1. Wallet - fund this Base wallet with ETH for gas and USDC/SINGIT for payments.\n"
         "2. Balance - check ETH, USDC, and SINGIT.\n"
@@ -778,7 +781,7 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
         if command == "start":
             client = _client_factory()
             wallet_text = client.execute("create-wallet", identity)
-            text = _start_text(wallet_text)
+            text = _start_text(wallet_text, support_id=identity.user_id)
         elif command == "help":
             text = _help_text()
         elif command == "wallet":

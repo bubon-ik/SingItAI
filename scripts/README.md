@@ -63,11 +63,16 @@ local state without printing private keys, encrypted values, or API tokens.
 
 ```bash
 cd ~/apps/sign402
+python3 scripts/sign402-operator.py users
+python3 scripts/sign402-operator.py users --search alice
 python3 scripts/sign402-operator.py user --telegram-id 8538252718
 python3 scripts/sign402-operator.py find-imessage +420736255120
 python3 scripts/sign402-operator.py pending --telegram-id 8538252718
 python3 scripts/sign402-operator.py last-purchase --telegram-id 8538252718
 ```
+
+Telegram does not expose a user's phone number to the bot. Use `users` or ask
+the user for the Support ID shown by `/start`.
 
 To remove a broken iMessage link, use the authenticated localhost gateway
 endpoint through the CLI:

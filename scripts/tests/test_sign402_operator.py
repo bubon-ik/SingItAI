@@ -125,6 +125,30 @@ class Sign402OperatorTests(unittest.TestCase):
             )
         db.close()
 
+    def seed_second_user_wallet(self):
+        db = sqlite3.connect(self.root / "user-wallets.db")
+        with db:
+            db.execute(
+                """
+                INSERT INTO user_wallets (
+                    telegram_user_id, telegram_username, chain, wallet_address,
+                    encrypted_private_key, status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "456",
+                    "bob",
+                    "base",
+                    "0x2222222222222222222222222222222222222222",
+                    "second-secret-private-key",
+                    "created",
+                    1_800_000_100,
+                    1_800_000_110,
+                ),
+            )
+        db.close()
+
     def seed_imessage(self):
         phone = "+15551234567"
         encrypted_phone = self.fernet.encrypt(phone.encode("utf-8")).decode("ascii")
@@ -309,6 +333,31 @@ class Sign402OperatorTests(unittest.TestCase):
         self.assertIn("Bitrefill: DELIVERED Bitrefill Gift Card $0.10", report)
         self.assertNotIn("super-secret-private-key", report)
         self.assertNotIn("secret-token-hash", report)
+
+    def test_users_report_lists_recent_users_without_known_phone(self):
+        operator = load_operator()
+        self.seed_user_wallet()
+        self.seed_second_user_wallet()
+        self.seed_imessage()
+
+        report = operator.build_users_report(self.make_config(), limit=10)
+
+        self.assertIn("Recent users:", report)
+        self.assertIn("456 @bob 0x2222...2222 iMessage not linked", report)
+        self.assertIn("123 @alice 0x1111...1111 iMessage linked", report)
+        self.assertLess(report.index("456 @bob"), report.index("123 @alice"))
+        self.assertNotIn("second-secret-private-key", report)
+        self.assertNotIn("super-secret-private-key", report)
+
+    def test_users_report_filters_by_id_or_username(self):
+        operator = load_operator()
+        self.seed_user_wallet()
+        self.seed_second_user_wallet()
+
+        report = operator.build_users_report(self.make_config(), search="ali")
+
+        self.assertIn("123 @alice", report)
+        self.assertNotIn("456 @bob", report)
 
     def test_find_imessage_locates_telegram_user_without_digest(self):
         operator = load_operator()

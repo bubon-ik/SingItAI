@@ -812,6 +812,7 @@ class PluginRegistrationTests(unittest.TestCase):
 
         self.assertIn("Welcome to Sign402.", text)
         self.assertIn("Your Base agent wallet:\n0xabc", text)
+        self.assertIn("Support ID: 1045618308", text)
         self.assertIn("1. Wallet", text)
         self.assertIn("2. Balance", text)
         self.assertIn("3. Connect iMessage", text)

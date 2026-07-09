@@ -56,7 +56,9 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config()
 
     try:
-        if args.command == "user":
+        if args.command == "users":
+            print(build_users_report(config, limit=args.limit, search=args.search))
+        elif args.command == "user":
             print(build_user_report(config, args.telegram_id))
         elif args.command == "find-imessage":
             print(find_imessage_report(config, args.phone))
@@ -86,6 +88,10 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Inspect and repair local Sign402 user state."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    users = subparsers.add_parser("users", help="List recent Telegram users")
+    users.add_argument("--limit", type=int, default=50)
+    users.add_argument("--search", default="")
 
     user = subparsers.add_parser("user", help="Show one Telegram user's state")
     user.add_argument("--telegram-id", required=True)
@@ -198,6 +204,38 @@ def build_user_report(config: OperatorConfig, telegram_id: str) -> str:
     return "\n".join(lines)
 
 
+def build_users_report(
+    config: OperatorConfig,
+    *,
+    limit: int = 50,
+    search: str = "",
+) -> str:
+    rows = _recent_wallet_users(config.user_wallet_db, limit=max(1, min(int(limit), 200)))
+    needle = str(search or "").strip().lower()
+    if needle:
+        rows = [
+            row
+            for row in rows
+            if needle in str(row.get("telegram_user_id", "")).lower()
+            or needle in str(row.get("telegram_username", "")).lower()
+            or needle in str(row.get("wallet_address", "")).lower()
+        ]
+    if not rows:
+        return "Recent users:\nnone"
+
+    lines = ["Recent users:"]
+    linked_user_ids = _linked_imessage_user_ids(config.imessage_db)
+    for row in rows:
+        user_id = str(row["telegram_user_id"])
+        username = str(row.get("telegram_username") or "")
+        username_text = f" @{username}" if username else " -"
+        wallet = _short_address(str(row.get("wallet_address") or ""))
+        imessage = "linked" if user_id in linked_user_ids else "not linked"
+        last_seen = _format_time(row.get("updated_at"))
+        lines.append(f"{user_id}{username_text} {wallet} iMessage {imessage} last {last_seen}")
+    return "\n".join(lines)
+
+
 def find_imessage_report(config: OperatorConfig, phone: str) -> str:
     normalized = normalize_e164(phone)
     row = _imessage_for_phone(config, normalized)
@@ -306,6 +344,31 @@ def _wallet_for_user(path: Path, user_id: str) -> dict[str, Any] | None:
             (user_id,),
         ).fetchone()
     return dict(row) if row else None
+
+
+def _recent_wallet_users(path: Path, limit: int) -> list[dict[str, Any]]:
+    with _connect_readonly(path) as db:
+        if db is None:
+            return []
+        rows = db.execute(
+            """
+            SELECT telegram_user_id, telegram_username, chain, wallet_address, status,
+                   created_at, updated_at
+            FROM user_wallets
+            ORDER BY updated_at DESC, created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _linked_imessage_user_ids(path: Path) -> set[str]:
+    with _connect_readonly(path) as db:
+        if db is None:
+            return set()
+        rows = db.execute("SELECT telegram_user_id FROM imessage_links").fetchall()
+    return {str(row["telegram_user_id"]) for row in rows}
 
 
 def _imessage_for_user(config: OperatorConfig, user_id: str) -> dict[str, Any] | None:
@@ -463,6 +526,13 @@ def _decrypt_phone(master_key: str, encrypted_value: str) -> str:
 def _display_username(username: str) -> str:
     value = str(username or "").strip()
     return f" (@{value})" if value else ""
+
+
+def _short_address(address: str) -> str:
+    value = str(address or "").strip()
+    if len(value) <= 12:
+        return value or "no-wallet"
+    return f"{value[:6]}...{value[-4:]}"
 
 
 def _format_imessage_line(row: dict[str, Any] | None) -> str:
