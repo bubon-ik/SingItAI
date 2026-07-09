@@ -32,6 +32,7 @@ _IMESSAGE_OPERATION_PATHS = {
     "link": "/agent/imessage/link",
     "pending": "/agent/imessage/pending",
     "decision": "/agent/imessage/decision",
+    "unlink": "/agent/imessage/unlink",
 }
 _BITREFILL_QUOTE_PATH = "/agent/quote-bitrefill"
 _BITREFILL_BUY_PATH = "/agent/buy-wallet-bitrefill"
@@ -478,7 +479,8 @@ class GatewayClient:
     def _safe_http_error_message(self, exc: HTTPError, *, operation: str) -> str | None:
         is_bitrefill = operation in {"quote-bitrefill", "buy-wallet-bitrefill"}
         is_llm = operation.startswith("llm-")
-        if not is_bitrefill and not is_llm:
+        is_imessage = operation in _IMESSAGE_OPERATION_PATHS
+        if not is_bitrefill and not is_llm and not is_imessage:
             return None
         try:
             body = exc.read(self.max_response_bytes + 1)
@@ -491,6 +493,12 @@ class GatewayClient:
         except (UnicodeDecodeError, json.JSONDecodeError):
             return None
         if not isinstance(payload, dict):
+            return None
+        if is_imessage:
+            for key in ("imessageText", "telegramText"):
+                text = payload.get(key)
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
             return None
         if is_llm:
             telegram_text = payload.get("telegramText")

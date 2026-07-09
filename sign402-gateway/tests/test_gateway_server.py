@@ -1390,6 +1390,32 @@ class GatewayServerTests(unittest.TestCase):
             approval_id=None,
         )
 
+    def test_imessage_unlink_endpoint_removes_link_by_telegram_user(self):
+        server = DummyServer()
+        server.imessage_approval_service.unlink_photon_sender.return_value = {
+            "ok": True,
+            "removed": True,
+            "telegramText": "iMessage approval link removed.",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/imessage/unlink",
+                {"telegramUserId": "1045618308"},
+                server=server,
+                headers=self.photon_auth_headers(),
+            )
+
+        response = self.response_text(handler)
+        body = self.response_json(handler)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertTrue(body["removed"])
+        server.imessage_approval_service.unlink_photon_sender.assert_called_once_with(
+            telegram_user_id="1045618308",
+            photon_user_id="",
+        )
+
     def test_test_imessage_approval_endpoint_uses_telegram_identity(self):
         server = DummyServer()
         server.imessage_approval_service.create_test_approval.return_value = {

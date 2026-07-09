@@ -137,6 +137,7 @@ class GatewayClientTests(unittest.TestCase):
             "link": "/agent/imessage/link",
             "pending": "/agent/imessage/pending",
             "decision": "/agent/imessage/decision",
+            "unlink": "/agent/imessage/unlink",
         }
 
         for operation, path in cases.items():
@@ -147,6 +148,38 @@ class GatewayClientTests(unittest.TestCase):
                     opener.requests[0][0].full_url,
                     f"http://127.0.0.1:8099{path}",
                 )
+
+    def test_execute_imessage_surfaces_safe_gateway_text(self):
+        error = HTTPError(
+            "http://127.0.0.1:8099/agent/imessage/link",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "imessageText": (
+                            "This iMessage number is already linked. "
+                            "Ask the operator to unlink it, then try again."
+                        ),
+                    }
+                ).encode("utf-8")
+            ),
+        )
+        opener = RecordingOpener(error=error)
+
+        with self.assertRaises(GatewayClientError) as caught:
+            self.make_client(opener).execute_imessage(
+                "link",
+                {"code": "ABCDEFGH", "photonUserId": "+15551234567"},
+            )
+
+        self.assertEqual(
+            caught.exception.user_message,
+            "This iMessage number is already linked. "
+            "Ask the operator to unlink it, then try again.",
+        )
 
     def test_from_env_reads_independent_photon_api_token(self):
         client = GatewayClient.from_env(

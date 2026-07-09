@@ -308,7 +308,8 @@ class ImessageApprovalService:
                 return {
                     "ok": False,
                     "imessageText": (
-                        "Could not link this iMessage sender. Please return to Telegram."
+                        "This iMessage number is already linked. "
+                        "Ask the operator to unlink it, then try again."
                     ),
                 }
 
@@ -341,6 +342,74 @@ class ImessageApprovalService:
             "telegramUserId": user_id,
             "imessageText": (
                 "iMessage linked. Future Sign402 approvals will arrive here."
+            ),
+        }
+
+    def unlink_photon_sender(
+        self,
+        *,
+        telegram_user_id: str = "",
+        photon_user_id: str = "",
+    ) -> dict[str, Any]:
+        user_id = str(telegram_user_id or "").strip()
+        photon_value = str(photon_user_id or "").strip()
+        if user_id:
+            user_id = _require_telegram_user_id(user_id)
+        if not user_id and not photon_value:
+            return {
+                "ok": False,
+                "removed": False,
+                "telegramText": "Provide a Telegram user ID or iMessage phone number to unlink.",
+            }
+
+        photon_digest = ""
+        if photon_value:
+            normalized_photon = normalize_e164(photon_value)
+            photon_digest = self._digest(f"photon:{normalized_photon}")
+
+        with self.store.lock, self.store._database() as db:
+            if user_id:
+                rows = db.execute(
+                    """
+                    SELECT telegram_user_id
+                    FROM imessage_links
+                    WHERE telegram_user_id = ?
+                    """,
+                    (user_id,),
+                ).fetchall()
+                removed = db.execute(
+                    "DELETE FROM imessage_links WHERE telegram_user_id = ?",
+                    (user_id,),
+                ).rowcount
+            else:
+                rows = db.execute(
+                    """
+                    SELECT telegram_user_id
+                    FROM imessage_links
+                    WHERE photon_digest = ?
+                    """,
+                    (photon_digest,),
+                ).fetchall()
+                removed = db.execute(
+                    "DELETE FROM imessage_links WHERE photon_digest = ?",
+                    (photon_digest,),
+                ).rowcount
+
+            for row in rows:
+                self._record_audit(
+                    db,
+                    telegram_user_id=str(row["telegram_user_id"]),
+                    event_type="identity_unlinked",
+                    status="unlinked",
+                )
+
+        return {
+            "ok": True,
+            "removed": bool(removed),
+            "telegramText": (
+                "iMessage approval link removed. Run /connect_imessage to link again."
+                if removed
+                else "No iMessage approval link was found."
             ),
         }
 

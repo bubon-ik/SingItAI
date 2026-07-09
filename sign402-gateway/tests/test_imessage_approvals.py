@@ -124,7 +124,24 @@ class ImessageApprovalTests(unittest.TestCase):
         conflict = service.link_photon_sender(second["code"], "+15551234567")
 
         self.assertFalse(conflict["ok"])
-        self.assertIn("could not link", conflict["imessageText"].lower())
+        self.assertIn("already linked", conflict["imessageText"].lower())
+        self.assertIn("unlink", conflict["imessageText"].lower())
+
+    def test_unlink_by_telegram_user_allows_phone_to_be_relinked(self):
+        service, wallet_service, _store = self.make_service()
+        wallet_service.create_wallet("1045618308")
+        wallet_service.create_wallet("2045618308")
+        first = service.create_pairing("1045618308")
+        service.link_photon_sender(first["code"], "+15551234567")
+
+        removed = service.unlink_photon_sender(telegram_user_id="1045618308")
+        second = service.create_pairing("2045618308")
+        relinked = service.link_photon_sender(second["code"], "+15551234567")
+
+        self.assertTrue(removed["ok"])
+        self.assertTrue(removed["removed"])
+        self.assertTrue(relinked["ok"])
+        self.assertEqual(relinked["telegramUserId"], "2045618308")
 
     def test_test_approval_sends_canonical_message_and_accepts_yes_once(self):
         service, _wallet_service, _store, notifier = self.make_linked_service()

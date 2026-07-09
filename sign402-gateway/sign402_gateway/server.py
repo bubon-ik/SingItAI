@@ -433,6 +433,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                         "/agent/llm-credits",
                         "/agent/imessage/pairing",
                         "/agent/imessage/link",
+                        "/agent/imessage/unlink",
                         "/agent/imessage/pending",
                         "/agent/imessage/decision",
                         "/agent/test-imessage-approval",
@@ -545,6 +546,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if path == "/agent/imessage/link":
             self._handle_agent_imessage_link()
+            return
+        if path == "/agent/imessage/unlink":
+            self._handle_agent_imessage_unlink()
             return
         if path == "/agent/imessage/pending":
             self._handle_agent_imessage_pending()
@@ -1023,6 +1027,31 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 _read_photon_user_id(payload),
             )
             self._send_json(_without_private_key_material(result), status=200 if result.get("ok") else 400)
+        except ImessageApprovalApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except ImessageApprovalApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_imessage_unlink(self) -> None:
+        try:
+            _require_imessage_approval_api_token(self)
+            payload = self._read_json()
+            result = self.server.imessage_approval_service.unlink_photon_sender(
+                telegram_user_id=_read_optional_text(
+                    payload,
+                    ("telegramUserId", "telegram_user_id", "userId"),
+                ),
+                photon_user_id=_read_optional_text(
+                    payload,
+                    ("photonUserId", "photon_user_id"),
+                ),
+            )
+            self._send_json(
+                _without_private_key_material(result),
+                status=200 if result.get("ok") else 400,
+            )
         except ImessageApprovalApiTokenNotConfiguredError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=503)
         except ImessageApprovalApiAuthError as exc:
@@ -4100,6 +4129,14 @@ def _read_required_text(payload: dict[str, Any], key: str) -> str:
     if not value:
         raise ValueError(f"{key} is required")
     return value
+
+
+def _read_optional_text(payload: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = str(payload.get(key, "") or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _read_evm_address(payload: dict[str, Any], key: str) -> str:

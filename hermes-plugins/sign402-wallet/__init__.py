@@ -351,11 +351,11 @@ def _start_text(wallet_text: str) -> str:
         "Welcome to Sign402.\n\n"
         f"{wallet_text.strip()}\n\n"
         "Next steps:\n"
-        "1. Fund this Base wallet with ETH for gas and USDC for payments.\n"
-        "2. Run /balance to check funds.\n"
-        "3. Run /limits to review spending limits.\n"
-        "4. Run /connect_imessage to link iMessage approvals.\n\n"
-        "After that, try: buy crypto news"
+        "1. Wallet - fund this Base wallet with ETH for gas and USDC/SINGIT for payments.\n"
+        "2. Balance - check ETH, USDC, and SINGIT.\n"
+        "3. Connect iMessage - link approvals from your phone number, not Apple ID email.\n"
+        "4. Limits - review or set spending limits.\n"
+        "5. Buy - use the buttons or send a request like: buy crypto news"
     )
 
 

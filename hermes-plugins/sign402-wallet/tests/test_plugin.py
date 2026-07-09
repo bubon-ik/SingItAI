@@ -812,9 +812,12 @@ class PluginRegistrationTests(unittest.TestCase):
 
         self.assertIn("Welcome to Sign402.", text)
         self.assertIn("Your Base agent wallet:\n0xabc", text)
-        self.assertIn("/balance", text)
-        self.assertIn("/connect_imessage", text)
-        self.assertIn("/limits", text)
+        self.assertIn("1. Wallet", text)
+        self.assertIn("2. Balance", text)
+        self.assertIn("3. Connect iMessage", text)
+        self.assertIn("phone number", text)
+        self.assertIn("4. Limits", text)
+        self.assertIn("5. Buy", text)
         self.assertEqual(len(client.calls), 1)
         operation, identity = client.calls[0]
         self.assertEqual(operation, "create-wallet")
