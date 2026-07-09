@@ -1929,6 +1929,64 @@ class PluginRegistrationTests(unittest.TestCase):
         )
         self.assertEqual(gateway.pairing_store.approved, [("photon", "HERMES1")])
 
+    def test_photon_pairing_code_resolves_shared_user_id_before_link(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.imessage_results["link"] = {
+            "ok": True,
+            "imessageText": "iMessage linked.",
+        }
+        plugin._client_factory = lambda: client
+        photon_requests = []
+
+        def fake_photon_opener(request, timeout):
+            photon_requests.append((request, timeout))
+            return FakePhotonResponse()
+
+        plugin._photon_api_opener = fake_photon_opener
+        plugin.register(context)
+        gateway = FakeGateway()
+
+        with patch.dict(
+            plugin.os.environ,
+            {
+                "PHOTON_PROJECT_ID": "project-id",
+                "PHOTON_PROJECT_SECRET": "project-secret",
+                "PHOTON_API_BASE_URL": "https://spectrum.test",
+            },
+        ):
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "ABCDEFGH",
+                    "c96ff937-53b5-4c86-8438-3ea65d8b5c44",
+                    username="Photon User",
+                    platform="photon",
+                    chat_id="photon-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(len(photon_requests), 1)
+        request, timeout = photon_requests[0]
+        self.assertEqual(
+            request.full_url,
+            "https://spectrum.test/projects/project-id/users/c96ff937-53b5-4c86-8438-3ea65d8b5c44/",
+        )
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(timeout, plugin._PHOTON_API_TIMEOUT_SECONDS)
+        self.assertEqual(
+            client.imessage_calls,
+            [
+                (
+                    "link",
+                    {"code": "ABCDEFGH", "photonUserId": "+420773173967"},
+                )
+            ],
+        )
+        self.assertEqual(gateway.adapters["photon"].sent, [("photon-chat", "iMessage linked.")])
+
     def test_imessage_platform_pairing_code_is_consumed_before_llm(self):
         plugin = load_plugin()
         context = FakeContext()
@@ -2027,6 +2085,54 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertEqual(
             gateway.adapters["photon"].sent,
             [("photon-chat", "Sign402 test approval approved.")],
+        )
+
+    def test_photon_yes_resolves_shared_user_id_before_decision(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.imessage_results["pending"] = {"ok": True, "pending": True}
+        client.imessage_results["decision"] = {
+            "ok": True,
+            "imessageText": "Sign402 test approval approved.",
+        }
+        plugin._client_factory = lambda: client
+
+        def fake_photon_opener(request, timeout):
+            return FakePhotonResponse()
+
+        plugin._photon_api_opener = fake_photon_opener
+        plugin.register(context)
+        gateway = FakeGateway()
+
+        with patch.dict(
+            plugin.os.environ,
+            {
+                "PHOTON_PROJECT_ID": "project-id",
+                "PHOTON_PROJECT_SECRET": "project-secret",
+                "PHOTON_API_BASE_URL": "https://spectrum.test",
+            },
+        ):
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "yes",
+                    "c96ff937-53b5-4c86-8438-3ea65d8b5c44",
+                    platform="photon",
+                    chat_id="photon-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(
+            client.imessage_calls,
+            [
+                ("pending", {"photonUserId": "+420773173967"}),
+                (
+                    "decision",
+                    {"photonUserId": "+420773173967", "decision": "YES"},
+                ),
+            ],
         )
 
 

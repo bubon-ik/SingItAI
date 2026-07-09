@@ -158,6 +158,7 @@ _BITREFILL_USER_COUNTRIES: dict[str, str] = {}
 _BITREFILL_SESSIONS: dict[str, dict] = {}
 _WITHDRAW_SESSIONS: dict[str, dict] = {}
 _IMESSAGE_CONNECT_SESSIONS: dict[str, dict] = {}
+_PHOTON_USER_PHONE_CACHE: dict[str, str] = {}
 
 
 def _default_background_runner(callback: Callable[[], None]) -> None:
@@ -419,6 +420,47 @@ def _photon_api_base_url() -> str:
     return _env_first(_PHOTON_API_BASE_URL_ENV_NAMES) or "https://spectrum.photon.codes"
 
 
+def _photon_project_credentials() -> tuple[str, str]:
+    project_id = _env_first(_PHOTON_PROJECT_ID_ENV_NAMES)
+    project_secret = _env_first(_PHOTON_PROJECT_SECRET_ENV_NAMES)
+    if not project_id or not project_secret:
+        raise GatewayClientError(
+            "iMessage registration is not configured. Please contact the operator."
+        )
+    return project_id, project_secret
+
+
+def _photon_auth_headers(project_id: str, project_secret: str) -> dict[str, str]:
+    basic = base64.b64encode(f"{project_id}:{project_secret}".encode("utf-8")).decode(
+        "ascii"
+    )
+    return {
+        "Authorization": f"Basic {basic}",
+        "Accept": "application/json",
+        "User-Agent": "Sign402-Hermes/0.1",
+    }
+
+
+def _read_photon_json_response(response) -> dict:
+    try:
+        body = response.read()
+    finally:
+        close = getattr(response, "close", None)
+        if callable(close):
+            close()
+    try:
+        parsed = json.loads(body.decode("utf-8") if isinstance(body, bytes) else body)
+    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError) as exc:
+        raise GatewayClientError(
+            "Could not reach the iMessage registration service. Please try again."
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise GatewayClientError(
+            "Could not reach the iMessage registration service. Please try again."
+        )
+    return parsed
+
+
 def _is_e164_phone_number(value: str) -> bool:
     return re.fullmatch(r"\+[1-9]\d{6,14}", str(value or "").strip()) is not None
 
@@ -435,12 +477,7 @@ def _imessage_phone_prompt() -> str:
 
 
 def _register_photon_shared_user(phone_number: str, identity: TelegramIdentity) -> str:
-    project_id = _env_first(_PHOTON_PROJECT_ID_ENV_NAMES)
-    project_secret = _env_first(_PHOTON_PROJECT_SECRET_ENV_NAMES)
-    if not project_id or not project_secret:
-        raise GatewayClientError(
-            "iMessage registration is not configured. Please contact the operator."
-        )
+    project_id, project_secret = _photon_project_credentials()
 
     payload = {
         "type": "shared",
@@ -449,18 +486,13 @@ def _register_photon_shared_user(phone_number: str, identity: TelegramIdentity) 
     if identity.username:
         payload["firstName"] = identity.username
 
-    basic = base64.b64encode(f"{project_id}:{project_secret}".encode("utf-8")).decode(
-        "ascii"
-    )
     base_url = _photon_api_base_url().rstrip("/")
     request = Request(
         f"{base_url}/projects/{project_id}/users/",
         data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
         headers={
-            "Authorization": f"Basic {basic}",
+            **_photon_auth_headers(project_id, project_secret),
             "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "Sign402-Hermes/0.1",
         },
         method="POST",
     )
@@ -470,28 +502,53 @@ def _register_photon_shared_user(phone_number: str, identity: TelegramIdentity) 
         raise GatewayClientError(
             "Could not register this iMessage number. Please check the phone number and try again."
         ) from exc
-    try:
-        body = response.read()
-    finally:
-        close = getattr(response, "close", None)
-        if callable(close):
-            close()
-    try:
-        parsed = json.loads(body.decode("utf-8") if isinstance(body, bytes) else body)
-    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError) as exc:
-        raise GatewayClientError(
-            "Could not register this iMessage number. Please try again."
-        ) from exc
+    parsed = _read_photon_json_response(response)
     if not isinstance(parsed, dict) or parsed.get("succeed") is not True:
         raise GatewayClientError(
             "Could not register this iMessage number. Please check the phone number and try again."
         )
     data = parsed.get("data")
     if isinstance(data, dict):
+        user_id = str(data.get("id") or "").strip()
+        phone = str(data.get("phoneNumber") or "").strip()
+        if user_id and phone:
+            _PHOTON_USER_PHONE_CACHE[user_id] = phone
         assigned_phone_number = str(data.get("assignedPhoneNumber") or "").strip()
         if assigned_phone_number:
             return assigned_phone_number
     return ""
+
+
+def _resolve_photon_sender_id(photon_user_id: str) -> str:
+    raw_id = str(photon_user_id or "").strip()
+    if not raw_id or _is_e164_phone_number(raw_id):
+        return raw_id
+    cached = _PHOTON_USER_PHONE_CACHE.get(raw_id)
+    if cached:
+        return cached
+
+    project_id, project_secret = _photon_project_credentials()
+    base_url = _photon_api_base_url().rstrip("/")
+    request = Request(
+        f"{base_url}/projects/{project_id}/users/{raw_id}/",
+        headers=_photon_auth_headers(project_id, project_secret),
+        method="GET",
+    )
+    try:
+        response = _photon_api_opener(request, timeout=_PHOTON_API_TIMEOUT_SECONDS)
+    except (HTTPError, TimeoutError, URLError, OSError) as exc:
+        raise GatewayClientError(
+            "Could not identify this iMessage sender. Please try connecting iMessage again."
+        ) from exc
+    parsed = _read_photon_json_response(response)
+    data = parsed.get("data")
+    phone = str(data.get("phoneNumber") or "").strip() if isinstance(data, dict) else ""
+    if not _is_e164_phone_number(phone):
+        raise GatewayClientError(
+            "Could not identify this iMessage sender. Please try connecting iMessage again."
+        )
+    _PHOTON_USER_PHONE_CACHE[raw_id] = phone
+    return phone
 
 
 def _connect_imessage_after_phone_registration(
@@ -1826,9 +1883,10 @@ def _run_in_background(callback: Callable[[], None]) -> None:
 
 def _handle_photon_pairing_code(*, code: str, photon_user_id: str, source, gateway):
     try:
+        resolved_photon_user_id = _resolve_photon_sender_id(photon_user_id)
         result = _client_factory().execute_imessage(
             "link",
-            {"code": code, "photonUserId": photon_user_id},
+            {"code": code, "photonUserId": resolved_photon_user_id},
         )
         text = _imessage_text(result)
         if result.get("ok"):
@@ -1849,16 +1907,17 @@ def _handle_photon_pairing_code(*, code: str, photon_user_id: str, source, gatew
 
 def _handle_photon_decision(*, decision: str, photon_user_id: str, source, gateway):
     try:
+        resolved_photon_user_id = _resolve_photon_sender_id(photon_user_id)
         client = _client_factory()
         pending = client.execute_imessage(
             "pending",
-            {"photonUserId": photon_user_id},
+            {"photonUserId": resolved_photon_user_id},
         )
         if not pending.get("pending"):
             return None
         result = client.execute_imessage(
             "decision",
-            {"photonUserId": photon_user_id, "decision": decision},
+            {"photonUserId": resolved_photon_user_id, "decision": decision},
         )
         _send_fixed_reply(gateway, source, _imessage_text(result))
         return dict(_SKIP_RESULT)
