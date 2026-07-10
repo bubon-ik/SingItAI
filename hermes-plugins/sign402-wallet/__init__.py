@@ -42,10 +42,14 @@ _TELEGRAM_TOKEN_ENV_NAMES = (
     "HERMES_TELEGRAM_BOT_TOKEN",
     "TELEGRAM_TOKEN",
 )
+_SIGN402_TELEGRAM_ALLOWED_USERS_ENV = "SIGN402_TELEGRAM_ALLOWED_USERS"
 _TELEGRAM_SEND_TIMEOUT_SECONDS = 15
 _TELEGRAM_COMMAND_MENU_TIMEOUT_SECONDS = 10
 _TELEGRAM_COMMAND_MENU_REFRESH_DELAYS_SECONDS = (0, 2, 8)
 _TELEGRAM_MESSAGE_CHUNK_SIZE = 3900
+_USER_ACCESS_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
+_USER_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 5 * 60
+_USER_ACCESS_TOKEN_CACHE_MAX_USERS = 4096
 _TELEGRAM_PAID_TOOL_STARTED_MESSAGE = (
     "Sign402 purchase started. Approve it in iMessage; I'll post the result here."
 )
@@ -64,9 +68,8 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "wallet", "description": "Show or create your Base wallet"},
     {"command": "balance", "description": "Show wallet balances"},
     {"command": "connect_imessage", "description": "Link iMessage approvals"},
-    {"command": "connect_whatsapp", "description": "Link WhatsApp approvals"},
     {"command": "limits", "description": "Show or set spending limits"},
-    {"command": "withdraw", "description": "Withdraw ERC-20 tokens"},
+    {"command": "withdraw", "description": "Withdraw Base assets"},
     {"command": "bitrefill", "description": "Buy Bitrefill with SINGIT"},
     {"command": "last_purchase", "description": "Reveal latest purchase"},
     {"command": "llm_buy", "description": "Buy Bankr LLM credits"},
@@ -74,7 +77,7 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
 )
 _TELEGRAM_MAIN_MENU_BUTTONS = (
     ("Wallet", "Balance"),
-    ("Connect iMessage", "Connect WhatsApp"),
+    ("Connect iMessage",),
     ("Limits",),
     ("Withdraw",),
     ("Buy Bitrefill", "Buy LLM Credits"),
@@ -84,7 +87,6 @@ _TELEGRAM_BUTTON_COMMANDS = {
     "wallet": "wallet",
     "balance": "balance",
     "connect imessage": "connect-imessage",
-    "connect whatsapp": "connect-whatsapp",
     "limits": "limits",
     "withdraw": "withdraw",
     "buy bitrefill": "bitrefill",
@@ -131,10 +133,6 @@ _IMESSAGE_COMMANDS = {
         "connect-imessage",
         "Link your iMessage number for Sign402 approvals",
     ),
-    "connect-whatsapp": (
-        "connect-whatsapp",
-        "Link your WhatsApp number for Sign402 approvals",
-    ),
 }
 _IMESSAGE_PUBLIC_LINE_ENV_NAMES = (
     "SIGN402_IMESSAGE_PUBLIC_LINE",
@@ -149,6 +147,9 @@ _PHOTON_AUTO_REGISTER_ENV_NAMES = (
 )
 _PHOTON_API_BASE_URL_ENV_NAMES = ("PHOTON_API_BASE_URL", "SPECTRUM_API_BASE_URL")
 _PHOTON_API_TIMEOUT_SECONDS = 15
+_PHOTON_REGISTRATION_WINDOW_SECONDS = 60 * 60
+_PHOTON_REGISTRATION_MAX_ATTEMPTS_PER_USER = 3
+_PHOTON_REGISTRATION_MAX_ATTEMPTS_GLOBAL = 120
 _LIMITS_USAGE = "Usage: /limits 0.005 0.05 or /set_limits 0.005 0.05"
 _BITREFILL_USAGE = "Usage: /bitrefill <productId> <packageId> [country]"
 _LLM_BUY_USAGE = "Usage: /llm_buy <usd> <email> [token]"
@@ -166,6 +167,9 @@ _BITREFILL_SESSIONS: dict[str, dict] = {}
 _WITHDRAW_SESSIONS: dict[str, dict] = {}
 _IMESSAGE_CONNECT_SESSIONS: dict[str, dict] = {}
 _PHOTON_USER_PHONE_CACHE: dict[str, str] = {}
+_PHOTON_REGISTRATION_ATTEMPTS_BY_USER: dict[str, list[float]] = {}
+_PHOTON_REGISTRATION_ATTEMPTS_GLOBAL: list[float] = []
+_PHOTON_REGISTRATION_ATTEMPTS_LOCK = threading.RLock()
 
 
 def _default_background_runner(callback: Callable[[], None]) -> None:
@@ -183,9 +187,10 @@ def _build_handler(operation: str):
             return _TELEGRAM_ONLY_MESSAGE
         try:
             client = _client_factory()
-            # create-wallet is the bootstrap that issues the token; every other
-            # op authenticates as the specific user via their per-user token.
-            token = None if operation == "create-wallet" else _user_access_token(client, identity)
+            if operation == "create-wallet":
+                return await asyncio.to_thread(_create_wallet_text, client, identity)
+            # The bootstrap token is never used as a substitute for a user token.
+            token = _user_access_token(client, identity)
             return await asyncio.to_thread(
                 client.execute, operation, identity, user_access_token=token
             )
@@ -207,12 +212,12 @@ def _build_imessage_handler(operation: str):
         identity = consume_gateway_identity()
         if identity is None:
             return _TELEGRAM_ONLY_MESSAGE
+        if operation != "connect-imessage":
+            return "WhatsApp Business approvals are not configured yet. Use /connect_imessage."
         try:
             client = _client_factory()
-            channel = "whatsapp" if operation == "connect-whatsapp" else "imessage"
+            channel = "imessage"
             payload = {"telegramUserId": identity.user_id}
-            if channel != "imessage":
-                payload["channel"] = channel
             result = await asyncio.to_thread(
                 client.execute_imessage,
                 "connect-imessage",
@@ -245,11 +250,7 @@ def _build_start_handler():
             return _TELEGRAM_ONLY_MESSAGE
         try:
             client = _client_factory()
-            wallet_text = await asyncio.to_thread(
-                client.execute,
-                "create-wallet",
-                identity,
-            )
+            wallet_text = await asyncio.to_thread(_create_wallet_text, client, identity)
             return _start_text(wallet_text, support_id=identity.user_id)
         except GatewayClientError as exc:
             return exc.user_message
@@ -279,6 +280,7 @@ def _build_limits_handler(command: str):
                 identity,
                 max_per_tx_usdc=max_per_tx_usdc,
                 daily_cap_usdc=daily_cap_usdc,
+                user_access_token=_user_access_token(client, identity),
             )
         except GatewayClientError as exc:
             return exc.user_message
@@ -370,7 +372,7 @@ def _start_text(wallet_text: str, *, support_id: str = "") -> str:
         "Next steps:\n"
         "1. Wallet - fund this Base wallet with ETH for gas and USDC/SINGIT for payments.\n"
         "2. Balance - check ETH, USDC, and SINGIT.\n"
-        "3. Connect iMessage or WhatsApp - link approvals from your phone number.\n"
+        "3. Connect iMessage - link approvals from your phone number.\n"
         "4. Limits - review or set spending limits.\n"
         "5. Buy - use the buttons or send a request like: buy crypto news"
     )
@@ -382,7 +384,6 @@ def _help_text() -> str:
         "/wallet - Create or show your Base wallet\n"
         "/balance - Show ETH, USDC, and SINGIT balances\n"
         "/connect_imessage - Link iMessage approvals\n"
-        "/connect_whatsapp - Link WhatsApp approvals\n"
         "/limits - View or set spending limits\n"
         "/bitrefill <product> <amount> <country> - Buy Bitrefill with SINGIT\n"
         "/last_purchase - Reveal your latest purchase\n"
@@ -490,13 +491,66 @@ def _read_photon_json_response(response) -> dict:
 
 
 def _is_e164_phone_number(value: str) -> bool:
-    return re.fullmatch(r"\+[1-9]\d{6,14}", str(value or "").strip()) is not None
+    # Keep this aligned with sign402_gateway.imessage_approvals.normalize_e164:
+    # E.164 numbers have 8 to 15 digits in the approval flow.
+    return re.fullmatch(r"\+[1-9]\d{7,14}", str(value or "").strip()) is not None
+
+
+def _reserve_photon_registration_attempt(identity: TelegramIdentity) -> None:
+    """Bound shared-number provisioning in the public Telegram beta.
+
+    Photon registration creates an external Project User. This in-memory guard
+    is intentionally applied before that API call, counts failed attempts too,
+    and does not restrict ordinary wallet or approval operations.
+    """
+    now = time.monotonic()
+    cutoff = now - _PHOTON_REGISTRATION_WINDOW_SECONDS
+    user_id = str(identity.user_id)
+    with _PHOTON_REGISTRATION_ATTEMPTS_LOCK:
+        _PHOTON_REGISTRATION_ATTEMPTS_GLOBAL[:] = [
+            timestamp
+            for timestamp in _PHOTON_REGISTRATION_ATTEMPTS_GLOBAL
+            if timestamp > cutoff
+        ]
+        for tracked_user_id, timestamps in tuple(
+            _PHOTON_REGISTRATION_ATTEMPTS_BY_USER.items()
+        ):
+            recent = [timestamp for timestamp in timestamps if timestamp > cutoff]
+            if recent:
+                _PHOTON_REGISTRATION_ATTEMPTS_BY_USER[tracked_user_id] = recent
+            else:
+                _PHOTON_REGISTRATION_ATTEMPTS_BY_USER.pop(tracked_user_id, None)
+
+        user_attempts = _PHOTON_REGISTRATION_ATTEMPTS_BY_USER.get(user_id, [])
+        if len(user_attempts) >= _PHOTON_REGISTRATION_MAX_ATTEMPTS_PER_USER:
+            raise GatewayClientError(
+                "Too many iMessage registration attempts. Please try again in an hour."
+            )
+        if (
+            len(_PHOTON_REGISTRATION_ATTEMPTS_GLOBAL)
+            >= _PHOTON_REGISTRATION_MAX_ATTEMPTS_GLOBAL
+        ):
+            raise GatewayClientError(
+                "iMessage registration is busy. Please try again later."
+            )
+
+        user_attempts.append(now)
+        _PHOTON_REGISTRATION_ATTEMPTS_BY_USER[user_id] = user_attempts
+        _PHOTON_REGISTRATION_ATTEMPTS_GLOBAL.append(now)
 
 
 def _imessage_phone_prompt(*, channel: str = "imessage") -> str:
-    public_line = _imessage_public_line()
+    # Shared Photon registrations receive an assigned line per user. Showing a
+    # static public line before that assignment caused people to text the wrong
+    # number and made onboarding look broken.
+    public_line = "" if _photon_auto_register_users_enabled() else _imessage_public_line()
     channel_label = _approval_channel_label(channel)
     target = f"\n\nSign402 {channel_label} line: {public_line}" if public_line else ""
+    assignment_note = (
+        "\n\nAfter you send it, Sign402 will show your private pairing line and code."
+        if _photon_auto_register_users_enabled()
+        else ""
+    )
     extra = (
         "\n\nMake sure iMessage starts new conversations from this phone number, not your Apple ID email."
         if channel_label == "iMessage"
@@ -506,6 +560,7 @@ def _imessage_phone_prompt(*, channel: str = "imessage") -> str:
         f"Send your {channel_label} phone number in international format.\n"
         "Example: +420773173967"
         f"{extra}"
+        f"{assignment_note}"
         f"{target}"
     )
 
@@ -517,8 +572,6 @@ def _register_photon_shared_user(phone_number: str, identity: TelegramIdentity) 
         "type": "shared",
         "phoneNumber": phone_number,
     }
-    if identity.username:
-        payload["firstName"] = identity.username
 
     base_url = _photon_api_base_url().rstrip("/")
     request = Request(
@@ -548,7 +601,7 @@ def _register_photon_shared_user(phone_number: str, identity: TelegramIdentity) 
         if user_id and phone:
             _PHOTON_USER_PHONE_CACHE[user_id] = phone
         assigned_phone_number = str(data.get("assignedPhoneNumber") or "").strip()
-        if assigned_phone_number:
+        if _is_e164_phone_number(assigned_phone_number):
             return assigned_phone_number
     return ""
 
@@ -591,7 +644,12 @@ def _connect_imessage_after_phone_registration(
     phone_number: str,
     channel: str = "imessage",
 ) -> str:
+    _reserve_photon_registration_attempt(identity)
     assigned_phone_number = _register_photon_shared_user(phone_number, identity)
+    if not _is_e164_phone_number(assigned_phone_number):
+        raise GatewayClientError(
+            "iMessage registration could not assign a private line. Please try again."
+        )
     client = _client_factory()
     payload = {"telegramUserId": identity.user_id}
     if channel != "imessage":
@@ -618,7 +676,39 @@ def _build_help_handler():
 
 
 def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
-    """Capture trusted identities and consume Photon approval messages."""
+    """Fail closed before Hermes can dispatch a Sign402 platform message."""
+
+    source = None
+    platform_name = "unknown"
+    is_telegram = False
+    try:
+        source = getattr(event, "source", None)
+        platform_name = _platform_name(source)
+        is_telegram = platform_name == "telegram"
+        if is_telegram and not _sign402_telegram_user_authorized(source):
+            # This hook runs before Hermes' general authorization/agent dispatch.
+            # Silently drop callers outside the Sign402-specific policy so a broad
+            # Hermes setting can never turn them into general-agent users.
+            return dict(_SKIP_RESULT)
+        return _handle_pre_gateway_dispatch(event=event, gateway=gateway, **kwargs)
+    except Exception as exc:
+        logger.warning(
+            "Sign402 pre-dispatch failed closed platform=%s error=%s",
+            platform_name,
+            type(exc).__name__,
+        )
+        if is_telegram:
+            try:
+                _send_fixed_reply(gateway, source, _UNEXPECTED_ERROR_MESSAGE)
+            except Exception:
+                logger.warning("Sign402 safe Telegram error reply failed")
+        # Never hand an unexpected platform event back to Hermes' general
+        # dispatcher. It could otherwise reach an unrelated agent/tool path.
+        return dict(_SKIP_RESULT)
+
+
+def _handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
+    """Capture trusted identities and consume configured approval messages."""
 
     capture_gateway_identity(event=event, **kwargs)
     source = getattr(event, "source", None)
@@ -679,6 +769,12 @@ def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
     if sign402_only_result:
         return sign402_only_result
 
+    # WhatsApp Business is not an approval provider in this deployment yet.
+    # Do not let a future generic WhatsApp integration feed pairing codes or
+    # YES/NO decisions into the iMessage sidecar flow by accident.
+    if _is_unconfigured_whatsapp_source(source):
+        return dict(_SKIP_RESULT)
+
     if not _is_photon_source(event, source):
         return None
 
@@ -704,7 +800,10 @@ def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
             gateway=gateway,
         )
 
-    return None
+    # This shared Photon/iMessage line is an approval channel, not a public
+    # Hermes conversation surface. Never let arbitrary iMessage text reach the
+    # general agent and consume its tools or model credits.
+    return dict(_SKIP_RESULT)
 
 
 def _handle_telegram_sign402_only_fallback(*, event, source, gateway):
@@ -723,12 +822,49 @@ def _handle_telegram_sign402_only_fallback(*, event, source, gateway):
 
 
 def _sign402_telegram_only_mode_enabled() -> bool:
-    return str(os.environ.get("SIGN402_TELEGRAM_SIGN402_ONLY", "") or "").strip().lower() in {
+    explicitly_enabled = str(
+        os.environ.get("SIGN402_TELEGRAM_SIGN402_ONLY", "") or ""
+    ).strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
     }
+    if explicitly_enabled:
+        return True
+    # A wildcard makes this a public Sign402 bot. Keep it Sign402-only even
+    # when an operator accidentally omits the companion mode flag; otherwise
+    # ordinary text could fall through to Hermes' general agent.
+    configured = os.environ.get(_SIGN402_TELEGRAM_ALLOWED_USERS_ENV)
+    allowed_users = {
+        value.strip()
+        for value in str(configured or "").split(",")
+        if value.strip()
+    }
+    return "*" in allowed_users
+
+
+def _sign402_telegram_user_authorized(source) -> bool:
+    """Apply an explicit public-beta policy before Hermes can dispatch a DM.
+
+    `pre_gateway_dispatch` runs before Hermes' own allowlist. In public beta,
+    this plugin therefore owns the access policy for Sign402 while the Hermes
+    allowlist can remain restricted to the operator.
+    """
+    identity = _identity_from_telegram_source(source)
+    if identity is None:
+        return False
+
+    configured = os.environ.get(_SIGN402_TELEGRAM_ALLOWED_USERS_ENV)
+    if configured is None:
+        configured = os.environ.get("TELEGRAM_ALLOWED_USERS", "")
+
+    allowed_users = {
+        value.strip()
+        for value in str(configured or "").split(",")
+        if value.strip()
+    }
+    return "*" in allowed_users or str(identity.user_id) in allowed_users
 
 
 def _sign402_only_fallback_text() -> str:
@@ -821,13 +957,13 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
     try:
         if command == "start":
             client = _client_factory()
-            wallet_text = client.execute("create-wallet", identity)
+            wallet_text = _create_wallet_text(client, identity)
             text = _start_text(wallet_text, support_id=identity.user_id)
         elif command == "help":
             text = _help_text()
         elif command == "wallet":
             client = _client_factory()
-            text = client.execute("create-wallet", identity)
+            text = _create_wallet_text(client, identity)
         elif command == "balance":
             client = _client_factory()
             text = client.execute(
@@ -853,9 +989,10 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
                     identity,
                     max_per_tx_usdc=max_per_tx_usdc,
                     daily_cap_usdc=daily_cap_usdc,
+                    user_access_token=_user_access_token(client, identity),
                 )
-        elif command in {"connect-imessage", "connect-whatsapp"}:
-            channel = "whatsapp" if command == "connect-whatsapp" else "imessage"
+        elif command == "connect-imessage":
+            channel = "imessage"
             if _photon_auto_register_users_enabled():
                 phone_number = str(args or "").strip()
                 if phone_number:
@@ -888,6 +1025,8 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
                     text = _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
                 else:
                     text = _telegram_imessage_pairing_text(text, channel=channel)
+        elif command == "connect-whatsapp":
+            text = "WhatsApp Business approvals are not configured yet. Use /connect_imessage."
         elif command in {"llm-buy", "llm-terms", "llm-credits"}:
             client = _client_factory()
             operation = {
@@ -1617,7 +1756,7 @@ def _open_withdraw_flow(*, identity: TelegramIdentity, source, gateway) -> None:
         _send_fixed_reply(
             gateway,
             source,
-            text or "No ERC-20 token balances are available to withdraw yet.",
+            text or "No Base asset balances are available to withdraw yet.",
             reply_markup=_telegram_main_menu_reply_markup(),
         )
         return
@@ -1657,10 +1796,10 @@ def _handle_telegram_withdraw_wizard_message(*, event, source, gateway):
         try:
             index = int(text)
         except ValueError:
-            _send_fixed_reply(gateway, source, "Reply with a token number.")
+            _send_fixed_reply(gateway, source, "Reply with an asset number.")
             return dict(_SKIP_RESULT)
         if index < 1 or index > len(tokens):
-            _send_fixed_reply(gateway, source, "Reply with a valid token number.")
+            _send_fixed_reply(gateway, source, "Reply with a valid asset number.")
             return dict(_SKIP_RESULT)
         token = tokens[index - 1]
         session.update({"step": "amount", "token": token})
@@ -1679,10 +1818,10 @@ def _handle_telegram_withdraw_wizard_message(*, event, source, gateway):
             _send_fixed_reply(gateway, source, "Send a positive amount.")
             return dict(_SKIP_RESULT)
         if Decimal(amount) > Decimal(str(token.get("balance") or "0")):
-            _send_fixed_reply(gateway, source, "Amount exceeds your token balance.")
+            _send_fixed_reply(gateway, source, "Amount exceeds your asset balance.")
             return dict(_SKIP_RESULT)
         session.update({"step": "address", "amount": amount})
-        _send_fixed_reply(gateway, source, "Send the Base address to receive the tokens.")
+        _send_fixed_reply(gateway, source, "Send the Base address to receive the asset.")
         return dict(_SKIP_RESULT)
 
     if step == "address":
@@ -1710,29 +1849,80 @@ def _handle_telegram_withdraw_wizard_message(*, event, source, gateway):
 
 
 _USER_ACCESS_TOKENS: dict[str, str] = {}
+_USER_ACCESS_TOKEN_ISSUED_AT: dict[str, float] = {}
+_USER_ACCESS_TOKEN_LOCK = threading.RLock()
+
+
+def _remember_user_access_token(identity: TelegramIdentity, result: object) -> str:
+    if not isinstance(result, dict):
+        return ""
+    token = str(result.get("accessToken") or "").strip()
+    if token:
+        user_id = str(identity.user_id)
+        now = time.time()
+        with _USER_ACCESS_TOKEN_LOCK:
+            _prune_user_access_token_cache(now)
+            _USER_ACCESS_TOKENS[user_id] = token
+            _USER_ACCESS_TOKEN_ISSUED_AT[user_id] = now
+            _prune_user_access_token_cache(now)
+    return token
+
+
+def _create_wallet_text(client, identity: TelegramIdentity) -> str:
+    result = client.create_wallet(identity)
+    _remember_user_access_token(identity, result)
+    telegram_text = result.get("telegramText") if isinstance(result, dict) else None
+    if not isinstance(telegram_text, str) or not telegram_text.strip():
+        raise GatewayClientError("Wallet service returned an invalid response. Please try again.")
+    return telegram_text.strip()
 
 
 def _user_access_token(client, identity: TelegramIdentity) -> str | None:
     """Return the caller's per-user gateway token, minting one if unseen.
 
-    Cached in-process across requests. create-wallet is idempotent and returns
-    a fresh token, so a cold cache (e.g. after restart) is refilled without a
-    separate bootstrap step. Failures degrade to None (gateway then falls back
-    to the shared-token path) rather than blocking the purchase.
+    Cached in-process across requests. A cold cache (for example after a
+    gateway restart) uses the trusted Telegram identity to mint a fresh token.
+    Requests never fall back to the shared gateway token.
     """
     user_id = str(identity.user_id)
-    cached = _USER_ACCESS_TOKENS.get(user_id)
-    if cached:
-        return cached
+    now = time.time()
+    with _USER_ACCESS_TOKEN_LOCK:
+        _prune_user_access_token_cache(now)
+        cached = _USER_ACCESS_TOKENS.get(user_id)
+        issued_at = _USER_ACCESS_TOKEN_ISSUED_AT.get(user_id, 0.0)
+        if cached and now < (
+            issued_at
+            + _USER_ACCESS_TOKEN_TTL_SECONDS
+            - _USER_ACCESS_TOKEN_REFRESH_SKEW_SECONDS
+        ):
+            return cached
+        _USER_ACCESS_TOKENS.pop(user_id, None)
+        _USER_ACCESS_TOKEN_ISSUED_AT.pop(user_id, None)
     try:
         result = client.create_wallet(identity)
     except Exception:
         return None
-    token = str(result.get("accessToken") or "") if isinstance(result, dict) else ""
-    if token:
-        _USER_ACCESS_TOKENS[user_id] = token
-        return token
-    return None
+    return _remember_user_access_token(identity, result) or None
+
+
+def _prune_user_access_token_cache(now: float | None = None) -> None:
+    current_time = time.time() if now is None else float(now)
+    valid_after = current_time - _USER_ACCESS_TOKEN_TTL_SECONDS
+    for user_id, issued_at in tuple(_USER_ACCESS_TOKEN_ISSUED_AT.items()):
+        if issued_at <= valid_after:
+            _USER_ACCESS_TOKEN_ISSUED_AT.pop(user_id, None)
+            _USER_ACCESS_TOKENS.pop(user_id, None)
+
+    overflow = len(_USER_ACCESS_TOKENS) - _USER_ACCESS_TOKEN_CACHE_MAX_USERS
+    if overflow <= 0:
+        return
+    oldest_user_ids = sorted(
+        _USER_ACCESS_TOKENS,
+        key=lambda user_id: _USER_ACCESS_TOKEN_ISSUED_AT.get(user_id, 0.0),
+    )[:overflow]
+    for user_id in oldest_user_ids:
+        _USER_ACCESS_TOKEN_ISSUED_AT.pop(user_id, None)
+        _USER_ACCESS_TOKENS.pop(user_id, None)
 
 
 def _normalize_withdraw_tokens(raw_tokens) -> list[dict]:
@@ -1746,7 +1936,11 @@ def _normalize_withdraw_tokens(raw_tokens) -> list[dict]:
         contract = str(raw.get("contractAddress") or "").strip()
         balance = str(raw.get("balance") or "0").strip()
         decimals = raw.get("decimals")
-        if re.fullmatch(r"0x[a-fA-F0-9]{40}", contract) is None:
+        native = bool(raw.get("native"))
+        if native:
+            if symbol != "ETH" or contract.lower() != "native":
+                continue
+        elif re.fullmatch(r"0x[a-fA-F0-9]{40}", contract) is None:
             continue
         if isinstance(decimals, bool) or not isinstance(decimals, int):
             continue
@@ -1761,17 +1955,20 @@ def _normalize_withdraw_tokens(raw_tokens) -> list[dict]:
                 "balance": balance,
                 "decimals": decimals,
                 "verified": bool(raw.get("verified")),
+                "native": native,
             }
         )
     return tokens
 
 
 def _format_withdraw_tokens(tokens: list[dict]) -> str:
-    lines = ["Choose a token to withdraw:"]
+    lines = ["Choose an asset to withdraw:"]
     for index, token in enumerate(tokens, start=1):
         symbol = str(token.get("symbol") or "ERC20")
         balance = str(token.get("balance") or "0")
         line = f"{index}. {symbol}: {balance}"
+        if token.get("native"):
+            line += " (leave ETH for gas)"
         if not token.get("verified"):
             line += f" ({_short_address(str(token.get('contractAddress') or ''))})"
         lines.append(line)
@@ -1784,7 +1981,7 @@ def _withdraw_reply_keyboard(tokens: list[dict]) -> dict:
     labels = [str(index) for index in range(1, min(len(tokens), 8) + 1)]
     rows = [tuple(labels[index : index + 4]) for index in range(0, len(labels), 4)]
     rows.append(("Back",))
-    return _reply_keyboard(rows, placeholder="Choose token")
+    return _reply_keyboard(rows, placeholder="Choose asset")
 
 
 def _parse_positive_decimal_text(text: str) -> str | None:
@@ -1964,7 +2161,8 @@ def _handle_photon_decision(*, decision: str, photon_user_id: str, source, gatew
             {"photonUserId": resolved_photon_user_id},
         )
         if not pending.get("pending"):
-            return None
+            # A stale YES/NO must not fall through into general Hermes chat.
+            return dict(_SKIP_RESULT)
         result = client.execute_imessage(
             "decision",
             {"photonUserId": resolved_photon_user_id, "decision": decision},
@@ -2203,15 +2401,21 @@ def _is_photon_source(event, source) -> bool:
         "imessage",
         "imessage via photon",
         "platforms/photon",
-        "whatsapp",
-        "whatsapp via photon",
     }:
         return True
     raw_message = getattr(event, "raw_message", None)
     if isinstance(raw_message, dict):
         raw_platform = str(raw_message.get("platform", "") or "").strip().lower()
-        return raw_platform in {"imessage", "photon", "whatsapp"}
+        return raw_platform in {"imessage", "photon"}
     return False
+
+
+def _is_unconfigured_whatsapp_source(source) -> bool:
+    return _platform_name(source) in {
+        "whatsapp",
+        "whatsapp via photon",
+        "platforms/whatsapp",
+    }
 
 
 def _is_telegram_source(source) -> bool:

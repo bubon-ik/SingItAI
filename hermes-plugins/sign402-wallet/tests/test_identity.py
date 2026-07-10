@@ -66,17 +66,10 @@ class TelegramIdentityTests(unittest.TestCase):
             ),
         )
 
-    def test_normalizes_telegram_create_wallet_command(self):
+    def test_ignores_legacy_create_wallet_command(self):
         capture_gateway_identity(event=telegram_event("/create_wallet ignored"))
 
-        self.assertEqual(
-            consume_gateway_identity(),
-            TelegramIdentity(
-                user_id="1045618308",
-                username="AlpskyKnedlik",
-                chat_id="chat-1",
-            ),
-        )
+        self.assertIsNone(consume_gateway_identity())
 
     def test_captures_trusted_source_for_limits_commands(self):
         for command in ("/limits", "/set_limits 0.005 0.05"):

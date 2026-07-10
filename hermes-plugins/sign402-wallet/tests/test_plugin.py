@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import logging
+import os
 import sys
 import unittest
 from dataclasses import dataclass
@@ -247,9 +248,22 @@ class FakeClient:
             raise self.error
         return self.bitrefill_product_result
 
-    def execute_spending_limits(self, identity, *, max_per_tx_usdc=None, daily_cap_usdc=None):
+    def execute_spending_limits(
+        self,
+        identity,
+        *,
+        max_per_tx_usdc=None,
+        daily_cap_usdc=None,
+        user_access_token=None,
+    ):
         self.limits_calls.append(
-            (identity.user_id, identity.username, max_per_tx_usdc, daily_cap_usdc)
+            (
+                identity.user_id,
+                identity.username,
+                max_per_tx_usdc,
+                daily_cap_usdc,
+                user_access_token,
+            )
         )
         if self.error:
             raise self.error
@@ -380,6 +394,17 @@ class PaidToolIntentTests(unittest.TestCase):
 
 
 class PluginRegistrationTests(unittest.TestCase):
+    def setUp(self):
+        # A deployed wallet plugin must always have an explicit Telegram
+        # policy. Tests that exercise normal wallet handling opt into the
+        # public Sign402 policy, while policy-specific tests override it.
+        self._sign402_policy = patch.dict(
+            os.environ,
+            {"SIGN402_TELEGRAM_ALLOWED_USERS": "*"},
+        )
+        self._sign402_policy.start()
+        self.addCleanup(self._sign402_policy.stop)
+
     def test_registers_dispatch_hook_and_wallet_commands(self):
         plugin = load_plugin()
         context = FakeContext()
@@ -398,7 +423,6 @@ class PluginRegistrationTests(unittest.TestCase):
                 "limits",
                 "set-limits",
                 "connect-imessage",
-                "connect-whatsapp",
                 "bitrefill",
                 "llm-buy",
                 "llm-terms",
@@ -464,7 +488,6 @@ class PluginRegistrationTests(unittest.TestCase):
                 "wallet",
                 "balance",
                 "connect_imessage",
-                "connect_whatsapp",
                 "limits",
                 "withdraw",
                 "bitrefill",
@@ -506,11 +529,9 @@ class PluginRegistrationTests(unittest.TestCase):
             gateway.adapters["telegram"].sent,
             [("telegram-chat", "gateway telegram text")],
         )
-        self.assertEqual(len(client.calls), 1)
-        operation, identity = client.calls[0]
-        self.assertEqual(operation, "create-wallet")
-        self.assertEqual(identity.user_id, "1045618308")
-        self.assertEqual(identity.username, "AlpskyKnedlik")
+        self.assertEqual(client.calls, [])
+        self.assertEqual(client.create_wallet_calls, ["1045618308"])
+        self.assertEqual(plugin._USER_ACCESS_TOKENS["1045618308"], "user-access-token")
 
     def test_public_command_handler_without_pre_dispatch_rejects(self):
         plugin = load_plugin()
@@ -543,6 +564,45 @@ class PluginRegistrationTests(unittest.TestCase):
         )
 
         self.assertIn(("balance", "user-access-token"), client.execute_tokens)
+
+    def test_expired_user_access_token_is_refreshed_before_request(self):
+        plugin = load_plugin()
+        client = FakeClient()
+        identity = plugin.TelegramIdentity(user_id="1045618308")
+
+        with patch.object(plugin.time, "time", return_value=1_000.0):
+            first = plugin._user_access_token(client, identity)
+        client.access_token = "fresh-user-access-token"
+        with patch.object(
+            plugin.time,
+            "time",
+            return_value=(
+                1_000.0
+                + plugin._USER_ACCESS_TOKEN_TTL_SECONDS
+                - plugin._USER_ACCESS_TOKEN_REFRESH_SKEW_SECONDS
+            ),
+        ):
+            refreshed = plugin._user_access_token(client, identity)
+
+        self.assertEqual(first, "user-access-token")
+        self.assertEqual(refreshed, "fresh-user-access-token")
+        self.assertEqual(client.create_wallet_calls, ["1045618308", "1045618308"])
+
+    def test_user_access_token_cache_is_bounded(self):
+        plugin = load_plugin()
+
+        with patch.object(plugin, "_USER_ACCESS_TOKEN_CACHE_MAX_USERS", 2), patch.object(
+            plugin.time,
+            "time",
+            side_effect=(1_000.0, 1_001.0, 1_002.0),
+        ):
+            for user_id in ("1", "2", "3"):
+                plugin._remember_user_access_token(
+                    plugin.TelegramIdentity(user_id=user_id),
+                    {"accessToken": f"token-{user_id}"},
+                )
+
+        self.assertEqual(plugin._USER_ACCESS_TOKENS, {"2": "token-2", "3": "token-3"})
 
     def test_last_purchase_command_uses_trusted_telegram_identity(self):
         plugin = load_plugin()
@@ -608,7 +668,7 @@ class PluginRegistrationTests(unittest.TestCase):
         plugin.register(context)
 
         self.assertIn("connect-imessage", context.commands)
-        self.assertIn("connect-whatsapp", context.commands)
+        self.assertNotIn("connect-whatsapp", context.commands)
         self.assertNotIn("test-approval", context.commands)
         self.assertNotIn("buy-crypto-news", context.commands)
 
@@ -651,13 +711,10 @@ class PluginRegistrationTests(unittest.TestCase):
             ],
         )
 
-    def test_connect_whatsapp_uses_trusted_telegram_identity(self):
+    def test_connect_whatsapp_is_not_exposed_as_a_fake_approval_channel(self):
         plugin = load_plugin()
         context = FakeContext()
         client = FakeClient()
-        client.imessage_results["connect-imessage"] = {
-            "telegramText": "Send ABCDEFGH to WhatsApp"
-        }
         plugin._client_factory = lambda: client
         plugin.register(context)
         gateway = FakeGateway(adapter_key="telegram")
@@ -675,17 +732,14 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertEqual(result, plugin._SKIP_RESULT)
         self.assertEqual(
             gateway.adapters["telegram"].sent,
-            [("telegram-chat", "Send ABCDEFGH to WhatsApp")],
-        )
-        self.assertEqual(
-            client.imessage_calls,
             [
                 (
-                    "connect-imessage",
-                    {"telegramUserId": "1045618308", "channel": "whatsapp"},
+                    "telegram-chat",
+                    "WhatsApp Business approvals are not configured yet. Use /connect_imessage.",
                 )
             ],
         )
+        self.assertEqual(client.imessage_calls, [])
 
     def test_connect_imessage_includes_public_imessage_line_when_configured(self):
         plugin = load_plugin()
@@ -746,6 +800,8 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertIn("phone number", text.lower())
         self.assertIn("+420", text)
         self.assertIn("iMessage", text)
+        self.assertIn("private pairing line", text)
+        self.assertNotIn("+420111222333", text)
 
     def test_connect_imessage_auto_registers_phone_before_pairing(self):
         plugin = load_plugin()
@@ -813,7 +869,6 @@ class PluginRegistrationTests(unittest.TestCase):
             {
                 "type": "shared",
                 "phoneNumber": "+420773173967",
-                "firstName": "AlpskyKnedlik",
             },
         )
         self.assertEqual(
@@ -824,6 +879,52 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertIn("+16282647754", text)
         self.assertNotIn("+420111222333", text)
         self.assertIn("ABCDEFGH", text)
+
+    def test_imessage_phone_validation_matches_gateway_minimum_length(self):
+        plugin = load_plugin()
+
+        self.assertFalse(plugin._is_e164_phone_number("+1234567"))
+        self.assertTrue(plugin._is_e164_phone_number("+12345678"))
+
+    def test_imessage_auto_registration_is_rate_limited_per_telegram_user(self):
+        plugin = load_plugin()
+        client = FakeClient()
+        client.imessage_results["connect-imessage"] = {
+            "telegramText": "Send ABCDEFGH to iMessage"
+        }
+        plugin._client_factory = lambda: client
+        photon_requests = []
+
+        def fake_photon_opener(request, timeout):
+            photon_requests.append((request, timeout))
+            return FakePhotonResponse()
+
+        plugin._photon_api_opener = fake_photon_opener
+        identity = plugin.TelegramIdentity(user_id="1045618308")
+        with patch.dict(
+            plugin.os.environ,
+            {
+                "PHOTON_PROJECT_ID": "project-id",
+                "PHOTON_PROJECT_SECRET": "project-secret",
+                "PHOTON_API_BASE_URL": "https://spectrum.test",
+            },
+        ):
+            for number in ("+420773173960", "+420773173961", "+420773173962"):
+                plugin._connect_imessage_after_phone_registration(
+                    identity=identity,
+                    phone_number=number,
+                )
+            with self.assertRaises(plugin.GatewayClientError) as raised:
+                plugin._connect_imessage_after_phone_registration(
+                    identity=identity,
+                    phone_number="+420773173963",
+                )
+
+        self.assertEqual(
+            raised.exception.user_message,
+            "Too many iMessage registration attempts. Please try again in an hour.",
+        )
+        self.assertEqual(len(photon_requests), 3)
 
     def test_start_creates_wallet_and_returns_onboarding_text(self):
         plugin = load_plugin()
@@ -858,10 +959,8 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertIn("phone number", text)
         self.assertIn("4. Limits", text)
         self.assertIn("5. Buy", text)
-        self.assertEqual(len(client.calls), 1)
-        operation, identity = client.calls[0]
-        self.assertEqual(operation, "create-wallet")
-        self.assertEqual(identity.user_id, "1045618308")
+        self.assertEqual(client.calls, [])
+        self.assertEqual(client.create_wallet_calls, ["1045618308"])
 
     def test_start_is_answered_in_pre_dispatch(self):
         plugin = load_plugin()
@@ -885,7 +984,7 @@ class PluginRegistrationTests(unittest.TestCase):
             result,
             {"action": "skip", "reason": "sign402-imessage-handled"},
         )
-        self.assertEqual(client.calls[0][0], "create-wallet")
+        self.assertEqual(client.create_wallet_calls, ["1045618308"])
         self.assertIn("Welcome to Sign402.", gateway.adapters["telegram"].sent[0][1])
 
     def test_help_is_answered_with_pilot_commands(self):
@@ -977,7 +1076,7 @@ class PluginRegistrationTests(unittest.TestCase):
             reply_markup["keyboard"],
             [
                 [{"text": "Wallet"}, {"text": "Balance"}],
-                [{"text": "Connect iMessage"}, {"text": "Connect WhatsApp"}],
+                [{"text": "Connect iMessage"}],
                 [{"text": "Limits"}],
                 [{"text": "Withdraw"}],
                 [{"text": "Buy Bitrefill"}, {"text": "Buy LLM Credits"}],
@@ -991,7 +1090,13 @@ class PluginRegistrationTests(unittest.TestCase):
         plugin.register(context)
         gateway = FakeGateway(adapter_key="telegram")
 
-        with patch.dict(plugin.os.environ, {"SIGN402_TELEGRAM_SIGN402_ONLY": "1"}):
+        with patch.dict(
+            plugin.os.environ,
+            {
+                "SIGN402_TELEGRAM_SIGN402_ONLY": "1",
+                "SIGN402_TELEGRAM_ALLOWED_USERS": "*",
+            },
+        ):
             result = context.hooks["pre_gateway_dispatch"](
                 event=FakeEvent(
                     "hello, what can you do?",
@@ -1008,24 +1113,217 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertIn("Use the Sign402 menu", text)
         self.assertIn("Wallet", text)
 
-    def test_unknown_telegram_text_falls_through_by_default(self):
+    def test_public_mode_requires_explicit_sign402_access_policy(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        with patch.dict(
+            plugin.os.environ,
+            {
+                "SIGN402_TELEGRAM_SIGN402_ONLY": "1",
+                "SIGN402_TELEGRAM_ALLOWED_USERS": "",
+            },
+        ):
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "/wallet",
+                    "8538252718",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(client.create_wallet_calls, [])
+        self.assertEqual(gateway.adapters["telegram"].sent, [])
+
+    def test_public_mode_allows_sign402_without_opening_hermes(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        with patch.dict(
+            plugin.os.environ,
+            {
+                "SIGN402_TELEGRAM_SIGN402_ONLY": "1",
+                "SIGN402_TELEGRAM_ALLOWED_USERS": "*",
+            },
+        ):
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "/wallet",
+                    "8538252718",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(client.create_wallet_calls, ["8538252718"])
+
+    def test_telegram_pre_dispatch_exception_fails_closed(self):
         plugin = load_plugin()
         context = FakeContext()
         plugin.register(context)
         gateway = FakeGateway(adapter_key="telegram")
 
-        result = context.hooks["pre_gateway_dispatch"](
-            event=FakeEvent(
-                "hello, what can you do?",
-                "1045618308",
-                platform="telegram",
-                chat_id="telegram-chat",
-            ),
-            gateway=gateway,
+        with patch.dict(
+            plugin.os.environ,
+            {
+                "SIGN402_TELEGRAM_SIGN402_ONLY": "1",
+                "SIGN402_TELEGRAM_ALLOWED_USERS": "*",
+            },
+        ), patch.object(
+            plugin,
+            "_telegram_public_command",
+            side_effect=RuntimeError("unexpected parser failure"),
+        ):
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "/model",
+                    "8538252718",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(
+            gateway.adapters["telegram"].sent,
+            [("telegram-chat", plugin._UNEXPECTED_ERROR_MESSAGE)],
         )
+
+    def test_photon_pre_dispatch_exception_fails_closed(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="photon")
+
+        with patch.object(
+            plugin,
+            "_handle_pre_gateway_dispatch",
+            side_effect=RuntimeError("unexpected parser failure"),
+        ):
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "YES",
+                    "+420736255120",
+                    platform="photon",
+                    chat_id="photon-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(gateway.adapters["photon"].sent, [])
+
+    def test_unknown_telegram_text_falls_through_when_sign402_only_is_disabled(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        with patch.dict(
+            plugin.os.environ,
+            {"SIGN402_TELEGRAM_ALLOWED_USERS": "1045618308"},
+        ):
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "hello, what can you do?",
+                    "1045618308",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
 
         self.assertIsNone(result)
         self.assertEqual(gateway.adapters["telegram"].sent, [])
+
+    def test_public_sign402_policy_forces_sign402_only_mode(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        with patch.dict(
+            plugin.os.environ,
+            {
+                "SIGN402_TELEGRAM_ALLOWED_USERS": "*",
+                "SIGN402_TELEGRAM_SIGN402_ONLY": "",
+            },
+        ):
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "hello, what can you do?",
+                    "8538252718",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertIn("Use the Sign402 menu", gateway.adapters["telegram"].sent[0][1])
+
+    def test_missing_telegram_access_policy_blocks_by_default(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        with patch.dict(plugin.os.environ, {}, clear=True):
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "/wallet",
+                    "8538252718",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(client.create_wallet_calls, [])
+        self.assertEqual(gateway.adapters["telegram"].sent, [])
+
+    def test_private_hermes_allowlist_remains_supported(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        with patch.dict(
+            plugin.os.environ,
+            {"TELEGRAM_ALLOWED_USERS": "8538252718"},
+            clear=True,
+        ):
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "/wallet",
+                    "8538252718",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(client.create_wallet_calls, ["8538252718"])
 
     def test_bitrefill_command_quotes_and_buys_with_trusted_identity(self):
         plugin = load_plugin()
@@ -1198,7 +1496,7 @@ class PluginRegistrationTests(unittest.TestCase):
 
         self.assertEqual(dispatch("Withdraw"), plugin._SKIP_RESULT)
         self.assertEqual(client.withdraw_tokens_calls, [("1045618308", "user-access-token")])
-        self.assertIn("Choose a token to withdraw", gateway.adapters["telegram"].sent[-1][1])
+        self.assertIn("Choose an asset to withdraw", gateway.adapters["telegram"].sent[-1][1])
         self.assertIn("1. SINGIT: 250", gateway.adapters["telegram"].sent[-1][1])
 
         self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
@@ -1230,6 +1528,33 @@ class PluginRegistrationTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_withdraw_normalizer_accepts_native_eth_only_with_native_marker(self):
+        plugin = load_plugin()
+
+        tokens = plugin._normalize_withdraw_tokens(
+            [
+                {
+                    "symbol": "ETH",
+                    "contractAddress": "native",
+                    "balance": "0.01",
+                    "decimals": 18,
+                    "verified": True,
+                    "native": True,
+                },
+                {
+                    "symbol": "ETH",
+                    "contractAddress": "native",
+                    "balance": "0.01",
+                    "decimals": 18,
+                    "verified": True,
+                },
+            ]
+        )
+
+        self.assertEqual(len(tokens), 1)
+        self.assertTrue(tokens[0]["native"])
+        self.assertIn("leave ETH for gas", plugin._format_withdraw_tokens(tokens))
 
     def test_bitrefill_catalog_browses_categories_pages_and_buys(self):
         plugin = load_plugin()
@@ -1515,7 +1840,7 @@ class PluginRegistrationTests(unittest.TestCase):
         )
         self.assertEqual(
             client.limits_calls,
-            [("1045618308", "AlpskyKnedlik", None, None)],
+            [("1045618308", "AlpskyKnedlik", None, None, "user-access-token")],
         )
         self.assertEqual(
             gateway.adapters["telegram"].sent,
@@ -1548,7 +1873,15 @@ class PluginRegistrationTests(unittest.TestCase):
         )
         self.assertEqual(
             client.limits_calls,
-            [("1045618308", "AlpskyKnedlik", "0.005", "0.05")],
+            [
+                (
+                    "1045618308",
+                    "AlpskyKnedlik",
+                    "0.005",
+                    "0.05",
+                    "user-access-token",
+                )
+            ],
         )
         self.assertEqual(
             gateway.adapters["telegram"].sent,
@@ -1578,7 +1911,10 @@ class PluginRegistrationTests(unittest.TestCase):
             result,
             {"action": "skip", "reason": "sign402-imessage-handled"},
         )
-        self.assertEqual(client.limits_calls, [("1045618308", None, "0.004", "0.04")])
+        self.assertEqual(
+            client.limits_calls,
+            [("1045618308", None, "0.004", "0.04", "user-access-token")],
+        )
 
     def test_set_limits_requires_two_numbers(self):
         plugin = load_plugin()
@@ -2070,14 +2406,10 @@ class PluginRegistrationTests(unittest.TestCase):
         )
         self.assertEqual(gateway.adapters[platform].sent, [("photon-chat", "iMessage linked.")])
 
-    def test_whatsapp_platform_pairing_code_is_consumed_before_llm(self):
+    def test_unconfigured_whatsapp_event_is_ignored_before_llm(self):
         plugin = load_plugin()
         context = FakeContext()
         client = FakeClient()
-        client.imessage_results["link"] = {
-            "ok": True,
-            "imessageText": "WhatsApp linked.",
-        }
         plugin._client_factory = lambda: client
         plugin.register(context)
         platform = FakePlatform("whatsapp")
@@ -2095,18 +2427,10 @@ class PluginRegistrationTests(unittest.TestCase):
         )
 
         self.assertEqual(result, plugin._SKIP_RESULT)
-        self.assertEqual(
-            client.imessage_calls,
-            [
-                (
-                    "link",
-                    {"code": "4JTLV6XQ", "photonUserId": "+15551234567"},
-                )
-            ],
-        )
-        self.assertEqual(gateway.adapters[platform].sent, [("whatsapp-chat", "WhatsApp linked.")])
+        self.assertEqual(client.imessage_calls, [])
+        self.assertEqual(gateway.adapters[platform].sent, [])
 
-    def test_photon_yes_without_pending_passes_through_to_normal_chat(self):
+    def test_photon_yes_without_pending_is_dropped_before_general_chat(self):
         plugin = load_plugin()
         context = FakeContext()
         client = FakeClient()
@@ -2119,11 +2443,33 @@ class PluginRegistrationTests(unittest.TestCase):
             gateway=FakeGateway(),
         )
 
-        self.assertIsNone(result)
+        self.assertEqual(result, plugin._SKIP_RESULT)
         self.assertEqual(
             client.imessage_calls,
             [("pending", {"photonUserId": "+15551234567"})],
         )
+
+    def test_photon_general_message_is_dropped_before_general_chat(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway()
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "What can you do?",
+                "+15551234567",
+                platform="photon",
+                chat_id="photon-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(client.imessage_calls, [])
+        self.assertEqual(gateway.adapters["photon"].sent, [])
 
     def test_photon_yes_with_pending_is_decided_and_consumed(self):
         plugin = load_plugin()

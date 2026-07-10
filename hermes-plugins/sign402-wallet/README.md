@@ -4,11 +4,15 @@ This Hermes plugin exposes deterministic managed-wallet commands in
 Telegram:
 
 ```text
+/start
 /wallet
-/create_wallet
 /balance
 /connect_imessage
-/test_approval
+/limits
+/withdraw
+/bitrefill
+/last_purchase
+/llm_buy
 ```
 
 The commands do not call the configured LLM. The plugin binds each request
@@ -25,6 +29,8 @@ SIGN402_GATEWAY_URL=http://127.0.0.1:8099
 SIGN402_WALLET_API_TOKEN=<same value configured for sign402-gateway>
 SIGN402_PHOTON_API_TOKEN=<same value configured for sign402-gateway>
 SIGN402_TELEGRAM_SIGN402_ONLY=1
+SIGN402_TELEGRAM_ALLOWED_USERS=*
+TELEGRAM_ALLOWED_USERS=<operator Telegram ID>
 SIGN402_IMESSAGE_PUBLIC_LINE=<public Sign402 iMessage number or contact>
 SIGN402_PHOTON_AUTO_REGISTER_USERS=1
 PHOTON_PROJECT_ID=<Photon project id>
@@ -51,19 +57,39 @@ chmod 600 ~/.hermes/.env
 The plugin rejects non-loopback gateway URLs so a configuration mistake
 cannot send the bearer token to a remote host.
 
-`SIGN402_TELEGRAM_SIGN402_ONLY=1` is recommended for public beta. It catches
+`SIGN402_TELEGRAM_SIGN402_ONLY=1` is required for public beta. It catches
 ordinary Telegram text that is not a Sign402 command or wizard response and
 returns the Sign402 menu instead of letting the message fall through to the
 general Hermes LLM chat.
 
-`SIGN402_IMESSAGE_PUBLIC_LINE` is shown in the `/connect_imessage` response so
-new users know where to send their pairing code.
+`SIGN402_TELEGRAM_ALLOWED_USERS=*` opens only the Sign402 plugin to every
+Telegram user. Keep `TELEGRAM_ALLOWED_USERS` restricted to the operator and do
+not set `TELEGRAM_ALLOW_ALL_USERS` or `GATEWAY_ALLOW_ALL_USERS`; the plugin
+intercepts public Sign402 traffic before Hermes can dispatch it to the general
+agent. An unset `SIGN402_TELEGRAM_ALLOWED_USERS` falls back to the private
+`TELEGRAM_ALLOWED_USERS` setting. If neither policy is set, Telegram wallet
+traffic is denied by default. A wildcard Sign402 policy also forces
+Sign402-only handling as a defensive fallback if the mode flag is omitted.
+
+`SIGN402_IMESSAGE_PUBLIC_LINE` is shown in the `/connect_imessage` response
+when automatic Photon registration is disabled. It identifies the shared line
+where users should send their pairing code.
 
 `SIGN402_PHOTON_AUTO_REGISTER_USERS=1` makes `/connect_imessage` ask the
 Telegram user for their iMessage phone number, add that number to Photon
 Project Users through Spectrum API, then return the pairing code. Users do not
 need a Photon account, but on the shared Photon number pool they must send the
 pairing code from their phone-number iMessage handle, not an Apple ID email.
+For this mode, Telegram shows the assigned private Photon line only after the
+phone number has been registered; do not tell users to use a stale shared line.
+Automatic provisioning is capped at three valid phone-number attempts per
+Telegram user per hour, with a beta-wide hourly guard, to protect the shared
+Photon number pool from abuse.
+
+WhatsApp approval is intentionally not exposed yet. Photon supports WhatsApp
+Business, but it needs a separately configured Meta Business provider rather
+than the bundled iMessage sidecar. Do not present it as an approval channel
+until that provider, its webhook, and its credentials are deployed.
 
 ## Install
 
@@ -88,45 +114,36 @@ or writes secrets.
 
 ## First Test
 
-Keep the existing Telegram allowlist restricted to the operator account.
+Set either `SIGN402_TELEGRAM_ALLOWED_USERS` or the existing Telegram allowlist
+to the operator account before testing.
 In Telegram, run:
 
 ```text
 /wallet
-/create_wallet
 /balance
 /connect_imessage
 ```
 
 Expected behavior:
 
-- `/wallet` returns the existing Base address or offers wallet creation.
-- `/create_wallet` creates one wallet or returns the existing address.
+- `/wallet` creates a Base wallet when needed, then returns its address.
 - `/balance` returns balances or the safe balance-unavailable response.
 - `/connect_imessage` returns a short pairing code.
 
-Send the pairing code to the configured Photon iMessage line. After the
-fixed linked confirmation, run:
-
-```text
-/test_approval
-```
-
-Expected behavior:
-
-- iMessage receives a fixed `Sign402 approval request`.
-- Replying `YES` marks the no-funds test approval as approved.
-- Replying `NO` marks the no-funds test approval as denied.
-- A conversational `yes` with no pending approval stays normal Hermes chat.
+Send the pairing code to the assigned Photon iMessage line. A real, low-value
+purchase is the user-facing approval check: iMessage receives the exact terms,
+and `YES` or `NO` resolves only that pending approval. The Photon/iMessage line
+is approval-only: other messages are dropped and cannot reach the general
+Hermes chat. Use Telegram for wallet and agent interactions.
 
 No public domain, reverse proxy, or tunnel is required. Hermes and the
 Sign402 Gateway communicate over `127.0.0.1:8099`.
 
 ## Public Beta
 
-Before removing the Telegram allowlist, make sure
-`SIGN402_TELEGRAM_SIGN402_ONLY=1` is set in `~/.hermes/.env`. Then follow
-`docs/production-beta-checklist.md` from the repository root.
+Before opening the bot, set both `SIGN402_TELEGRAM_SIGN402_ONLY=1` and an
+explicit `SIGN402_TELEGRAM_ALLOWED_USERS` policy in `~/.hermes/.env`. Then
+follow `docs/production-beta-checklist.md` from the repository root.
 
 ## Diagnostics
 

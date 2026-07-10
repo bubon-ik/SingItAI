@@ -9,13 +9,11 @@ _TELEGRAM_COMMANDS = frozenset(
     {
         "start",
         "wallet",
-        "create-wallet",
         "balance",
         "limits",
         "set-limits",
         "withdraw",
         "connect-imessage",
-        "connect-whatsapp",
         "llm-buy",
         "llm-terms",
         "llm-code",

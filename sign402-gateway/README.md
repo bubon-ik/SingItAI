@@ -377,9 +377,17 @@ curl -sS -X POST http://127.0.0.1:8099/agent/buy-wallet-bitrefill \
   -d '{"quoteId":"<quote_id_from_quote>","recipient":{}}'
 ```
 
-The legacy `/agent/buy-bitrefill` route remains available for Bankr x402 experiments, but the Telegram checkout should use `/agent/buy-wallet-bitrefill`.
+The legacy `/agent/buy-bitrefill` route is disabled by default. It is only for
+isolated Bankr x402 experiments and requires both
+`SIGN402_ENABLE_LEGACY_PAYMENT_EXECUTOR=1` and a separate
+`SIGN402_LEGACY_OPERATOR_API_TOKEN`. Public Telegram checkout uses
+`/agent/buy-wallet-bitrefill`.
 
-Expose one tunnel:
+The following tunnel example is for an isolated local demo only. Do not expose
+the production gateway: the Hermes wallet plugin requires
+`SIGN402_GATEWAY_URL=http://127.0.0.1:8099` on the VPS.
+
+Expose one local-demo tunnel:
 
 ```bash
 cloudflared tunnel --url http://127.0.0.1:8099

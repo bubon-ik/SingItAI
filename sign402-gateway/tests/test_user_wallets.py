@@ -9,6 +9,8 @@ from cryptography.fernet import Fernet
 
 from sign402_gateway.base_balances import AlchemyBaseBalanceProvider
 from sign402_gateway.user_wallets import (
+    BASE_NATIVE_ETH_ASSET_ID,
+    MAX_ACTIVE_ACCESS_TOKENS_PER_USER,
     ManagedBaseWalletService,
     UserWalletStore,
     WalletEncryptionError,
@@ -49,15 +51,28 @@ class UserWalletTests(unittest.TestCase):
         self.assertIsNone(store.resolve_telegram_user_id("bogus-token"))
         self.assertIsNone(store.resolve_telegram_user_id(""))
 
-    def test_reissuing_access_token_revokes_the_previous_one(self):
+    def test_reissuing_access_token_keeps_recent_tokens_valid(self):
         _service, store = self.make_service()
 
         first = store.issue_access_token("1045618308")
         second = store.issue_access_token("1045618308")
 
         self.assertNotEqual(first, second)
-        self.assertIsNone(store.resolve_telegram_user_id(first))
+        self.assertEqual(store.resolve_telegram_user_id(first), "1045618308")
         self.assertEqual(store.resolve_telegram_user_id(second), "1045618308")
+
+    def test_access_token_store_keeps_a_bounded_recent_set(self):
+        _service, store = self.make_service()
+
+        tokens = [
+            store.issue_access_token("1045618308")
+            for _index in range(MAX_ACTIVE_ACCESS_TOKENS_PER_USER + 2)
+        ]
+
+        self.assertIsNone(store.resolve_telegram_user_id(tokens[0]))
+        self.assertIsNone(store.resolve_telegram_user_id(tokens[1]))
+        for token in tokens[2:]:
+            self.assertEqual(store.resolve_telegram_user_id(token), "1045618308")
 
     def test_create_wallet_encrypts_private_key_and_returns_safe_metadata(self):
         service, store = self.make_service()
@@ -277,7 +292,7 @@ class UserWalletTests(unittest.TestCase):
             result["telegramText"].index("- USDC:"),
         )
 
-    def test_withdrawable_tokens_includes_trusted_and_discovered_erc20(self):
+    def test_withdrawable_assets_include_native_eth_and_erc20_tokens(self):
         other_token = "0x" + "22" * 20
 
         def balance_provider(_address: str):
@@ -305,14 +320,16 @@ class UserWalletTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["balanceUnavailable"])
         symbols = [token["symbol"] for token in result["tokens"]]
-        self.assertEqual(symbols, ["USDC", "SINGIT", "OTHER"])
-        self.assertEqual(result["tokens"][0]["decimals"], 6)
-        self.assertEqual(result["tokens"][0]["balance"], "12.5")
-        self.assertEqual(result["tokens"][1]["decimals"], 18)
-        self.assertEqual(result["tokens"][2]["contractAddress"], other_token)
-        self.assertEqual(result["tokens"][2]["decimals"], 8)
-        self.assertNotIn("ETH", symbols)
-        self.assertIn("Choose a token to withdraw", result["telegramText"])
+        self.assertEqual(symbols, ["ETH", "USDC", "SINGIT", "OTHER"])
+        self.assertEqual(result["tokens"][0]["contractAddress"], BASE_NATIVE_ETH_ASSET_ID)
+        self.assertTrue(result["tokens"][0]["native"])
+        self.assertEqual(result["tokens"][1]["decimals"], 6)
+        self.assertEqual(result["tokens"][1]["balance"], "12.5")
+        self.assertEqual(result["tokens"][2]["decimals"], 18)
+        self.assertEqual(result["tokens"][3]["contractAddress"], other_token)
+        self.assertEqual(result["tokens"][3]["decimals"], 8)
+        self.assertIn("ETH", symbols)
+        self.assertIn("Choose an asset to withdraw", result["telegramText"])
 
 
 if __name__ == "__main__":

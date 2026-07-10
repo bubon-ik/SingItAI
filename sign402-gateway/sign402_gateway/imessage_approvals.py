@@ -25,6 +25,7 @@ PAIRING_CODE_LENGTH = 8
 PAIRING_TTL_SECONDS = 10 * 60
 TEST_APPROVAL_TTL_SECONDS = 2 * 60
 PURCHASE_APPROVAL_TTL_SECONDS = 2 * 60
+SUPPORTED_APPROVAL_CHANNELS = frozenset({"imessage"})
 
 
 class ImessageApprovalStore:
@@ -162,6 +163,12 @@ class HermesCliNotifier:
         message: str,
         channel: str = "imessage",
     ) -> dict[str, object]:
+        normalized_channel = _normalize_approval_channel(channel)
+        if normalized_channel not in SUPPORTED_APPROVAL_CHANNELS:
+            # Hermes's bundled Photon sidecar is configured for iMessage. It
+            # does not become a WhatsApp Business sender merely by changing a
+            # recipient label, so fail closed until a real provider is wired.
+            return {"ok": False, "error": "approval_channel_not_configured"}
         if not self.hermes_cli:
             return {"ok": False, "error": "hermes_cli_not_configured"}
         home = str(Path(self.hermes_home).expanduser().parent)
@@ -252,6 +259,15 @@ class ImessageApprovalService:
     ) -> dict[str, Any]:
         user_id = _require_telegram_user_id(telegram_user_id)
         approval_channel = _normalize_approval_channel(channel)
+        if approval_channel not in SUPPORTED_APPROVAL_CHANNELS:
+            return {
+                "ok": False,
+                "channel": approval_channel,
+                "telegramText": (
+                    "WhatsApp approvals are not configured yet. "
+                    "Use /connect_imessage."
+                ),
+            }
         channel_label = _approval_channel_label(approval_channel)
         wallet_status = self.wallet_service.wallet_status(user_id)
         if not wallet_status.get("ok"):
@@ -259,7 +275,7 @@ class ImessageApprovalService:
                 "ok": False,
                 "telegramText": wallet_status.get(
                     "telegramText",
-                    "No Base agent wallet yet. Send /create_wallet to create one.",
+                    "No Base agent wallet yet. Send /wallet to create one.",
                 ),
             }
 
@@ -513,7 +529,7 @@ class ImessageApprovalService:
             "ok": True,
             "removed": bool(removed),
             "telegramText": (
-                "Approval channel link removed. Run /connect_imessage or /connect_whatsapp to link again."
+                "Approval channel link removed. Run /connect_imessage to link again."
                 if removed
                 else "No approval channel link was found."
             ),
@@ -527,7 +543,7 @@ class ImessageApprovalService:
                 "ok": False,
                 "telegramText": wallet_status.get(
                     "telegramText",
-                    "No Base agent wallet yet. Send /create_wallet to create one.",
+                    "No Base agent wallet yet. Send /wallet to create one.",
                 ),
             }
         wallet = wallet_status.get("wallet") or {}
@@ -541,7 +557,7 @@ class ImessageApprovalService:
                 return {
                     "ok": False,
                     "telegramText": (
-                        "No approval channel is linked yet. Send /connect_imessage or /connect_whatsapp first."
+                        "No iMessage approval is linked yet. Send /connect_imessage first."
                     ),
                 }
 
@@ -681,7 +697,7 @@ class ImessageApprovalService:
                 "approved": False,
                 "telegramText": wallet_status.get(
                     "telegramText",
-                    "No Base agent wallet yet. Send /create_wallet to create one.",
+                    "No Base agent wallet yet. Send /wallet to create one.",
                 ),
             }
 
@@ -694,7 +710,7 @@ class ImessageApprovalService:
                     "ok": False,
                     "approved": False,
                     "telegramText": (
-                        "No approval channel is linked yet. Send /connect_imessage or /connect_whatsapp first."
+                        "No iMessage approval is linked yet. Send /connect_imessage first."
                     ),
                 }
 
@@ -833,7 +849,7 @@ class ImessageApprovalService:
                 "status": "wallet_missing",
                 "telegramText": wallet_status.get(
                     "telegramText",
-                    "No Base agent wallet yet. Send /create_wallet to create one.",
+                    "No Base agent wallet yet. Send /wallet to create one.",
                 ),
             }
         wallet = wallet_status.get("wallet") or {}
@@ -848,7 +864,7 @@ class ImessageApprovalService:
                     "ok": False,
                     "status": "approval_channel_not_linked",
                     "telegramText": (
-                        "No approval channel is linked yet. Send /connect_imessage or /connect_whatsapp first."
+                        "No iMessage approval is linked yet. Send /connect_imessage first."
                     ),
                 }
 
@@ -1170,6 +1186,10 @@ class ImessageApprovalService:
         links: list[dict[str, str]] = []
         for row in rows:
             channel = _normalize_approval_channel(row["channel"])
+            if channel not in SUPPORTED_APPROVAL_CHANNELS:
+                # Keep historical rows for audit/unlinking, but never use a
+                # transport that has not been configured on this deployment.
+                continue
             encrypted_photon = str(row["encrypted_photon_user_id"])
             photon_user_id = self._fernet.decrypt(
                 encrypted_photon.encode("ascii")

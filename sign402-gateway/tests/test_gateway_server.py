@@ -10,6 +10,7 @@ from unittest.mock import ANY, Mock, patch
 
 from sign402_gateway.bankr_llm_purchase import BankrLlmError
 from sign402_gateway.bitrefill import LiveBitrefillClient, TestBitrefillClient
+from sign402_gateway.user_wallets import BASE_NATIVE_ETH_ASSET_ID
 from sign402_gateway.server import (
     AgentStateStore,
     BankrCliX402PaymentClient,
@@ -134,6 +135,40 @@ class FakeSocket:
 
 
 class GatewayServerTests(unittest.TestCase):
+    _LEGACY_TEST_PATHS = frozenset(
+        {
+            "/approve-policy",
+            "/approve-payment",
+            "/execute-payment",
+            "/events/latest",
+            "/agent/buy-probe",
+            "/agent/tools",
+            "/agent/inspect-tool",
+            "/agent/buy-tool",
+            "/agent/inspect-x402",
+            "/agent/buy-x402",
+            "/agent/inspect-llm-credits-topup",
+            "/agent/top-up-llm-credits",
+            "/agent/quote-bitrefill",
+            "/agent/buy-bitrefill",
+            "/agent/buy-wallet-bitrefill",
+            "/agent/get-bitrefill-order",
+        }
+    )
+
+    def setUp(self):
+        # Older tests exercise the local Firefly/demo endpoints intentionally.
+        # Production coverage below explicitly disables this opt-in mode.
+        self._legacy_env = patch.dict(
+            os.environ,
+            {
+                "SIGN402_ENABLE_LEGACY_PAYMENT_EXECUTOR": "true",
+                "SIGN402_LEGACY_OPERATOR_API_TOKEN": "legacy-operator-token",
+            },
+        )
+        self._legacy_env.start()
+        self.addCleanup(self._legacy_env.stop)
+
     def test_disabled_approval_provider_rejects_without_firefly(self):
         client = build_approval_client_from_env(
             firefly_port=None,
@@ -626,6 +661,10 @@ class GatewayServerTests(unittest.TestCase):
         server=None,
         headers: dict[str, str] | None = None,
     ):
+        request_headers = dict(headers or {})
+        if headers is None and path in self._LEGACY_TEST_PATHS:
+            request_headers["Authorization"] = "Bearer legacy-operator-token"
+
         encoded = b""
         if body is not None:
             encoded = json.dumps(body).encode("utf-8")
@@ -636,7 +675,7 @@ class GatewayServerTests(unittest.TestCase):
             + b"Content-Type: application/json\r\n"
             + b"".join(
                 f"{key}: {value}\r\n".encode("ascii")
-                for key, value in (headers or {}).items()
+                for key, value in request_headers.items()
             )
             + b"\r\n"
             + encoded
@@ -695,7 +734,7 @@ class GatewayServerTests(unittest.TestCase):
                     "verified": True,
                 }
             ],
-            "telegramText": "Choose a token to withdraw:\n1. SINGIT: 250",
+            "telegramText": "Choose an asset to withdraw:\n1. SINGIT: 250",
         }
 
         with patch("sys.stderr", io.StringIO()):
@@ -767,6 +806,99 @@ class GatewayServerTests(unittest.TestCase):
             chain="base",
             decimals=18,
         )
+
+    def test_withdraw_native_eth_uses_approval_and_native_transfer(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "123"
+        server.user_wallet_service.withdrawable_tokens.return_value = {
+            "ok": True,
+            "wallet": {"address": "0xAc4aCb03cAdaFE1d68262cf94cD5E8B56d9bf45C"},
+            "tokens": [
+                {
+                    "symbol": "ETH",
+                    "contractAddress": BASE_NATIVE_ETH_ASSET_ID,
+                    "balance": "0.01",
+                    "decimals": 18,
+                    "verified": True,
+                    "native": True,
+                }
+            ],
+        }
+        server.user_wallet_service.decrypt_private_key_for_future_signing.return_value = (
+            "0xSECRET"
+        )
+        server.imessage_approval_service.request_hash_approval.return_value = {
+            "ok": True,
+            "status": "approved",
+            "commitmentHash": "a" * 64,
+        }
+        server.user_token_transfer_client.transfer_native.return_value = {
+            "ok": True,
+            "txId": "0x" + "c" * 64,
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/withdraw",
+                {
+                    "telegramUserId": "123",
+                    "tokenAddress": BASE_NATIVE_ETH_ASSET_ID,
+                    "amount": "0.005",
+                    "toAddress": "0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+                },
+                server=server,
+                headers=self.llm_auth_headers(),
+            )
+
+        body = self.response_json(handler)
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(handler))
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["txId"], "0x" + "c" * 64)
+        server.imessage_approval_service.request_hash_approval.assert_called_once()
+        server.user_token_transfer_client.transfer_native.assert_called_once_with(
+            private_key="0xSECRET",
+            to_address="0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+            amount="0.005",
+            chain="base",
+        )
+
+    def test_withdraw_native_eth_keeps_gas_reserve_before_approval(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "123"
+        server.user_wallet_service.withdrawable_tokens.return_value = {
+            "ok": True,
+            "wallet": {"address": "0xAc4aCb03cAdaFE1d68262cf94cD5E8B56d9bf45C"},
+            "tokens": [
+                {
+                    "symbol": "ETH",
+                    "contractAddress": BASE_NATIVE_ETH_ASSET_ID,
+                    "balance": "0.01",
+                    "decimals": 18,
+                    "verified": True,
+                    "native": True,
+                }
+            ],
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/withdraw",
+                {
+                    "telegramUserId": "123",
+                    "tokenAddress": BASE_NATIVE_ETH_ASSET_ID,
+                    "amount": "0.01",
+                    "toAddress": "0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+                },
+                server=server,
+                headers=self.llm_auth_headers(),
+            )
+
+        body = self.response_json(handler)
+        self.assertIn("HTTP/1.0 400 Bad Request", self.response_text(handler))
+        self.assertEqual(body["error"], "withdraw_request_failed")
+        self.assertIn("leave at least", body["detail"])
+        server.imessage_approval_service.request_hash_approval.assert_not_called()
+        server.user_token_transfer_client.transfer_native.assert_not_called()
 
     def test_llm_key_start_requires_per_user_token(self):
         server = DummyServer()
@@ -1050,6 +1182,21 @@ class GatewayServerTests(unittest.TestCase):
         self.assertIn("/agent/llm-key/verify", endpoints)
         self.assertIn("/agent/llm-key/reconcile", endpoints)
         self.assertIn("/agent/llm-credits", endpoints)
+        self.assertNotIn("/agent/test-imessage-approval", endpoints)
+
+    def test_health_lists_test_approval_only_when_explicitly_enabled(self):
+        with patch.dict(
+            os.environ,
+            {"SIGN402_ENABLE_TEST_ENDPOINTS": "true"},
+        ), patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/health",
+                method="GET",
+                server=DummyServer(),
+            )
+
+        endpoints = self.response_json(handler)["endpoints"]
+        self.assertIn("/agent/test-imessage-approval", endpoints)
 
     def test_health_lists_bitrefill_catalog_route(self):
         with patch("sys.stderr", io.StringIO()):
@@ -1423,7 +1570,10 @@ class GatewayServerTests(unittest.TestCase):
             "telegramText": "Test approval sent",
         }
 
-        with patch("sys.stderr", io.StringIO()):
+        with patch.dict(
+            os.environ,
+            {"SIGN402_ENABLE_TEST_ENDPOINTS": "true"},
+        ), patch("sys.stderr", io.StringIO()):
             handler = self.make_handler(
                 "/agent/test-imessage-approval",
                 {"telegramUserId": "1045618308"},
@@ -1437,6 +1587,23 @@ class GatewayServerTests(unittest.TestCase):
         server.imessage_approval_service.create_test_approval.assert_called_once_with(
             "1045618308"
         )
+
+    def test_test_imessage_approval_endpoint_is_disabled_by_default(self):
+        server = DummyServer()
+
+        with patch.dict(
+            os.environ,
+            {"SIGN402_ENABLE_TEST_ENDPOINTS": ""},
+        ), patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/test-imessage-approval",
+                {"telegramUserId": "1045618308"},
+                server=server,
+                headers=self.photon_auth_headers(),
+            )
+
+        self.assertIn("HTTP/1.0 404 Not Found", self.response_text(handler))
+        server.imessage_approval_service.create_test_approval.assert_not_called()
 
     def test_approve_payment_uses_firefly(self):
         payment_hash = "b" * 64
@@ -1533,7 +1700,13 @@ class GatewayServerTests(unittest.TestCase):
             "note": f"sign402:{policy_hash}:intent-001",
         }
 
-        with patch("sys.stderr", io.StringIO()):
+        with patch.dict(
+            os.environ,
+            {
+                "SIGN402_ENABLE_LEGACY_PAYMENT_EXECUTOR": "true",
+                "SIGN402_LEGACY_OPERATOR_API_TOKEN": "legacy-operator-token",
+            },
+        ), patch("sys.stderr", io.StringIO()):
             handler = self.make_handler(
                 "/execute-payment",
                 {
@@ -1541,6 +1714,7 @@ class GatewayServerTests(unittest.TestCase):
                     "paymentApprovalHash": approval_hash,
                     "paymentRequirements": requirement,
                 },
+                headers={"Authorization": "Bearer legacy-operator-token"},
             )
 
         response = self.response_text(handler)
@@ -1552,6 +1726,56 @@ class GatewayServerTests(unittest.TestCase):
         self.assertNotIn("mnemonic", response.lower())
         DummyServer.payment_executor.assert_called_once_with(requirement, policy_hash)
 
+    def test_execute_payment_is_not_available_without_explicit_operator_opt_in(self):
+        DummyServer.payment_executor.reset_mock()
+        requirement = {
+            "network": "algorand-testnet",
+            "asset": "ALGO_TEST",
+            "amountAtomic": "50000",
+            "receiver": "MERCHANT",
+            "paymentIntent": "intent-001",
+        }
+
+        with patch.dict(
+            os.environ,
+            {
+                "SIGN402_ENABLE_LEGACY_PAYMENT_EXECUTOR": "",
+                "SIGN402_LEGACY_OPERATOR_API_TOKEN": "",
+            },
+        ), patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/execute-payment",
+                {
+                    "policyHash": "a" * 64,
+                    "paymentApprovalHash": "b" * 64,
+                    "paymentRequirements": requirement,
+                },
+            )
+
+        self.assertIn("HTTP/1.0 404 Not Found", self.response_text(handler))
+        self.assertEqual(self.response_json(handler)["error"], "not_found")
+        DummyServer.payment_executor.assert_not_called()
+
+    def test_legacy_payment_routes_are_hidden_without_explicit_operator_opt_in(self):
+        DummyServer.x402_buyer.reset_mock()
+
+        with patch.dict(
+            os.environ,
+            {
+                "SIGN402_ENABLE_LEGACY_PAYMENT_EXECUTOR": "",
+                "SIGN402_LEGACY_OPERATOR_API_TOKEN": "",
+            },
+        ), patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/buy-x402",
+                {"url": "https://merchant.example/paid"},
+                headers={},
+            )
+
+        self.assertIn("HTTP/1.0 404 Not Found", self.response_text(handler))
+        self.assertEqual(self.response_json(handler)["error"], "not_found")
+        DummyServer.x402_buyer.assert_not_called()
+
     def test_execute_payment_rejects_invalid_hash_before_executor(self):
         DummyServer.payment_executor.reset_mock()
         requirement = {
@@ -1562,7 +1786,13 @@ class GatewayServerTests(unittest.TestCase):
             "paymentIntent": "intent-001",
         }
 
-        with patch("sys.stderr", io.StringIO()):
+        with patch.dict(
+            os.environ,
+            {
+                "SIGN402_ENABLE_LEGACY_PAYMENT_EXECUTOR": "true",
+                "SIGN402_LEGACY_OPERATOR_API_TOKEN": "legacy-operator-token",
+            },
+        ), patch("sys.stderr", io.StringIO()):
             handler = self.make_handler(
                 "/execute-payment",
                 {
@@ -1570,6 +1800,7 @@ class GatewayServerTests(unittest.TestCase):
                     "paymentApprovalHash": "b" * 64,
                     "paymentRequirements": requirement,
                 },
+                headers={"Authorization": "Bearer legacy-operator-token"},
             )
 
         response = self.response_text(handler)
@@ -1597,11 +1828,41 @@ class GatewayServerTests(unittest.TestCase):
 
         self.assertIn("HTTP/1.0 200 OK", post_response)
         self.assertIn('"ok": true', post_response)
-        self.assertIn("Access-Control-Allow-Origin: *", post_response)
+        self.assertNotIn("Access-Control-Allow-Origin", post_response)
         self.assertIn("HTTP/1.0 200 OK", get_response)
         self.assertIn('"decision": "APPROVED & EXECUTED"', get_response)
         DummyServer.event_store.write.assert_called_once_with(event)
         DummyServer.event_store.read.assert_called_once()
+
+    def test_cors_requires_an_explicit_allowlisted_origin(self):
+        with patch.dict(
+            os.environ,
+            {
+                "SIGN402_ENABLE_CORS": "true",
+                "SIGN402_CORS_ALLOWED_ORIGINS": "https://app.sign402.example",
+            },
+        ), patch("sys.stderr", io.StringIO()):
+            allowed = self.make_handler(
+                "/health",
+                method="OPTIONS",
+                headers={"Origin": "https://app.sign402.example"},
+            )
+            denied = self.make_handler(
+                "/health",
+                method="OPTIONS",
+                headers={"Origin": "https://evil.example"},
+            )
+
+        allowed_response = self.response_text(allowed)
+        denied_response = self.response_text(denied)
+        self.assertIn("HTTP/1.0 204 No Content", allowed_response)
+        self.assertIn(
+            "Access-Control-Allow-Origin: https://app.sign402.example",
+            allowed_response,
+        )
+        self.assertIn("Vary: Origin", allowed_response)
+        self.assertIn("HTTP/1.0 404 Not Found", denied_response)
+        self.assertNotIn("Access-Control-Allow-Origin", denied_response)
 
     def test_agent_buy_probe_runs_single_orchestrated_flow(self):
         DummyServer.agent_buy_probe.reset_mock()
@@ -2093,6 +2354,7 @@ class GatewayServerTests(unittest.TestCase):
 
     def test_agent_spending_limits_returns_default_operator_caps(self):
         server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
         with tempfile.TemporaryDirectory() as tmpdir:
             server.user_spend_limit_store = UserSpendLimitStore(Path(tmpdir) / "limits.json")
 
@@ -2101,7 +2363,7 @@ class GatewayServerTests(unittest.TestCase):
                     "/agent/spending-limits",
                     {"telegramUserId": "1045618308"},
                     server=server,
-                    headers=self.wallet_auth_headers(),
+                    headers=self.llm_auth_headers(),
                 )
 
         response = self.response_text(handler)
@@ -2116,6 +2378,7 @@ class GatewayServerTests(unittest.TestCase):
 
     def test_agent_spending_limits_updates_user_limits_below_operator_caps(self):
         server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
         with tempfile.TemporaryDirectory() as tmpdir:
             server.user_spend_limit_store = UserSpendLimitStore(Path(tmpdir) / "limits.json")
 
@@ -2128,7 +2391,7 @@ class GatewayServerTests(unittest.TestCase):
                         "dailyCapUsdc": "0.05",
                     },
                     server=server,
-                    headers=self.wallet_auth_headers(),
+                    headers=self.llm_auth_headers(),
                 )
 
         response = self.response_text(handler)
@@ -2143,6 +2406,7 @@ class GatewayServerTests(unittest.TestCase):
 
     def test_agent_spending_limits_allows_user_limits_above_default_caps(self):
         server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
         with tempfile.TemporaryDirectory() as tmpdir:
             server.user_spend_limit_store = UserSpendLimitStore(Path(tmpdir) / "limits.json")
 
@@ -2155,7 +2419,7 @@ class GatewayServerTests(unittest.TestCase):
                         "dailyCapUsdc": "500",
                     },
                     server=server,
-                    headers=self.wallet_auth_headers(),
+                    headers=self.llm_auth_headers(),
                 )
 
         response = self.response_text(handler)
@@ -2166,6 +2430,25 @@ class GatewayServerTests(unittest.TestCase):
         self.assertEqual(body["limits"]["maxPerTxAtomic"], 100000000)
         self.assertEqual(body["limits"]["dailyCapAtomic"], 500000000)
         self.assertTrue(body["limits"]["userConfigured"])
+
+    def test_agent_spending_limits_requires_the_callers_per_user_token(self):
+        server = DummyServer()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server.user_spend_limit_store = UserSpendLimitStore(Path(tmpdir) / "limits.json")
+
+            with patch("sys.stderr", io.StringIO()):
+                handler = self.make_handler(
+                    "/agent/spending-limits",
+                    {"telegramUserId": "1045618308"},
+                    server=server,
+                    headers=self.wallet_auth_headers(),
+                )
+
+        self.assertIn("HTTP/1.0 401 Unauthorized", self.response_text(handler))
+        self.assertEqual(
+            self.response_json(handler)["error"],
+            "per-user access token is required",
+        )
 
     def test_agent_buy_tool_for_user_rejects_amount_over_default_tx_cap(self):
         server = DummyServer()
@@ -2630,6 +2913,44 @@ class GatewayServerTests(unittest.TestCase):
         self.assertEqual(
             recorded["command"][recorded["command"].index("--decimals") + 1], "6"
         )
+
+    def test_user_wallet_native_transfer_client_passes_private_key_in_env_only(self):
+        completed = subprocess.CompletedProcess(
+            args=["node"],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "transactionHash": "0xNATIVETRANSFER",
+                    "from": "0xAc4aCb03cAdaFE1d68262cf94cD5E8B56d9bf45C",
+                }
+            ),
+            stderr="",
+        )
+        runner = Mock(return_value=completed)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service_dir = Path(tmpdir)
+            script = service_dir / "src" / "index.mjs"
+            script.parent.mkdir(parents=True)
+            script.write_text("// test", encoding="utf-8")
+            client = UserWalletTokenTransferClient(service_dir, runner=runner)
+
+            result = client.transfer_native(
+                private_key="0xSECRET",
+                to_address="0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+                amount="0.005",
+                chain="base",
+            )
+
+        self.assertTrue(result["ok"])
+        args = runner.call_args.args[0]
+        kwargs = runner.call_args.kwargs
+        self.assertEqual(args[2], "transfer-native-user")
+        self.assertIn("--to", args)
+        self.assertIn("--amount", args)
+        self.assertIn("0.005", args)
+        self.assertNotIn("0xSECRET", args)
+        self.assertEqual(kwargs["env"]["SIGN402_EVM_PRIVATE_KEY"], "0xSECRET")
 
     def test_user_wallet_token_transfer_client_reads_token_info_and_balance(self):
         recorded = []

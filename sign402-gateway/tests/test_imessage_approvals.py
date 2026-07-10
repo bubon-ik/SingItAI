@@ -177,40 +177,19 @@ class ImessageApprovalTests(unittest.TestCase):
         self.assertFalse(replay["ok"])
         self.assertIn("No pending approval", replay["imessageText"])
 
-    def test_whatsapp_link_gets_same_test_approval_as_imessage(self):
-        service, wallet_service, _store, notifier = self.make_linked_service()
-        wallet_service.create_wallet("2045618308")
-        whatsapp_pairing = service.create_pairing("1045618308", channel="whatsapp")
-        linked = service.link_photon_sender(whatsapp_pairing["code"], "+15557654321")
+    def test_whatsapp_pairing_is_rejected_until_a_real_provider_is_configured(self):
+        service, _wallet_service, _store, notifier = self.make_linked_service()
 
+        pairing = service.create_pairing("1045618308", channel="whatsapp")
         created = service.create_test_approval("1045618308")
 
-        self.assertTrue(linked["ok"])
-        self.assertIn("whatsapp", linked["imessageText"].lower())
+        self.assertFalse(pairing["ok"])
+        self.assertIn("not configured", pairing["telegramText"].lower())
         self.assertTrue(created["ok"])
         self.assertEqual(
-            [
-                (message["channel"], message["photonUserId"])
-                for message in notifier.messages
-            ],
-            [("imessage", "+15551234567"), ("whatsapp", "+15557654321")],
+            [(message["channel"], message["photonUserId"]) for message in notifier.messages],
+            [("imessage", "+15551234567")],
         )
-        self.assertIn("iMessage and WhatsApp", created["telegramText"])
-
-    def test_whatsapp_decision_closes_multichannel_approval(self):
-        service, _wallet_service, _store, _notifier = self.make_linked_service()
-        whatsapp_pairing = service.create_pairing("1045618308", channel="whatsapp")
-        service.link_photon_sender(whatsapp_pairing["code"], "+15557654321")
-        service.create_test_approval("1045618308")
-
-        decided = service.record_decision("+15557654321", "YES")
-        imessage_replay = service.record_decision("+15551234567", "YES")
-        whatsapp_pending = service.pending_for_photon_sender("+15557654321")
-
-        self.assertTrue(decided["ok"])
-        self.assertEqual(decided["status"], "approved")
-        self.assertFalse(imessage_replay["ok"])
-        self.assertFalse(whatsapp_pending["pending"])
 
     def test_external_hash_approval_uses_supplied_commitment_hash(self):
         service_ref = []
@@ -337,6 +316,29 @@ class ImessageApprovalTests(unittest.TestCase):
         self.assertFalse(calls[0][1]["shell"])
         self.assertEqual(calls[0][1]["env"]["HOME"], "/home/hermes")
         self.assertEqual(calls[0][1]["env"]["HERMES_HOME"], "/home/hermes/.hermes")
+
+    def test_hermes_cli_notifier_rejects_unconfigured_whatsapp_without_sending(self):
+        calls = []
+
+        def runner(args, **kwargs):
+            calls.append((args, kwargs))
+            return type("Completed", (), {"returncode": 0, "stdout": "sent", "stderr": ""})()
+
+        notifier = HermesCliNotifier(
+            hermes_cli="/home/hermes/.local/bin/hermes",
+            hermes_home="/home/hermes/.hermes",
+            runner=runner,
+        )
+
+        result = notifier.send(
+            photon_user_id="+15551234567",
+            message="Sign402 approval request",
+            channel="whatsapp",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "approval_channel_not_configured")
+        self.assertEqual(calls, [])
 
     def test_hermes_cli_notifier_passes_photon_sidecar_environment(self):
         calls = []

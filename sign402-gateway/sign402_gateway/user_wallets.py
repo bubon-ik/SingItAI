@@ -19,6 +19,9 @@ from .base_balances import (
 
 
 DEFAULT_USER_WALLET_STORE_PATH = Path.home() / ".sign402" / "user-wallets.db"
+ACCESS_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
+MAX_ACTIVE_ACCESS_TOKENS_PER_USER = 8
+BASE_NATIVE_ETH_ASSET_ID = "native"
 
 
 class WalletEncryptionError(RuntimeError):
@@ -147,26 +150,74 @@ class UserWalletStore:
                 )
                 """
             )
+            # The original token table stores one token per user. Keeping
+            # several short-lived hashes avoids a race where /wallet rotates a
+            # token while another authenticated command is already in flight.
+            # Leave the old table in place for a smooth upgrade from existing
+            # deployments; a fresh v2 token revokes its legacy predecessor.
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_access_tokens_v2 (
+                    token_hash TEXT PRIMARY KEY,
+                    telegram_user_id TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL
+                )
+                """
+            )
+            db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS user_access_tokens_v2_user_created
+                ON user_access_tokens_v2 (telegram_user_id, created_at DESC)
+                """
+            )
 
     def issue_access_token(self, telegram_user_id: str) -> str:
         """Mint a fresh per-user API token, storing only its hash.
 
         Binds a caller to one specific user so a leaked token compromises that
-        user alone rather than authorizing action as any user. Re-issuing
-        replaces (revokes) the previous token for that user.
+        user alone rather than authorizing action as any user. Multiple recent
+        tokens are allowed briefly so concurrent Telegram commands cannot
+        invalidate one another midway through a request.
         """
         token = secrets.token_urlsafe(32)
         token_hash = _token_hash(token)
         now = int(time.time())
+        expires_at = now + ACCESS_TOKEN_TTL_SECONDS
         with self.lock, self._database() as db:
             db.execute(
+                "DELETE FROM user_access_tokens_v2 WHERE expires_at <= ?",
+                (now,),
+            )
+            db.execute(
                 """
-                INSERT INTO user_access_tokens (telegram_user_id, token_hash, created_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(telegram_user_id)
-                DO UPDATE SET token_hash = excluded.token_hash, created_at = excluded.created_at
+                INSERT INTO user_access_tokens_v2 (
+                    token_hash, telegram_user_id, created_at, expires_at
+                )
+                VALUES (?, ?, ?, ?)
                 """,
-                (str(telegram_user_id), token_hash, now),
+                (token_hash, str(telegram_user_id), now, expires_at),
+            )
+            stale_rows = db.execute(
+                """
+                SELECT token_hash
+                FROM user_access_tokens_v2
+                WHERE telegram_user_id = ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT -1 OFFSET ?
+                """,
+                (str(telegram_user_id), MAX_ACTIVE_ACCESS_TOKENS_PER_USER),
+            ).fetchall()
+            if stale_rows:
+                db.executemany(
+                    "DELETE FROM user_access_tokens_v2 WHERE token_hash = ?",
+                    [(str(row["token_hash"]),) for row in stale_rows],
+                )
+            # A v2 token has now been issued to the trusted plugin, so the
+            # one-token legacy record is no longer needed for this user.
+            db.execute(
+                "DELETE FROM user_access_tokens WHERE telegram_user_id = ?",
+                (str(telegram_user_id),),
             )
         return token
 
@@ -175,11 +226,23 @@ class UserWalletStore:
         if not token:
             return None
         token_hash = _token_hash(token)
+        now = int(time.time())
         with self.lock, self._database() as db:
             row = db.execute(
-                "SELECT telegram_user_id FROM user_access_tokens WHERE token_hash = ?",
-                (token_hash,),
+                """
+                SELECT telegram_user_id
+                FROM user_access_tokens_v2
+                WHERE token_hash = ? AND expires_at > ?
+                """,
+                (token_hash, now),
             ).fetchone()
+            if row is None:
+                # Compatibility for a running Hermes process during the first
+                # deployment of this migration. The next token mint removes it.
+                row = db.execute(
+                    "SELECT telegram_user_id FROM user_access_tokens WHERE token_hash = ?",
+                    (token_hash,),
+                ).fetchone()
         return str(row["telegram_user_id"]) if row is not None else None
 
     def _connect(self) -> sqlite3.Connection:
@@ -275,7 +338,7 @@ class ManagedBaseWalletService:
                 "ok": False,
                 "wallet": None,
                 "telegramText": (
-                    "No Base agent wallet yet. Send /create_wallet to create one."
+                    "No Base agent wallet yet. Send /wallet to create one."
                 ),
             }
         self.store.record_audit_event(
@@ -294,7 +357,7 @@ class ManagedBaseWalletService:
                 "wallet": None,
                 "balanceUnavailable": True,
                 "telegramText": (
-                    "No Base agent wallet yet. Send /create_wallet to create one."
+                    "No Base agent wallet yet. Send /wallet to create one."
                 ),
             }
 
@@ -357,7 +420,7 @@ class ManagedBaseWalletService:
                 "balanceUnavailable": True,
                 "tokens": [],
                 "telegramText": (
-                    "No Base agent wallet yet. Send /create_wallet to create one."
+                    "No Base agent wallet yet. Send /wallet to create one."
                 ),
             }
 
@@ -542,6 +605,18 @@ def _withdrawable_token_list(
     unverified_tokens: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     tokens: list[dict[str, Any]] = []
+    eth_balance = str(balances.get("ETH", "0"))
+    if _positive_decimal(eth_balance):
+        tokens.append(
+            {
+                "symbol": "ETH",
+                "contractAddress": BASE_NATIVE_ETH_ASSET_ID,
+                "balance": eth_balance,
+                "decimals": 18,
+                "verified": True,
+                "native": True,
+            }
+        )
     trusted = (
         ("USDC", BASE_USDC_ADDRESS, 6),
         ("SINGIT", DEFAULT_SINGIT_TOKEN_ADDRESS, 18),
@@ -588,12 +663,14 @@ def _withdrawable_token_list(
 
 def _withdrawable_tokens_text(tokens: list[dict[str, Any]]) -> str:
     if not tokens:
-        return "No ERC-20 token balances are available to withdraw yet."
-    lines = ["Choose a token to withdraw:"]
+        return "No Base asset balances are available to withdraw yet."
+    lines = ["Choose an asset to withdraw:"]
     for index, token in enumerate(tokens, start=1):
         symbol = str(token.get("symbol") or "ERC20")
         balance = str(token.get("balance") or "0")
         line = f"{index}. {symbol}: {balance}"
+        if token.get("native"):
+            line += " (leave ETH for gas)"
         if not token.get("verified"):
             line += f" ({_short_address(str(token.get('contractAddress') or ''))})"
         lines.append(line)

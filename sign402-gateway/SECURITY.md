@@ -21,6 +21,9 @@ with shared bearer tokens:
 - **Pairing binds phone ↔ Telegram.** An approver phone is linked only after the
   user enters a pairing code that was delivered to them on their authenticated
   Telegram account.
+- **iMessage is approval-only.** Pairing codes and `YES`/`NO` decisions are
+  consumed by Sign402; unrelated Photon/iMessage text is dropped before it can
+  reach the general Hermes agent.
 - **Decisions are bound to a commitment.** `record_decision` accepts the
   `approval_id` the sidecar showed the user (from `/agent/imessage/pending`), so
   a stale "YES" cannot approve a different, newer commitment.
@@ -43,6 +46,24 @@ sidecar as a trusted component.** Operationally:
 - Run the gateway single-process (the SQLite stores serialize with a
   `threading.Lock`; multi-process deployment would weaken the
   claim-once guarantees).
+
+### Production endpoint mode
+
+The legacy Firefly/demo payment executor is disabled by default. Do not set
+`SIGN402_ENABLE_LEGACY_PAYMENT_EXECUTOR` on the public VPS. If it is required
+for an isolated local demo, it also requires a distinct
+`SIGN402_LEGACY_OPERATOR_API_TOKEN`; it must never reuse a Telegram, Photon,
+or managed-wallet token.
+
+CORS is also disabled by default. Leave `SIGN402_ENABLE_CORS` unset while the
+gateway is a localhost-only backend for Hermes. Enabling it also requires an
+exact comma-separated `SIGN402_CORS_ALLOWED_ORIGINS` list; it should be a
+deliberate web-client design decision, not a quick way to make the gateway
+reachable from a browser.
+
+The `/agent/test-imessage-approval` probe is disabled by default as well. It is
+not part of the user product; enable `SIGN402_ENABLE_TEST_ENDPOINTS=true` only
+for a short, operator-controlled diagnostic session, then remove it again.
 
 ## End-to-end verification checklist
 

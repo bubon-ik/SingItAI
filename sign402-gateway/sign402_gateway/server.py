@@ -63,6 +63,7 @@ SINGIT_RISK_CHECK_REQUEST_BODY = {
 BANKR_LLM_CREDITS_PURPOSE = "bankr_llm_credits_topup"
 BANKR_LLM_CREDITS_RESOURCE = "bankr://llm-credits/top-up"
 BANKR_LLM_CREDITS_RECEIVER = "bankr.llm"
+DEFAULT_NATIVE_ETH_WITHDRAW_GAS_RESERVE = Decimal("0.000001")
 
 for package_dir in (SIGN402_BRIDGE_DIR, PAYMENT_EXECUTOR_DIR, LIVE_DEMO_DIR, DEMO_RESOURCE_SERVER_DIR):
     package_path = str(package_dir)
@@ -91,6 +92,7 @@ from .numeric import format_decimal
 from .goplausible import fetch_x402_paid_resource, fetch_x402_payment_required, normalize_x402_payment_required
 from .real_rate_pricing import RealRateSingitPricer
 from .user_wallets import (
+    BASE_NATIVE_ETH_ASSET_ID,
     DEFAULT_USER_WALLET_STORE_PATH,
     WalletEncryptionError,
     build_wallet_service_from_env,
@@ -395,11 +397,36 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
         if path == "/health":
-            self._send_json(
-                {
-                    "ok": True,
-                    "service": "sign402-gateway",
-                    "endpoints": [
+            endpoints = [
+                "/agent/buy-tool",
+                "/agent/search-bitrefill",
+                "/agent/list-bitrefill-products",
+                "/agent/get-bitrefill-product",
+                "/agent/quote-bitrefill",
+                "/agent/buy-wallet-bitrefill",
+                "/agent/wallet",
+                "/agent/create-wallet",
+                "/agent/wallet-balance",
+                "/agent/last-purchase",
+                "/agent/spending-limits",
+                "/agent/withdraw/tokens",
+                "/agent/withdraw",
+                "/agent/llm-key/start",
+                "/agent/llm-key/accept-terms",
+                "/agent/llm-key/verify",
+                "/agent/llm-key/reconcile",
+                "/agent/llm-credits",
+                "/agent/imessage/pairing",
+                "/agent/imessage/link",
+                "/agent/imessage/unlink",
+                "/agent/imessage/pending",
+                "/agent/imessage/decision",
+            ]
+            if _test_endpoints_enabled():
+                endpoints.append("/agent/test-imessage-approval")
+            if _legacy_payment_executor_enabled():
+                endpoints.extend(
+                    [
                         "/approve-policy",
                         "/approve-payment",
                         "/execute-payment",
@@ -407,37 +434,19 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                         "/agent/buy-probe",
                         "/agent/tools",
                         "/agent/inspect-tool",
-                        "/agent/buy-tool",
                         "/agent/inspect-x402",
                         "/agent/buy-x402",
                         "/agent/inspect-llm-credits-topup",
                         "/agent/top-up-llm-credits",
-                        "/agent/search-bitrefill",
-                        "/agent/list-bitrefill-products",
-                        "/agent/get-bitrefill-product",
-                        "/agent/quote-bitrefill",
                         "/agent/buy-bitrefill",
-                        "/agent/buy-wallet-bitrefill",
                         "/agent/get-bitrefill-order",
-                        "/agent/wallet",
-                        "/agent/create-wallet",
-                        "/agent/wallet-balance",
-                        "/agent/last-purchase",
-                        "/agent/spending-limits",
-                        "/agent/withdraw/tokens",
-                        "/agent/withdraw",
-                        "/agent/llm-key/start",
-                        "/agent/llm-key/accept-terms",
-                        "/agent/llm-key/verify",
-                        "/agent/llm-key/reconcile",
-                        "/agent/llm-credits",
-                        "/agent/imessage/pairing",
-                        "/agent/imessage/link",
-                        "/agent/imessage/unlink",
-                        "/agent/imessage/pending",
-                        "/agent/imessage/decision",
-                        "/agent/test-imessage-approval",
-                    ],
+                    ]
+                )
+            self._send_json(
+                {
+                    "ok": True,
+                    "service": "sign402-gateway",
+                    "endpoints": endpoints,
                 }
             )
             return
@@ -557,6 +566,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._handle_agent_imessage_decision()
             return
         if path == "/agent/test-imessage-approval":
+            if not _test_endpoints_enabled():
+                self._send_json({"error": "not_found"}, status=404)
+                return
             self._handle_agent_test_imessage_approval()
             return
         if path == "/internal/fulfill-bitrefill":
@@ -568,12 +580,17 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "not_found"}, status=404)
 
     def do_OPTIONS(self) -> None:
+        if not _cors_allowed_origin(self.headers.get("Origin", "")):
+            self._send_json({"error": "not_found"}, status=404)
+            return
         self.send_response(204)
         self._send_cors_headers()
         self.send_header("Content-Length", "0")
         self.end_headers()
 
     def _handle_approve_policy(self) -> None:
+        if not self._legacy_operator_request_allowed():
+            return
         if not self._acquire_firefly():
             self._send_json(_busy_payload(), status=409)
             return
@@ -606,6 +623,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._release_firefly()
 
     def _handle_approve_payment(self) -> None:
+        if not self._legacy_operator_request_allowed():
+            return
         if not self._acquire_firefly():
             self._send_json(_busy_payload(), status=409)
             return
@@ -639,6 +658,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._release_firefly()
 
     def _handle_execute_payment(self) -> None:
+        if not self._legacy_operator_request_allowed():
+            return
         try:
             payload = self._read_json()
             policy_hash = _read_hash(payload, "policyHash")
@@ -763,9 +784,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
 
     def _handle_agent_spending_limits(self) -> None:
         try:
-            _require_wallet_api_token(self)
             payload = self._read_json()
-            telegram_user_id = _read_telegram_user_id(payload)
+            telegram_user_id = _require_authenticated_user(self, payload)
             operator_limits = _operator_user_wallet_limits()
             if _payload_has_spending_limit_update(payload):
                 max_per_tx_atomic = _read_usdc_limit_atomic(payload, "maxPerTx")
@@ -820,13 +840,22 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             user_id = _require_authenticated_user(self, payload)
             amount = _read_positive_amount(payload, "amount")
             to_address = _read_evm_address(payload, "toAddress")
-            token_address = _read_evm_address(payload, "tokenAddress")
+            token_address = _read_withdraw_asset(payload, "tokenAddress")
             inventory = self.server.user_wallet_service.withdrawable_tokens(user_id)
             token = _find_withdrawable_token(inventory, token_address)
             if token is None:
                 raise ValueError("token is not available for withdrawal")
             if Decimal(amount) > Decimal(str(token.get("balance") or "0")):
                 raise ValueError("withdraw amount exceeds token balance")
+            is_native = bool(token.get("native"))
+            if is_native:
+                reserve = _native_eth_withdraw_gas_reserve()
+                remaining = Decimal(str(token.get("balance") or "0")) - Decimal(amount)
+                if remaining < reserve:
+                    raise ValueError(
+                        "ETH withdrawal must leave at least "
+                        f"{format_decimal(reserve)} ETH for Base gas"
+                    )
 
             wallet = inventory.get("wallet") if isinstance(inventory, dict) else {}
             from_address = str(wallet.get("address", "") if isinstance(wallet, dict) else "")
@@ -867,14 +896,22 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             private_key = self.server.user_wallet_service.decrypt_private_key_for_future_signing(
                 user_id
             )
-            transfer = self.server.user_token_transfer_client.transfer_token(
-                private_key=private_key,
-                to_address=to_address,
-                token_address=token_address,
-                amount=amount,
-                chain="base",
-                decimals=decimals,
-            )
+            if is_native:
+                transfer = self.server.user_token_transfer_client.transfer_native(
+                    private_key=private_key,
+                    to_address=to_address,
+                    amount=amount,
+                    chain="base",
+                )
+            else:
+                transfer = self.server.user_token_transfer_client.transfer_token(
+                    private_key=private_key,
+                    to_address=to_address,
+                    token_address=token_address,
+                    amount=amount,
+                    chain="base",
+                    decimals=decimals,
+                )
             tx_id = str(transfer.get("txId") or transfer.get("transactionHash") or "")
             telegram_text = _withdraw_telegram_text(
                 symbol=symbol,
@@ -1113,10 +1150,14 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=400)
 
     def _handle_get_latest_event(self) -> None:
+        if not self._legacy_operator_request_allowed():
+            return
         event = self.server.event_store.read()
         self._send_json({"ok": event is not None, "event": event})
 
     def _handle_post_latest_event(self) -> None:
+        if not self._legacy_operator_request_allowed():
+            return
         try:
             payload = self._read_json()
             event = payload.get("event", payload)
@@ -1128,6 +1169,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=400)
 
     def _handle_agent_buy_probe(self) -> None:
+        if not self._legacy_operator_request_allowed():
+            return
         if not self._acquire_firefly():
             self._send_json(_busy_payload(), status=409)
             return
@@ -1146,6 +1189,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._release_firefly()
 
     def _handle_agent_tools(self) -> None:
+        if not self._legacy_operator_request_allowed():
+            return
         self._send_json(
             {
                 "ok": True,
@@ -1156,6 +1201,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         )
 
     def _handle_agent_inspect_tool(self) -> None:
+        if not self._legacy_operator_request_allowed():
+            return
         try:
             payload = self._read_json()
             tool = _resolve_paid_tool(payload)
@@ -1185,6 +1232,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                     resource_url=resource_url,
                     telegram_user_id=telegram_user_id,
                 )
+                return
+            if not self._legacy_operator_request_allowed():
                 return
             cache_key = _buy_tool_cache_key(tool, resource_url)
             cached = self._read_buy_tool_cache(cache_key)
@@ -1308,6 +1357,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"decision": "rejected", "ok": False, "error": str(exc)}, status=400)
 
     def _handle_agent_inspect_x402(self) -> None:
+        if not self._legacy_operator_request_allowed():
+            return
         try:
             payload = self._read_json()
             resource_url = str(payload.get("url", "")).strip()
@@ -1324,6 +1375,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=400)
 
     def _handle_agent_buy_x402(self) -> None:
+        if not self._legacy_operator_request_allowed():
+            return
         if not self._acquire_firefly():
             self._send_json(_busy_payload(), status=409)
             return
@@ -1350,6 +1403,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._release_firefly()
 
     def _handle_agent_inspect_llm_credits_topup(self) -> None:
+        if not self._legacy_operator_request_allowed():
+            return
         try:
             payload = self._read_json()
             policy_hash = self._policy_hash_from_payload_or_state(payload)
@@ -1359,6 +1414,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=400)
 
     def _handle_agent_top_up_llm_credits(self) -> None:
+        if not self._legacy_operator_request_allowed():
+            return
         if not self._acquire_firefly():
             self._send_json(_busy_payload(), status=409)
             return
@@ -1381,6 +1438,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             if str(payload.get("telegramUserId", "") or "").strip():
                 user_id = _require_authenticated_user(self, payload)
                 payload = {**payload, "telegramUserId": user_id}
+            elif not self._legacy_operator_request_allowed():
+                return
             result = self.server.bitrefill_quote_service(payload)
             if user_id and isinstance(result, dict) and result.get("priceUsd"):
                 _enforce_user_wallet_spend_limits(
@@ -1419,6 +1478,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=400)
 
     def _handle_agent_buy_bitrefill(self) -> None:
+        if not self._legacy_operator_request_allowed():
+            return
         if not self._acquire_firefly():
             self._send_json(_busy_payload(), status=409)
             return
@@ -1435,16 +1496,26 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._release_firefly()
 
     def _handle_agent_buy_wallet_bitrefill(self) -> None:
-        if not self._acquire_firefly():
-            self._send_json(_busy_payload(), status=409)
-            return
-
         try:
             payload = self._read_json()
             user_id = ""
             if str(payload.get("telegramUserId", "") or "").strip():
                 user_id = _require_authenticated_user(self, payload)
                 payload = {**payload, "telegramUserId": user_id}
+            elif not self._legacy_operator_request_allowed():
+                return
+        except WalletApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+            return
+        except Exception as exc:
+            self._send_json({"decision": "rejected", "ok": False, "error": str(exc)}, status=400)
+            return
+
+        if not self._acquire_firefly():
+            self._send_json(_busy_payload(), status=409)
+            return
+
+        try:
             result = self.server.bitrefill_wallet_purchase_runner(payload)
             if result.get("ok"):
                 redacted = _without_fulfillment_token(result)
@@ -1472,6 +1543,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._release_firefly()
 
     def _handle_agent_get_bitrefill_order(self) -> None:
+        if not self._legacy_operator_request_allowed():
+            return
         try:
             payload = self._read_json()
             quote_id = str(payload.get("quoteId") or payload.get("orderId") or "").strip()
@@ -1568,9 +1641,17 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_cors_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = _cors_allowed_origin(self.headers.get("Origin", ""))
+        if not origin:
+            return
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, Authorization, X-Sign402-Wallet-Token, "
+            "X-Sign402-User-Token, X-Sign402-Photon-Token",
+        )
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -1581,6 +1662,20 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return False
         authorization = str(self.headers.get("Authorization", ""))
         return hmac.compare_digest(authorization, f"Bearer {expected_secret}")
+
+    def _legacy_operator_request_allowed(self) -> bool:
+        if not _legacy_payment_executor_enabled():
+            self._send_json({"error": "not_found"}, status=404)
+            return False
+        try:
+            _require_legacy_operator_token(self)
+        except LegacyOperatorApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+            return False
+        except LegacyOperatorApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+            return False
+        return True
 
     def _acquire_firefly(self) -> bool:
         lock = getattr(self.server, "firefly_lock", None)
@@ -3484,6 +3579,57 @@ class UserWalletTokenTransferClient:
         tx_id = payload.get("transactionHash") or payload.get("txId")
         return {**payload, "txId": str(tx_id) if tx_id else None}
 
+    def transfer_native(
+        self,
+        *,
+        private_key: str,
+        to_address: str,
+        amount: str,
+        chain: str = "base",
+    ) -> dict[str, Any]:
+        script = self.service_dir / "src" / "index.mjs"
+        if not script.exists():
+            raise ValueError(f"CDP x402 service script not found: {script}")
+        if not str(private_key or "").strip():
+            raise ValueError("user wallet private key is required")
+
+        command = [
+            "node",
+            str(script),
+            "transfer-native-user",
+            "--to",
+            str(to_address),
+            "--amount",
+            str(amount),
+            "--chain",
+            str(chain),
+        ]
+        env = dict(os.environ)
+        env["SIGN402_EVM_PRIVATE_KEY"] = str(private_key).strip()
+        result = self.runner(
+            command,
+            cwd=str(self.service_dir),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=self.timeout,
+            env=env,
+        )
+        if result.returncode != 0:
+            key = str(private_key).strip()
+            raw = result.stderr.strip() or result.stdout.strip() or ""
+            if key:
+                raw = raw.replace(key, "***")
+            raise ValueError(raw or "user wallet native transfer failed")
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise ValueError("user wallet native transfer returned non-JSON output") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("user wallet native transfer returned non-object JSON")
+        tx_id = payload.get("transactionHash") or payload.get("txId")
+        return {**payload, "txId": str(tx_id) if tx_id else None}
+
     def _run_read_only(self, args: list[str]) -> dict[str, Any]:
         script = self.service_dir / "src" / "index.mjs"
         if not script.exists():
@@ -4152,6 +4298,15 @@ def _read_evm_address(payload: dict[str, Any], key: str) -> str:
     return value
 
 
+def _read_withdraw_asset(payload: dict[str, Any], key: str) -> str:
+    value = _read_required_text(payload, key)
+    if value.lower() == BASE_NATIVE_ETH_ASSET_ID:
+        return BASE_NATIVE_ETH_ASSET_ID
+    if not re.fullmatch(r"0x[a-fA-F0-9]{40}", value):
+        raise ValueError(f"{key} must be a Base token address or native")
+    return value
+
+
 def _read_positive_amount(payload: dict[str, Any], key: str) -> str:
     value = _read_required_text(payload, key)
     try:
@@ -4163,6 +4318,22 @@ def _read_positive_amount(payload: dict[str, Any], key: str) -> str:
     if amount.as_tuple().exponent < -36:
         raise ValueError(f"{key} has too many decimal places")
     return format_decimal(amount)
+
+
+def _native_eth_withdraw_gas_reserve() -> Decimal:
+    raw = str(
+        os.environ.get(
+            "SIGN402_NATIVE_ETH_WITHDRAW_GAS_RESERVE_ETH",
+            str(DEFAULT_NATIVE_ETH_WITHDRAW_GAS_RESERVE),
+        )
+    ).strip()
+    try:
+        reserve = Decimal(raw)
+    except InvalidOperation as exc:
+        raise ValueError("SIGN402_NATIVE_ETH_WITHDRAW_GAS_RESERVE_ETH must be positive") from exc
+    if not reserve.is_finite() or reserve <= 0:
+        raise ValueError("SIGN402_NATIVE_ETH_WITHDRAW_GAS_RESERVE_ETH must be positive")
+    return reserve
 
 
 def _find_withdrawable_token(
@@ -4278,6 +4449,68 @@ class ImessageApprovalApiAuthError(ValueError):
 
 class ImessageApprovalApiTokenNotConfiguredError(RuntimeError):
     pass
+
+
+class LegacyOperatorApiAuthError(ValueError):
+    pass
+
+
+class LegacyOperatorApiTokenNotConfiguredError(RuntimeError):
+    pass
+
+
+def _legacy_payment_executor_enabled() -> bool:
+    return str(
+        os.environ.get("SIGN402_ENABLE_LEGACY_PAYMENT_EXECUTOR", "")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _test_endpoints_enabled() -> bool:
+    """Keep non-product approval probes out of normal production runtime."""
+    return str(os.environ.get("SIGN402_ENABLE_TEST_ENDPOINTS", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _cors_enabled() -> bool:
+    return str(os.environ.get("SIGN402_ENABLE_CORS", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _cors_allowed_origin(origin: str) -> str:
+    """Return an explicitly allowlisted browser origin, or an empty string."""
+    if not _cors_enabled():
+        return ""
+    requested = str(origin or "").strip().rstrip("/")
+    if not requested:
+        return ""
+    configured = {
+        value.strip().rstrip("/")
+        for value in str(os.environ.get("SIGN402_CORS_ALLOWED_ORIGINS", "")).split(",")
+        if value.strip().rstrip("/")
+    }
+    return requested if requested in configured else ""
+
+
+def _require_legacy_operator_token(handler: BaseHTTPRequestHandler) -> None:
+    expected = str(
+        os.environ.get("SIGN402_LEGACY_OPERATOR_API_TOKEN", "")
+    ).strip()
+    if not expected:
+        raise LegacyOperatorApiTokenNotConfiguredError(
+            "SIGN402_LEGACY_OPERATOR_API_TOKEN is required when legacy payment execution is enabled"
+        )
+    authorization = str(handler.headers.get("Authorization", "") or "").strip()
+    supplied = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        raise LegacyOperatorApiAuthError("invalid legacy operator API token")
 
 
 def _require_wallet_api_token(handler: BaseHTTPRequestHandler) -> None:

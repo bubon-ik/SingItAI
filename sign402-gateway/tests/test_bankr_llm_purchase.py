@@ -28,6 +28,7 @@ from sign402_gateway.bankr_llm_purchase import (
 
 EVM_ADDRESS = "0x1111111111111111111111111111111111111111"
 API_KEY = "bk_test_key"
+LLM_API_KEY = "bk_llm_test_key"
 IDENTITY_TOKEN = "identity-secret"
 
 
@@ -194,7 +195,7 @@ class BankrIdentityClientTests(unittest.TestCase):
         self.assertTrue(config_response.closed)
         self.assertTrue(otp_response.closed)
 
-    def test_verify_and_create_key_uses_minimum_capabilities(self):
+    def test_verify_and_create_key_keeps_funding_and_llm_permissions_separate(self):
         responses = [
             json_response({"privyAppId": "app-1", "privyClientId": "client-1"}),
             json_response({"identity_token": IDENTITY_TOKEN}),
@@ -209,10 +210,24 @@ class BankrIdentityClientTests(unittest.TestCase):
                 {
                     "id": "key-1",
                     "apiKey": API_KEY,
-                    "name": "Sign402-123",
+                    "name": "Sign402-123-funding",
                     "walletApiEnabled": True,
                     "agentApiEnabled": False,
                     "readOnly": False,
+                    "tokenLaunchApiEnabled": False,
+                    "llmGatewayEnabled": False,
+                    "allowedIps": [],
+                    "allowedRecipients": {},
+                }
+            ),
+            json_response(
+                {
+                    "id": "key-2",
+                    "apiKey": LLM_API_KEY,
+                    "name": "Sign402-123-llm",
+                    "walletApiEnabled": False,
+                    "agentApiEnabled": False,
+                    "readOnly": True,
                     "tokenLaunchApiEnabled": False,
                     "llmGatewayEnabled": True,
                     "allowedIps": [],
@@ -236,6 +251,7 @@ class BankrIdentityClientTests(unittest.TestCase):
                 "https://api.bankr.bot/cli/config",
                 "https://auth.privy.io/api/v1/passwordless/authenticate",
                 "https://api.bankr.bot/cli/generate-wallet",
+                "https://api.bankr.bot/api-keys",
                 "https://api.bankr.bot/api-keys",
             ],
         )
@@ -262,10 +278,23 @@ class BankrIdentityClientTests(unittest.TestCase):
         self.assertEqual(
             request_json(opener.requests[3]),
             {
-                "name": "Sign402-123",
+                "name": "Sign402-123-funding",
                 "walletApiEnabled": True,
                 "agentApiEnabled": False,
                 "readOnly": False,
+                "tokenLaunchApiEnabled": False,
+                "llmGatewayEnabled": False,
+                "allowedIps": [],
+                "allowedRecipients": {},
+            },
+        )
+        self.assertEqual(
+            request_json(opener.requests[4]),
+            {
+                "name": "Sign402-123-llm",
+                "walletApiEnabled": False,
+                "agentApiEnabled": False,
+                "readOnly": True,
                 "tokenLaunchApiEnabled": False,
                 "llmGatewayEnabled": True,
                 "allowedIps": [],
@@ -277,14 +306,15 @@ class BankrIdentityClientTests(unittest.TestCase):
             {
                 "evmAddress": EVM_ADDRESS,
                 "apiKey": API_KEY,
+                "llmApiKey": LLM_API_KEY,
                 "key": {
-                    "id": "key-1",
-                    "name": "Sign402-123",
+                    "id": "key-2",
+                    "name": "Sign402-123-llm",
                     "llmGatewayEnabled": True,
                     "requestedCapabilities": {
-                        "walletApiEnabled": True,
+                        "walletApiEnabled": False,
                         "agentApiEnabled": False,
-                        "readOnly": False,
+                        "readOnly": True,
                         "tokenLaunchApiEnabled": False,
                         "llmGatewayEnabled": True,
                         "allowedIps": [],
@@ -309,7 +339,14 @@ class BankrIdentityClientTests(unittest.TestCase):
             json_response(
                 {
                     "apiKey": API_KEY,
-                    "name": "Sign402-123",
+                    "name": "Sign402-123-funding",
+                    "llmGatewayEnabled": False,
+                }
+            ),
+            json_response(
+                {
+                    "apiKey": LLM_API_KEY,
+                    "name": "Sign402-123-llm",
                     "llmGatewayEnabled": True,
                 }
             ),
@@ -351,7 +388,14 @@ class BankrIdentityClientTests(unittest.TestCase):
                     json_response(
                         {
                             "apiKey": API_KEY,
-                            "name": "Sign402-123",
+                            "name": "Sign402-123-funding",
+                            "llmGatewayEnabled": False,
+                        }
+                    ),
+                    json_response(
+                        {
+                            "apiKey": LLM_API_KEY,
+                            "name": "Sign402-123-llm",
                             "llmGatewayEnabled": True,
                         }
                     ),
@@ -377,7 +421,7 @@ class BankrIdentityClientTests(unittest.TestCase):
                 key_name="Sign402-123",
                 accept_terms=False,
             )
-            self.assertEqual(request_json(opener.requests[7])["allowedIps"], [])
+            self.assertEqual(request_json(opener.requests[9])["allowedIps"], [])
         finally:
             first["key"]["requestedCapabilities"]["allowedIps"].clear()
 
@@ -953,16 +997,19 @@ class BankrLlmStoreTests(unittest.TestCase):
         self.store.save_bankr_identity(
             purchase["purchaseId"],
             bankr_wallet_address=EVM_ADDRESS,
-            api_key="bk_secret",
+            funding_api_key="bk_funding_secret",
+            llm_api_key="bk_llm_secret",
         )
 
         raw = self.path.read_bytes()
         loaded = self.store.get_active_purchase("123")
-        self.assertNotIn(b"bk_secret", raw)
-        self.assertEqual(self.store.decrypt_api_key(loaded), "bk_secret")
+        self.assertNotIn(b"bk_funding_secret", raw)
+        self.assertNotIn(b"bk_llm_secret", raw)
+        self.assertEqual(self.store.decrypt_funding_api_key(loaded), "bk_funding_secret")
+        self.assertEqual(self.store.decrypt_llm_api_key(loaded), "bk_llm_secret")
         self.assertEqual(
             loaded["apiKeyFingerprint"],
-            hashlib.sha256(b"bk_secret").hexdigest()[:12],
+            hashlib.sha256(b"bk_llm_secret").hexdigest()[:12],
         )
 
     def test_purchase_rows_carry_payment_token_fields(self):
@@ -1175,14 +1222,16 @@ class BankrLlmStoreTests(unittest.TestCase):
         self.store.save_bankr_identity(
             purchase["purchaseId"],
             bankr_wallet_address=EVM_ADDRESS,
-            api_key="bk_secret",
+            funding_api_key="bk_funding_secret",
+            llm_api_key="bk_llm_secret",
         )
 
         loaded = self.store.get_purchase(purchase["purchaseId"])
 
         self.assertNotIn("encryptedApiKey", loaded)
         self.assertNotIn("encrypted_api_key", loaded)
-        self.assertNotIn("bk_secret", repr(loaded))
+        self.assertNotIn("bk_funding_secret", repr(loaded))
+        self.assertNotIn("bk_llm_secret", repr(loaded))
         with self._connect() as db:
             encrypted_key = db.execute(
                 """
@@ -1193,7 +1242,7 @@ class BankrLlmStoreTests(unittest.TestCase):
                 (purchase["purchaseId"],),
             ).fetchone()["encrypted_api_key"]
         self.assertIsInstance(encrypted_key, str)
-        self.assertNotEqual(encrypted_key, "bk_secret")
+        self.assertNotEqual(encrypted_key, "bk_funding_secret")
 
     def test_transition_updates_only_whitelisted_fields(self):
         purchase = self.store.create_purchase(
@@ -1267,6 +1316,7 @@ class BankrLlmStoreTests(unittest.TestCase):
 class FakeBankrForPurchase:
     def __init__(self):
         self.sent_otps = []
+        self.send_otp_error = None
         self.created_key_count = 0
         self.topups = []
         self.credits_calls = []
@@ -1276,6 +1326,8 @@ class FakeBankrForPurchase:
 
     def send_otp(self, email):
         self.sent_otps.append(email)
+        if self.send_otp_error is not None:
+            raise self.send_otp_error
 
     def verify_and_create_key(self, *, email, code, key_name, accept_terms):
         if code != "123456":
@@ -1287,6 +1339,7 @@ class FakeBankrForPurchase:
         return {
             "evmAddress": EVM_ADDRESS,
             "apiKey": API_KEY,
+            "llmApiKey": LLM_API_KEY,
             "key": {"id": "key-1", "name": key_name, "llmGatewayEnabled": True},
         }
 
@@ -1501,6 +1554,33 @@ class BankrLlmPurchaseServiceAuthTests(unittest.TestCase):
             self.bankr.sent_otps,
             ["user@example.com", "user@example.com"],
         )
+
+    def test_otp_delivery_failure_is_terminal_and_a_retry_can_start_cleanly(self):
+        self.bankr.send_otp_error = BankrLlmError(
+            "bankr_auth_unavailable",
+            "Bankr authentication is unavailable. Please try again.",
+        )
+        self.store.record_terms_acceptance("123", accepted_at=self.now_value)
+
+        failed = self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+
+        self.assertEqual(failed["state"], "FAILED_BEFORE_TRANSFER")
+        self.assertEqual(failed["errorCode"], "otp_send_failed")
+        self.assertIn("No funds moved", failed["telegramText"])
+        self.assertIsNone(self.store.get_active_purchase("123"))
+
+        self.bankr.send_otp_error = None
+        restarted = self.service.start(
+            telegram_user_id="123",
+            email="user@example.com",
+            amount_usd="10",
+        )
+        self.assertEqual(restarted["state"], "AWAITING_OTP")
+        self.assertNotEqual(restarted["purchaseId"], failed["purchaseId"])
 
     def test_verify_creates_one_key_and_requests_approval(self):
         self.approval.result = {"ok": False, "status": "rejected"}
@@ -1758,11 +1838,18 @@ class BankrLlmPurchaseServiceAuthTests(unittest.TestCase):
     def test_cas_failure_after_saving_key_stops_before_spend_checks(self):
         original_save = self.store.save_bankr_identity
 
-        def save_and_expire(purchase_id, *, bankr_wallet_address, api_key):
+        def save_and_expire(
+            purchase_id,
+            *,
+            bankr_wallet_address,
+            funding_api_key,
+            llm_api_key,
+        ):
             original_save(
                 purchase_id,
                 bankr_wallet_address=bankr_wallet_address,
-                api_key=api_key,
+                funding_api_key=funding_api_key,
+                llm_api_key=llm_api_key,
             )
             self.store.transition(
                 purchase_id,
@@ -1809,7 +1896,7 @@ class BankrLlmPurchaseServiceAuthTests(unittest.TestCase):
             "paymentTokenSymbol": "SINGIT",
             "sourceWalletAddress": "0x2222222222222222222222222222222222222222",
             "bankrWalletAddress": EVM_ADDRESS,
-            "apiKeyFingerprint": hashlib.sha256(API_KEY.encode("utf-8")).hexdigest()[
+            "apiKeyFingerprint": hashlib.sha256(LLM_API_KEY.encode("utf-8")).hexdigest()[
                 :12
             ],
             "expiresAt": started["expiresAt"],
@@ -2217,6 +2304,21 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
         self.assertEqual(self.transfer.calls[0]["decimals"], 8)
         self.assertEqual(self.bankr.topups[0]["source_token"], custom)
 
+    def test_custom_token_named_usdc_is_not_treated_as_a_stablecoin(self):
+        custom = "0x" + "e" * 40
+        self.transfer.token_info_result = {
+            "ok": True,
+            "symbol": "USDC",
+            "decimals": 6,
+        }
+
+        awaiting = self.approved_purchase_with_token(custom)
+        result = self.service.resume(awaiting["purchaseId"])
+
+        self.assertEqual(result["state"], "COMPLETE")
+        self.assertEqual(self.pricer.calls[0]["from_token"], custom)
+        self.assertEqual(self.pricer.calls[0]["decimals"], 6)
+
     def test_custom_token_balance_checked_before_transfer(self):
         custom = "0x" + "a" * 40
         self.transfer.token_balance_result = "1"
@@ -2272,7 +2374,7 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
         result = self.complete_purchase()
 
         self.assertEqual(result["state"], "COMPLETE")
-        self.assertEqual(result["apiKey"], API_KEY)
+        self.assertEqual(result["apiKey"], LLM_API_KEY)
         self.assertEqual(self.transfer.calls[0]["private_key"], "0xUSER_PRIVATE_KEY")
         self.assertEqual(self.transfer.calls[0]["to_address"], EVM_ADDRESS)
         self.assertEqual(
@@ -2325,10 +2427,10 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
         reconciled = self.service.reconcile(result["purchaseId"])
 
         self.assertEqual(reconciled["state"], "COMPLETE")
-        self.assertEqual(self.bankr.credits_calls[0]["api_key"], API_KEY)
+        self.assertEqual(self.bankr.credits_calls[0]["api_key"], LLM_API_KEY)
         self.assertEqual(len(self.transfer.calls), 1)
         self.assertEqual(len(self.bankr.topups), 1)
-        self.assertEqual(reconciled["apiKey"], API_KEY)
+        self.assertEqual(reconciled["apiKey"], LLM_API_KEY)
         self.assertNotIn("apiKey", self.service.resume(result["purchaseId"]))
 
     def test_key_creation_snapshots_baseline_credits(self):
@@ -2413,7 +2515,7 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
         result = self.service.resume(awaiting["purchaseId"])
 
         self.assertEqual(result["state"], "COMPLETE")
-        self.assertEqual(result["apiKey"], API_KEY)
+        self.assertEqual(result["apiKey"], LLM_API_KEY)
         self.assertEqual(len(self.bankr.topups), 1)
         self.assertEqual(self.sleeps, [10.0])
 
@@ -2452,7 +2554,7 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
         )
 
         self.assertEqual(reconciled["state"], "COMPLETE")
-        self.assertEqual(reconciled["apiKey"], API_KEY)
+        self.assertEqual(reconciled["apiKey"], LLM_API_KEY)
 
     def test_reconciliation_retries_only_bankr_topup_when_credits_are_missing(self):
         result = self.complete_purchase(reconcile_required=True)
@@ -2466,7 +2568,7 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
         self.assertEqual(self.bankr.topups[1]["api_key"], API_KEY)
         self.assertEqual(self.bankr.topups[1]["source_token"], "SINGIT")
         self.assertEqual(len(self.recorded_spends), 1)
-        self.assertEqual(reconciled["apiKey"], API_KEY)
+        self.assertEqual(reconciled["apiKey"], LLM_API_KEY)
         self.assertNotIn("apiKey", self.service.resume(result["purchaseId"]))
 
     def test_resume_reprices_before_transfer_and_rejects_above_approved_max(self):

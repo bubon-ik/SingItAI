@@ -129,6 +129,7 @@ If public beta needs to be closed quickly, restore a Telegram allowlist in
 `/home/hermes/.hermes/.env` and restart Hermes gateway:
 
 ```env
+SIGN402_TELEGRAM_ALLOWED_USERS=1045618308
 TELEGRAM_ALLOWED_USERS=1045618308
 ```
 

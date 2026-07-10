@@ -28,7 +28,6 @@ _OPERATION_PATHS = {
 }
 _IMESSAGE_OPERATION_PATHS = {
     "connect-imessage": "/agent/imessage/pairing",
-    "test-imessage-approval": "/agent/test-imessage-approval",
     "link": "/agent/imessage/link",
     "pending": "/agent/imessage/pending",
     "decision": "/agent/imessage/decision",
@@ -312,7 +311,11 @@ class GatewayClient:
         *,
         max_per_tx_usdc: str | None = None,
         daily_cap_usdc: str | None = None,
+        user_access_token: str | None = None,
     ) -> str:
+        user_token = str(user_access_token or "").strip()
+        if not user_token:
+            raise GatewayClientError(_AUTH_FAILED)
         payload = {"telegramUserId": identity.user_id}
         if identity.username:
             payload["telegramUsername"] = identity.username
@@ -325,6 +328,7 @@ class GatewayClient:
             payload,
             token=self.api_token,
             operation="spending-limits",
+            user_token=user_token,
         )
         telegram_text = result.get("telegramText")
         if not isinstance(telegram_text, str) or not telegram_text.strip():

@@ -30,7 +30,11 @@ BASE_MAINNET_PAYMENT_TOKENS: dict[str, tuple[str, int]] = {
     "WETH": ("0x4200000000000000000000000000000000000006", 18),
     "CBBTC": ("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf", 8),
 }
-STABLE_PAYMENT_TOKEN_SYMBOLS = frozenset({"USDC", "USDT"})
+STABLE_PAYMENT_TOKEN_ADDRESSES = frozenset(
+    address.lower()
+    for symbol, (address, _decimals) in BASE_MAINNET_PAYMENT_TOKENS.items()
+    if symbol in {"USDC", "USDT"}
+)
 PRIVY_AUTH_URL = "https://auth.privy.io/api/v1"
 DEFAULT_PRIVY_BROWSER_ORIGIN = "https://bankr.bot"
 MAX_RESPONSE_BYTES = 64 * 1024
@@ -39,10 +43,21 @@ EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 OTP_RE = re.compile(r"^\d{6}$")
 EVM_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
-KEY_CAPABILITIES: dict[str, Any] = {
+FUNDING_KEY_CAPABILITIES: dict[str, Any] = {
     "walletApiEnabled": True,
     "agentApiEnabled": False,
     "readOnly": False,
+    "tokenLaunchApiEnabled": False,
+    "llmGatewayEnabled": False,
+    "allowedIps": [],
+    "allowedRecipients": {},
+}
+
+
+LLM_KEY_CAPABILITIES: dict[str, Any] = {
+    "walletApiEnabled": False,
+    "agentApiEnabled": False,
+    "readOnly": True,
     "tokenLaunchApiEnabled": False,
     "llmGatewayEnabled": True,
     "allowedIps": [],
@@ -50,12 +65,18 @@ KEY_CAPABILITIES: dict[str, Any] = {
 }
 
 
-def _key_capabilities() -> dict[str, Any]:
+def _key_capabilities(capabilities: Mapping[str, Any]) -> dict[str, Any]:
     return {
-        **KEY_CAPABILITIES,
+        **dict(capabilities),
         "allowedIps": [],
         "allowedRecipients": {},
     }
+
+
+def _bankr_key_name(value: str, suffix: str) -> str:
+    suffix_value = f"-{str(suffix).strip()}"
+    base = str(value or "").strip() or "Sign402"
+    return f"{base[: 64 - len(suffix_value)]}{suffix_value}"
 
 
 class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -254,12 +275,17 @@ class BankrLlmStore:
         purchase_id: str,
         *,
         bankr_wallet_address: str,
-        api_key: str,
+        funding_api_key: str,
+        llm_api_key: str,
     ) -> None:
-        encrypted_key = self.fernet.encrypt(str(api_key).encode("utf-8")).decode(
-            "ascii"
-        )
-        fingerprint = _api_key_fingerprint(str(api_key))
+        encrypted_funding_key = self.fernet.encrypt(
+            str(funding_api_key).encode("utf-8")
+        ).decode("ascii")
+        encrypted_llm_key = self.fernet.encrypt(
+            str(llm_api_key).encode("utf-8")
+        ).decode("ascii")
+        fingerprint = _api_key_fingerprint(str(llm_api_key))
+        funding_fingerprint = _api_key_fingerprint(str(funding_api_key))
         now = int(time.time())
         with self.lock, self._database() as db:
             result = db.execute(
@@ -267,13 +293,15 @@ class BankrLlmStore:
                 UPDATE bankr_llm_purchases
                 SET bankr_wallet_address = ?,
                     encrypted_api_key = ?,
+                    encrypted_llm_api_key = ?,
                     api_key_fingerprint = ?,
                     updated_at = ?
                 WHERE purchase_id = ?
                 """,
                 (
                     str(bankr_wallet_address),
-                    encrypted_key,
+                    encrypted_funding_key,
+                    encrypted_llm_key,
                     fingerprint,
                     now,
                     str(purchase_id),
@@ -294,34 +322,59 @@ class BankrLlmStore:
                 purchase_id=str(purchase_id),
                 telegram_user_id=str(row["telegram_user_id"]),
                 event_type="bankr_identity_saved",
-                metadata={"apiKeyFingerprint": fingerprint},
+                metadata={
+                    "apiKeyFingerprint": fingerprint,
+                    "fundingApiKeyFingerprint": funding_fingerprint,
+                },
             )
 
+    def decrypt_funding_api_key(self, purchase: Mapping[str, Any]) -> str:
+        return self._decrypt_key(purchase, "encrypted_api_key", "funding API")
+
+    def decrypt_llm_api_key(self, purchase: Mapping[str, Any]) -> str:
+        return self._decrypt_key(
+            purchase,
+            "encrypted_llm_api_key",
+            "LLM API",
+            fallback_column="encrypted_api_key",
+        )
+
+    # Backwards-compatible internal alias for pre-separation purchases.
     def decrypt_api_key(self, purchase: Mapping[str, Any]) -> str:
+        return self.decrypt_funding_api_key(purchase)
+
+    def _decrypt_key(
+        self,
+        purchase: Mapping[str, Any],
+        column: str,
+        label: str,
+        *,
+        fallback_column: str = "",
+    ) -> str:
         purchase_id = str(
             purchase.get("purchaseId") or purchase.get("purchase_id") or ""
         )
         if not purchase_id:
             raise ValueError("purchaseId is required")
         with self.lock, self._database() as db:
+            columns = [column]
+            if fallback_column:
+                columns.append(fallback_column)
             row = db.execute(
-                """
-                SELECT encrypted_api_key
-                FROM bankr_llm_purchases
-                WHERE purchase_id = ?
-                """,
+                f"SELECT {', '.join(columns)} FROM bankr_llm_purchases WHERE purchase_id = ?",
                 (purchase_id,),
             ).fetchone()
-        if row is None or not row["encrypted_api_key"]:
-            raise ValueError("purchase has no Bankr API key")
+        encrypted_key = str(row[column] or "") if row is not None else ""
+        if not encrypted_key and fallback_column and row is not None:
+            encrypted_key = str(row[fallback_column] or "")
+        if not encrypted_key:
+            raise ValueError(f"purchase has no Bankr {label} key")
         try:
-            return self.fernet.decrypt(
-                str(row["encrypted_api_key"]).encode("ascii")
-            ).decode("utf-8")
+            return self.fernet.decrypt(encrypted_key.encode("ascii")).decode("utf-8")
         except (InvalidToken, UnicodeDecodeError) as exc:
             raise BankrLlmError(
                 "invalid_api_key",
-                "Stored Bankr API key could not be decrypted.",
+                f"Stored Bankr {label} key could not be decrypted.",
             ) from exc
 
     def transition(
@@ -390,6 +443,7 @@ class BankrLlmStore:
                     expires_at INTEGER NOT NULL,
                     bankr_wallet_address TEXT NOT NULL DEFAULT '',
                     encrypted_api_key TEXT NOT NULL DEFAULT '',
+                    encrypted_llm_api_key TEXT NOT NULL DEFAULT '',
                     api_key_fingerprint TEXT NOT NULL DEFAULT '',
                     approval_request_id TEXT NOT NULL DEFAULT '',
                     source_wallet_address TEXT NOT NULL DEFAULT '',
@@ -421,6 +475,7 @@ class BankrLlmStore:
                 "payment_token_address",
                 "payment_token_symbol",
                 "payment_token_decimals",
+                "encrypted_llm_api_key",
             ):
                 if column not in existing_columns:
                     db.execute(
@@ -651,26 +706,54 @@ class BankrIdentityClient:
                 )
             self.accept_terms(identity_token)
 
-        key_payload = {"name": str(key_name), **_key_capabilities()}
-        key_response = self._request_json(
-            method="POST",
-            url=f"{self.api_url}/api-keys",
-            payload=key_payload,
-            headers=self._identity_headers(identity_token),
-            error_scope="key_creation",
+        funding_key_name = _bankr_key_name(key_name, "funding")
+        funding_response = self._create_api_key(
+            identity_token,
+            key_name=funding_key_name,
+            capabilities=FUNDING_KEY_CAPABILITIES,
         )
-        api_key = key_response.get("apiKey")
-        if not isinstance(api_key, str) or not api_key.startswith("bk_"):
+        funding_api_key = funding_response.get("apiKey")
+        if not isinstance(funding_api_key, str) or not funding_api_key.startswith("bk_"):
+            self._invalid_response("key_creation")
+
+        llm_key_name = _bankr_key_name(key_name, "llm")
+        llm_response = self._create_api_key(
+            identity_token,
+            key_name=llm_key_name,
+            capabilities=LLM_KEY_CAPABILITIES,
+        )
+        llm_api_key = llm_response.get("apiKey")
+        if not isinstance(llm_api_key, str) or not llm_api_key.startswith("bk_"):
             self._invalid_response("key_creation")
 
         return {
             "evmAddress": evm_address,
-            "apiKey": api_key,
+            # This key stays encrypted server-side and is only used to fund
+            # credits after the explicit Sign402 approval.
+            "apiKey": funding_api_key,
+            # This is the user-visible LLM-only credential.
+            "llmApiKey": llm_api_key,
             "key": self._normalize_key_metadata(
-                key_response,
-                key_name=str(key_name),
+                llm_response,
+                key_name=llm_key_name,
+                capabilities=LLM_KEY_CAPABILITIES,
             ),
         }
+
+    def _create_api_key(
+        self,
+        identity_token: str,
+        *,
+        key_name: str,
+        capabilities: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return self._request_json(
+            method="POST",
+            url=f"{self.api_url}/api-keys",
+            payload={"name": key_name, **_key_capabilities(capabilities)},
+            headers=self._identity_headers(identity_token),
+            error_scope="key_creation",
+        )
 
     def accept_terms(self, identity_token: str) -> None:
         if not isinstance(identity_token, str) or not identity_token:
@@ -807,13 +890,10 @@ class BankrIdentityClient:
         key_response: dict[str, Any],
         *,
         key_name: str,
+        capabilities: Mapping[str, Any],
     ) -> dict[str, Any]:
-        requested_capabilities = _key_capabilities()
-        if key_response.get("llmGatewayEnabled") is not True:
-            self._invalid_response("key_creation")
+        requested_capabilities = _key_capabilities(capabilities)
         for field, expected in requested_capabilities.items():
-            if field == "llmGatewayEnabled":
-                continue
             if field in key_response and key_response[field] != expected:
                 self._invalid_response("key_creation")
 
@@ -827,7 +907,9 @@ class BankrIdentityClient:
                 self._invalid_response("key_creation")
             metadata["id"] = key_id
         metadata["name"] = name
-        metadata["llmGatewayEnabled"] = True
+        metadata["llmGatewayEnabled"] = bool(
+            requested_capabilities["llmGatewayEnabled"]
+        )
         metadata["requestedCapabilities"] = requested_capabilities
         return metadata
 
@@ -1136,7 +1218,9 @@ class BankrLlmPurchaseService:
             payment_token_decimals=str(token_decimals),
         )
         if state == "AWAITING_OTP":
-            self.bankr.send_otp(str(purchase["email"]))
+            failed = self._send_otp_or_fail(purchase)
+            if failed is not None:
+                return failed
         return self._safe_purchase_response(purchase)
 
     def accept_terms(self, telegram_user_id: str) -> dict[str, Any]:
@@ -1159,10 +1243,12 @@ class BankrLlmPurchaseService:
                 new_state="AWAITING_OTP",
             )
             purchase = self.store.get_purchase(purchase["purchaseId"]) or purchase
-            if transitioned:
-                self.bankr.send_otp(purchase["email"])
-        elif purchase["state"] == "AWAITING_OTP":
-            self.bankr.send_otp(purchase["email"])
+            if not transitioned:
+                return self._safe_purchase_response(purchase)
+        if purchase["state"] == "AWAITING_OTP":
+            failed = self._send_otp_or_fail(purchase)
+            if failed is not None:
+                return failed
         return self._safe_purchase_response(purchase)
 
     def verify_otp(
@@ -1263,8 +1349,9 @@ class BankrLlmPurchaseService:
 
             try:
                 bankr_wallet = self._require_evm_address(identity.get("evmAddress"))
-                api_key = str(identity.get("apiKey") or "")
-                if not api_key.startswith("bk_"):
+                funding_api_key = str(identity.get("apiKey") or "")
+                llm_api_key = str(identity.get("llmApiKey") or "")
+                if not funding_api_key.startswith("bk_") or not llm_api_key.startswith("bk_"):
                     raise BankrLlmError(
                         "bankr_key_creation_ambiguous",
                         "Bankr API key creation result is unclear. Please check status before retrying.",
@@ -1274,14 +1361,15 @@ class BankrLlmPurchaseService:
             self.store.save_bankr_identity(
                 purchase["purchaseId"],
                 bankr_wallet_address=bankr_wallet,
-                api_key=api_key,
+                funding_api_key=funding_api_key,
+                llm_api_key=llm_api_key,
             )
             transitioned = self.store.transition(
                 purchase["purchaseId"],
                 expected_state="CREATING_BANKR_KEY",
                 new_state="BANKR_KEY_CREATED",
                 fields={
-                    "baselineCreditsUsd": self._baseline_credits_usd(api_key),
+                    "baselineCreditsUsd": self._baseline_credits_usd(llm_api_key),
                 },
             )
             purchase = self.store.get_purchase(purchase["purchaseId"]) or purchase
@@ -1391,9 +1479,10 @@ class BankrLlmPurchaseService:
         if not purchase.get("transferHash"):
             return self._safe_purchase_response(purchase)
 
-        api_key = self.store.decrypt_api_key(purchase)
+        funding_api_key = self.store.decrypt_funding_api_key(purchase)
+        llm_api_key = self.store.decrypt_llm_api_key(purchase)
         try:
-            credits = self.bankr.credits(api_key=api_key)
+            credits = self.bankr.credits(api_key=llm_api_key)
         except BankrLlmError as exc:
             self.store.transition(
                 purchase["purchaseId"],
@@ -1411,13 +1500,14 @@ class BankrLlmPurchaseService:
             return self._complete_purchase(
                 purchase,
                 expected_state=state,
-                api_key=api_key,
+                api_key=llm_api_key,
                 reveal_api_key=True,
                 credits=credits,
             )
         return self._top_up_from_funded_wallet(
             purchase,
-            api_key=api_key,
+            funding_api_key=funding_api_key,
+            llm_api_key=llm_api_key,
             expected_state=state,
             reveal_api_key=True,
         )
@@ -1435,7 +1525,7 @@ class BankrLlmPurchaseService:
             }
         if not purchase.get("apiKeyFingerprint"):
             return self._safe_purchase_response(purchase)
-        credits = self.bankr.credits(api_key=self.store.decrypt_api_key(purchase))
+        credits = self.bankr.credits(api_key=self.store.decrypt_llm_api_key(purchase))
         result = self._safe_purchase_response(purchase)
         result["credits"] = credits
         return result
@@ -1601,30 +1691,40 @@ class BankrLlmPurchaseService:
         self,
         purchase: Mapping[str, Any],
         *,
-        api_key: str | None = None,
+        funding_api_key: str | None = None,
+        llm_api_key: str | None = None,
         expected_state: str | None = None,
         reveal_api_key: bool = True,
     ) -> dict[str, Any]:
         state = str(expected_state or purchase.get("state") or "")
-        key = api_key if api_key is not None else self.store.decrypt_api_key(purchase)
+        funding_key = (
+            funding_api_key
+            if funding_api_key is not None
+            else self.store.decrypt_funding_api_key(purchase)
+        )
+        llm_key = (
+            llm_api_key
+            if llm_api_key is not None
+            else self.store.decrypt_llm_api_key(purchase)
+        )
         token_address, token_symbol, _ = self._payment_token(purchase)
         source_token = (
             self.topup_source_token if token_symbol == "SINGIT" else token_address
         )
         try:
             topup = self._top_up_with_retries(
-                api_key=key,
+                api_key=funding_key,
                 amount_usd=str(purchase["amountUsd"]),
                 source_token=source_token,
             )
         except BankrLlmError as exc:
             if exc.code == "bankr_topup_ambiguous":
-                credits = self._await_topup_credit(purchase, key)
+                credits = self._await_topup_credit(purchase, llm_key)
                 if credits is not None:
                     return self._complete_purchase(
                         purchase,
                         expected_state=state,
-                        api_key=key,
+                        api_key=llm_key,
                         reveal_api_key=reveal_api_key,
                         credits=credits,
                     )
@@ -1655,7 +1755,7 @@ class BankrLlmPurchaseService:
         return self._complete_purchase(
             purchase,
             expected_state=state,
-            api_key=key,
+            api_key=llm_key,
             reveal_api_key=reveal_api_key,
             topup=topup,
         )
@@ -1761,6 +1861,28 @@ class BankrLlmPurchaseService:
         if transitioned and reveal_api_key:
             result["apiKey"] = api_key
         return result
+
+    def _send_otp_or_fail(
+        self,
+        purchase: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        try:
+            self.bankr.send_otp(str(purchase["email"]))
+        except BankrLlmError:
+            return self._fail_before_transfer(
+                purchase,
+                expected_state="AWAITING_OTP",
+                code="otp_send_failed",
+                message="Could not send the verification code. Retry /llm_buy. No funds moved.",
+            )
+        except Exception:
+            return self._fail_before_transfer(
+                purchase,
+                expected_state="AWAITING_OTP",
+                code="otp_send_failed",
+                message="Could not send the verification code. Retry /llm_buy. No funds moved.",
+            )
+        return None
 
     def _fail_before_transfer(
         self,
@@ -2034,7 +2156,7 @@ class BankrLlmPurchaseService:
     def _payment_pricing(self, purchase: Mapping[str, Any]) -> tuple[int, str]:
         """Return (required_atomic, human_transfer_amount) for the purchase."""
         address, symbol, decimals = self._payment_token(purchase)
-        if symbol.upper() in STABLE_PAYMENT_TOKEN_SYMBOLS:
+        if self._payment_token_is_stable(purchase):
             # Bankr accepts stables directly: transfer exactly amountUsd,
             # no swap quote required.
             amount = Decimal(str(purchase["amountUsd"]))
@@ -2340,8 +2462,8 @@ class BankrLlmPurchaseService:
         return address, symbol, decimals
 
     def _payment_token_is_stable(self, purchase: Mapping[str, Any]) -> bool:
-        _, symbol, _ = self._payment_token(purchase)
-        return symbol.upper() in STABLE_PAYMENT_TOKEN_SYMBOLS
+        address, _, _ = self._payment_token(purchase)
+        return address.lower() in STABLE_PAYMENT_TOKEN_ADDRESSES
 
     @staticmethod
     def _require_user_id(value: str) -> str:

@@ -133,7 +133,6 @@ class GatewayClientTests(unittest.TestCase):
     def test_execute_imessage_maps_operations_to_expected_endpoints(self):
         cases = {
             "connect-imessage": "/agent/imessage/pairing",
-            "test-imessage-approval": "/agent/test-imessage-approval",
             "link": "/agent/imessage/link",
             "pending": "/agent/imessage/pending",
             "decision": "/agent/imessage/decision",
@@ -519,7 +518,8 @@ class GatewayClientTests(unittest.TestCase):
         )
 
         result = self.make_client(opener).execute_spending_limits(
-            TelegramIdentity(user_id="1045618308")
+            TelegramIdentity(user_id="1045618308"),
+            user_access_token="user-token-1",
         )
 
         request, timeout = opener.requests[0]
@@ -527,6 +527,7 @@ class GatewayClientTests(unittest.TestCase):
         self.assertEqual(request.full_url, "http://127.0.0.1:8099/agent/spending-limits")
         self.assertEqual(timeout, 5.0)
         self.assertEqual(json.loads(request.data), {"telegramUserId": "1045618308"})
+        self.assertEqual(request.get_header("X-sign402-user-token"), "user-token-1")
 
     def test_execute_spending_limits_posts_requested_limits(self):
         opener = RecordingOpener(
@@ -537,6 +538,7 @@ class GatewayClientTests(unittest.TestCase):
             TelegramIdentity(user_id="1045618308", username="AlpskyKnedlik"),
             max_per_tx_usdc="0.005",
             daily_cap_usdc="0.05",
+            user_access_token="user-token-1",
         )
 
         request, _timeout = opener.requests[0]
@@ -550,6 +552,7 @@ class GatewayClientTests(unittest.TestCase):
                 "dailyCapUsdc": "0.05",
             },
         )
+        self.assertEqual(request.get_header("X-sign402-user-token"), "user-token-1")
 
     def test_execute_llm_start_uses_user_token_and_purchase_timeout(self):
         opener = RecordingOpener(

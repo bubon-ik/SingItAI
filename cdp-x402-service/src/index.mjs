@@ -75,6 +75,12 @@ async function main() {
     return;
   }
 
+  if (command === "transfer-native-user") {
+    const result = await transferNativeFromUserWallet(options);
+    writeJson(result);
+    return;
+  }
+
   if (command === "token-info") {
     const result = await readTokenInfo(options);
     writeJson(result);
@@ -318,6 +324,39 @@ async function transferTokenFromUserWallet(options) {
     to,
     token,
     amount: amount.toString(),
+    network: networkName(options.chain || "base"),
+  };
+}
+
+async function transferNativeFromUserWallet(options) {
+  const privateKey = requiredEnv("SIGN402_EVM_PRIVATE_KEY");
+  const account = privateKeyToAccount(privateKey);
+  const to = requiredOption(options, "to");
+  const value = humanTokenAmountToAtomic(requiredOption(options, "amount"), 18);
+  const chain = viemChain(options.chain || "base");
+  const rpcUrl = process.env.SIGN402_BASE_RPC_URL || process.env.BASE_RPC_URL || chain.rpcUrls.default.http[0];
+  const walletClient = createWalletClient({
+    account,
+    chain,
+    transport: http(rpcUrl),
+  });
+  const publicClient = basePublicClient(options.chain);
+
+  const transactionHash = await walletClient.sendTransaction({ to, value });
+  const receipt = await publicClient.waitForTransactionReceipt({
+    hash: transactionHash,
+  });
+  if (receipt.status !== "success") {
+    throw new Error(`user wallet native transfer failed: ${transactionHash}`);
+  }
+  return {
+    ok: true,
+    transactionHash,
+    from: account.address,
+    to,
+    asset: "native",
+    symbol: "ETH",
+    amount: value.toString(),
     network: networkName(options.chain || "base"),
   };
 }
