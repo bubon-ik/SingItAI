@@ -1,6 +1,6 @@
 # Sign402 Gateway — Security Model & Verification
 
-## Trust model (managed wallets, iMessage approvals)
+## Trust model (managed wallets, iMessage and WhatsApp approvals)
 
 The gateway is a backend-for-frontend. It trusts two front-end components to
 authenticate end users on their platforms, and authenticates *those components*
@@ -10,6 +10,9 @@ with shared bearer tokens:
   authenticates the user; the plugin forwards the authenticated `telegramUserId`.
 - **iMessage / Photon sidecar** — holds `SIGN402_PHOTON_API_TOKEN`. iMessage
   delivers approval replies from real phone numbers; the sidecar relays them.
+- **WhatsApp Cloud / Hermes adapter** — verifies Meta webhook signatures with
+  `WHATSAPP_CLOUD_APP_SECRET`, then forwards the trusted `wa_id` through the
+  same independent approval bearer-token boundary.
 
 ### What hardens this beyond the shared tokens
 
@@ -24,6 +27,10 @@ with shared bearer tokens:
 - **iMessage is approval-only.** Pairing codes and `YES`/`NO` decisions are
   consumed by Sign402; unrelated Photon/iMessage text is dropped before it can
   reach the general Hermes agent.
+- **WhatsApp is approval-only.** Pairing codes and exact
+  `sign402:(approve|reject):<approval_id>` button payloads are consumed before
+  general agent dispatch. Plain text, malformed buttons, and unknown events are
+  dropped.
 - **Decisions are bound to a commitment.** `record_decision` accepts the
   `approval_id` the sidecar showed the user (from `/agent/imessage/pending`), so
   a stale "YES" cannot approve a different, newer commitment.
@@ -41,6 +48,9 @@ sidecar as a trusted component.** Operationally:
 
 - Keep `SIGN402_PHOTON_API_TOKEN` and `SIGN402_WALLET_API_TOKEN` secret, strong,
   and rotatable; never log them.
+- Keep the Meta System User token, App Secret, and webhook Verify Token secret
+  and rotatable. The outbound client returns only fixed error codes and never
+  logs Meta response bodies.
 - Run the sidecar and gateway on trusted infrastructure; restrict network access
   to the internal endpoints.
 - Run the gateway single-process (the SQLite stores serialize with a
@@ -69,7 +79,8 @@ for a short, operator-controlled diagnostic session, then remove it again.
 
 Prerequisites: `SIGN402_WALLET_MASTER_KEY`, `SIGN402_WALLET_API_TOKEN`,
 `SIGN402_PHOTON_API_TOKEN`, CDP wallet credentials, `BITREFILL_API_KEY` (for
-live mode), a funded Base wallet, and the iMessage sidecar running.
+live mode), a funded Base wallet, and either the iMessage sidecar or signed
+Hermes WhatsApp Cloud adapter running.
 
 1. **Create wallet** — `/start` (or `/wallet`) in Telegram. Expect a Base
    address and a per-user token issued server-side.
@@ -78,6 +89,9 @@ live mode), a funded Base wallet, and the iMessage sidecar running.
    `X-Sign402-User-Token` (check gateway logs).
 4. **Pair iMessage** — `/connect_imessage`, enter the pairing code from an
    iMessage on the paired number.
+   Alternatively, **pair WhatsApp** — `/connect_whatsapp`, then send the code to
+   the configured Meta business number. Confirm this becomes the sole active
+   approval channel.
 5. **Set limits** — `/limits 0.01 0.05` (per-tx / daily). Try a purchase above
    the per-tx cap and confirm it is rejected before any approval prompt.
 6. **Buy (x402 tool)** — "buy crypto news". Approve in iMessage. Confirm: the
@@ -89,3 +103,6 @@ live mode), a funded Base wallet, and the iMessage sidecar running.
 8. **Negative checks** — a stale/duplicate "YES" does not approve a new
    purchase; a request with another user's `telegramUserId` under a per-user
    token is rejected (401).
+9. **WhatsApp negative checks** — a repeated or expired button payload, a
+   payload from another `wa_id`, a wrong-channel decision, and ordinary text
+   all fail closed without executing payment or reaching the general agent.
