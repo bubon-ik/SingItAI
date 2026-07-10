@@ -146,6 +146,7 @@ class MetaWhatsAppTemplateNotifierTests(unittest.TestCase):
                 )
                 self.assertEqual(result, {"ok": False, "error": expected_error})
                 self.assertNotIn("test-system-user-token", repr(result))
+        self.assertTrue(http_error.fp.closed)
 
 
 if __name__ == "__main__":

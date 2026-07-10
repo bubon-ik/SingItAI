@@ -116,7 +116,8 @@ class MetaWhatsAppTemplateNotifier:
         )
         try:
             response = self.opener(request, timeout=self.timeout)
-        except HTTPError:
+        except HTTPError as exc:
+            exc.close()
             return {"ok": False, "error": "http_error"}
         except (URLError, TimeoutError, OSError):
             return {"ok": False, "error": "transport_error"}

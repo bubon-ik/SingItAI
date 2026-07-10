@@ -177,19 +177,71 @@ class ImessageApprovalTests(unittest.TestCase):
         self.assertFalse(replay["ok"])
         self.assertIn("No pending approval", replay["imessageText"])
 
-    def test_whatsapp_pairing_is_rejected_until_a_real_provider_is_configured(self):
-        service, _wallet_service, _store, notifier = self.make_linked_service()
+    def test_whatsapp_pairing_selects_whatsapp_as_active_channel(self):
+        notifier = RecordingNotifier()
+        service, wallet_service, _store = self.make_service(notifier=notifier)
+        wallet_service.create_wallet("1045618308")
 
         pairing = service.create_pairing("1045618308", channel="whatsapp")
+        linked = service.link_sender(
+            pairing["code"],
+            "420777111222",
+            channel="whatsapp",
+        )
+
+        self.assertTrue(pairing["ok"])
+        self.assertTrue(linked["ok"])
+        self.assertEqual(linked["channel"], "whatsapp")
+        self.assertEqual(service.active_channel("1045618308"), "whatsapp")
+
+    def test_linking_whatsapp_switches_delivery_away_from_imessage(self):
+        service, wallet_service, _store, notifier = self.make_linked_service()
+        whatsapp_pairing = service.create_pairing("1045618308", channel="whatsapp")
+        service.link_sender(
+            whatsapp_pairing["code"],
+            "420777111222",
+            channel="whatsapp",
+        )
+
         created = service.create_test_approval("1045618308")
 
-        self.assertFalse(pairing["ok"])
-        self.assertIn("not configured", pairing["telegramText"].lower())
         self.assertTrue(created["ok"])
         self.assertEqual(
             [(message["channel"], message["photonUserId"]) for message in notifier.messages],
-            [("imessage", "+15551234567")],
+            [("whatsapp", "420777111222")],
         )
+
+    def test_whatsapp_decision_requires_matching_channel_and_approval_id(self):
+        notifier = RecordingNotifier()
+        service, wallet_service, _store = self.make_service(notifier=notifier)
+        wallet_service.create_wallet("1045618308")
+        pairing = service.create_pairing("1045618308", channel="whatsapp")
+        service.link_sender(pairing["code"], "420777111222", channel="whatsapp")
+        created = service.create_test_approval("1045618308")
+
+        wrong_channel = service.record_decision(
+            "420777111222",
+            "YES",
+            approval_id=created["approvalId"],
+            channel="imessage",
+        )
+        decided = service.record_decision(
+            "420777111222",
+            "YES",
+            approval_id=created["approvalId"],
+            channel="whatsapp",
+        )
+        replay = service.record_decision(
+            "420777111222",
+            "YES",
+            approval_id=created["approvalId"],
+            channel="whatsapp",
+        )
+
+        self.assertFalse(wrong_channel["ok"])
+        self.assertTrue(decided["ok"])
+        self.assertEqual(decided["status"], "approved")
+        self.assertFalse(replay["ok"])
 
     def test_external_hash_approval_uses_supplied_commitment_hash(self):
         service_ref = []
