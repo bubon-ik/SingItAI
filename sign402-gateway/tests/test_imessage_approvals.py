@@ -9,6 +9,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 
 from sign402_gateway.imessage_approvals import (
+    ApprovalChannelNotifier,
     HermesCliNotifier,
     ImessageApprovalService,
     ImessageApprovalStore,
@@ -32,9 +33,19 @@ class RecordingNotifier:
         photon_user_id: str,
         message: str,
         channel: str = "imessage",
+        approval_id: str = "",
+        context_lines: list[str] | None = None,
+        expires_at: int = 0,
     ) -> dict[str, object]:
         self.messages.append(
-            {"photonUserId": photon_user_id, "message": message, "channel": channel}
+            {
+                "photonUserId": photon_user_id,
+                "message": message,
+                "channel": channel,
+                "approvalId": approval_id,
+                "contextLines": list(context_lines or []),
+                "expiresAt": expires_at,
+            }
         )
         return {"ok": self.ok, "stdout": "", "stderr": ""}
 
@@ -50,11 +61,17 @@ class AutoDecisionNotifier(RecordingNotifier):
         photon_user_id: str,
         message: str,
         channel: str = "imessage",
+        approval_id: str = "",
+        context_lines: list[str] | None = None,
+        expires_at: int = 0,
     ) -> dict[str, object]:
         result = super().send(
             photon_user_id=photon_user_id,
             message=message,
             channel=channel,
+            approval_id=approval_id,
+            context_lines=context_lines,
+            expires_at=expires_at,
         )
         self.decision_callback(photon_user_id)
         return result
@@ -177,19 +194,71 @@ class ImessageApprovalTests(unittest.TestCase):
         self.assertFalse(replay["ok"])
         self.assertIn("No pending approval", replay["imessageText"])
 
-    def test_whatsapp_pairing_is_rejected_until_a_real_provider_is_configured(self):
-        service, _wallet_service, _store, notifier = self.make_linked_service()
+    def test_whatsapp_pairing_selects_whatsapp_as_active_channel(self):
+        notifier = RecordingNotifier()
+        service, wallet_service, _store = self.make_service(notifier=notifier)
+        wallet_service.create_wallet("1045618308")
 
         pairing = service.create_pairing("1045618308", channel="whatsapp")
+        linked = service.link_sender(
+            pairing["code"],
+            "420777111222",
+            channel="whatsapp",
+        )
+
+        self.assertTrue(pairing["ok"])
+        self.assertTrue(linked["ok"])
+        self.assertEqual(linked["channel"], "whatsapp")
+        self.assertEqual(service.active_channel("1045618308"), "whatsapp")
+
+    def test_linking_whatsapp_switches_delivery_away_from_imessage(self):
+        service, wallet_service, _store, notifier = self.make_linked_service()
+        whatsapp_pairing = service.create_pairing("1045618308", channel="whatsapp")
+        service.link_sender(
+            whatsapp_pairing["code"],
+            "420777111222",
+            channel="whatsapp",
+        )
+
         created = service.create_test_approval("1045618308")
 
-        self.assertFalse(pairing["ok"])
-        self.assertIn("not configured", pairing["telegramText"].lower())
         self.assertTrue(created["ok"])
         self.assertEqual(
             [(message["channel"], message["photonUserId"]) for message in notifier.messages],
-            [("imessage", "+15551234567")],
+            [("whatsapp", "420777111222")],
         )
+
+    def test_whatsapp_decision_requires_matching_channel_and_approval_id(self):
+        notifier = RecordingNotifier()
+        service, wallet_service, _store = self.make_service(notifier=notifier)
+        wallet_service.create_wallet("1045618308")
+        pairing = service.create_pairing("1045618308", channel="whatsapp")
+        service.link_sender(pairing["code"], "420777111222", channel="whatsapp")
+        created = service.create_test_approval("1045618308")
+
+        wrong_channel = service.record_decision(
+            "420777111222",
+            "YES",
+            approval_id=created["approvalId"],
+            channel="imessage",
+        )
+        decided = service.record_decision(
+            "420777111222",
+            "YES",
+            approval_id=created["approvalId"],
+            channel="whatsapp",
+        )
+        replay = service.record_decision(
+            "420777111222",
+            "YES",
+            approval_id=created["approvalId"],
+            channel="whatsapp",
+        )
+
+        self.assertFalse(wrong_channel["ok"])
+        self.assertTrue(decided["ok"])
+        self.assertEqual(decided["status"], "approved")
+        self.assertFalse(replay["ok"])
 
     def test_external_hash_approval_uses_supplied_commitment_hash(self):
         service_ref = []
@@ -316,6 +385,66 @@ class ImessageApprovalTests(unittest.TestCase):
         self.assertFalse(calls[0][1]["shell"])
         self.assertEqual(calls[0][1]["env"]["HOME"], "/home/hermes")
         self.assertEqual(calls[0][1]["env"]["HERMES_HOME"], "/home/hermes/.hermes")
+
+    def test_channel_router_uses_meta_template_for_whatsapp(self):
+        imessage = RecordingNotifier()
+
+        class RecordingTemplateNotifier:
+            def __init__(self):
+                self.calls = []
+
+            def send_approval(self, **kwargs):
+                self.calls.append(kwargs)
+                return {"ok": True, "messageId": "wamid.123"}
+
+        whatsapp = RecordingTemplateNotifier()
+        notifier = ApprovalChannelNotifier(
+            imessage_notifier=imessage,
+            whatsapp_notifier=whatsapp,
+        )
+
+        result = notifier.send(
+            photon_user_id="420777111222",
+            message="fallback text",
+            channel="whatsapp",
+            approval_id="approval-123",
+            context_lines=["Amount: 10 USDC"],
+            expires_at=1_800_000_600,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(imessage.messages, [])
+        self.assertEqual(
+            whatsapp.calls,
+            [
+                {
+                    "wa_id": "420777111222",
+                    "approval_id": "approval-123",
+                    "context_lines": ["Amount: 10 USDC"],
+                    "expires_at": 1_800_000_600,
+                }
+            ],
+        )
+
+    def test_channel_router_fails_closed_without_whatsapp_provider(self):
+        notifier = ApprovalChannelNotifier(
+            imessage_notifier=RecordingNotifier(),
+            whatsapp_notifier=None,
+        )
+
+        result = notifier.send(
+            photon_user_id="420777111222",
+            message="fallback text",
+            channel="whatsapp",
+            approval_id="approval-123",
+            context_lines=["Amount: 10 USDC"],
+            expires_at=1_800_000_600,
+        )
+
+        self.assertEqual(
+            result,
+            {"ok": False, "error": "approval_channel_not_configured"},
+        )
 
     def test_hermes_cli_notifier_rejects_unconfigured_whatsapp_without_sending(self):
         calls = []

@@ -86,6 +86,8 @@ class FakeClient:
         self.calls = []
         self.imessage_results = {}
         self.imessage_calls = []
+        self.approval_results = {}
+        self.approval_calls = []
         self.execute_tokens = []
         self.paid_tool_calls = []
         self.paid_tool_tokens = []
@@ -179,6 +181,12 @@ class FakeClient:
         if self.error:
             raise self.error
         return self.imessage_results.get(operation, {"ok": True})
+
+    def execute_approval(self, operation, payload):
+        self.approval_calls.append((operation, payload))
+        if self.error:
+            raise self.error
+        return self.approval_results.get(operation, {"ok": True})
 
     def execute_paid_tool(self, tool, identity, *, user_access_token=None):
         self.paid_tool_calls.append((tool, identity.user_id, identity.username))
@@ -423,6 +431,7 @@ class PluginRegistrationTests(unittest.TestCase):
                 "limits",
                 "set-limits",
                 "connect-imessage",
+                "connect-whatsapp",
                 "bitrefill",
                 "llm-buy",
                 "llm-terms",
@@ -488,6 +497,7 @@ class PluginRegistrationTests(unittest.TestCase):
                 "wallet",
                 "balance",
                 "connect_imessage",
+                "connect_whatsapp",
                 "limits",
                 "withdraw",
                 "bitrefill",
@@ -668,7 +678,7 @@ class PluginRegistrationTests(unittest.TestCase):
         plugin.register(context)
 
         self.assertIn("connect-imessage", context.commands)
-        self.assertNotIn("connect-whatsapp", context.commands)
+        self.assertIn("connect-whatsapp", context.commands)
         self.assertNotIn("test-approval", context.commands)
         self.assertNotIn("buy-crypto-news", context.commands)
 
@@ -711,35 +721,46 @@ class PluginRegistrationTests(unittest.TestCase):
             ],
         )
 
-    def test_connect_whatsapp_is_not_exposed_as_a_fake_approval_channel(self):
+    def test_connect_whatsapp_uses_trusted_telegram_identity(self):
         plugin = load_plugin()
         context = FakeContext()
         client = FakeClient()
+        client.approval_results["connect-imessage"] = {
+            "ok": True,
+            "telegramText": "Send ABCDEFGH to WhatsApp",
+        }
         plugin._client_factory = lambda: client
         plugin.register(context)
         gateway = FakeGateway(adapter_key="telegram")
 
-        result = context.hooks["pre_gateway_dispatch"](
-            event=FakeEvent(
-                "/connect_whatsapp telegramUserId=999",
-                "1045618308",
-                platform="telegram",
-                chat_id="telegram-chat",
-            ),
-            gateway=gateway,
-        )
+        with patch.dict(
+            plugin.os.environ,
+            {"SIGN402_WHATSAPP_PUBLIC_LINE": "+15551431969"},
+        ):
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "/connect_whatsapp telegramUserId=999",
+                    "1045618308",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
 
         self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertIn(
+            "+15551431969",
+            gateway.adapters["telegram"].sent[0][1],
+        )
         self.assertEqual(
-            gateway.adapters["telegram"].sent,
+            client.approval_calls,
             [
                 (
-                    "telegram-chat",
-                    "WhatsApp Business approvals are not configured yet. Use /connect_imessage.",
+                    "connect-imessage",
+                    {"telegramUserId": "1045618308", "channel": "whatsapp"},
                 )
             ],
         )
-        self.assertEqual(client.imessage_calls, [])
 
     def test_connect_imessage_includes_public_imessage_line_when_configured(self):
         plugin = load_plugin()
@@ -1076,7 +1097,7 @@ class PluginRegistrationTests(unittest.TestCase):
             reply_markup["keyboard"],
             [
                 [{"text": "Wallet"}, {"text": "Balance"}],
-                [{"text": "Connect iMessage"}],
+                [{"text": "Connect iMessage"}, {"text": "Connect WhatsApp"}],
                 [{"text": "Limits"}],
                 [{"text": "Withdraw"}],
                 [{"text": "Buy Bitrefill"}, {"text": "Buy LLM Credits"}],
@@ -1352,7 +1373,7 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertEqual(
             gateway.adapters["telegram"].sent,
             [
-                ("telegram-chat", "Bitrefill purchase started. Approve it in iMessage; I'll post the result here."),
+                ("telegram-chat", plugin._TELEGRAM_BITREFILL_STARTED_MESSAGE),
                 ("telegram-chat", "Bitrefill delivered."),
             ],
         )
@@ -1419,7 +1440,7 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertEqual(
             gateway.adapters["telegram"].sent[-2:],
             [
-                ("telegram-chat", "Bitrefill purchase started. Approve it in iMessage; I'll post the result here."),
+                ("telegram-chat", plugin._TELEGRAM_BITREFILL_STARTED_MESSAGE),
                 ("telegram-chat", "Bitrefill delivered."),
             ],
         )
@@ -1512,7 +1533,7 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertEqual(
             gateway.adapters["telegram"].sent[-2:],
             [
-                ("telegram-chat", "Withdrawal started. Approve it in iMessage; I'll post the result here."),
+                ("telegram-chat", plugin._TELEGRAM_WITHDRAW_STARTED_MESSAGE),
                 ("telegram-chat", "Withdrawal sent."),
             ],
         )
@@ -2406,29 +2427,109 @@ class PluginRegistrationTests(unittest.TestCase):
         )
         self.assertEqual(gateway.adapters[platform].sent, [("photon-chat", "iMessage linked.")])
 
-    def test_unconfigured_whatsapp_event_is_ignored_before_llm(self):
+    def test_whatsapp_cloud_pairing_code_is_linked_and_consumed(self):
         plugin = load_plugin()
         context = FakeContext()
         client = FakeClient()
+        client.approval_results["link"] = {
+            "ok": True,
+            "imessageText": "WhatsApp linked.",
+        }
         plugin._client_factory = lambda: client
         plugin.register(context)
-        platform = FakePlatform("whatsapp")
-        gateway = FakeGateway(adapter_key=platform)
+        gateway = FakeGateway(adapter_key="whatsapp_cloud")
 
         result = context.hooks["pre_gateway_dispatch"](
             event=FakeEvent(
                 "4JTLV6XQ",
-                "+15551234567",
-                username="Photon User",
-                platform="whatsapp",
+                "420777111222",
+                username="WhatsApp User",
+                platform="whatsapp_cloud",
                 chat_id="whatsapp-chat",
             ),
             gateway=gateway,
         )
 
         self.assertEqual(result, plugin._SKIP_RESULT)
-        self.assertEqual(client.imessage_calls, [])
-        self.assertEqual(gateway.adapters[platform].sent, [])
+        self.assertEqual(
+            client.approval_calls,
+            [
+                (
+                    "link",
+                    {
+                        "code": "4JTLV6XQ",
+                        "approvalUserId": "420777111222",
+                        "channel": "whatsapp",
+                    },
+                )
+            ],
+        )
+        self.assertEqual(
+            gateway.adapters["whatsapp_cloud"].sent,
+            [("whatsapp-chat", "WhatsApp linked.")],
+        )
+
+    def test_whatsapp_cloud_button_decides_exact_approval_and_is_consumed(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.approval_results["decision"] = {
+            "ok": True,
+            "imessageText": "Approved.",
+        }
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="whatsapp_cloud")
+        event = FakeEvent(
+            "Approve",
+            "420777111222",
+            platform="whatsapp_cloud",
+            chat_id="whatsapp-chat",
+        )
+        event.raw_message = {
+            "type": "button",
+            "button": {"payload": "sign402:approve:approval-123"},
+        }
+
+        result = context.hooks["pre_gateway_dispatch"](event=event, gateway=gateway)
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(
+            client.approval_calls,
+            [
+                (
+                    "decision",
+                    {
+                        "approvalUserId": "420777111222",
+                        "channel": "whatsapp",
+                        "decision": "YES",
+                        "approvalId": "approval-123",
+                    },
+                )
+            ],
+        )
+
+    def test_whatsapp_cloud_plain_text_is_dropped_before_general_chat(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="whatsapp_cloud")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "hello agent",
+                "420777111222",
+                platform="whatsapp_cloud",
+                chat_id="whatsapp-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(client.approval_calls, [])
+        self.assertEqual(gateway.adapters["whatsapp_cloud"].sent, [])
 
     def test_photon_yes_without_pending_is_dropped_before_general_chat(self):
         plugin = load_plugin()

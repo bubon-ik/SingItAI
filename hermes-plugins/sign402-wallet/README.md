@@ -8,6 +8,7 @@ Telegram:
 /wallet
 /balance
 /connect_imessage
+/connect_whatsapp
 /limits
 /withdraw
 /bitrefill
@@ -32,9 +33,17 @@ SIGN402_TELEGRAM_SIGN402_ONLY=1
 SIGN402_TELEGRAM_ALLOWED_USERS=*
 TELEGRAM_ALLOWED_USERS=<operator Telegram ID>
 SIGN402_IMESSAGE_PUBLIC_LINE=<public Sign402 iMessage number or contact>
+SIGN402_WHATSAPP_PUBLIC_LINE=<public Meta WhatsApp Business number or wa.me link>
 SIGN402_PHOTON_AUTO_REGISTER_USERS=1
 PHOTON_PROJECT_ID=<Photon project id>
 PHOTON_PROJECT_SECRET=<Photon project secret>
+
+# Added by `hermes whatsapp-cloud` for inbound Meta webhooks:
+WHATSAPP_CLOUD_PHONE_NUMBER_ID=<Meta Phone Number ID>
+WHATSAPP_CLOUD_ACCESS_TOKEN=<Meta System User token>
+WHATSAPP_CLOUD_APP_SECRET=<Meta App Secret>
+WHATSAPP_CLOUD_VERIFY_TOKEN=<random webhook verify token>
+WHATSAPP_CLOUD_ALLOWED_USERS=<test wa_id without +>
 ```
 
 The Sign402 Gateway systemd environment also needs:
@@ -44,10 +53,15 @@ SIGN402_PHOTON_API_TOKEN=<independent random bearer token>
 SIGN402_IMESSAGE_APPROVAL_STORE_PATH=/home/hermes/.sign402/imessage-approvals.db
 SIGN402_HERMES_CLI=/home/hermes/.local/bin/hermes
 SIGN402_HERMES_HOME=/home/hermes/.hermes
+SIGN402_WHATSAPP_ACCESS_TOKEN=<same Meta System User token>
+SIGN402_WHATSAPP_PHONE_NUMBER_ID=<Meta Phone Number ID>
+SIGN402_WHATSAPP_TEMPLATE_NAME=sign402_payment_approval
+SIGN402_WHATSAPP_TEMPLATE_LANGUAGE=en_US
+SIGN402_WHATSAPP_GRAPH_API_VERSION=v25.0
 ```
 
-Do not put wallet or Photon API tokens in `SOUL.md`, a skill, a prompt,
-Telegram, iMessage, or repository files. Keep `~/.hermes/.env` readable only
+Do not put wallet, Photon, or Meta API tokens in `SOUL.md`, a skill, a prompt,
+Telegram, iMessage, WhatsApp, or repository files. Keep `~/.hermes/.env` readable only
 by the `hermes` user:
 
 ```bash
@@ -86,10 +100,41 @@ Automatic provisioning is capped at three valid phone-number attempts per
 Telegram user per hour, with a beta-wide hourly guard, to protect the shared
 Photon number pool from abuse.
 
-WhatsApp approval is intentionally not exposed yet. Photon supports WhatsApp
-Business, but it needs a separately configured Meta Business provider rather
-than the bundled iMessage sidecar. Do not present it as an approval channel
-until that provider, its webhook, and its credentials are deployed.
+`/connect_whatsapp` creates the same single-use pairing code without using
+Photon. The user sends it to `SIGN402_WHATSAPP_PUBLIC_LINE`; Hermes receives the
+signed Meta webhook through its official `whatsapp_cloud` adapter, and the
+plugin links the trusted Meta `wa_id`. Pairing WhatsApp makes it the user's sole
+active approval channel; pairing iMessage later switches the channel back.
+
+Run the Hermes Cloud setup wizard before enabling WhatsApp:
+
+```bash
+hermes whatsapp-cloud
+```
+
+For a first test, expose the wizard's webhook port with the free Cloudflare
+quick tunnel it prints and configure the resulting callback as
+`https://<tunnel>.trycloudflare.com/whatsapp/webhook` in Meta. Subscribe the
+WhatsApp app to the `messages` field. No purchased domain is required for this
+test, but the quick-tunnel URL must be updated in Meta whenever it changes.
+
+Create and obtain Meta approval for a `UTILITY` template named
+`sign402_payment_approval`, language `en_US`, with three body variables and two
+quick-reply buttons in this order:
+
+```text
+Sign402 payment approval
+{{1}}
+Approval reference: {{2}}
+Expires: {{3}}
+
+[Approve] [Reject]
+```
+
+The gateway always sends this template for WhatsApp payment approvals, so the
+request works even outside Meta's 24-hour customer-service window. Hermes
+currently handles the signed inbound webhook; the gateway calls Meta directly
+only for this approved outbound template.
 
 ## Install
 
@@ -122,6 +167,7 @@ In Telegram, run:
 /wallet
 /balance
 /connect_imessage
+/connect_whatsapp
 ```
 
 Expected behavior:
@@ -129,15 +175,16 @@ Expected behavior:
 - `/wallet` creates a Base wallet when needed, then returns its address.
 - `/balance` returns balances or the safe balance-unavailable response.
 - `/connect_imessage` returns a short pairing code.
+- `/connect_whatsapp` returns a short pairing code for the Meta business number.
 
-Send the pairing code to the assigned Photon iMessage line. A real, low-value
-purchase is the user-facing approval check: iMessage receives the exact terms,
-and `YES` or `NO` resolves only that pending approval. The Photon/iMessage line
-is approval-only: other messages are dropped and cannot reach the general
-Hermes chat. Use Telegram for wallet and agent interactions.
+Send the pairing code to the chosen channel. A real, low-value purchase is the
+user-facing approval check: iMessage accepts `YES`/`NO`; WhatsApp displays
+Approve/Reject buttons bound to the exact approval ID. Both channels are
+approval-only: unrelated messages are dropped before the general Hermes chat.
+Use Telegram for wallet and agent interactions.
 
-No public domain, reverse proxy, or tunnel is required. Hermes and the
-Sign402 Gateway communicate over `127.0.0.1:8099`.
+The Sign402 Gateway remains private on `127.0.0.1:8099`. WhatsApp additionally
+requires a public HTTPS tunnel only for Hermes's signed Meta webhook endpoint.
 
 ## Public Beta
 

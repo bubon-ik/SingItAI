@@ -148,6 +148,13 @@ class GatewayClient:
         operation: str,
         payload: Mapping[str, Any],
     ) -> dict[str, Any]:
+        return self.execute_approval(operation, payload)
+
+    def execute_approval(
+        self,
+        operation: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
         path = _IMESSAGE_OPERATION_PATHS.get(operation)
         if path is None:
             raise GatewayClientError(_UNSUPPORTED)

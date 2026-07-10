@@ -130,6 +130,34 @@ class GatewayClientTests(unittest.TestCase):
             {"code": "ABCDEFGH", "photonUserId": "+15551234567"},
         )
 
+    def test_execute_approval_uses_independent_token_and_generic_payload(self):
+        opener = RecordingOpener(response=FakeResponse(b'{"imessageText":"linked"}'))
+        client = self.make_client(opener)
+
+        result = client.execute_approval(
+            "link",
+            {
+                "code": "ABCDEFGH",
+                "approvalUserId": "420777111222",
+                "channel": "whatsapp",
+            },
+        )
+
+        self.assertEqual(result["imessageText"], "linked")
+        request, _timeout = opener.requests[0]
+        self.assertEqual(
+            request.get_header("Authorization"),
+            "Bearer photon-token-secret-value",
+        )
+        self.assertEqual(
+            json.loads(request.data),
+            {
+                "code": "ABCDEFGH",
+                "approvalUserId": "420777111222",
+                "channel": "whatsapp",
+            },
+        )
+
     def test_execute_imessage_maps_operations_to_expected_endpoints(self):
         cases = {
             "connect-imessage": "/agent/imessage/pairing",

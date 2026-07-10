@@ -51,16 +51,20 @@ _USER_ACCESS_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 _USER_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 5 * 60
 _USER_ACCESS_TOKEN_CACHE_MAX_USERS = 4096
 _TELEGRAM_PAID_TOOL_STARTED_MESSAGE = (
-    "Sign402 purchase started. Approve it in iMessage; I'll post the result here."
+    "Sign402 purchase started. Approve it in your selected approval channel; "
+    "I'll post the result here."
 )
 _TELEGRAM_BITREFILL_STARTED_MESSAGE = (
-    "Bitrefill purchase started. Approve it in iMessage; I'll post the result here."
+    "Bitrefill purchase started. Approve it in your selected approval channel; "
+    "I'll post the result here."
 )
 _TELEGRAM_LLM_STARTED_MESSAGE = (
-    "Bankr LLM purchase started. Approve it in iMessage; I'll post the result here."
+    "Bankr LLM purchase started. Approve it in your selected approval channel; "
+    "I'll post the result here."
 )
 _TELEGRAM_WITHDRAW_STARTED_MESSAGE = (
-    "Withdrawal started. Approve it in iMessage; I'll post the result here."
+    "Withdrawal started. Approve it in your selected approval channel; "
+    "I'll post the result here."
 )
 _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "start", "description": "Set up your Sign402 wallet"},
@@ -68,6 +72,7 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "wallet", "description": "Show or create your Base wallet"},
     {"command": "balance", "description": "Show wallet balances"},
     {"command": "connect_imessage", "description": "Link iMessage approvals"},
+    {"command": "connect_whatsapp", "description": "Link WhatsApp approvals"},
     {"command": "limits", "description": "Show or set spending limits"},
     {"command": "withdraw", "description": "Withdraw Base assets"},
     {"command": "bitrefill", "description": "Buy Bitrefill with SINGIT"},
@@ -77,7 +82,7 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
 )
 _TELEGRAM_MAIN_MENU_BUTTONS = (
     ("Wallet", "Balance"),
-    ("Connect iMessage",),
+    ("Connect iMessage", "Connect WhatsApp"),
     ("Limits",),
     ("Withdraw",),
     ("Buy Bitrefill", "Buy LLM Credits"),
@@ -87,6 +92,7 @@ _TELEGRAM_BUTTON_COMMANDS = {
     "wallet": "wallet",
     "balance": "balance",
     "connect imessage": "connect-imessage",
+    "connect whatsapp": "connect-whatsapp",
     "limits": "limits",
     "withdraw": "withdraw",
     "buy bitrefill": "bitrefill",
@@ -133,11 +139,19 @@ _IMESSAGE_COMMANDS = {
         "connect-imessage",
         "Link your iMessage number for Sign402 approvals",
     ),
+    "connect-whatsapp": (
+        "connect-whatsapp",
+        "Link your WhatsApp number for Sign402 approvals",
+    ),
 }
 _IMESSAGE_PUBLIC_LINE_ENV_NAMES = (
     "SIGN402_IMESSAGE_PUBLIC_LINE",
     "SIGN402_IMESSAGE_PUBLIC_NUMBER",
     "PHOTON_PUBLIC_IMESSAGE_LINE",
+)
+_WHATSAPP_PUBLIC_LINE_ENV_NAMES = (
+    "SIGN402_WHATSAPP_PUBLIC_LINE",
+    "WHATSAPP_CLOUD_PUBLIC_LINE",
 )
 _PHOTON_PROJECT_ID_ENV_NAMES = ("PHOTON_PROJECT_ID", "SPECTRUM_PROJECT_ID")
 _PHOTON_PROJECT_SECRET_ENV_NAMES = ("PHOTON_PROJECT_SECRET", "SPECTRUM_PROJECT_SECRET")
@@ -212,14 +226,14 @@ def _build_imessage_handler(operation: str):
         identity = consume_gateway_identity()
         if identity is None:
             return _TELEGRAM_ONLY_MESSAGE
-        if operation != "connect-imessage":
-            return "WhatsApp Business approvals are not configured yet. Use /connect_imessage."
         try:
             client = _client_factory()
-            channel = "imessage"
+            channel = "whatsapp" if operation == "connect-whatsapp" else "imessage"
             payload = {"telegramUserId": identity.user_id}
+            if channel == "whatsapp":
+                payload["channel"] = "whatsapp"
             result = await asyncio.to_thread(
-                client.execute_imessage,
+                client.execute_approval,
                 "connect-imessage",
                 payload,
             )
@@ -227,6 +241,7 @@ def _build_imessage_handler(operation: str):
             if isinstance(telegram_text, str) and telegram_text.strip():
                 return _telegram_imessage_pairing_text(
                     telegram_text,
+                    public_line=_approval_public_line(channel),
                     channel=channel,
                 )
             return _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
@@ -372,7 +387,7 @@ def _start_text(wallet_text: str, *, support_id: str = "") -> str:
         "Next steps:\n"
         "1. Wallet - fund this Base wallet with ETH for gas and USDC/SINGIT for payments.\n"
         "2. Balance - check ETH, USDC, and SINGIT.\n"
-        "3. Connect iMessage - link approvals from your phone number.\n"
+        "3. Connect iMessage or Connect WhatsApp - link approvals for your phone number.\n"
         "4. Limits - review or set spending limits.\n"
         "5. Buy - use the buttons or send a request like: buy crypto news"
     )
@@ -384,6 +399,7 @@ def _help_text() -> str:
         "/wallet - Create or show your Base wallet\n"
         "/balance - Show ETH, USDC, and SINGIT balances\n"
         "/connect_imessage - Link iMessage approvals\n"
+        "/connect_whatsapp - Link WhatsApp approvals\n"
         "/limits - View or set spending limits\n"
         "/bitrefill <product> <amount> <country> - Buy Bitrefill with SINGIT\n"
         "/last_purchase - Reveal your latest purchase\n"
@@ -418,6 +434,12 @@ def _imessage_public_line() -> str:
         if value:
             return value
     return ""
+
+
+def _approval_public_line(channel: str) -> str:
+    if str(channel or "").strip().lower() == "whatsapp":
+        return _env_first(_WHATSAPP_PUBLIC_LINE_ENV_NAMES)
+    return _imessage_public_line()
 
 
 def _approval_channel_label(channel: str) -> str:
@@ -769,9 +791,14 @@ def _handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
     if sign402_only_result:
         return sign402_only_result
 
-    # WhatsApp Business is not an approval provider in this deployment yet.
-    # Do not let a future generic WhatsApp integration feed pairing codes or
-    # YES/NO decisions into the iMessage sidecar flow by accident.
+    if _is_whatsapp_cloud_source(source):
+        return _handle_whatsapp_cloud_event(
+            event=event,
+            source=source,
+            gateway=gateway,
+        )
+
+    # The unofficial/personal WhatsApp adapter is not an approval provider.
     if _is_unconfigured_whatsapp_source(source):
         return dict(_SKIP_RESULT)
 
@@ -1026,7 +1053,21 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
                 else:
                     text = _telegram_imessage_pairing_text(text, channel=channel)
         elif command == "connect-whatsapp":
-            text = "WhatsApp Business approvals are not configured yet. Use /connect_imessage."
+            channel = "whatsapp"
+            client = _client_factory()
+            result = client.execute_approval(
+                "connect-imessage",
+                {"telegramUserId": identity.user_id, "channel": channel},
+            )
+            text = result.get("telegramText")
+            if not isinstance(text, str) or not text.strip():
+                text = _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
+            else:
+                text = _telegram_imessage_pairing_text(
+                    text,
+                    public_line=_approval_public_line(channel),
+                    channel=channel,
+                )
         elif command in {"llm-buy", "llm-terms", "llm-credits"}:
             client = _client_factory()
             operation = {
@@ -2152,6 +2193,75 @@ def _handle_photon_pairing_code(*, code: str, photon_user_id: str, source, gatew
         return dict(_SKIP_RESULT)
 
 
+def _handle_whatsapp_cloud_event(*, event, source, gateway):
+    wa_id = str(getattr(source, "user_id", "") or "").strip()
+    if not re.fullmatch(r"[1-9][0-9]{4,19}", wa_id):
+        return dict(_SKIP_RESULT)
+    text = str(getattr(event, "text", "") or "").strip()
+    try:
+        client = _client_factory()
+        if _looks_like_pairing_code(text.upper()):
+            result = client.execute_approval(
+                "link",
+                {
+                    "code": text.upper(),
+                    "approvalUserId": wa_id,
+                    "channel": "whatsapp",
+                },
+            )
+            _send_fixed_reply(gateway, source, _imessage_text(result))
+            return dict(_SKIP_RESULT)
+
+        button = _whatsapp_button_decision(event)
+        if button is None:
+            return dict(_SKIP_RESULT)
+        decision, approval_id = button
+        result = client.execute_approval(
+            "decision",
+            {
+                "approvalUserId": wa_id,
+                "channel": "whatsapp",
+                "decision": decision,
+                "approvalId": approval_id,
+            },
+        )
+        _send_fixed_reply(gateway, source, _imessage_text(result))
+        return dict(_SKIP_RESULT)
+    except GatewayClientError:
+        return dict(_SKIP_RESULT)
+    except Exception as exc:
+        logger.warning(
+            "Unexpected Sign402 WhatsApp approval failure error=%s",
+            type(exc).__name__,
+        )
+        return dict(_SKIP_RESULT)
+
+
+def _whatsapp_button_decision(event) -> tuple[str, str] | None:
+    candidates = [str(getattr(event, "text", "") or "").strip()]
+
+    def collect(value) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if str(key).lower() in {"payload", "id", "button_payload"}:
+                    candidates.append(str(item or "").strip())
+                collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    collect(getattr(event, "raw_message", None))
+    for candidate in candidates:
+        match = re.fullmatch(
+            r"sign402:(approve|reject):([A-Za-z0-9_-]{8,128})",
+            candidate,
+        )
+        if match:
+            decision = "YES" if match.group(1) == "approve" else "NO"
+            return decision, match.group(2)
+    return None
+
+
 def _handle_photon_decision(*, decision: str, photon_user_id: str, source, gateway):
     try:
         resolved_photon_user_id = _resolve_photon_sender_id(photon_user_id)
@@ -2415,6 +2525,14 @@ def _is_unconfigured_whatsapp_source(source) -> bool:
         "whatsapp",
         "whatsapp via photon",
         "platforms/whatsapp",
+    }
+
+
+def _is_whatsapp_cloud_source(source) -> bool:
+    return _platform_name(source) in {
+        "whatsapp_cloud",
+        "whatsapp-cloud",
+        "platforms/whatsapp_cloud",
     }
 
 
