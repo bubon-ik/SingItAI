@@ -1499,6 +1499,69 @@ class GatewayServerTests(unittest.TestCase):
             "+15551234567",
         )
 
+    def test_approval_endpoints_accept_whatsapp_identity_and_channel(self):
+        server = DummyServer()
+        server.imessage_approval_service.link_sender.return_value = {
+            "ok": True,
+            "channel": "whatsapp",
+            "imessageText": "WhatsApp linked.",
+        }
+        server.imessage_approval_service.pending_for_photon_sender.return_value = {
+            "ok": True,
+            "pending": True,
+            "approvalId": "approval-123",
+        }
+        server.imessage_approval_service.record_decision.return_value = {
+            "ok": True,
+            "status": "approved",
+            "imessageText": "Approved.",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            link_handler = self.make_handler(
+                "/agent/imessage/link",
+                {
+                    "code": "ABCDEFGH",
+                    "approvalUserId": "420777111222",
+                    "channel": "whatsapp",
+                },
+                server=server,
+                headers=self.photon_auth_headers(),
+            )
+            pending_handler = self.make_handler(
+                "/agent/imessage/pending",
+                {"approvalUserId": "420777111222", "channel": "whatsapp"},
+                server=server,
+                headers=self.photon_auth_headers(),
+            )
+            decision_handler = self.make_handler(
+                "/agent/imessage/decision",
+                {
+                    "approvalUserId": "420777111222",
+                    "channel": "whatsapp",
+                    "decision": "YES",
+                    "approvalId": "approval-123",
+                },
+                server=server,
+                headers=self.photon_auth_headers(),
+            )
+
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(link_handler))
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(pending_handler))
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(decision_handler))
+        server.imessage_approval_service.link_sender.assert_called_once_with(
+            "ABCDEFGH", "420777111222", channel="whatsapp"
+        )
+        server.imessage_approval_service.pending_for_photon_sender.assert_called_once_with(
+            "420777111222", channel="whatsapp"
+        )
+        server.imessage_approval_service.record_decision.assert_called_once_with(
+            "420777111222",
+            "YES",
+            approval_id="approval-123",
+            channel="whatsapp",
+        )
+
     def test_imessage_pending_and_decision_endpoints_use_photon_source(self):
         server = DummyServer()
         server.imessage_approval_service.pending_for_photon_sender.return_value = {

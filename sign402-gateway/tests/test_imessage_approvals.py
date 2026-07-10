@@ -9,6 +9,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 
 from sign402_gateway.imessage_approvals import (
+    ApprovalChannelNotifier,
     HermesCliNotifier,
     ImessageApprovalService,
     ImessageApprovalStore,
@@ -32,9 +33,19 @@ class RecordingNotifier:
         photon_user_id: str,
         message: str,
         channel: str = "imessage",
+        approval_id: str = "",
+        context_lines: list[str] | None = None,
+        expires_at: int = 0,
     ) -> dict[str, object]:
         self.messages.append(
-            {"photonUserId": photon_user_id, "message": message, "channel": channel}
+            {
+                "photonUserId": photon_user_id,
+                "message": message,
+                "channel": channel,
+                "approvalId": approval_id,
+                "contextLines": list(context_lines or []),
+                "expiresAt": expires_at,
+            }
         )
         return {"ok": self.ok, "stdout": "", "stderr": ""}
 
@@ -50,11 +61,17 @@ class AutoDecisionNotifier(RecordingNotifier):
         photon_user_id: str,
         message: str,
         channel: str = "imessage",
+        approval_id: str = "",
+        context_lines: list[str] | None = None,
+        expires_at: int = 0,
     ) -> dict[str, object]:
         result = super().send(
             photon_user_id=photon_user_id,
             message=message,
             channel=channel,
+            approval_id=approval_id,
+            context_lines=context_lines,
+            expires_at=expires_at,
         )
         self.decision_callback(photon_user_id)
         return result
@@ -368,6 +385,66 @@ class ImessageApprovalTests(unittest.TestCase):
         self.assertFalse(calls[0][1]["shell"])
         self.assertEqual(calls[0][1]["env"]["HOME"], "/home/hermes")
         self.assertEqual(calls[0][1]["env"]["HERMES_HOME"], "/home/hermes/.hermes")
+
+    def test_channel_router_uses_meta_template_for_whatsapp(self):
+        imessage = RecordingNotifier()
+
+        class RecordingTemplateNotifier:
+            def __init__(self):
+                self.calls = []
+
+            def send_approval(self, **kwargs):
+                self.calls.append(kwargs)
+                return {"ok": True, "messageId": "wamid.123"}
+
+        whatsapp = RecordingTemplateNotifier()
+        notifier = ApprovalChannelNotifier(
+            imessage_notifier=imessage,
+            whatsapp_notifier=whatsapp,
+        )
+
+        result = notifier.send(
+            photon_user_id="420777111222",
+            message="fallback text",
+            channel="whatsapp",
+            approval_id="approval-123",
+            context_lines=["Amount: 10 USDC"],
+            expires_at=1_800_000_600,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(imessage.messages, [])
+        self.assertEqual(
+            whatsapp.calls,
+            [
+                {
+                    "wa_id": "420777111222",
+                    "approval_id": "approval-123",
+                    "context_lines": ["Amount: 10 USDC"],
+                    "expires_at": 1_800_000_600,
+                }
+            ],
+        )
+
+    def test_channel_router_fails_closed_without_whatsapp_provider(self):
+        notifier = ApprovalChannelNotifier(
+            imessage_notifier=RecordingNotifier(),
+            whatsapp_notifier=None,
+        )
+
+        result = notifier.send(
+            photon_user_id="420777111222",
+            message="fallback text",
+            channel="whatsapp",
+            approval_id="approval-123",
+            context_lines=["Amount: 10 USDC"],
+            expires_at=1_800_000_600,
+        )
+
+        self.assertEqual(
+            result,
+            {"ok": False, "error": "approval_channel_not_configured"},
+        )
 
     def test_hermes_cli_notifier_rejects_unconfigured_whatsapp_without_sending(self):
         calls = []

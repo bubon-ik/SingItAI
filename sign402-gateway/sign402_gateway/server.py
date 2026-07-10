@@ -1065,10 +1065,18 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         try:
             _require_imessage_approval_api_token(self)
             payload = self._read_json()
-            result = self.server.imessage_approval_service.link_photon_sender(
-                _read_required_text(payload, "code"),
-                _read_photon_user_id(payload),
-            )
+            channel = _read_optional_text(payload, ("channel", "approvalChannel"))
+            if channel or _has_approval_user_id(payload):
+                result = self.server.imessage_approval_service.link_sender(
+                    _read_required_text(payload, "code"),
+                    _read_approval_user_id(payload),
+                    channel=channel or "imessage",
+                )
+            else:
+                result = self.server.imessage_approval_service.link_photon_sender(
+                    _read_required_text(payload, "code"),
+                    _read_photon_user_id(payload),
+                )
             self._send_json(_without_private_key_material(result), status=200 if result.get("ok") else 400)
         except ImessageApprovalApiTokenNotConfiguredError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=503)
@@ -1106,9 +1114,16 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         try:
             _require_imessage_approval_api_token(self)
             payload = self._read_json()
-            result = self.server.imessage_approval_service.pending_for_photon_sender(
-                _read_photon_user_id(payload)
-            )
+            channel = _read_optional_text(payload, ("channel", "approvalChannel"))
+            if channel or _has_approval_user_id(payload):
+                result = self.server.imessage_approval_service.pending_for_photon_sender(
+                    _read_approval_user_id(payload),
+                    channel=channel or "imessage",
+                )
+            else:
+                result = self.server.imessage_approval_service.pending_for_photon_sender(
+                    _read_photon_user_id(payload)
+                )
             self._send_json(_without_private_key_material(result), status=200)
         except ImessageApprovalApiTokenNotConfiguredError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=503)
@@ -1121,11 +1136,20 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         try:
             _require_imessage_approval_api_token(self)
             payload = self._read_json()
-            result = self.server.imessage_approval_service.record_decision(
-                _read_photon_user_id(payload),
-                _read_required_text(payload, "decision"),
-                approval_id=str(payload.get("approvalId", "")).strip() or None,
-            )
+            channel = _read_optional_text(payload, ("channel", "approvalChannel"))
+            if channel or _has_approval_user_id(payload):
+                result = self.server.imessage_approval_service.record_decision(
+                    _read_approval_user_id(payload),
+                    _read_required_text(payload, "decision"),
+                    approval_id=str(payload.get("approvalId", "")).strip() or None,
+                    channel=channel or "imessage",
+                )
+            else:
+                result = self.server.imessage_approval_service.record_decision(
+                    _read_photon_user_id(payload),
+                    _read_required_text(payload, "decision"),
+                    approval_id=str(payload.get("approvalId", "")).strip() or None,
+                )
             self._send_json(_without_private_key_material(result), status=200 if result.get("ok") else 404)
         except ImessageApprovalApiTokenNotConfiguredError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=503)
@@ -4274,6 +4298,27 @@ def _read_photon_user_id(payload: dict[str, Any]) -> str:
         if value:
             return value
     raise ValueError("photonUserId is required")
+
+
+def _has_approval_user_id(payload: dict[str, Any]) -> bool:
+    return any(
+        str(payload.get(key, "") or "").strip()
+        for key in ("approvalUserId", "approval_user_id")
+    )
+
+
+def _read_approval_user_id(payload: dict[str, Any]) -> str:
+    for key in (
+        "approvalUserId",
+        "approval_user_id",
+        "photonUserId",
+        "photon_user_id",
+        "userId",
+    ):
+        value = str(payload.get(key, "") or "").strip()
+        if value:
+            return value
+    raise ValueError("approvalUserId is required")
 
 
 def _read_required_text(payload: dict[str, Any], key: str) -> str:

@@ -16,6 +16,8 @@ from typing import Any, Callable, Iterator
 
 from cryptography.fernet import Fernet
 
+from .whatsapp_cloud import MetaWhatsAppTemplateNotifier
+
 
 DEFAULT_IMESSAGE_APPROVAL_STORE_PATH = (
     Path.home() / ".sign402" / "imessage-approvals.db"
@@ -235,6 +237,38 @@ class HermesCliNotifier:
             "stdout": str(getattr(completed, "stdout", "") or "")[:2000],
             "stderr": str(getattr(completed, "stderr", "") or "")[:2000],
         }
+
+
+class ApprovalChannelNotifier:
+    def __init__(self, *, imessage_notifier, whatsapp_notifier=None):
+        self.imessage_notifier = imessage_notifier
+        self.whatsapp_notifier = whatsapp_notifier
+
+    def send(
+        self,
+        *,
+        photon_user_id: str,
+        message: str,
+        channel: str = "imessage",
+        approval_id: str = "",
+        context_lines: list[str] | None = None,
+        expires_at: int = 0,
+    ) -> dict[str, object]:
+        approval_channel = _normalize_approval_channel(channel)
+        if approval_channel == "imessage":
+            return self.imessage_notifier.send(
+                photon_user_id=photon_user_id,
+                message=message,
+                channel="imessage",
+            )
+        if approval_channel == "whatsapp" and self.whatsapp_notifier is not None:
+            return self.whatsapp_notifier.send_approval(
+                wa_id=photon_user_id,
+                approval_id=approval_id,
+                context_lines=list(context_lines or []),
+                expires_at=expires_at,
+            )
+        return {"ok": False, "error": "approval_channel_not_configured"}
 
 
 class ImessageApprovalService:
@@ -675,7 +709,13 @@ class ImessageApprovalService:
                 status="pending",
             )
 
-        deliveries = self._send_approval_to_channels(links=links, message=message)
+        deliveries = self._send_approval_to_channels(
+            links=links,
+            message=message,
+            approval_id=approval_id,
+            context_lines=context_lines,
+            expires_at=expires_at,
+        )
         delivered_channels = self._delivery_channels(deliveries)
         if not delivered_channels:
             with self.store.lock, self.store._database() as db:
@@ -822,7 +862,13 @@ class ImessageApprovalService:
                 status="pending",
             )
 
-        deliveries = self._send_approval_to_channels(links=links, message=message)
+        deliveries = self._send_approval_to_channels(
+            links=links,
+            message=message,
+            approval_id=approval_id,
+            context_lines=[str(line) for line in context_lines],
+            expires_at=expires_at,
+        )
         delivered_channels = self._delivery_channels(deliveries)
         if not delivered_channels:
             with self.store.lock, self.store._database() as db:
@@ -988,7 +1034,13 @@ class ImessageApprovalService:
                 metadata={"toolName": str(tool_name or ""), "resourceUrl": str(resource_url or "")},
             )
 
-        deliveries = self._send_approval_to_channels(links=links, message=message)
+        deliveries = self._send_approval_to_channels(
+            links=links,
+            message=message,
+            approval_id=approval_id,
+            context_lines=context_lines,
+            expires_at=expires_at,
+        )
         delivered_channels = self._delivery_channels(deliveries)
         if not delivered_channels:
             with self.store.lock, self.store._database() as db:
@@ -1276,6 +1328,9 @@ class ImessageApprovalService:
         *,
         links: list[dict[str, str]],
         message: str,
+        approval_id: str,
+        context_lines: list[str],
+        expires_at: int,
     ) -> list[dict[str, Any]]:
         deliveries: list[dict[str, Any]] = []
         for link in links:
@@ -1284,6 +1339,9 @@ class ImessageApprovalService:
                 photon_user_id=str(link["photonUserId"]),
                 message=message,
                 channel=channel,
+                approval_id=approval_id,
+                context_lines=context_lines,
+                expires_at=expires_at,
             )
             deliveries.append(
                 {
@@ -1425,16 +1483,41 @@ def build_imessage_approval_service_from_env(
     wallet_service,
     store_path: Path | None = None,
 ) -> ImessageApprovalService:
+    whatsapp_notifier = None
+    whatsapp_access_token = str(
+        env.get("SIGN402_WHATSAPP_ACCESS_TOKEN", "") or ""
+    ).strip()
+    whatsapp_phone_number_id = str(
+        env.get("SIGN402_WHATSAPP_PHONE_NUMBER_ID", "") or ""
+    ).strip()
+    if whatsapp_access_token and whatsapp_phone_number_id:
+        whatsapp_notifier = MetaWhatsAppTemplateNotifier(
+            access_token=whatsapp_access_token,
+            phone_number_id=whatsapp_phone_number_id,
+            template_name=env.get(
+                "SIGN402_WHATSAPP_TEMPLATE_NAME",
+                "sign402_payment_approval",
+            ),
+            template_language=env.get("SIGN402_WHATSAPP_TEMPLATE_LANGUAGE", "en_US"),
+            graph_api_version=env.get("SIGN402_WHATSAPP_GRAPH_API_VERSION", "v25.0"),
+            timeout=float(env.get("SIGN402_WHATSAPP_HTTP_TIMEOUT_SECONDS", "20")),
+        )
     return ImessageApprovalService(
         store=ImessageApprovalStore(
             store_path or DEFAULT_IMESSAGE_APPROVAL_STORE_PATH
         ),
         wallet_service=wallet_service,
         master_key=env.get("SIGN402_WALLET_MASTER_KEY", ""),
-        notifier=HermesCliNotifier(
-            hermes_cli=env.get("SIGN402_HERMES_CLI", "/home/hermes/.local/bin/hermes"),
-            hermes_home=env.get("SIGN402_HERMES_HOME", "/home/hermes/.hermes"),
-            timeout=float(env.get("SIGN402_HERMES_SEND_TIMEOUT", "30")),
+        notifier=ApprovalChannelNotifier(
+            imessage_notifier=HermesCliNotifier(
+                hermes_cli=env.get(
+                    "SIGN402_HERMES_CLI",
+                    "/home/hermes/.local/bin/hermes",
+                ),
+                hermes_home=env.get("SIGN402_HERMES_HOME", "/home/hermes/.hermes"),
+                timeout=float(env.get("SIGN402_HERMES_SEND_TIMEOUT", "30")),
+            ),
+            whatsapp_notifier=whatsapp_notifier,
         ),
         purchase_approval_timeout=float(
             env.get("SIGN402_IMESSAGE_PURCHASE_APPROVAL_TIMEOUT", "120")
