@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SingIt - Spending limits your AI agent cannot break</title>
 <meta name="description" content="SingIt gives AI agents hardware-signed spending limits, approved by you in Telegram, WhatsApp, or iMessage. Payments settle over x402 on Algorand.">
-<link rel="icon" type="image/png" href="assets/singit-approval-mark.png">
+<link rel="icon" type="image/svg+xml" href="assets/singit-mark.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,500;0,600;0,700;1,500;1,600&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -13,9 +13,29 @@
 </head>
 <body>
 
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="singit-mark" viewBox="0 0 240 240" fill="none">
+    <path d="M192 108 V152 Q192 176 168 176 H112 Q88 176 88 152 V88 Q88 64 112 64 H168 Q192 64 192 78"
+          stroke="currentColor" stroke-width="12.5" stroke-linecap="round"/>
+    <path d="M116 118 L139 143 L188 86 H206" stroke="currentColor" stroke-width="11.5"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="216" cy="86" r="8" stroke="currentColor" stroke-width="8.5"/>
+    <g stroke="currentColor" stroke-width="9" stroke-linecap="round">
+      <line x1="58" y1="94"  x2="88" y2="94"/>
+      <line x1="58" y1="121" x2="88" y2="121"/>
+      <line x1="58" y1="148" x2="88" y2="148"/>
+    </g>
+    <g fill="currentColor">
+      <circle cx="49" cy="94"  r="9"/>
+      <circle cx="49" cy="121" r="9"/>
+      <circle cx="49" cy="148" r="9"/>
+    </g>
+  </symbol>
+</svg>
+
 <header class="nav">
   <div class="shell nav-inner">
-    <a class="wordmark" href="#top">Sing<span class="wordmark-it">It</span><span class="wordmark-dot"></span></a>
+    <a class="wordmark" href="#top"><svg class="mark" aria-hidden="true"><use href="#singit-mark"/></svg>Sing<span class="wordmark-it">It</span></a>
     <nav class="nav-links" aria-label="Primary">
       <a href="#how">How it works</a>
       <a href="#features">Features</a>
@@ -43,7 +63,7 @@
       <div class="hero-visual reveal delay-1">
         <figure class="approval-card" aria-label="Example of a SingIt payment approval request">
           <div class="approval-head">
-            <img src="assets/singit-approval-mark.png" alt="" class="approval-mark">
+            <span class="approval-avatar" aria-hidden="true"><svg class="mark"><use href="#singit-mark"/></svg></span>
             <div>
               <strong>Payment approval</strong>
               <span>SingIt via WhatsApp</span>
@@ -187,7 +207,7 @@
 
 <footer class="footer">
   <div class="shell footer-inner">
-    <a class="wordmark wordmark-footer" href="#top">Sing<span class="wordmark-it">It</span><span class="wordmark-dot"></span></a>
+    <a class="wordmark wordmark-footer" href="#top"><svg class="mark" aria-hidden="true"><use href="#singit-mark"/></svg>Sing<span class="wordmark-it">It</span></a>
     <nav class="footer-links" aria-label="Footer">
       <a href="https://bubon-ik.github.io/SingItAI/" target="_blank" rel="noopener">Privacy policy</a>
       <a href="https://bubon-ik.github.io/SingItAI/data-deletion.html" target="_blank" rel="noopener">Data deletion</a>

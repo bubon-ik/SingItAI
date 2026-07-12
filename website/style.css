@@ -98,12 +98,11 @@ h1 em, h2 em { font-style: italic; color: var(--green); }
   color: var(--ink);
   text-decoration: none;
   letter-spacing: -0.01em;
+  display: inline-flex;
+  align-items: center;
 }
 .wordmark-it { margin-left: 2px; }
-.wordmark-dot {
-  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
-  background: var(--green); margin-left: 3px; vertical-align: super;
-}
+.wordmark .mark { width: 34px; height: 34px; color: var(--ink); margin-right: 9px; }
 
 .nav-links { display: flex; gap: 28px; margin-left: auto; }
 .nav-links a { color: var(--ink-soft); text-decoration: none; font-size: 15px; font-weight: 500; transition: color 0.18s var(--ease); }
@@ -138,7 +137,13 @@ h1 em, h2 em { font-style: italic; color: var(--green); }
 }
 
 .approval-head { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
-.approval-mark { width: 46px; height: 46px; mix-blend-mode: multiply; }
+.approval-avatar {
+  width: 46px; height: 46px; flex: none;
+  background: var(--green-deep);
+  border-radius: 12px;
+  display: grid; place-items: center;
+}
+.approval-avatar .mark { width: 32px; height: 32px; color: #f4f1e6; }
 .approval-head strong { display: block; font-size: 16px; }
 .approval-head span { font-size: 13px; color: var(--ink-faint); }
 
@@ -272,6 +277,7 @@ h1 em, h2 em { font-style: italic; color: var(--green); }
 .footer { background: var(--ink); border-top: 1px solid rgba(236, 233, 221, 0.14); padding: 36px 0; }
 .footer-inner { display: flex; align-items: center; gap: 32px; flex-wrap: wrap; }
 .wordmark-footer { color: #f4f1e6; font-size: 22px; }
+.wordmark-footer .mark { width: 28px; height: 28px; color: #f4f1e6; }
 .footer-links { display: flex; gap: 24px; margin-left: auto; }
 .footer-links a { color: rgba(236, 233, 221, 0.65); font-size: 14px; text-decoration: none; }
 .footer-links a:hover { color: #f4f1e6; }
