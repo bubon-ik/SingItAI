@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SingIt - Spending limits your AI agent cannot break</title>
+<meta name="description" content="SingIt gives AI agents hardware-signed spending limits, approved by you in Telegram, WhatsApp, or iMessage. Payments settle over x402 on Algorand.">
+<link rel="icon" type="image/png" href="assets/singit-approval-mark.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,500;0,600;0,700;1,500;1,600&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="nav">
+  <div class="shell nav-inner">
+    <a class="wordmark" href="#top">Sing<span class="wordmark-it">It</span><span class="wordmark-dot"></span></a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="https://bubon-ik.github.io/SingItAI/" target="_blank" rel="noopener">Privacy</a>
+    </nav>
+    <a class="btn btn-primary btn-sm" href="https://github.com/bubon-ik/SingItAI" target="_blank" rel="noopener">View on GitHub</a>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- ============ HERO : asymmetric split ============ -->
+  <section class="hero">
+    <div class="shell hero-grid">
+      <div class="hero-copy reveal">
+        <p class="eyebrow">Consent layer for agentic payments</p>
+        <h1>Your AI agent can spend.<br><em>You</em> stay in control.</h1>
+        <p class="hero-sub">Delegate a budget in chat, approve it once, and your agent pays on its own, inside hard limits.</p>
+        <div class="hero-cta">
+          <a class="btn btn-primary" href="#how">See how it works</a>
+          <a class="btn btn-ghost" href="https://github.com/bubon-ik/SingItAI" target="_blank" rel="noopener">View on GitHub</a>
+        </div>
+      </div>
+
+      <div class="hero-visual reveal delay-1">
+        <figure class="approval-card" aria-label="Example of a SingIt payment approval request">
+          <div class="approval-head">
+            <img src="assets/singit-approval-mark.png" alt="" class="approval-mark">
+            <div>
+              <strong>Payment approval</strong>
+              <span>SingIt via WhatsApp</span>
+            </div>
+          </div>
+          <p class="approval-msg">Your agent <b>hermes-demo</b> wants a spending policy:</p>
+          <dl class="approval-rows">
+            <div><dt>Merchant</dt><dd>demo-merchant.local</dd></div>
+            <div><dt>Max per payment</dt><dd>0.05 ALGO</dd></div>
+            <div><dt>Total budget</dt><dd>1.00 ALGO</dd></div>
+            <div><dt>Expires</dt><dd>Today, 18:00</dd></div>
+          </dl>
+          <div class="approval-actions">
+            <button type="button" class="btn btn-approve">Approve</button>
+            <button type="button" class="btn btn-reject">Reject</button>
+          </div>
+          <p class="approval-foot">Strict mode: confirmed on your Firefly with a physical button press.</p>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PROBLEM : editorial statement + numbered list ============ -->
+  <section class="problem">
+    <div class="shell shell-narrow">
+      <h2 class="reveal">Agents can pay for things now.<br><em>Who gave them the keys?</em></h2>
+      <p class="problem-lede reveal">x402 crossed 169M agent payments on Base. Every one of them was signed with keys a human handed to a machine.</p>
+
+      <ol class="bad-options">
+        <li class="reveal">
+          <h3>Hand over your private keys</h3>
+          <p>One bad prompt, one hijacked tool, and the wallet is gone.</p>
+        </li>
+        <li class="reveal delay-1">
+          <h3>Approve every payment by hand</h3>
+          <p>Then why have an agent at all?</p>
+        </li>
+        <li class="reveal delay-2">
+          <h3>Trust a backend limit</h3>
+          <p>That is just trusting a different server with the same keys.</p>
+        </li>
+      </ol>
+
+      <p class="problem-answer reveal">The missing piece is consent: <em>a limit you actually signed.</em></p>
+    </div>
+  </section>
+
+  <div class="rule-gold shell" role="presentation"></div>
+
+  <!-- ============ HOW IT WORKS : split, sticky policy artifact ============ -->
+  <section class="how" id="how">
+    <div class="shell how-grid">
+      <div class="how-artifact">
+        <div class="policy-sticky reveal">
+          <p class="policy-label">The artifact behind every approval</p>
+          <pre class="policy-code"><code>{
+  <span class="k">"agent"</span>:          <span class="v">"hermes-demo"</span>,
+  <span class="k">"merchant"</span>:       <span class="v">"demo-merchant.local"</span>,
+  <span class="k">"maxPerPayment"</span>:  <span class="v">"0.05 ALGO"</span>,
+  <span class="k">"budget"</span>:         <span class="v">"1.00 ALGO"</span>,
+  <span class="k">"expiresAt"</span>:      <span class="v">"2026-07-12T18:00Z"</span>,
+  <span class="k">"nonce"</span>:          <span class="v">"berlin-demo-001"</span>
+}</code></pre>
+          <p class="policy-note">Canonicalized, hashed, and signed. The agent never sees a private key.</p>
+        </div>
+      </div>
+
+      <div class="how-steps">
+        <h2 class="reveal">How it works</h2>
+        <ol class="steps">
+          <li class="reveal">
+            <h3>Delegate</h3>
+            <p>Tell your agent what it may spend, right in the chat: budget, merchant, expiry.</p>
+          </li>
+          <li class="reveal">
+            <h3>Approve</h3>
+            <p>SingIt sends the policy to you on Telegram, WhatsApp, or iMessage. Strict mode adds a Firefly hardware confirmation.</p>
+          </li>
+          <li class="reveal">
+            <h3>Pay</h3>
+            <p>The agent settles x402 payments on Algorand on its own, as long as they fit the policy.</p>
+          </li>
+          <li class="reveal">
+            <h3>Prove</h3>
+            <p>Every payment carries the signed consent, so the merchant verifies both the money and the permission.</p>
+          </li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ FEATURES : bento, 5 cells ============ -->
+  <section class="features" id="features">
+    <div class="shell">
+      <h2 class="features-title reveal">Everything between intent and payment</h2>
+      <div class="bento">
+        <article class="cell cell-green reveal">
+          <h3>Approvals where you already are</h3>
+          <p>No new app. SingIt reaches you on the channel you answer fastest.</p>
+          <ul class="chips" aria-label="Approval channels">
+            <li>Telegram</li>
+            <li>WhatsApp</li>
+            <li>iMessage</li>
+          </ul>
+        </article>
+        <article class="cell reveal delay-1">
+          <h3>Hard limits</h3>
+          <p>Budget, per-payment cap, merchant, purpose, expiry. The policy is the wall, not a suggestion.</p>
+        </article>
+        <article class="cell reveal">
+          <h3>Hardware in the loop</h3>
+          <p>A $30 Firefly signs the policy hash. Approval is a physical button, not a text field.</p>
+        </article>
+        <article class="cell cell-ink reveal delay-1">
+          <h3>x402-native</h3>
+          <p class="flow-mono">402 Payment Required<br>&darr; policy check<br>200 OK</p>
+        </article>
+        <article class="cell reveal delay-2">
+          <h3>Receipts for everything</h3>
+          <p>Balances, history, and the consent proof for each payment, queryable from the same chat.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ BERLIN HACK : single deliberate theme flip ============ -->
+  <section class="berlin">
+    <div class="shell shell-narrow">
+      <h2 class="reveal">Built at Berlin Hack</h2>
+      <p class="reveal">A Telegram commerce agent, a payment gateway, and a $30 hardware signer, wired together in a weekend.</p>
+      <ul class="stack-list reveal" aria-label="Stack">
+        <li><strong>x402</strong><span>the protocol</span></li>
+        <li><strong>Algorand</strong><span>the settlement</span></li>
+        <li><strong>Firefly</strong><span>the consent</span></li>
+      </ul>
+      <a class="btn btn-paper reveal" href="https://github.com/bubon-ik/SingItAI" target="_blank" rel="noopener">View on GitHub</a>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="shell footer-inner">
+    <a class="wordmark wordmark-footer" href="#top">Sing<span class="wordmark-it">It</span><span class="wordmark-dot"></span></a>
+    <nav class="footer-links" aria-label="Footer">
+      <a href="https://bubon-ik.github.io/SingItAI/" target="_blank" rel="noopener">Privacy policy</a>
+      <a href="https://bubon-ik.github.io/SingItAI/data-deletion.html" target="_blank" rel="noopener">Data deletion</a>
+      <a href="mailto:Exkalibur1919@proton.me">Contact</a>
+    </nav>
+    <p class="footer-fine">&copy; 2026 SingIt</p>
+  </div>
+</footer>
+
+<script>
+  // Scroll reveal: IntersectionObserver only, honors prefers-reduced-motion.
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const els = document.querySelectorAll('.reveal');
+  if (reduce || !('IntersectionObserver' in window)) {
+    els.forEach(el => el.classList.add('in'));
+  } else {
+    const io = new IntersectionObserver(entries => {
+      entries.forEach(e => {
+        if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
+      });
+    }, { threshold: 0.18 });
+    els.forEach(el => io.observe(el));
+  }
+
+  // Approval card: tactile demo state, no network.
+  const card = document.querySelector('.approval-card');
+  document.querySelector('.btn-approve').addEventListener('click', () => {
+    card.classList.remove('is-rejected'); card.classList.add('is-approved');
+  });
+  document.querySelector('.btn-reject').addEventListener('click', () => {
+    card.classList.remove('is-approved'); card.classList.add('is-rejected');
+  });
+</script>
+
+</body>
+</html>
