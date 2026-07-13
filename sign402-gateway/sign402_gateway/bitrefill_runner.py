@@ -572,7 +572,7 @@ class WalletBitrefillPurchaseRunner:
                     },
                 },
             )
-            return {
+            result = {
                 "ok": False,
                 "decision": "rejected_by_user",
                 "quoteId": quote_id,
@@ -582,6 +582,10 @@ class WalletBitrefillPurchaseRunner:
                     "approval": approval,
                 },
             }
+            telegram_text = approval.get("telegramText")
+            if isinstance(telegram_text, str) and telegram_text.strip():
+                result["telegramText"] = telegram_text.strip()
+            return result
         approved_hash = str(approval.get("approvedHash", "")).lower()
         if approved_hash and approved_hash != payment_hash:
             raise ValueError("approved hash does not match Bitrefill purchase hash")

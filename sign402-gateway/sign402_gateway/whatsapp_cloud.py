@@ -159,7 +159,7 @@ def _safe_context(context_lines: list[str]) -> str:
         line = " ".join(str(value or "").split()).strip()
         if line:
             lines.append(line[:160])
-    return "\n".join(lines)[:960]
+    return " | ".join(lines)[:960]
 
 
 def _format_expiry(expires_at: int) -> str:

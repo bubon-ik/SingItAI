@@ -70,10 +70,13 @@ class MetaWhatsAppTemplateNotifierTests(unittest.TestCase):
         self.assertEqual(payload["template"]["name"], "sign402_payment_approval")
         components = payload["template"]["components"]
         self.assertEqual(components[0]["type"], "body")
+        context = components[0]["parameters"][0]["text"]
         self.assertEqual(
-            components[0]["parameters"][0]["text"],
-            "Merchant: Bitrefill\nAmount: 10 USDC",
+            context,
+            "Merchant: Bitrefill | Amount: 10 USDC",
         )
+        self.assertNotIn("\n", context)
+        self.assertNotIn("\t", context)
         self.assertEqual(
             components[-2]["parameters"][0]["payload"],
             "sign402:approve:approval-123",

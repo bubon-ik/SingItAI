@@ -876,7 +876,15 @@ class BitrefillRunnerTests(unittest.TestCase):
                 {"productId": "test-gift-card-link", "packageId": "1", "country": "US"}
             )
             fulfillment = Mock()
-            approval = Mock(return_value={"approved": False, "approvedHash": ""})
+            approval = Mock(
+                return_value={
+                    "approved": False,
+                    "approvedHash": "",
+                    "telegramText": (
+                        "could not deliver the approval. No action was approved."
+                    ),
+                }
+            )
             runner = WalletBitrefillPurchaseRunner(
                 store=store,
                 approval_client=approval,
@@ -888,6 +896,10 @@ class BitrefillRunnerTests(unittest.TestCase):
 
             self.assertFalse(result["ok"])
             self.assertEqual(result["decision"], "rejected_by_user")
+            self.assertEqual(
+                result.get("telegramText"),
+                "could not deliver the approval. No action was approved.",
+            )
             fulfillment.assert_not_called()
             self.assertEqual(store.get_quote("quote_wallet_1")["state"], "USER_REJECTED")
 
