@@ -791,14 +791,34 @@ class BitrefillFulfillmentRunner:
         return self._redacted_result(record["quote"], result)
 
     def _redacted_result(self, quote: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
-        return {
+        redacted = {
             "ok": True,
             "quoteId": quote["quoteId"],
             "orderId": result["orderId"],
             "status": result.get("status", "delivered"),
-            "settleAmountAtomic": quote["maxSingitAtomic"],
-            "maxSingitAtomic": quote["maxSingitAtomic"],
         }
+        if quote.get("maxPaymentTokenAtomic") is not None:
+            maximum = str(quote["maxPaymentTokenAtomic"])
+            redacted.update(
+                {
+                    "settleAmountAtomic": maximum,
+                    "maxPaymentTokenAtomic": maximum,
+                }
+            )
+            payment_token_symbol = str(quote.get("paymentTokenSymbol") or "").strip()
+            if payment_token_symbol:
+                redacted["paymentTokenSymbol"] = payment_token_symbol
+            return redacted
+        if quote.get("maxSingitAtomic") is not None:
+            maximum = str(quote["maxSingitAtomic"])
+            redacted.update(
+                {
+                    "settleAmountAtomic": maximum,
+                    "maxSingitAtomic": maximum,
+                }
+            )
+            return redacted
+        raise ValueError("quote settlement maximum is missing")
 
 
 def _provider_is_delivered(result: dict[str, Any], quote: dict[str, Any]) -> bool:

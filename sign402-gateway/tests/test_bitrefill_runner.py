@@ -1007,6 +1007,51 @@ class BitrefillRunnerTests(unittest.TestCase):
                     {"quoteId": "quote_1", "fulfillmentToken": "fulfill_secret_1"}
                 )
 
+    def test_fulfillment_runner_returns_token_aware_atomic_amount(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store.save_quote(
+                {
+                    "quoteId": "quote_token_1",
+                    "productId": "test-gift-card-link",
+                    "productType": "gift_card",
+                    "packageId": "1",
+                    "packageValue": "1",
+                    "priceUsd": "1.00",
+                    "expiresAtEpoch": 1_719_000_120,
+                    "maxPaymentTokenAtomic": "100000",
+                    "paymentTokenSymbol": "USDC",
+                }
+            )
+            store.advance_state(
+                "quote_token_1",
+                "USER_APPROVED",
+                {
+                    "fulfillmentTokenHash": hashlib.sha256(
+                        b"fulfill_token_secret"
+                    ).hexdigest()
+                },
+            )
+            runner = BitrefillFulfillmentRunner(
+                store=store,
+                bitrefill_client=TestBitrefillClient(),
+                now_provider=lambda: 1_719_000_001,
+            )
+
+            result = runner.fulfill(
+                {
+                    "quoteId": "quote_token_1",
+                    "fulfillmentToken": "fulfill_token_secret",
+                }
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["settleAmountAtomic"], "100000")
+            self.assertEqual(result["maxPaymentTokenAtomic"], "100000")
+            self.assertEqual(result["paymentTokenSymbol"], "USDC")
+            self.assertNotIn("maxSingitAtomic", result)
+            self.assertNotIn("redemption", result)
+
     def test_fulfillment_rejects_quote_that_expires_before_provider_purchase(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
