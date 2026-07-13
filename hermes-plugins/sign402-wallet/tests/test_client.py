@@ -497,6 +497,7 @@ class GatewayClientTests(unittest.TestCase):
             {
                 "query": "amazon",
                 "country": "CZ",
+                "searchAllCountries": True,
                 "includeTestProducts": False,
             },
         )

@@ -133,9 +133,12 @@ class BitrefillSearchService:
         self.bitrefill_client = bitrefill_client
 
     def __call__(self, payload: dict[str, Any]) -> dict[str, Any]:
+        search_all_countries = payload.get("searchAllCountries", False)
+        if not isinstance(search_all_countries, bool):
+            raise ValueError("searchAllCountries must be a boolean")
         products = self.bitrefill_client.search_products(
             query=str(payload.get("query", "")),
-            country=str(payload.get("country", "")),
+            country="" if search_all_countries else str(payload.get("country", "")),
             category=str(payload.get("category", "")),
             product_type=str(payload.get("productType", "")),
             include_test_products=bool(payload.get("includeTestProducts", False)),

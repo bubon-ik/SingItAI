@@ -270,11 +270,13 @@ class GatewayClient:
         *,
         query: str,
         country: str,
+        search_all_countries: bool = True,
         include_test_products: bool = False,
     ) -> dict[str, Any]:
         payload = {
             "query": str(query or "").strip(),
             "country": str(country or "US").strip().upper(),
+            "searchAllCountries": bool(search_all_countries),
             "includeTestProducts": bool(include_test_products),
         }
         return self._post(

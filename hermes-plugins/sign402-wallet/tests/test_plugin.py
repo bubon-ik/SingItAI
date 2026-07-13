@@ -222,8 +222,17 @@ class FakeClient:
             raise self.error
         return self.bitrefill_result
 
-    def search_bitrefill_products(self, *, query, country, include_test_products=False):
-        self.bitrefill_search_calls.append((query, country, include_test_products))
+    def search_bitrefill_products(
+        self,
+        *,
+        query,
+        country,
+        search_all_countries=True,
+        include_test_products=False,
+    ):
+        self.bitrefill_search_calls.append(
+            (query, country, search_all_countries, include_test_products)
+        )
         if self.error:
             raise self.error
         return self.bitrefill_search_result
@@ -1478,11 +1487,11 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertIn("What do you want to buy in DE?", gateway.adapters["telegram"].sent[-1][1])
 
         self.assertEqual(dispatch("amazon"), plugin._SKIP_RESULT)
-        self.assertEqual(client.bitrefill_search_calls, [("amazon", "DE", False)])
+        self.assertEqual(client.bitrefill_search_calls, [("amazon", "DE", True, False)])
         self.assertIn("1. Amazon Czech Republic", gateway.adapters["telegram"].sent[-1][1])
 
         self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
-        self.assertEqual(client.bitrefill_product_calls, [("amazon-cz", "DE")])
+        self.assertEqual(client.bitrefill_product_calls, [("amazon-cz", "CZ")])
         self.assertIn("Choose amount for Amazon Czech Republic", gateway.adapters["telegram"].sent[-1][1])
         self.assertIn("1. 10", gateway.adapters["telegram"].sent[-1][1])
 
@@ -1504,7 +1513,7 @@ class PluginRegistrationTests(unittest.TestCase):
                     "AlpskyKnedlik",
                     "amazon-cz",
                     "amazon-cz-10",
-                    "DE",
+                    "CZ",
                     {},
                     {
                         **client.withdraw_tokens_result["tokens"][0],
@@ -1513,6 +1522,59 @@ class PluginRegistrationTests(unittest.TestCase):
                     "user-access-token",
                 )
             ],
+        )
+
+    def test_bitrefill_global_search_uses_selected_products_real_country(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.bitrefill_search_result = {
+            "ok": True,
+            "products": [
+                {
+                    "productId": "bitrefill-giftcard-usd",
+                    "name": "Bitrefill Gift Card (USD)",
+                    "country": "US",
+                    "category": "gift_card",
+                }
+            ],
+        }
+        client.bitrefill_product_result = {
+            "ok": True,
+            "productId": "bitrefill-giftcard-usd",
+            "name": "Bitrefill Gift Card (USD)",
+            "country": "US",
+            "requiredRecipientFields": [],
+            "packages": [
+                {"packageId": "bitrefill-giftcard-usd<&>1", "value": "1", "priceUsd": "1.00"}
+            ],
+        }
+        plugin._client_factory = lambda: client
+        plugin._background_runner = lambda callback: callback()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        def dispatch(text):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    text,
+                    "1045618308",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        dispatch("Buy Bitrefill")
+        dispatch("Search Products")
+        dispatch("Bitrefill Gift Card")
+        self.assertIn("Bitrefill Gift Card (USD) (US)", gateway.adapters["telegram"].sent[-1][1])
+
+        dispatch("1")
+
+        self.assertEqual(
+            client.bitrefill_product_calls,
+            [("bitrefill-giftcard-usd", "US")],
         )
 
     def test_bitrefill_back_after_failed_purchase_returns_to_main_menu(self):

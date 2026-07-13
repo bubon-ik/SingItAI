@@ -366,6 +366,34 @@ class BitrefillRunnerTests(unittest.TestCase):
         self.assertEqual(search["products"][0]["productId"], "test-phone-refill")
         self.assertEqual(details["recipientType"], "phone")
 
+    def test_search_service_can_search_all_countries(self):
+        client = Mock()
+        client.search_products.return_value = [
+            {
+                "productId": "bitrefill-giftcard-usd",
+                "name": "Bitrefill Gift Card (USD)",
+                "country": "US",
+            }
+        ]
+        service = BitrefillSearchService(bitrefill_client=client)
+
+        result = service(
+            {
+                "query": "Bitrefill Gift Card",
+                "country": "CZ",
+                "searchAllCountries": True,
+            }
+        )
+
+        self.assertEqual(result["products"][0]["productId"], "bitrefill-giftcard-usd")
+        client.search_products.assert_called_once_with(
+            query="Bitrefill Gift Card",
+            country="",
+            category="",
+            product_type="",
+            include_test_products=False,
+        )
+
     def test_quote_service_quotes_selected_phone_refill(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")

@@ -1363,6 +1363,7 @@ def _handle_bitrefill_search_input(*, identity: TelegramIdentity, query: str, so
     result = client.search_bitrefill_products(
         query=clean_query,
         country=country,
+        search_all_countries=True,
         include_test_products=False,
     )
     products = _normalize_bitrefill_products(result.get("products"))
@@ -1511,8 +1512,10 @@ def _handle_bitrefill_product_choice(*, identity: TelegramIdentity, text: str, s
             reply_markup=_numbered_reply_keyboard(len(products)),
         )
         return dict(_SKIP_RESULT)
-    country = str(session.get("country") or _bitrefill_country(str(identity.user_id)))
     product = products[index]
+    country = str(product.get("country") or session.get("country") or "").strip().upper()
+    if not re.fullmatch(r"[A-Z]{2}", country):
+        country = _bitrefill_country(str(identity.user_id))
     product_id = str(product.get("productId") or product.get("id") or "").strip()
     client = _client_factory()
     details = client.get_bitrefill_product(product_id=product_id, country=country)
@@ -1757,12 +1760,14 @@ def _normalize_bitrefill_packages(raw_packages) -> list[dict]:
 
 
 def _format_bitrefill_search_results(query: str, country: str, products: list[dict]) -> str:
-    lines = [f"Found products for \"{query}\" in {country}:"]
+    lines = [f"Found products for \"{query}\" globally (preferred country: {country}):"]
     for index, product in enumerate(products, start=1):
         name = str(product.get("name") or "Unknown product").strip()
         category = str(product.get("category") or product.get("productType") or "").strip()
+        product_country = str(product.get("country") or "").strip().upper()
+        country_suffix = _bitrefill_product_country_suffix(name, product_country, country)
         suffix = f" - {category}" if category else ""
-        lines.append(f"{index}. {name}{suffix}")
+        lines.append(f"{index}. {name}{country_suffix}{suffix}")
     lines.append("")
     lines.append("Reply with a number.")
     return "\n".join(lines)
