@@ -55,8 +55,8 @@ SIGN402_HERMES_CLI=/home/hermes/.local/bin/hermes
 SIGN402_HERMES_HOME=/home/hermes/.hermes
 SIGN402_WHATSAPP_ACCESS_TOKEN=<same Meta System User token>
 SIGN402_WHATSAPP_PHONE_NUMBER_ID=<Meta Phone Number ID>
-SIGN402_WHATSAPP_TEMPLATE_NAME=sign402_payment_approval
-SIGN402_WHATSAPP_TEMPLATE_LANGUAGE=en_US
+SIGN402_WHATSAPP_TEMPLATE_NAME=singit_payment_request
+SIGN402_WHATSAPP_TEMPLATE_LANGUAGE=en
 SIGN402_WHATSAPP_GRAPH_API_VERSION=v25.0
 ```
 
@@ -112,18 +112,18 @@ Run the Hermes Cloud setup wizard before enabling WhatsApp:
 hermes whatsapp-cloud
 ```
 
-For a first test, expose the wizard's webhook port with the free Cloudflare
-quick tunnel it prints and configure the resulting callback as
-`https://<tunnel>.trycloudflare.com/whatsapp/webhook` in Meta. Subscribe the
-WhatsApp app to the `messages` field. No purchased domain is required for this
-test, but the quick-tunnel URL must be updated in Meta whenever it changes.
+The production Cloudflare Tunnel publishes the Hermes webhook at
+`https://whatsapp.singitai.app/whatsapp/webhook`. Configure that exact callback
+in Meta and subscribe the WhatsApp app to the `messages` field. A temporary
+`trycloudflare.com` URL is suitable only for a short operator test because it
+changes whenever the quick tunnel restarts.
 
 Create and obtain Meta approval for a `UTILITY` template named
-`sign402_payment_approval`, language `en_US`, with three body variables and two
+`singit_payment_request`, language `en`, with three body variables and two
 quick-reply buttons in this order:
 
 ```text
-Sign402 payment approval
+SingIt payment approval
 {{1}}
 Approval reference: {{2}}
 Expires: {{3}}
@@ -135,6 +135,29 @@ The gateway always sends this template for WhatsApp payment approvals, so the
 request works even outside Meta's 24-hour customer-service window. Hermes
 currently handles the signed inbound webhook; the gateway calls Meta directly
 only for this approved outbound template.
+
+## Bitrefill payment token selection
+
+Every Telegram user pays from the managed Base wallet already shown by
+`/wallet` and `/balance`. The interactive Bitrefill flow asks for a payment
+token after the product amount and recipient fields. Its numbered buttons reuse
+the same positive-balance inventory as `/withdraw`; no second wallet or balance
+store is created.
+
+The token choice is mandatory. The gateway resolves the selected address again
+for the authenticated Telegram user, prices that asset to USDC, and commits its
+address and maximum atomic amount into the WhatsApp/iMessage approval. A changed
+balance, token identity, quote, or unavailable swap stops the purchase before
+Bitrefill fulfillment.
+
+For direct commands, include the wallet token symbol or contract address:
+
+```text
+/bitrefill <productId> <packageId> <country> <token>
+```
+
+Example: `/bitrefill bitrefill-giftcard-usd 1 US USDC`. If duplicate unverified
+tokens share a symbol, use the contract address instead.
 
 ## Install
 
