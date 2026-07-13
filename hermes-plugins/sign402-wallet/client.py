@@ -208,15 +208,27 @@ class GatewayClient:
         *,
         product_id: str,
         package_id: str,
+        payment_token: Mapping[str, Any],
         country: str = "US",
         recipient: Mapping[str, Any] | None = None,
         user_access_token: str | None = None,
     ) -> str:
+        payment_token_address = str(
+            payment_token.get("contractAddress") or payment_token.get("address") or ""
+        ).strip()
+        if not payment_token_address:
+            raise GatewayClientError("Choose a wallet token before buying with Bitrefill.")
         quote_payload: dict[str, Any] = {
             "productId": str(product_id or "").strip(),
             "packageId": str(package_id or "").strip(),
             "country": str(country or "US").strip().upper(),
             "recipient": dict(recipient or {}),
+            "paymentToken": {
+                "address": payment_token_address,
+                "symbol": str(payment_token.get("symbol") or "").strip(),
+                "decimals": int(payment_token["decimals"]),
+                "native": bool(payment_token.get("native", False)),
+            },
             "telegramUserId": identity.user_id,
         }
         if identity.username:

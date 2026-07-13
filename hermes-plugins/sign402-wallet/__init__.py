@@ -75,7 +75,7 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "connect_whatsapp", "description": "Link WhatsApp approvals"},
     {"command": "limits", "description": "Show or set spending limits"},
     {"command": "withdraw", "description": "Withdraw Base assets"},
-    {"command": "bitrefill", "description": "Buy Bitrefill with SINGIT"},
+    {"command": "bitrefill", "description": "Buy Bitrefill with a wallet token"},
     {"command": "last_purchase", "description": "Reveal latest purchase"},
     {"command": "llm_buy", "description": "Buy Bankr LLM credits"},
     {"command": "llm_credits", "description": "Show Bankr LLM credits"},
@@ -165,7 +165,7 @@ _PHOTON_REGISTRATION_WINDOW_SECONDS = 60 * 60
 _PHOTON_REGISTRATION_MAX_ATTEMPTS_PER_USER = 3
 _PHOTON_REGISTRATION_MAX_ATTEMPTS_GLOBAL = 120
 _LIMITS_USAGE = "Usage: /limits 0.005 0.05 or /set_limits 0.005 0.05"
-_BITREFILL_USAGE = "Usage: /bitrefill <productId> <packageId> [country]"
+_BITREFILL_USAGE = "Usage: /bitrefill <productId> <packageId> <country> <token>"
 _LLM_BUY_USAGE = "Usage: /llm_buy <usd> <email> [token]"
 _LLM_TERMS_USAGE = "Usage: /llm_terms accept"
 _LLM_CODE_USAGE = "Usage: /llm_code <six-digit code>"
@@ -317,10 +317,16 @@ def _build_bitrefill_handler():
         parsed = _parse_bitrefill_args(raw_args)
         if parsed is None:
             return _BITREFILL_USAGE
-        product_id, package_id, country = parsed
+        product_id, package_id, country, token_selector = parsed
         try:
             client = _client_factory()
             token = _user_access_token(client, identity)
+            payment_token = _load_bitrefill_payment_token(
+                client,
+                identity,
+                token_selector,
+                user_access_token=token,
+            )
             return await asyncio.to_thread(
                 client.execute_bitrefill_purchase,
                 identity,
@@ -328,6 +334,7 @@ def _build_bitrefill_handler():
                 package_id=package_id,
                 country=country,
                 recipient={},
+                payment_token=payment_token,
                 user_access_token=token,
             )
         except GatewayClientError as exc:
@@ -401,7 +408,7 @@ def _help_text() -> str:
         "/connect_imessage - Link iMessage approvals\n"
         "/connect_whatsapp - Link WhatsApp approvals\n"
         "/limits - View or set spending limits\n"
-        "/bitrefill <product> <amount> <country> - Buy Bitrefill with SINGIT\n"
+        "/bitrefill <product> <amount> <country> <token> - Buy with a wallet token\n"
         "/last_purchase - Reveal your latest purchase\n"
         "/llm_buy <usd> <email> - Buy Bankr LLM credits\n"
         "/llm_credits - Show Bankr LLM credits"
@@ -1113,13 +1120,21 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
                 else:
                     _open_bitrefill_menu(identity=identity, source=source, gateway=gateway)
                 return dict(_SKIP_RESULT)
-            product_id, package_id, country = parsed
+            product_id, package_id, country, token_selector = parsed
+            client = _client_factory()
+            payment_token = _load_bitrefill_payment_token(
+                client,
+                identity,
+                token_selector,
+                user_access_token=_user_access_token(client, identity),
+            )
             _send_fixed_reply(gateway, source, _TELEGRAM_BITREFILL_STARTED_MESSAGE)
             _run_in_background(
                 lambda: _execute_telegram_bitrefill_request(
                     product_id=product_id,
                     package_id=package_id,
                     country=country,
+                    payment_token=payment_token,
                     identity=identity,
                     source=source,
                     gateway=gateway,
@@ -1241,6 +1256,13 @@ def _handle_telegram_bitrefill_wizard_message(*, event, source, gateway):
             )
         if stage == "awaiting-recipient":
             return _handle_bitrefill_recipient_input(
+                identity=identity,
+                text=text,
+                source=source,
+                gateway=gateway,
+            )
+        if stage == "select-payment-token":
+            return _handle_bitrefill_payment_token_choice(
                 identity=identity,
                 text=text,
                 source=source,
@@ -1555,7 +1577,7 @@ def _handle_bitrefill_package_choice(*, identity: TelegramIdentity, text: str, s
             reply_markup=_reply_keyboard((("Back",),)),
         )
         return dict(_SKIP_RESULT)
-    _start_bitrefill_purchase_from_wizard(
+    _open_bitrefill_payment_token_selection(
         identity=identity,
         product=product,
         package=package,
@@ -1591,12 +1613,88 @@ def _handle_bitrefill_recipient_input(*, identity: TelegramIdentity, text: str, 
     product = session.get("product") if isinstance(session.get("product"), dict) else {}
     package = session.get("package") if isinstance(session.get("package"), dict) else {}
     country = str(session.get("country") or _bitrefill_country(user_id))
-    _start_bitrefill_purchase_from_wizard(
+    _open_bitrefill_payment_token_selection(
         identity=identity,
         product=product,
         package=package,
         country=country,
         recipient=recipient,
+        source=source,
+        gateway=gateway,
+    )
+    return dict(_SKIP_RESULT)
+
+
+def _open_bitrefill_payment_token_selection(
+    *,
+    identity: TelegramIdentity,
+    product: dict,
+    package: dict,
+    country: str,
+    recipient: dict,
+    source,
+    gateway,
+) -> None:
+    user_id = str(identity.user_id)
+    try:
+        client = _client_factory()
+        user_access_token = _user_access_token(client, identity)
+        result = client.withdraw_tokens(identity, user_access_token=user_access_token)
+    except GatewayClientError as exc:
+        _send_fixed_reply(gateway, source, exc.user_message)
+        return
+    tokens = _normalize_withdraw_tokens(
+        result.get("tokens") if isinstance(result, dict) else []
+    )
+    if not tokens:
+        _BITREFILL_SESSIONS.pop(user_id, None)
+        _send_fixed_reply(
+            gateway,
+            source,
+            "No funded Base wallet tokens are available for this Bitrefill purchase.",
+            reply_markup=_telegram_main_menu_reply_markup(),
+        )
+        return
+    _BITREFILL_SESSIONS[user_id] = {
+        "stage": "select-payment-token",
+        "country": country,
+        "product": product,
+        "package": package,
+        "recipient": dict(recipient or {}),
+        "paymentTokens": tokens,
+    }
+    _send_fixed_reply(
+        gateway,
+        source,
+        _format_bitrefill_payment_tokens(tokens),
+        reply_markup=_withdraw_reply_keyboard(tokens),
+    )
+
+
+def _handle_bitrefill_payment_token_choice(
+    *, identity: TelegramIdentity, text: str, source, gateway
+):
+    user_id = str(identity.user_id)
+    session = _BITREFILL_SESSIONS.get(user_id, {})
+    tokens = _normalize_withdraw_tokens(session.get("paymentTokens"))
+    index = _parse_choice_index(text, len(tokens))
+    if index is None:
+        _send_fixed_reply(
+            gateway,
+            source,
+            "Reply with a payment token number from the list.",
+            reply_markup=_withdraw_reply_keyboard(tokens),
+        )
+        return dict(_SKIP_RESULT)
+    product = session.get("product") if isinstance(session.get("product"), dict) else {}
+    package = session.get("package") if isinstance(session.get("package"), dict) else {}
+    _start_bitrefill_purchase_from_wizard(
+        identity=identity,
+        product=product,
+        package=package,
+        country=str(session.get("country") or _bitrefill_country(user_id)),
+        recipient=dict(session.get("recipient") or {}),
+        payment_token=tokens[index],
         source=source,
         gateway=gateway,
     )
@@ -1610,12 +1708,12 @@ def _start_bitrefill_purchase_from_wizard(
     package: dict,
     country: str,
     recipient: dict,
+    payment_token: dict,
     source,
     gateway,
 ) -> None:
     product_id = str(product.get("productId") or product.get("id") or "").strip()
     package_id = str(package.get("packageId") or package.get("id") or "").strip()
-    _BITREFILL_SESSIONS.pop(str(identity.user_id), None)
     _send_fixed_reply(gateway, source, _TELEGRAM_BITREFILL_STARTED_MESSAGE)
     _run_in_background(
         lambda: _execute_telegram_bitrefill_request(
@@ -1623,6 +1721,7 @@ def _start_bitrefill_purchase_from_wizard(
             package_id=package_id,
             country=country,
             recipient=recipient,
+            payment_token=payment_token,
             identity=identity,
             source=source,
             gateway=gateway,
@@ -2002,6 +2101,50 @@ def _normalize_withdraw_tokens(raw_tokens) -> list[dict]:
     return tokens
 
 
+def _format_bitrefill_payment_tokens(tokens: list[dict]) -> str:
+    lines = ["Choose a token to pay with:"]
+    for index, token in enumerate(tokens, start=1):
+        symbol = str(token.get("symbol") or "ERC20")
+        balance = str(token.get("balance") or "0")
+        line = f"{index}. {symbol}: {balance} available"
+        if token.get("native"):
+            line += " (network gas is reserved)"
+        if not token.get("verified"):
+            line += f" ({_short_address(str(token.get('contractAddress') or ''))})"
+        lines.append(line)
+    lines.extend(("", "Reply with a number."))
+    return "\n".join(lines)
+
+
+def _load_bitrefill_payment_token(
+    client,
+    identity: TelegramIdentity,
+    selector: str,
+    *,
+    user_access_token: str,
+) -> dict:
+    result = client.withdraw_tokens(identity, user_access_token=user_access_token)
+    tokens = _normalize_withdraw_tokens(
+        result.get("tokens") if isinstance(result, dict) else []
+    )
+    requested = str(selector or "").strip()
+    matches = [
+        token
+        for token in tokens
+        if str(token.get("contractAddress") or "").casefold() == requested.casefold()
+        or str(token.get("symbol") or "").casefold() == requested.casefold()
+    ]
+    if not matches:
+        raise GatewayClientError(
+            f"Token {requested or 'selection'} is not available in your Base wallet."
+        )
+    if len(matches) > 1:
+        raise GatewayClientError(
+            f"More than one {requested} token is available. Use the contract address."
+        )
+    return matches[0]
+
+
 def _format_withdraw_tokens(tokens: list[dict]) -> str:
     lines = ["Choose an asset to withdraw:"]
     for index, token in enumerate(tokens, start=1):
@@ -2101,6 +2244,7 @@ def _execute_telegram_bitrefill_request(
     product_id: str,
     package_id: str,
     country: str,
+    payment_token: dict,
     recipient: dict | None = None,
     identity: TelegramIdentity,
     source,
@@ -2115,15 +2259,26 @@ def _execute_telegram_bitrefill_request(
             package_id=package_id,
             country=country,
             recipient=dict(recipient or {}),
+            payment_token=payment_token,
             user_access_token=token,
         )
+        _BITREFILL_SESSIONS.pop(str(identity.user_id), None)
         _send_fixed_reply(gateway, source, text)
     except GatewayClientError as exc:
         _send_fixed_reply(
             gateway,
             source,
             exc.user_message,
-            reply_markup=_telegram_main_menu_reply_markup(),
+            reply_markup=_withdraw_reply_keyboard(
+                _normalize_withdraw_tokens(
+                    _BITREFILL_SESSIONS.get(str(identity.user_id), {}).get(
+                        "paymentTokens"
+                    )
+                )
+            )
+            if _BITREFILL_SESSIONS.get(str(identity.user_id), {}).get("stage")
+            == "select-payment-token"
+            else _telegram_main_menu_reply_markup(),
         )
     except Exception as exc:
         logger.warning(
@@ -2635,12 +2790,14 @@ def _parse_limit_args(command: str, raw_args: str) -> tuple[str | None, str | No
     return (args[0], args[1])
 
 
-def _parse_bitrefill_args(raw_args: str) -> tuple[str, str, str] | None:
+def _parse_bitrefill_args(raw_args: str) -> tuple[str, str, str, str] | None:
     args = str(raw_args or "").strip().split()
-    if len(args) < 2:
+    if len(args) != 4:
         return None
-    country = args[2].upper() if len(args) >= 3 else "US"
-    return (args[0], args[1], country)
+    country = args[2].upper()
+    if re.fullmatch(r"[A-Z]{2}", country) is None:
+        return None
+    return (args[0], args[1], country, args[3])
 
 
 def _parse_llm_buy_args(raw_args: str) -> tuple[str, str, str] | None:
@@ -2776,7 +2933,7 @@ def register(ctx) -> None:
     ctx.register_command(
         "bitrefill",
         handler=_build_bitrefill_handler(),
-        description="Buy Bitrefill with SINGIT",
+        description="Buy Bitrefill with a wallet token",
     )
     ctx.register_command(
         "llm-buy",

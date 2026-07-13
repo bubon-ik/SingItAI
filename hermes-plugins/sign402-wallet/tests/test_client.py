@@ -357,6 +357,12 @@ class GatewayClientTests(unittest.TestCase):
             package_id="1",
             country="US",
             recipient={},
+            payment_token={
+                "contractAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "symbol": "USDC",
+                "decimals": 6,
+                "native": False,
+            },
             user_access_token="user-token-1",
         )
 
@@ -375,6 +381,12 @@ class GatewayClientTests(unittest.TestCase):
                 "packageId": "1",
                 "country": "US",
                 "recipient": {},
+                "paymentToken": {
+                    "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                    "symbol": "USDC",
+                    "decimals": 6,
+                    "native": False,
+                },
                 "telegramUserId": "1045618308",
                 "telegramUsername": "AlpskyKnedlik",
             },
@@ -418,6 +430,11 @@ class GatewayClientTests(unittest.TestCase):
                 product_id="test-gift-card-link",
                 package_id="0.1",
                 country="US",
+                payment_token={
+                    "contractAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                    "symbol": "USDC",
+                    "decimals": 6,
+                },
                 user_access_token="user-token-1",
             )
 
@@ -444,6 +461,11 @@ class GatewayClientTests(unittest.TestCase):
                 product_id="doordash-us",
                 package_id="15",
                 country="US",
+                payment_token={
+                    "contractAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                    "symbol": "USDC",
+                    "decimals": 6,
+                },
                 user_access_token="user-token-1",
             )
 

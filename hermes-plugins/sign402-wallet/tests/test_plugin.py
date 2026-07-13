@@ -203,6 +203,7 @@ class FakeClient:
         package_id,
         country="US",
         recipient=None,
+        payment_token=None,
         user_access_token=None,
     ):
         self.bitrefill_calls.append(
@@ -213,6 +214,7 @@ class FakeClient:
                 package_id,
                 country,
                 recipient or {},
+                payment_token,
                 user_access_token,
             )
         )
@@ -1357,7 +1359,7 @@ class PluginRegistrationTests(unittest.TestCase):
 
         result = context.hooks["pre_gateway_dispatch"](
             event=FakeEvent(
-                "/bitrefill test-gift-card-link 1 US",
+                "/bitrefill test-gift-card-link 1 US SINGIT",
                 "1045618308",
                 username="AlpskyKnedlik",
                 platform="telegram",
@@ -1388,10 +1390,58 @@ class PluginRegistrationTests(unittest.TestCase):
                     "1",
                     "US",
                     {},
+                    {
+                        **client.withdraw_tokens_result["tokens"][0],
+                        "native": False,
+                    },
                     "user-access-token",
                 )
             ],
         )
+
+    def test_bitrefill_direct_command_requires_token_argument(self):
+        plugin = load_plugin()
+
+        self.assertIsNone(plugin._parse_bitrefill_args("gift 1 US"))
+        self.assertEqual(
+            plugin._parse_bitrefill_args("gift 1 US USDC"),
+            ("gift", "1", "US", "USDC"),
+        )
+
+    def test_bitrefill_wizard_requires_token_button_before_purchase(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        plugin._client_factory = lambda: client
+        plugin._background_runner = lambda callback: callback()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        def dispatch(text):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    text,
+                    "1045618308",
+                    username="AlpskyKnedlik",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        dispatch("Buy Bitrefill")
+        dispatch("Search Products")
+        dispatch("amazon")
+        dispatch("1")
+        dispatch("1")
+
+        self.assertEqual(client.bitrefill_calls, [])
+        self.assertIn("Choose a token to pay with", gateway.adapters["telegram"].sent[-1][1])
+        self.assertEqual(client.withdraw_tokens_calls, [("1045618308", "user-access-token")])
+
+        dispatch("2")
+
+        self.assertEqual(client.bitrefill_calls[-1][6]["symbol"], "OTHER")
 
     def test_bitrefill_button_opens_country_aware_search_flow(self):
         plugin = load_plugin()
@@ -1437,6 +1487,8 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertIn("1. 10", gateway.adapters["telegram"].sent[-1][1])
 
         self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
+        self.assertIn("Choose a token to pay with", gateway.adapters["telegram"].sent[-1][1])
+        self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
         self.assertEqual(
             gateway.adapters["telegram"].sent[-2:],
             [
@@ -1454,6 +1506,10 @@ class PluginRegistrationTests(unittest.TestCase):
                     "amazon-cz-10",
                     "DE",
                     {},
+                    {
+                        **client.withdraw_tokens_result["tokens"][0],
+                        "native": False,
+                    },
                     "user-access-token",
                 )
             ],
@@ -1689,6 +1745,8 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertIn("500 CZK", gateway.adapters["telegram"].sent[-1][1])
 
         self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
+        self.assertIn("Choose a token to pay with", gateway.adapters["telegram"].sent[-1][1])
+        self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
         self.assertEqual(
             client.bitrefill_calls[-1],
             (
@@ -1698,6 +1756,10 @@ class PluginRegistrationTests(unittest.TestCase):
                 "wolt-cz<&>500",
                 "CZ",
                 {},
+                {
+                    **client.withdraw_tokens_result["tokens"][0],
+                    "native": False,
+                },
                 "user-access-token",
             ),
         )
@@ -1748,6 +1810,8 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertIn("Send phone", gateway.adapters["telegram"].sent[-1][1])
 
         dispatch("+420777111222")
+        self.assertIn("Choose a token to pay with", gateway.adapters["telegram"].sent[-1][1])
+        dispatch("1")
 
         self.assertEqual(
             client.bitrefill_calls[-1],
@@ -1758,6 +1822,10 @@ class PluginRegistrationTests(unittest.TestCase):
                 "mobile-5",
                 "CZ",
                 {"phone": "+420777111222"},
+                {
+                    **client.withdraw_tokens_result["tokens"][0],
+                    "native": False,
+                },
                 "user-access-token",
             ),
         )
