@@ -543,4 +543,11 @@ class GatewayClient:
                 "This Bitrefill amount is above the current live purchase limit "
                 f"({live_max_match.group(1)}). Choose a smaller amount or another product."
             )
+        if (
+            "\n" in error
+            or "node_modules" in error.casefold()
+            or "file://" in error.casefold()
+            or error.casefold().startswith("apierror:")
+        ):
+            return "Bitrefill request failed. Please try another token or amount."
         return f"Bitrefill request failed: {error}"

@@ -3,8 +3,10 @@ import hmac
 import re
 import secrets
 from copy import deepcopy
+from decimal import Decimal, ROUND_CEILING
 from typing import Any, Callable
 
+from .bankr_swap import BASE_USDC_MAINNET
 from .bitrefill import BitrefillClient
 from .bitrefill_quote import (
     build_purchase_commitment,
@@ -15,6 +17,7 @@ from .bitrefill_quote import (
     now_epoch,
 )
 from .commerce_store import BitrefillCommerceStore
+from .numeric import format_decimal
 
 
 BITREFILL_BROWSE_CATEGORIES = {
@@ -278,12 +281,19 @@ class BitrefillQuoteService:
                     if payment_token["native"]
                     else payment_token["address"]
                 )
-                pricing = self.real_rate_pricer.price_for_usdc(
-                    product["priceUsd"],
-                    from_token=pricing_address,
-                    decimals=payment_token["decimals"],
-                    max_amount=payment_token["balance"],
-                )
+                if pricing_address.casefold() == BASE_USDC_MAINNET.casefold():
+                    pricing = _price_direct_usdc(
+                        product["priceUsd"],
+                        decimals=payment_token["decimals"],
+                        balance=payment_token["balance"],
+                    )
+                else:
+                    pricing = self.real_rate_pricer.price_for_usdc(
+                        product["priceUsd"],
+                        from_token=pricing_address,
+                        decimals=payment_token["decimals"],
+                        max_amount=payment_token["balance"],
+                    )
             else:
                 pricing = self.real_rate_pricer.price_for_usdc(product["priceUsd"])
             quote = build_real_rate_quote(
@@ -306,6 +316,40 @@ class BitrefillQuoteService:
             )
         self.store.save_quote(quote)
         return quote
+
+
+def _price_direct_usdc(
+    target_usdc: Any,
+    *,
+    decimals: int,
+    balance: Any,
+) -> dict[str, Any]:
+    token_decimals = int(decimals)
+    if token_decimals < 0:
+        raise ValueError("USDC decimals must not be negative")
+    target = Decimal(str(target_usdc))
+    if target <= 0:
+        raise ValueError("target USDC must be positive")
+    quantum = Decimal(1).scaleb(-token_decimals)
+    required = target.quantize(quantum, rounding=ROUND_CEILING)
+    if Decimal(str(balance)) < required:
+        raise ValueError("USDC balance is insufficient for this Bitrefill purchase")
+    amount = format_decimal(required)
+    return {
+        "pricingMode": "bankr_real_rate",
+        "targetUsdc": format_decimal(target),
+        "bufferedTargetUsdc": amount,
+        "requiredAmount": amount,
+        "requiredAmountAtomic": str(
+            int(required * (Decimal(10) ** token_decimals))
+        ),
+        "expectedUsdc": amount,
+        "minUsdc": amount,
+        "fromToken": BASE_USDC_MAINNET,
+        "toToken": "USDC",
+        "chain": "base",
+        "quote": None,
+    }
 
 
 class BitrefillPurchaseRunner:

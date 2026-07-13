@@ -192,10 +192,10 @@ class BitrefillRunnerTests(unittest.TestCase):
                     "ok": True,
                     "tokens": [
                         {
-                            "symbol": "USDC",
-                            "contractAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-                            "balance": "4.82",
-                            "decimals": 6,
+                            "symbol": "SINGIT",
+                            "contractAddress": "0x1111111111111111111111111111111111111111",
+                            "balance": "9180933.33",
+                            "decimals": 18,
                             "verified": True,
                         }
                     ],
@@ -218,25 +218,110 @@ class BitrefillRunnerTests(unittest.TestCase):
                     "country": "US",
                     "telegramUserId": "1045618308",
                     "paymentToken": {
-                        "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+                        "address": "0x1111111111111111111111111111111111111111"
                     },
                 }
             )
 
-            self.assertEqual(quote["paymentTokenSymbol"], "USDC")
+            self.assertEqual(quote["paymentTokenSymbol"], "SINGIT")
             self.assertEqual(
                 pricer.calls,
                 [
                     (
                         "1.00",
                         {
-                            "from_token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-                            "decimals": 6,
-                            "max_amount": "4.82",
+                            "from_token": "0x1111111111111111111111111111111111111111",
+                            "decimals": 18,
+                            "max_amount": "9180933.33",
                         },
                     )
                 ],
             )
+
+    def test_quote_service_uses_usdc_directly_without_requesting_a_swap_quote(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            pricer = Mock()
+            pricer.price_for_usdc.side_effect = AssertionError(
+                "USDC must not be quoted against itself"
+            )
+            resolver = WalletPaymentTokenResolver(
+                lambda user_id: {
+                    "ok": True,
+                    "tokens": [
+                        {
+                            "symbol": "USDC",
+                            "contractAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                            "balance": "4.82",
+                            "decimals": 6,
+                            "verified": True,
+                        }
+                    ],
+                }
+            )
+            service = BitrefillQuoteService(
+                bitrefill_client=TestBitrefillClient(),
+                store=store,
+                singit_usd_price_provider=lambda: "0.01",
+                real_rate_pricer=pricer,
+                payment_token_resolver=resolver,
+                quote_id_provider=lambda: "quote_direct_usdc",
+                now_provider=lambda: 1_719_000_000,
+            )
+
+            quote = service.quote(
+                {
+                    "productId": "test-gift-card-link",
+                    "packageId": "1",
+                    "country": "US",
+                    "telegramUserId": "1045618308",
+                    "paymentToken": {
+                        "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+                    },
+                }
+            )
+
+            pricer.price_for_usdc.assert_not_called()
+            self.assertEqual(quote["paymentTokenSymbol"], "USDC")
+            self.assertEqual(quote["paymentTokenAmount"], "1")
+            self.assertEqual(quote["maxPaymentTokenAtomic"], "1000000")
+            self.assertEqual(quote["requiredUsdc"], "1")
+
+    def test_quote_service_rejects_direct_usdc_when_wallet_balance_is_too_low(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = BitrefillQuoteService(
+                bitrefill_client=TestBitrefillClient(),
+                store=BitrefillCommerceStore(Path(tmp) / "orders.sqlite3"),
+                singit_usd_price_provider=lambda: "0.01",
+                real_rate_pricer=FixedWalletTokenPricer(),
+                payment_token_resolver=WalletPaymentTokenResolver(
+                    lambda user_id: {
+                        "ok": True,
+                        "tokens": [
+                            {
+                                "symbol": "USDC",
+                                "contractAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                                "balance": "0.50",
+                                "decimals": 6,
+                                "verified": True,
+                            }
+                        ],
+                    }
+                ),
+            )
+
+            with self.assertRaisesRegex(ValueError, "USDC balance is insufficient"):
+                service.quote(
+                    {
+                        "productId": "test-gift-card-link",
+                        "packageId": "1",
+                        "country": "US",
+                        "telegramUserId": "1045618308",
+                        "paymentToken": {
+                            "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+                        },
+                    }
+                )
 
     def test_quote_service_requires_payment_token_for_authenticated_user(self):
         with tempfile.TemporaryDirectory() as tmp:

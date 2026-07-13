@@ -474,6 +474,49 @@ class GatewayClientTests(unittest.TestCase):
             "This Bitrefill amount is above the current live purchase limit ($5.00). Choose a smaller amount or another product.",
         )
 
+    def test_execute_bitrefill_purchase_hides_upstream_stack_traces(self):
+        error = HTTPError(
+            "http://127.0.0.1:8099/agent/quote-bitrefill",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": (
+                            "APIError: Invalid request.\n"
+                            "    at cdpApiClient "
+                            "(file:///home/hermes/apps/sign402/node_modules/"
+                            "@coinbase/cdp-sdk/cdpApiClient.js:105:23)"
+                        ),
+                    }
+                ).encode("utf-8")
+            ),
+        )
+        opener = RecordingOpener(error=error)
+
+        with self.assertRaises(GatewayClientError) as raised:
+            self.make_client(opener).execute_bitrefill_purchase(
+                TelegramIdentity(user_id="1045618308"),
+                product_id="test-gift-card-link",
+                package_id="1",
+                country="US",
+                payment_token={
+                    "contractAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                    "symbol": "USDC",
+                    "decimals": 6,
+                },
+                user_access_token="user-token-1",
+            )
+
+        self.assertEqual(
+            raised.exception.user_message,
+            "Bitrefill request failed. Please try another token or amount.",
+        )
+        self.assertNotIn("node_modules", raised.exception.user_message)
+        self.assertNotIn("APIError", raised.exception.user_message)
+
     def test_search_bitrefill_products_posts_country_query(self):
         opener = RecordingOpener(
             response=FakeResponse(b'{"ok":true,"products":[]}')
