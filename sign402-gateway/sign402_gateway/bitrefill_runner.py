@@ -27,6 +27,42 @@ BITREFILL_BROWSE_CATEGORIES = {
     "entertainment": "entertainment,streaming,music",
 }
 
+COINBASE_NATIVE_TOKEN_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+
+
+class WalletPaymentTokenResolver:
+    def __init__(self, token_provider: Callable[[str], dict[str, Any]]):
+        self.token_provider = token_provider
+
+    def resolve(self, user_id: str, raw_token: Any) -> dict[str, Any]:
+        if not isinstance(raw_token, dict):
+            raise ValueError("paymentToken is required")
+        requested_address = str(
+            raw_token.get("address") or raw_token.get("contractAddress") or ""
+        ).strip()
+        if not requested_address:
+            raise ValueError("paymentToken address is required")
+
+        inventory = self.token_provider(str(user_id))
+        tokens = inventory.get("tokens", []) if isinstance(inventory, dict) else []
+        for candidate in tokens if isinstance(tokens, list) else []:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_address = str(
+                candidate.get("contractAddress") or candidate.get("address") or ""
+            ).strip()
+            if candidate_address.casefold() != requested_address.casefold():
+                continue
+            return {
+                "address": candidate_address,
+                "symbol": str(candidate.get("symbol", "")).strip(),
+                "decimals": int(candidate["decimals"]),
+                "balance": str(candidate["balance"]),
+                "verified": bool(candidate.get("verified", False)),
+                "native": bool(candidate.get("native", False)),
+            }
+        raise ValueError("selected payment token is not available in this wallet")
+
 
 def _fulfillment_token_matches(metadata: dict[str, Any], fulfillment_token: str | None) -> bool:
     expected_hash = str(metadata.get("fulfillmentTokenHash", "")) if isinstance(metadata, dict) else ""
@@ -185,6 +221,7 @@ class BitrefillQuoteService:
         store: BitrefillCommerceStore,
         singit_usd_price_provider: Callable[[], str],
         real_rate_pricer: Any | None = None,
+        payment_token_resolver: WalletPaymentTokenResolver | None = None,
         quote_id_provider: Callable[[], str] = new_quote_id,
         now_provider: Callable[[], int] = now_epoch,
         ttl_seconds: int = 120,
@@ -193,6 +230,7 @@ class BitrefillQuoteService:
         self.store = store
         self.singit_usd_price_provider = singit_usd_price_provider
         self.real_rate_pricer = real_rate_pricer
+        self.payment_token_resolver = payment_token_resolver
         self.quote_id_provider = quote_id_provider
         self.now_provider = now_provider
         self.ttl_seconds = int(ttl_seconds)
@@ -221,11 +259,35 @@ class BitrefillQuoteService:
             recipient=recipient,
         )
         if self.real_rate_pricer is not None:
-            pricing = self.real_rate_pricer.price_for_usdc(product["priceUsd"])
+            user_id = str(payload.get("telegramUserId", "")).strip()
+            payment_token = None
+            if user_id:
+                if self.payment_token_resolver is None:
+                    raise ValueError("payment token selection is not configured")
+                if not isinstance(payload.get("paymentToken"), dict):
+                    raise ValueError("paymentToken is required")
+                payment_token = self.payment_token_resolver.resolve(
+                    user_id,
+                    payload["paymentToken"],
+                )
+                pricing_address = (
+                    COINBASE_NATIVE_TOKEN_ADDRESS
+                    if payment_token["native"]
+                    else payment_token["address"]
+                )
+                pricing = self.real_rate_pricer.price_for_usdc(
+                    product["priceUsd"],
+                    from_token=pricing_address,
+                    decimals=payment_token["decimals"],
+                    max_amount=payment_token["balance"],
+                )
+            else:
+                pricing = self.real_rate_pricer.price_for_usdc(product["priceUsd"])
             quote = build_real_rate_quote(
                 request=payload,
                 product=product,
                 pricing=pricing,
+                payment_token=payment_token,
                 quote_id=self.quote_id_provider(),
                 now_epoch=self.now_provider(),
                 ttl_seconds=self.ttl_seconds,

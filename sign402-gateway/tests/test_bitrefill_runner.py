@@ -14,6 +14,7 @@ from sign402_gateway.bitrefill_runner import (
     BitrefillQuoteService,
     BitrefillSearchService,
     BitrefillSettlementPreparationRunner,
+    WalletPaymentTokenResolver,
     WalletBitrefillPurchaseRunner,
     lookup_bitrefill_order,
 )
@@ -69,6 +70,23 @@ class FixedRealRatePricer:
         }
 
 
+class FixedWalletTokenPricer:
+    def __init__(self):
+        self.calls = []
+
+    def price_for_usdc(self, target_usdc, **kwargs):
+        self.calls.append((str(target_usdc), kwargs))
+        return {
+            "pricingMode": "bankr_real_rate",
+            "targetUsdc": str(target_usdc),
+            "bufferedTargetUsdc": "0.11",
+            "requiredAmount": "0.11",
+            "requiredAmountAtomic": "110000",
+            "expectedUsdc": "0.111",
+            "minUsdc": "0.109",
+        }
+
+
 class FakeFundingRunner:
     def __init__(self, *, fail=False):
         self.fail = fail
@@ -108,6 +126,123 @@ class FakeUserFundingRunner:
 
 
 class BitrefillRunnerTests(unittest.TestCase):
+    def test_wallet_payment_token_resolver_uses_server_inventory_metadata(self):
+        resolver = WalletPaymentTokenResolver(
+            lambda user_id: {
+                "ok": True,
+                "tokens": [
+                    {
+                        "symbol": "USDC",
+                        "contractAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                        "balance": "4.82",
+                        "decimals": 6,
+                        "verified": True,
+                    }
+                ],
+            }
+        )
+
+        token = resolver.resolve(
+            "1045618308",
+            {
+                "address": "0x833589fcD6edb6E08f4c7C32D4f71b54bdA02913",
+                "symbol": "FAKE",
+                "decimals": 18,
+            },
+        )
+
+        self.assertEqual(token["symbol"], "USDC")
+        self.assertEqual(token["decimals"], 6)
+        self.assertEqual(token["balance"], "4.82")
+
+    def test_wallet_payment_token_resolver_rejects_token_outside_user_wallet(self):
+        resolver = WalletPaymentTokenResolver(
+            lambda user_id: {"ok": True, "tokens": []}
+        )
+
+        with self.assertRaisesRegex(ValueError, "not available in this wallet"):
+            resolver.resolve(
+                "1045618308",
+                {"address": "0x2222222222222222222222222222222222222222"},
+            )
+
+    def test_quote_service_prices_authenticated_users_selected_wallet_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            pricer = FixedWalletTokenPricer()
+            resolver = WalletPaymentTokenResolver(
+                lambda user_id: {
+                    "ok": True,
+                    "tokens": [
+                        {
+                            "symbol": "USDC",
+                            "contractAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                            "balance": "4.82",
+                            "decimals": 6,
+                            "verified": True,
+                        }
+                    ],
+                }
+            )
+            service = BitrefillQuoteService(
+                bitrefill_client=TestBitrefillClient(),
+                store=store,
+                singit_usd_price_provider=lambda: "0.01",
+                real_rate_pricer=pricer,
+                payment_token_resolver=resolver,
+                quote_id_provider=lambda: "quote_usdc",
+                now_provider=lambda: 1_719_000_000,
+            )
+
+            quote = service.quote(
+                {
+                    "productId": "test-gift-card-link",
+                    "packageId": "1",
+                    "country": "US",
+                    "telegramUserId": "1045618308",
+                    "paymentToken": {
+                        "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+                    },
+                }
+            )
+
+            self.assertEqual(quote["paymentTokenSymbol"], "USDC")
+            self.assertEqual(
+                pricer.calls,
+                [
+                    (
+                        "1.00",
+                        {
+                            "from_token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                            "decimals": 6,
+                            "max_amount": "4.82",
+                        },
+                    )
+                ],
+            )
+
+    def test_quote_service_requires_payment_token_for_authenticated_user(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = BitrefillQuoteService(
+                bitrefill_client=TestBitrefillClient(),
+                store=BitrefillCommerceStore(Path(tmp) / "orders.sqlite3"),
+                singit_usd_price_provider=lambda: "0.01",
+                real_rate_pricer=FixedWalletTokenPricer(),
+                payment_token_resolver=WalletPaymentTokenResolver(
+                    lambda user_id: {"ok": True, "tokens": []}
+                ),
+            )
+
+            with self.assertRaisesRegex(ValueError, "paymentToken is required"):
+                service.quote(
+                    {
+                        "productId": "test-gift-card-link",
+                        "packageId": "1",
+                        "country": "US",
+                        "telegramUserId": "1045618308",
+                    }
+                )
+
     def test_catalog_service_maps_filters_and_returns_page_metadata(self):
         products = [{"productId": f"product-{index}"} for index in range(9)]
         client = Mock()

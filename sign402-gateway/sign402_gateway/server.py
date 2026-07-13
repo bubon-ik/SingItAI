@@ -2089,6 +2089,7 @@ def build_server(
         BitrefillQuoteService,
         BitrefillSearchService,
         BitrefillSettlementPreparationRunner,
+        WalletPaymentTokenResolver,
         WalletBitrefillPurchaseRunner,
         lookup_bitrefill_order,
     )
@@ -2129,6 +2130,9 @@ def build_server(
         store=bitrefill_commerce_store,
         singit_usd_price_provider=lambda: os.getenv("SIGN402_SINGIT_USD_PRICE", "0.01"),
         real_rate_pricer=real_rate_pricer,
+        payment_token_resolver=WalletPaymentTokenResolver(
+            user_wallet_service.withdrawable_tokens
+        ),
         ttl_seconds=int(os.getenv("SIGN402_BITREFILL_QUOTE_TTL_SECONDS", "120")),
     )
     bitrefill_fulfillment_runner = BitrefillFulfillmentRunner(
