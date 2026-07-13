@@ -87,6 +87,14 @@ def trusted_batch(
     ]
 
 
+class BaseTokenConstantTests(unittest.TestCase):
+    def test_base_usdc_address_uses_canonical_checksum(self):
+        self.assertEqual(
+            BASE_USDC_ADDRESS,
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        )
+
+
 class JsonRpcClientTests(unittest.TestCase):
     def test_formats_atomic_values_exactly(self):
         self.assertEqual(format_atomic_amount(0, 18), "0")
