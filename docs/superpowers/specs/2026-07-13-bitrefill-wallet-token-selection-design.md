@@ -9,6 +9,11 @@ balance and withdrawal flows. Do not silently default to SINGIT.
 The selected asset must be priced, balance-checked, committed into the payment
 approval, shown in WhatsApp, and used for the actual transfer and swap.
 
+Every balance, token choice, signature, and debit belongs to the managed Base
+wallet created for the authenticated Telegram user. A shared Hermes, Bankr, or
+CDP wallet must never be used as the source wallet for a per-user purchase; CDP
+may only receive the already approved user funds and perform settlement steps.
+
 ## User Experience
 
 The existing Telegram Bitrefill wizard remains unchanged through product,
@@ -67,6 +72,10 @@ Unverified assets are identified by contract address and remain unusable unless
 the pricing provider can quote them. Native ETH is displayed and supported by
 the existing user-wallet native-transfer command; its funding path must reserve
 enough ETH for gas before declaring the balance sufficient.
+
+The wallet inventory keeps its existing `native` identity for ETH. At the CDP
+pricing and swap boundary, the gateway maps it to Coinbase's native-token
+sentinel `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE`.
 
 ## Gateway Contract
 
