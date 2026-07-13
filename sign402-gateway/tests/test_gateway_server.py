@@ -449,6 +449,61 @@ class GatewayServerTests(unittest.TestCase):
             chain="base",
         )
 
+    def test_cdp_wallet_swap_funding_runner_uses_quote_payment_token(self):
+        cdp_client = Mock(
+            **{"swap_singit_to_usdc.return_value": {"ok": True, "txId": "0xTOKEN"}}
+        )
+        runner = CdpWalletSwapFundingRunner(
+            cdp_client=cdp_client,
+            from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+            chain="base",
+        )
+
+        result = runner(
+            {
+                "pricingMode": "bankr_real_rate",
+                "paymentTokenAddress": "0x1111111111111111111111111111111111111111",
+                "paymentTokenSymbol": "TOKEN",
+                "paymentTokenDecimals": 6,
+                "paymentTokenNative": False,
+                "paymentTokenAmount": "2.5",
+                "requiredUsdc": "1.00",
+            }
+        )
+
+        self.assertEqual(result["fromToken"], "0x1111111111111111111111111111111111111111")
+        cdp_client.swap_singit_to_usdc.assert_called_once_with(
+            amount="2.5",
+            from_token="0x1111111111111111111111111111111111111111",
+            min_usdc="1.00",
+            chain="base",
+            decimals=6,
+        )
+
+    def test_cdp_wallet_swap_funding_runner_skips_usdc_to_usdc_swap(self):
+        cdp_client = Mock()
+        runner = CdpWalletSwapFundingRunner(
+            cdp_client=cdp_client,
+            from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+            chain="base",
+        )
+
+        result = runner(
+            {
+                "pricingMode": "bankr_real_rate",
+                "paymentTokenAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "paymentTokenSymbol": "USDC",
+                "paymentTokenDecimals": 6,
+                "paymentTokenNative": False,
+                "paymentTokenAmount": "1.10",
+                "requiredUsdc": "1.00",
+            }
+        )
+
+        self.assertEqual(result["mode"], "cdp_wallet_usdc_ready")
+        self.assertEqual(result["amount"], "1.10")
+        cdp_client.swap_singit_to_usdc.assert_not_called()
+
     def test_bankr_transfer_to_cdp_swap_runner_transfers_then_swaps(self):
         transfer_client = Mock(
             **{"transfer_singit.return_value": {"ok": True, "txId": "0xTRANSFER"}}
@@ -566,6 +621,23 @@ class GatewayServerTests(unittest.TestCase):
         command = run.call_args_list[0].args[0]
         self.assertIn("--decimals", command)
         self.assertEqual(command[command.index("--decimals") + 1], "8")
+
+    def test_cdp_wallet_client_swap_passes_custom_decimals(self):
+        completed = subprocess_completed(
+            stdout=json.dumps({"ok": True, "transactionHash": "0xSWAP"})
+        )
+        with patch("subprocess.run", side_effect=[completed]) as run:
+            client = CdpWalletClient(service_dir=Path("/tmp/cdp"))
+            client.swap_singit_to_usdc(
+                amount="1.25",
+                from_token="0x1111111111111111111111111111111111111111",
+                min_usdc="1.00",
+                decimals=6,
+            )
+
+        command = run.call_args_list[0].args[0]
+        self.assertIn("--decimals", command)
+        self.assertEqual(command[command.index("--decimals") + 1], "6")
 
     def test_real_rate_pricer_env_builder_requires_max_singit(self):
         with self.assertRaisesRegex(ValueError, "SIGN402_MAX_SINGIT_PER_BITREFILL_ORDER"):
@@ -3091,6 +3163,157 @@ class GatewayServerTests(unittest.TestCase):
             amount="130000",
             chain="base",
         )
+
+    def test_user_wallet_transfer_to_cdp_uses_selected_wallet_token(self):
+        wallet_service = Mock(
+            **{
+                "withdrawable_tokens.return_value": {
+                    "ok": True,
+                    "wallet": {"address": "0xUser"},
+                    "tokens": [
+                        {
+                            "symbol": "USDC",
+                            "contractAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                            "balance": "4.82",
+                            "decimals": 6,
+                            "verified": True,
+                            "native": False,
+                        }
+                    ],
+                },
+                "decrypt_private_key_for_future_signing.return_value": "0xSECRET",
+            }
+        )
+        transfer_client = Mock(
+            **{"transfer_token.return_value": {"ok": True, "txId": "0xTRANSFER"}}
+        )
+        runner = UserWalletTransferToCdpFundingRunner(
+            wallet_service=wallet_service,
+            transfer_client=transfer_client,
+            cdp_wallet_address="0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+            from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+        )
+
+        result = runner(
+            telegram_user_id="1045618308",
+            quote={
+                "pricingMode": "bankr_real_rate",
+                "paymentTokenAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "paymentTokenSymbol": "USDC",
+                "paymentTokenDecimals": 6,
+                "paymentTokenNative": False,
+                "paymentTokenAmount": "1.10",
+                "maxPaymentTokenAtomic": "1100000",
+            },
+            recipient={},
+        )
+
+        self.assertEqual(result["fromToken"], "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
+        wallet_service.withdrawable_tokens.assert_called_once_with("1045618308")
+        transfer_client.transfer_token.assert_called_once_with(
+            private_key="0xSECRET",
+            to_address="0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+            token_address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            amount="1.10",
+            chain="base",
+            decimals=6,
+        )
+
+    def test_user_wallet_transfer_to_cdp_uses_native_eth_transfer(self):
+        wallet_service = Mock(
+            **{
+                "withdrawable_tokens.return_value": {
+                    "ok": True,
+                    "wallet": {"address": "0xUser"},
+                    "tokens": [
+                        {
+                            "symbol": "ETH",
+                            "contractAddress": BASE_NATIVE_ETH_ASSET_ID,
+                            "balance": "0.01",
+                            "decimals": 18,
+                            "verified": True,
+                            "native": True,
+                        }
+                    ],
+                },
+                "decrypt_private_key_for_future_signing.return_value": "0xSECRET",
+            }
+        )
+        transfer_client = Mock(
+            **{"transfer_native.return_value": {"ok": True, "txId": "0xNATIVE"}}
+        )
+        runner = UserWalletTransferToCdpFundingRunner(
+            wallet_service=wallet_service,
+            transfer_client=transfer_client,
+            cdp_wallet_address="0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+            from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+        )
+
+        runner(
+            telegram_user_id="1045618308",
+            quote={
+                "pricingMode": "bankr_real_rate",
+                "paymentTokenAddress": BASE_NATIVE_ETH_ASSET_ID,
+                "paymentTokenSymbol": "ETH",
+                "paymentTokenDecimals": 18,
+                "paymentTokenNative": True,
+                "paymentTokenAmount": "0.001",
+                "maxPaymentTokenAtomic": "1000000000000000",
+            },
+            recipient={},
+        )
+
+        transfer_client.transfer_native.assert_called_once_with(
+            private_key="0xSECRET",
+            to_address="0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+            amount="0.001",
+            chain="base",
+        )
+        transfer_client.transfer_token.assert_not_called()
+
+    def test_user_wallet_transfer_to_cdp_rechecks_selected_token_balance(self):
+        wallet_service = Mock(
+            **{
+                "withdrawable_tokens.return_value": {
+                    "ok": True,
+                    "wallet": {"address": "0xUser"},
+                    "tokens": [
+                        {
+                            "symbol": "USDC",
+                            "contractAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                            "balance": "0.50",
+                            "decimals": 6,
+                            "verified": True,
+                            "native": False,
+                        }
+                    ],
+                }
+            }
+        )
+        transfer_client = Mock()
+        runner = UserWalletTransferToCdpFundingRunner(
+            wallet_service=wallet_service,
+            transfer_client=transfer_client,
+            cdp_wallet_address="0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+            from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+        )
+
+        with self.assertRaisesRegex(ValueError, "balance"):
+            runner(
+                telegram_user_id="1045618308",
+                quote={
+                    "pricingMode": "bankr_real_rate",
+                    "paymentTokenAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                    "paymentTokenSymbol": "USDC",
+                    "paymentTokenDecimals": 6,
+                    "paymentTokenNative": False,
+                    "paymentTokenAmount": "1.10",
+                    "maxPaymentTokenAtomic": "1100000",
+                },
+                recipient={},
+            )
+
+        transfer_client.transfer_token.assert_not_called()
 
     def test_user_wallet_bitrefill_funding_env_builder_uses_user_transfer_to_cdp(self):
         wallet_service = Mock()

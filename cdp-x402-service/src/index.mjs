@@ -193,7 +193,10 @@ async function swapTokens(options) {
   const account = await getCdpAccount();
   const fromToken = requiredOption(options, "from-token");
   const toToken = requiredOption(options, "to-token");
-  const fromAmount = singitAmountToAtomic(requiredOption(options, "amount"));
+  const fromAmount = humanTokenAmountToAtomic(
+    requiredOption(options, "amount"),
+    Number(options.decimals || "18"),
+  );
   const network = networkName(options.chain || "base");
   const slippageBps = Number(options["slippage-bps"] || "100");
   const minUsdc = options["min-usdc"] || "";

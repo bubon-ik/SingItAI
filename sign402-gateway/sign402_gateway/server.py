@@ -64,6 +64,7 @@ BANKR_LLM_CREDITS_PURPOSE = "bankr_llm_credits_topup"
 BANKR_LLM_CREDITS_RESOURCE = "bankr://llm-credits/top-up"
 BANKR_LLM_CREDITS_RECEIVER = "bankr.llm"
 DEFAULT_NATIVE_ETH_WITHDRAW_GAS_RESERVE = Decimal("0.000001")
+COINBASE_NATIVE_TOKEN_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 
 for package_dir in (SIGN402_BRIDGE_DIR, PAYMENT_EXECUTOR_DIR, LIVE_DEMO_DIR, DEMO_RESOURCE_SERVER_DIR):
     package_path = str(package_dir)
@@ -3089,6 +3090,7 @@ class CdpWalletClient:
         from_token: str = DEFAULT_SINGIT_TOKEN_ADDRESS,
         min_usdc: str = "",
         chain: str = "base",
+        decimals: int = 18,
     ) -> dict[str, Any]:
         payload = self._run(
             [
@@ -3101,6 +3103,8 @@ class CdpWalletClient:
                 str(amount),
                 "--chain",
                 str(chain),
+                "--decimals",
+                str(int(decimals)),
                 "--min-usdc",
                 str(min_usdc),
             ]
@@ -3220,22 +3224,48 @@ class CdpWalletSwapFundingRunner:
     def __call__(self, quote: dict[str, Any]) -> dict[str, Any]:
         if quote.get("pricingMode") != "bankr_real_rate":
             raise ValueError("CDP wallet swap funding requires pricingMode=bankr_real_rate")
-        amount = str(quote.get("singitAmount", "")).strip()
+        token_quote = quote.get("paymentTokenAddress") is not None
+        amount = str(
+            quote.get("paymentTokenAmount") if token_quote else quote.get("singitAmount", "")
+        ).strip()
         if not amount:
-            raise ValueError("quote singitAmount is required for CDP wallet swap funding")
+            raise ValueError("quote payment token amount is required for CDP wallet swap funding")
+        from_token = str(
+            quote.get("paymentTokenAddress") if token_quote else self.from_token
+        ).strip()
+        decimals = int(quote.get("paymentTokenDecimals", 18))
+        native = bool(quote.get("paymentTokenNative", False)) if token_quote else False
+        swap_token = COINBASE_NATIVE_TOKEN_ADDRESS if native else from_token
         required_usdc = str(quote.get("requiredUsdc") or quote.get("priceUsd") or "")
-        swap_result = self.cdp_client.swap_singit_to_usdc(
-            amount=amount,
-            from_token=self.from_token,
-            min_usdc=required_usdc,
-            chain=self.chain,
-        )
+        if token_quote and from_token.casefold() == BASE_USDC_MAINNET.casefold():
+            return {
+                "ok": True,
+                "pricingMode": "bankr_real_rate",
+                "mode": "cdp_wallet_usdc_ready",
+                "amount": amount,
+                "fromToken": from_token,
+                "toToken": "USDC",
+                "chain": self.chain,
+                "expectedUsdc": str(quote.get("expectedUsdc", "")),
+                "requiredUsdc": required_usdc,
+                "swap": None,
+                "txId": None,
+            }
+        swap_kwargs = {
+            "amount": amount,
+            "from_token": swap_token,
+            "min_usdc": required_usdc,
+            "chain": self.chain,
+        }
+        if token_quote:
+            swap_kwargs["decimals"] = decimals
+        swap_result = self.cdp_client.swap_singit_to_usdc(**swap_kwargs)
         return {
             "ok": bool(swap_result.get("ok", True)),
             "pricingMode": "bankr_real_rate",
             "mode": "cdp_wallet_swap",
             "amount": amount,
-            "fromToken": self.from_token,
+            "fromToken": from_token,
             "toToken": "USDC",
             "chain": self.chain,
             "expectedUsdc": str(quote.get("expectedUsdc", "")),
@@ -3730,31 +3760,83 @@ class UserWalletTransferToCdpFundingRunner:
         del recipient
         if quote.get("pricingMode") != "bankr_real_rate":
             raise ValueError("user wallet Bitrefill funding requires pricingMode=bankr_real_rate")
-        amount = str(quote.get("singitAmount", "")).strip()
+        token_quote = quote.get("paymentTokenAddress") is not None
+        amount = str(
+            quote.get("paymentTokenAmount") if token_quote else quote.get("singitAmount", "")
+        ).strip()
         if not amount:
-            raise ValueError("quote singitAmount is required for user wallet Bitrefill funding")
+            raise ValueError("quote payment token amount is required for user wallet Bitrefill funding")
         user_id = str(telegram_user_id or "").strip()
         if not user_id:
             raise ValueError("telegramUserId is required for user wallet Bitrefill funding")
 
+        token_address = self.from_token
+        decimals = 18
+        native = False
+        wallet_status = None
+        if token_quote:
+            token_address = str(quote.get("paymentTokenAddress", "")).strip()
+            decimals = int(quote.get("paymentTokenDecimals", 18))
+            native = bool(quote.get("paymentTokenNative", False))
+            wallet_status = self.wallet_service.withdrawable_tokens(user_id)
+            tokens = wallet_status.get("tokens", []) if isinstance(wallet_status, dict) else []
+            selected = next(
+                (
+                    token
+                    for token in tokens
+                    if isinstance(token, dict)
+                    and str(token.get("contractAddress", "")).strip().casefold()
+                    == token_address.casefold()
+                ),
+                None,
+            )
+            if selected is None:
+                raise ValueError("selected payment token is no longer available in this wallet")
+            if int(selected.get("decimals", -1)) != decimals or bool(
+                selected.get("native", False)
+            ) != native:
+                raise ValueError("selected payment token metadata changed")
+            current_balance = Decimal(str(selected.get("balance") or "0"))
+            transfer_amount = Decimal(amount)
+            if transfer_amount > current_balance:
+                raise ValueError("selected payment token balance is insufficient")
+            approved_atomic = str(quote.get("maxPaymentTokenAtomic", "")).strip()
+            amount_atomic = transfer_amount * (Decimal(10) ** decimals)
+            if approved_atomic and amount_atomic != Decimal(approved_atomic):
+                raise ValueError("selected payment token amount does not match approval")
+            if native and current_balance - transfer_amount < DEFAULT_NATIVE_ETH_WITHDRAW_GAS_RESERVE:
+                raise ValueError("ETH payment must leave enough balance for network gas")
+
         private_key = self.wallet_service.decrypt_private_key_for_future_signing(user_id)
-        wallet_status = self.wallet_service.wallet_status(user_id)
+        if wallet_status is None:
+            wallet_status = self.wallet_service.wallet_status(user_id)
         wallet = wallet_status.get("wallet") if isinstance(wallet_status, dict) else {}
         from_wallet = str(wallet.get("address", "") if isinstance(wallet, dict) else "")
-        transfer_result = self.transfer_client.transfer_token(
-            private_key=private_key,
-            to_address=self.cdp_wallet_address,
-            token_address=self.from_token,
-            amount=amount,
-            chain=self.chain,
-        )
+        if native:
+            transfer_result = self.transfer_client.transfer_native(
+                private_key=private_key,
+                to_address=self.cdp_wallet_address,
+                amount=amount,
+                chain=self.chain,
+            )
+        else:
+            transfer_kwargs = {
+                "private_key": private_key,
+                "to_address": self.cdp_wallet_address,
+                "token_address": token_address,
+                "amount": amount,
+                "chain": self.chain,
+            }
+            if token_quote:
+                transfer_kwargs["decimals"] = decimals
+            transfer_result = self.transfer_client.transfer_token(**transfer_kwargs)
         return {
             "ok": bool(transfer_result.get("ok", True)),
             "mode": "user_wallet_transfer_to_cdp_swap",
             "fromWallet": from_wallet or str(transfer_result.get("from", "")),
             "toWallet": self.cdp_wallet_address,
             "amount": amount,
-            "fromToken": self.from_token,
+            "fromToken": token_address,
             "chain": self.chain,
             "transfer": transfer_result,
             "txId": transfer_result.get("txId"),
