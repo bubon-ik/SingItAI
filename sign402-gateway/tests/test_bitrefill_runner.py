@@ -16,6 +16,7 @@ from sign402_gateway.bitrefill_runner import (
     BitrefillSettlementPreparationRunner,
     WalletPaymentTokenResolver,
     WalletBitrefillPurchaseRunner,
+    _bitrefill_approval_context_lines,
     lookup_bitrefill_order,
 )
 from sign402_gateway.commerce_store import BitrefillCommerceStore
@@ -126,6 +127,22 @@ class FakeUserFundingRunner:
 
 
 class BitrefillRunnerTests(unittest.TestCase):
+    def test_bitrefill_approval_names_selected_token_and_amount(self):
+        lines = _bitrefill_approval_context_lines(
+            {
+                "productName": "Bitrefill Gift Card",
+                "priceUsd": "1.00",
+                "paymentTokenSymbol": "USDC",
+                "paymentTokenAmount": "1.10",
+                "expiresAtEpoch": 220,
+            },
+            source_wallet="0x1111111111111111111111111111111111111111",
+            now_epoch_value=100,
+        )
+
+        self.assertIn("Payment token: USDC", lines)
+        self.assertIn("Maximum spend: 1.1 USDC", lines)
+
     def test_wallet_payment_token_resolver_uses_server_inventory_metadata(self):
         resolver = WalletPaymentTokenResolver(
             lambda user_id: {

@@ -351,12 +351,16 @@ class BitrefillPurchaseRunner:
             self.pre_payment_guard(quote)
         commitment = build_purchase_commitment(quote, recipient=recipient)
         payment_hash = hash_purchase_commitment(commitment)
+        payment_symbol = str(quote.get("paymentTokenSymbol") or "SINGIT")
+        payment_amount = str(
+            quote.get("paymentTokenAmount") or quote.get("singitAmount") or ""
+        )
         approval = self.firefly.approve_payment_hash(
             payment_hash,
             context_lines=[
                 "BUY BITREFILL",
                 str(quote.get("productName", quote.get("productId", "")))[:20],
-                f"MAX {quote['singitAmount']} SINGIT"[:20],
+                f"MAX {payment_amount} {payment_symbol}"[:20],
             ],
         )
         if not approval.get("approved"):
@@ -766,12 +770,18 @@ def _bitrefill_purchase_telegram_text(
     package_value = str(quote.get("packageValue") or "").strip()
     value_text = f" ${package_value}" if package_value else ""
     source_text = f" Paid from {_short_address(source_wallet)}." if source_wallet else ""
-    spent_text = f"\nSpent: {_format_amount(singit_spent)} SINGIT" if singit_spent else ""
+    payment_symbol = str(quote.get("paymentTokenSymbol") or "SINGIT")
+    payment_amount = str(quote.get("paymentTokenAmount") or singit_spent or "").strip()
+    spent_text = (
+        f"\nSpent: {_format_amount(payment_amount)} {payment_symbol}"
+        if payment_amount
+        else ""
+    )
     tx_url = _base_tx_url(transfer_tx_id)
     tx_text = f"\nTransfer tx: {tx_url}" if tx_url else ""
     return (
         f"✅ {product_name}{value_text} is ready. "
-        f"The purchase was paid with SINGIT.{source_text} "
+        f"The purchase was paid with {payment_symbol}.{source_text} "
         "Use /last_purchase to reveal your code."
         f"{spent_text}"
         f"{tx_text}"
@@ -786,12 +796,24 @@ def _bitrefill_approval_context_lines(
 ) -> list[str]:
     expires_in = max(0, int(quote.get("expiresAtEpoch", now_epoch_value)) - int(now_epoch_value))
     expires_minutes = max(1, (expires_in + 59) // 60)
+    payment_symbol = str(quote.get("paymentTokenSymbol") or "").strip()
+    payment_amount = str(quote.get("paymentTokenAmount") or "").strip()
     lines = [
         "Action: BUY BITREFILL",
         f"Product: {str(quote.get('productName', quote.get('productId', '')))}",
         f"Cost: {_format_amount(str(quote.get('priceUsd', '')))} USD",
-        f"Max spend: {_format_amount(str(quote.get('singitAmount', '')))} SINGIT",
     ]
+    if payment_symbol and payment_amount:
+        lines.extend(
+            [
+                f"Payment token: {payment_symbol}",
+                f"Maximum spend: {_format_amount(payment_amount)} {payment_symbol}",
+            ]
+        )
+    else:
+        lines.append(
+            f"Max spend: {_format_amount(str(quote.get('singitAmount', '')))} SINGIT"
+        )
     if source_wallet:
         lines.append(f"Paid from: {_short_address(source_wallet)}")
     lines.append(f"Expires: {expires_minutes} minute{'s' if expires_minutes != 1 else ''}")
