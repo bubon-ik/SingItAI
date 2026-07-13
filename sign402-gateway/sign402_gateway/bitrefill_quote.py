@@ -93,6 +93,7 @@ def build_real_rate_quote(
     request: dict[str, Any],
     product: dict[str, Any],
     pricing: dict[str, Any],
+    payment_token: dict[str, Any] | None = None,
     quote_id: str | None = None,
     now_epoch: int | None = None,
     ttl_seconds: int = DEFAULT_QUOTE_TTL_SECONDS,
@@ -106,7 +107,11 @@ def build_real_rate_quote(
     price_usd = Decimal(str(product.get("priceUsd", product.get("packageValue", ""))))
     if price_usd <= 0:
         raise ValueError("product priceUsd must be positive")
-    required_singit = Decimal(str(pricing["requiredSingit"]))
+    required_amount_key = "requiredAmount" if payment_token is not None else "requiredSingit"
+    required_atomic_key = (
+        "requiredAmountAtomic" if payment_token is not None else "requiredSingitAtomic"
+    )
+    required_singit = Decimal(str(pricing[required_amount_key]))
     if required_singit <= 0:
         raise ValueError("requiredSingit must be positive")
     started_at = int(now_epoch if now_epoch is not None else time.time())
@@ -116,7 +121,7 @@ def build_real_rate_quote(
     if not value:
         raise ValueError("packageValue is required")
 
-    return {
+    quote = {
         "quoteId": quote_id or new_quote_id(),
         "productId": product_id,
         "productName": product_name,
@@ -131,17 +136,40 @@ def build_real_rate_quote(
         "bufferedTargetUsdc": str(pricing["bufferedTargetUsdc"]),
         "expectedUsdc": str(pricing["expectedUsdc"]),
         "minUsdc": str(pricing["minUsdc"]),
-        "singitAmount": format_decimal(required_singit),
-        "maxSingitAtomic": str(pricing["requiredSingitAtomic"]),
         "createdAtEpoch": started_at,
         "expiresAtEpoch": expires_at_epoch,
         "expiresAt": iso_from_epoch(expires_at_epoch),
-        "quoteText": (
-            f"{product_name} ${value}: pay {format_decimal(required_singit)} SINGIT "
-            f"at the real-rate Bankr route for about {pricing['expectedUsdc']} USDC. "
-            f"Quote expires in {ttl_seconds}s."
-        ),
     }
+    if payment_token is None:
+        quote.update(
+            {
+                "singitAmount": format_decimal(required_singit),
+                "maxSingitAtomic": str(pricing[required_atomic_key]),
+                "quoteText": (
+                    f"{product_name} ${value}: pay {format_decimal(required_singit)} SINGIT "
+                    f"at the real-rate Bankr route for about {pricing['expectedUsdc']} USDC. "
+                    f"Quote expires in {ttl_seconds}s."
+                ),
+            }
+        )
+        return quote
+    symbol = str(payment_token["symbol"])
+    quote.update(
+        {
+            "paymentTokenAddress": str(payment_token["address"]),
+            "paymentTokenSymbol": symbol,
+            "paymentTokenDecimals": int(payment_token["decimals"]),
+            "paymentTokenNative": bool(payment_token.get("native", False)),
+            "paymentTokenAmount": format_decimal(required_singit),
+            "maxPaymentTokenAtomic": str(pricing[required_atomic_key]),
+            "quoteText": (
+                f"{product_name} ${value}: pay up to {format_decimal(required_singit)} "
+                f"{symbol} for about {pricing['expectedUsdc']} USDC. "
+                f"Quote expires in {ttl_seconds}s."
+            ),
+        }
+    )
+    return quote
 
 
 def build_purchase_commitment(
@@ -157,10 +185,21 @@ def build_purchase_commitment(
         "packageId": str(quote["packageId"]),
         "packageValue": str(quote["packageValue"]),
         "priceUsd": str(quote["priceUsd"]),
-        "maxSingitAtomic": str(quote["maxSingitAtomic"]),
         "recipientCommitment": recipient_commitment(recipient or {}),
         "expiresAt": str(quote["expiresAt"]),
     }
+    if quote.get("maxPaymentTokenAtomic") is not None:
+        commitment.update(
+            {
+                "paymentTokenAddress": str(quote["paymentTokenAddress"]),
+                "paymentTokenSymbol": str(quote["paymentTokenSymbol"]),
+                "paymentTokenDecimals": int(quote["paymentTokenDecimals"]),
+                "paymentTokenNative": bool(quote.get("paymentTokenNative", False)),
+                "maxPaymentTokenAtomic": str(quote["maxPaymentTokenAtomic"]),
+            }
+        )
+    else:
+        commitment["maxSingitAtomic"] = str(quote["maxSingitAtomic"])
     if quote.get("pricingMode"):
         commitment["pricingMode"] = str(quote["pricingMode"])
     if quote.get("requiredUsdc"):

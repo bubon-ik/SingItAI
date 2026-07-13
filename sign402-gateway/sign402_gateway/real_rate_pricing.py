@@ -35,9 +35,22 @@ class RealRateSingitPricer:
         *,
         from_token: str | None = None,
         decimals: int | None = None,
+        max_amount: str | None = None,
     ) -> dict[str, Any]:
         token = str(from_token or self.from_token)
         token_decimals = int(decimals) if decimals is not None else SINGIT_DECIMALS
+        amount_quantum = (
+            Decimal(1).scaleb(-token_decimals)
+            if decimals is not None
+            else Decimal("1")
+        )
+        amount_cap = (
+            Decimal(str(max_amount))
+            if max_amount is not None
+            else self.max_singit
+        )
+        if amount_cap <= 0:
+            raise ValueError("payment token balance must be positive")
         self._quote_cache = {}
         target = Decimal(str(target_usdc))
         if target <= 0:
@@ -58,7 +71,7 @@ class RealRateSingitPricer:
                 quote=high_quote,
                 buffered_target=buffered_target,
             )
-            if high > self.max_singit:
+            if high > amount_cap:
                 raise ValueError("required SINGIT exceeds configured maximum")
             high_quote = self._quote_or_none(high, token, token_decimals)
 
@@ -75,27 +88,32 @@ class RealRateSingitPricer:
             else:
                 low = mid
 
-        rounded_singit = best_amount.quantize(Decimal("1"), rounding=ROUND_CEILING)
-        if rounded_singit > self.max_singit:
+        rounded_singit = best_amount.quantize(amount_quantum, rounding=ROUND_CEILING)
+        if rounded_singit > amount_cap:
             raise ValueError("required SINGIT exceeds configured maximum")
-        rounded_singit = self._minimize_integer_amount(
+        rounded_singit = self._minimize_amount(
             amount=rounded_singit,
             buffered_target=buffered_target,
             token=token,
             token_decimals=token_decimals,
+            quantum=amount_quantum,
         )
         final_quote = self._quote(rounded_singit, token, token_decimals)
         if Decimal(final_quote["toAmount"]) < buffered_target:
             raise ValueError("Bankr quote did not meet target USDC after rounding")
 
+        amount_text = format_decimal(rounded_singit)
+        amount_atomic = str(
+            int(rounded_singit * (Decimal(10) ** token_decimals))
+        )
         return {
             "pricingMode": "bankr_real_rate",
             "targetUsdc": format(target, "f"),
             "bufferedTargetUsdc": format(buffered_target, "f"),
-            "requiredSingit": format_decimal(rounded_singit),
-            "requiredSingitAtomic": str(
-                int(rounded_singit * (Decimal(10) ** token_decimals))
-            ),
+            "requiredAmount": amount_text,
+            "requiredAmountAtomic": amount_atomic,
+            "requiredSingit": amount_text,
+            "requiredSingitAtomic": amount_atomic,
             "expectedUsdc": final_quote["toAmount"],
             "minUsdc": final_quote.get("minToAmount", final_quote["toAmount"]),
             "fromToken": token,
@@ -154,17 +172,36 @@ class RealRateSingitPricer:
         ).quantize(Decimal("1"), rounding=ROUND_CEILING)
         return max(doubled, estimated)
 
-    def _minimize_integer_amount(
+    def _minimize_amount(
         self,
         *,
         amount: Decimal,
         buffered_target: Decimal,
         token: str,
         token_decimals: int,
+        quantum: Decimal,
     ) -> Decimal:
-        if amount <= 1:
+        quote = self._quote(amount, token, token_decimals)
+        received = Decimal(str(quote.get("toAmount", "0")))
+        if received > 0:
+            proportional = (amount * buffered_target / received).quantize(
+                quantum,
+                rounding=ROUND_CEILING,
+            )
+            if Decimal("0") < proportional < amount:
+                proportional_quote = self._quote_or_none(
+                    proportional,
+                    token,
+                    token_decimals,
+                )
+                if (
+                    proportional_quote is not None
+                    and Decimal(proportional_quote["toAmount"]) >= buffered_target
+                ):
+                    amount = proportional
+        if amount <= quantum:
             return amount
-        previous = amount - 1
+        previous = amount - quantum
         quote = self._quote_or_none(previous, token, token_decimals)
         if quote is not None and Decimal(quote["toAmount"]) >= buffered_target:
             return previous

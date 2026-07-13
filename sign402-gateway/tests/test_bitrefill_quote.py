@@ -132,6 +132,54 @@ class BitrefillQuoteTests(unittest.TestCase):
         self.assertEqual(quote["requiredUsdc"], "0.10")
         self.assertIn("real-rate", quote["quoteText"])
 
+    def test_build_real_rate_quote_binds_selected_payment_token(self):
+        quote = build_real_rate_quote(
+            request={
+                "productId": "bitrefill-giftcard-usd",
+                "packageId": "0.1",
+                "country": "US",
+            },
+            product={
+                "productId": "bitrefill-giftcard-usd",
+                "name": "Bitrefill Gift Card (USD)",
+                "productType": "gift_card",
+                "packageId": "0.1",
+                "packageValue": "0.1",
+                "country": "US",
+                "currency": "USD",
+                "priceUsd": "0.10",
+            },
+            pricing={
+                "pricingMode": "bankr_real_rate",
+                "targetUsdc": "0.10",
+                "bufferedTargetUsdc": "0.11",
+                "requiredAmount": "0.11",
+                "requiredAmountAtomic": "110000",
+                "expectedUsdc": "0.111",
+                "minUsdc": "0.109",
+            },
+            payment_token={
+                "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "symbol": "USDC",
+                "decimals": 6,
+                "native": False,
+            },
+            quote_id="quote_usdc",
+            now_epoch=1_719_000_000,
+        )
+
+        self.assertEqual(quote["paymentTokenSymbol"], "USDC")
+        self.assertEqual(quote["paymentTokenAmount"], "0.11")
+        self.assertEqual(quote["maxPaymentTokenAtomic"], "110000")
+        self.assertNotIn("maxSingitAtomic", quote)
+
+        commitment = build_purchase_commitment(quote)
+        self.assertEqual(
+            commitment["paymentTokenAddress"],
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        )
+        self.assertEqual(commitment["maxPaymentTokenAtomic"], "110000")
+
     def test_purchase_commitment_hash_is_stable_and_hides_recipient(self):
         quote = {
             "quoteId": "quote_fixed",

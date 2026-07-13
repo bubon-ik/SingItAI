@@ -140,6 +140,27 @@ class WalletApiAuthErrorQuoteClient(LinearQuoteClient):
 
 
 class RealRatePricingTests(unittest.TestCase):
+    def test_rounds_selected_token_to_its_decimal_precision(self):
+        client = LinearQuoteClient(Decimal("1"))
+        pricer = RealRateSingitPricer(
+            quote_client=client,
+            from_token="0xc2c1e0b7C401e6217193732272444D928646eba3",
+            to_token="USDC",
+            chain="base",
+            buffer_bps=1000,
+            max_singit="1000000",
+        )
+
+        result = pricer.price_for_usdc(
+            "1.00",
+            from_token="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            decimals=6,
+            max_amount="5",
+        )
+
+        self.assertEqual(result["requiredAmount"], "1.1")
+        self.assertEqual(result["requiredAmountAtomic"], "1100000")
+
     def test_tolerates_wallet_api_5xx_for_small_amounts(self):
         client = WalletApiMinAmountQuoteClient(Decimal("0.01"), minimum=Decimal("5"))
         pricer = RealRateSingitPricer(
