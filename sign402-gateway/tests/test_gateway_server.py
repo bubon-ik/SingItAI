@@ -44,6 +44,7 @@ from sign402_gateway.server import (
     build_singit_settlement_verifier_from_env,
     build_usdc_reserve_guard_from_env,
     _bankr_cli_transaction_hash,
+    _base_rpc_call,
     _build_bankr_llm_topup_intent,
     _resolve_paid_tool,
     _tool_result,
@@ -135,6 +136,21 @@ class FakeSocket:
 
 
 class GatewayServerTests(unittest.TestCase):
+    def test_base_rpc_rejects_oversized_response(self):
+        class OversizedResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, size=-1):
+                return b"x" * 1_048_577
+
+        with patch("urllib.request.urlopen", return_value=OversizedResponse()):
+            with self.assertRaisesRegex(ValueError, "response is too large"):
+                _base_rpc_call("eth_blockNumber", [])
+
     _LEGACY_TEST_PATHS = frozenset(
         {
             "/approve-policy",
@@ -764,6 +780,78 @@ class GatewayServerTests(unittest.TestCase):
         response = self.response_text(handler)
         _, body = response.split("\r\n\r\n", 1)
         return json.loads(body)
+
+    def test_post_rejects_oversized_request_before_dispatch(self):
+        request = (
+            b"POST /agent/wallet HTTP/1.1\r\n"
+            b"Content-Length: 1048577\r\n"
+            b"Content-Type: application/json\r\n"
+            b"\r\n"
+            b"{}"
+        )
+        socket = FakeSocket(request)
+        server = DummyServer()
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = Sign402GatewayHandler(
+                socket,
+                ("127.0.0.1", 12345),
+                server,
+            )
+        handler.response = socket.wfile
+
+        self.assertIn(
+            "HTTP/1.0 413 ",
+            self.response_text(handler),
+        )
+        self.assertEqual(self.response_json(handler)["error"], "request_body_too_large")
+        server.user_wallet_service.wallet_status.assert_not_called()
+
+    def test_post_rejects_negative_content_length_before_dispatch(self):
+        request = (
+            b"POST /agent/wallet HTTP/1.1\r\n"
+            b"Content-Length: -1\r\n"
+            b"Content-Type: application/json\r\n"
+            b"\r\n"
+            b"{}"
+        )
+        socket = FakeSocket(request)
+        server = DummyServer()
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = Sign402GatewayHandler(
+                socket,
+                ("127.0.0.1", 12345),
+                server,
+            )
+        handler.response = socket.wfile
+
+        self.assertIn("HTTP/1.0 400 ", self.response_text(handler))
+        self.assertEqual(self.response_json(handler)["error"], "invalid_content_length")
+        server.user_wallet_service.wallet_status.assert_not_called()
+
+    def test_post_rejects_malformed_content_length_before_dispatch(self):
+        request = (
+            b"POST /agent/wallet HTTP/1.1\r\n"
+            b"Content-Length: nope\r\n"
+            b"Content-Type: application/json\r\n"
+            b"\r\n"
+            b"{}"
+        )
+        socket = FakeSocket(request)
+        server = DummyServer()
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = Sign402GatewayHandler(
+                socket,
+                ("127.0.0.1", 12345),
+                server,
+            )
+        handler.response = socket.wfile
+
+        self.assertIn("HTTP/1.0 400 ", self.response_text(handler))
+        self.assertEqual(self.response_json(handler)["error"], "invalid_content_length")
+        server.user_wallet_service.wallet_status.assert_not_called()
 
     def wallet_auth_headers(self) -> dict[str, str]:
         return {"Authorization": "Bearer test-wallet-token"}

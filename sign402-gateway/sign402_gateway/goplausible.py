@@ -11,6 +11,7 @@ ALGORAND_MAINNET_CAIP2 = "algorand:wGHE2Pwdvd7S12BL5FaOP20EGYesN73ktiC1qzkkit8="
 ALGORAND_TESTNET_CAIP2 = "algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDexi9/cOUJOiI="
 BASE_MAINNET_CAIP2 = "eip155:8453"
 BASE_SEPOLIA_CAIP2 = "eip155:84532"
+MAX_X402_RESPONSE_BYTES = 1024 * 1024
 
 NETWORK_ALIASES = {
     ALGORAND_MAINNET_CAIP2: "algorand-mainnet",
@@ -46,13 +47,13 @@ def fetch_x402_payment_required(
     )
     try:
         with opener(request, timeout=timeout) as response:
-            body = response.read().decode("utf-8")
+            body = _read_x402_response_text(response)
             payload = json.loads(body) if body else {}
             raise ValueError(
                 f"Expected x402 resource to return HTTP 402, got HTTP {response.status}."
             )
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8")
+        body = _read_x402_response_text(exc)
         if exc.code != 402:
             raise ValueError(f"Expected HTTP 402 from x402 resource, got HTTP {exc.code}: {body}")
         header_payload = exc.headers.get("Payment-Required")
@@ -83,7 +84,7 @@ def fetch_x402_paid_resource(
     )
     try:
         with opener(request, timeout=timeout) as response:
-            body = response.read().decode("utf-8")
+            body = _read_x402_response_text(response)
             payload = json.loads(body) if body else {}
             if not isinstance(payload, dict):
                 payload = {"body": payload}
@@ -93,7 +94,7 @@ def fetch_x402_paid_resource(
                 payload["paymentResponse"] = _decode_payment_required_header(payment_response)
             return payload
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8")
+        body = _read_x402_response_text(exc)
         payload = json.loads(body) if body else {}
         if not isinstance(payload, dict):
             payload = {"body": payload}
@@ -102,6 +103,13 @@ def fetch_x402_paid_resource(
         if payment_response:
             payload["paymentResponse"] = _decode_payment_required_header(payment_response)
         return payload
+
+
+def _read_x402_response_text(response: Any) -> str:
+    raw = response.read(MAX_X402_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_X402_RESPONSE_BYTES:
+        raise ValueError("x402 response is too large")
+    return raw.decode("utf-8")
 
 
 def normalize_x402_payment_required(

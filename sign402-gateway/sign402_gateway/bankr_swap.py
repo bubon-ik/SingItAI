@@ -16,6 +16,7 @@ PAY_RE = re.compile(rf"You pay:\s*{AMOUNT_PATTERN}\s+([A-Za-z0-9_.$-]+)")
 MIN_RE = re.compile(rf"Min received:\s*{AMOUNT_PATTERN}\s+([A-Za-z0-9_.$-]+)")
 DEFAULT_BANKR_API_BASE_URL = "https://api.bankr.bot"
 BASE_USDC_MAINNET = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+MAX_BANKR_RESPONSE_BYTES = 1024 * 1024
 
 
 def usdc_balance_from_portfolio(payload: dict[str, Any], *, chain: str = "base") -> Decimal:
@@ -204,9 +205,9 @@ class BankrWalletApiClient:
         )
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
-                body = response.read().decode("utf-8")
+                body = _read_bankr_response_text(response)
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", "replace")
+            body = _read_bankr_response_text(exc, errors="replace")
             raise ValueError(f"Bankr Wallet API error {exc.code}: {body}") from exc
         payload_json = json.loads(body)
         if not isinstance(payload_json, dict):
@@ -218,6 +219,13 @@ class BankrWalletApiClient:
         if value.upper() == "USDC":
             return BASE_USDC_MAINNET
         return value
+
+
+def _read_bankr_response_text(response: Any, *, errors: str = "strict") -> str:
+    raw = response.read(MAX_BANKR_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_BANKR_RESPONSE_BYTES:
+        raise ValueError("Bankr Wallet API response is too large")
+    return raw.decode("utf-8", errors)
 
 
 class BankrSwapClient:

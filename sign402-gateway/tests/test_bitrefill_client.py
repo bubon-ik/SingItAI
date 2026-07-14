@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from sign402_gateway.bitrefill import LiveBitrefillClient, TestBitrefillClient
 
@@ -41,6 +42,22 @@ class FakeTreasuryClient:
 
 
 class BitrefillClientTests(unittest.TestCase):
+    def test_live_transport_rejects_oversized_response(self):
+        class OversizedResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, size=-1):
+                return b"x" * 1_048_577
+
+        client = LiveBitrefillClient(api_key="key_123")
+        with patch("urllib.request.urlopen", return_value=OversizedResponse()):
+            with self.assertRaisesRegex(ValueError, "response is too large"):
+                client._default_request_json("GET", "/products")
+
     def test_test_catalog_list_filters_country_and_category_then_slices(self):
         client = TestBitrefillClient()
 

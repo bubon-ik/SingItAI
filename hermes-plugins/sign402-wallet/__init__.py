@@ -47,6 +47,7 @@ _TELEGRAM_SEND_TIMEOUT_SECONDS = 15
 _TELEGRAM_COMMAND_MENU_TIMEOUT_SECONDS = 10
 _TELEGRAM_COMMAND_MENU_REFRESH_DELAYS_SECONDS = (0, 2, 8)
 _TELEGRAM_MESSAGE_CHUNK_SIZE = 3900
+_PHOTON_MAX_RESPONSE_BYTES = 256 * 1024
 _USER_ACCESS_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 _USER_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 5 * 60
 _USER_ACCESS_TOKEN_CACHE_MAX_USERS = 4096
@@ -501,11 +502,15 @@ def _photon_auth_headers(project_id: str, project_secret: str) -> dict[str, str]
 
 def _read_photon_json_response(response) -> dict:
     try:
-        body = response.read()
+        body = response.read(_PHOTON_MAX_RESPONSE_BYTES + 1)
     finally:
         close = getattr(response, "close", None)
         if callable(close):
             close()
+    if len(body) > _PHOTON_MAX_RESPONSE_BYTES:
+        raise GatewayClientError(
+            "Could not reach the iMessage registration service. Please try again."
+        )
     try:
         parsed = json.loads(body.decode("utf-8") if isinstance(body, bytes) else body)
     except (json.JSONDecodeError, UnicodeDecodeError, AttributeError) as exc:

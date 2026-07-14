@@ -34,11 +34,21 @@ class FakeHttpResponse:
     def __exit__(self, exc_type, exc, tb):
         return False
 
-    def read(self):
+    def read(self, size=-1):
         return json.dumps(self.payload).encode("utf-8")
 
 
 class BankrSwapTests(unittest.TestCase):
+    def test_wallet_api_rejects_oversized_response(self):
+        class OversizedResponse(FakeHttpResponse):
+            def read(self, size=-1):
+                return b"x" * 1_048_577
+
+        with patch("urllib.request.urlopen", return_value=OversizedResponse({})):
+            client = BankrWalletApiClient(api_key="secret")
+            with self.assertRaisesRegex(ValueError, "response is too large"):
+                client.usdc_balance()
+
     def test_load_bankr_api_key_reads_env_before_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.json"

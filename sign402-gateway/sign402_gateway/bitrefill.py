@@ -9,6 +9,9 @@ from decimal import Decimal
 from typing import Any, Callable, Protocol
 
 
+MAX_BITREFILL_RESPONSE_BYTES = 1024 * 1024
+
+
 class BitrefillClient(Protocol):
     def list_products(
         self,
@@ -701,9 +704,9 @@ class LiveBitrefillClient:
         )
         try:
             with urllib.request.urlopen(request, timeout=20) as response:
-                text = response.read().decode("utf-8")
+                text = _read_bitrefill_response_text(response)
         except urllib.error.HTTPError as exc:
-            error_text = exc.read().decode("utf-8", "replace")
+            error_text = _read_bitrefill_response_text(exc, errors="replace")
             raise ValueError(f"Bitrefill API error {exc.code}: {error_text}") from exc
         data = json.loads(text or "{}")
         if not isinstance(data, dict):
@@ -790,6 +793,13 @@ class LiveBitrefillClient:
             if package["packageId"] == package_id_text or package["value"] == package_id_text:
                 return package
         raise ValueError("unknown Bitrefill package")
+
+
+def _read_bitrefill_response_text(response: Any, *, errors: str = "strict") -> str:
+    raw = response.read(MAX_BITREFILL_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_BITREFILL_RESPONSE_BYTES:
+        raise ValueError("Bitrefill API response is too large")
+    return raw.decode("utf-8", errors)
 
 
 def _infer_product_type(product_id: str, name: str, recipient_type: str) -> str:

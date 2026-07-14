@@ -364,7 +364,7 @@ class FakePhotonResponse:
     def __init__(self):
         self.closed = False
 
-    def read(self):
+    def read(self, size=-1):
         return (
             b'{"succeed":true,"data":{"id":"user-1","type":"shared",'
             b'"phoneNumber":"+420773173967","assignedPhoneNumber":"+16282647754"}}'
@@ -413,6 +413,31 @@ class PaidToolIntentTests(unittest.TestCase):
 
 
 class PluginRegistrationTests(unittest.TestCase):
+    def test_photon_registration_rejects_oversized_response(self):
+        plugin = load_plugin()
+
+        class OversizedResponse:
+            def __init__(self):
+                self.closed = False
+                self.read_size = None
+
+            def read(self, size=-1):
+                self.read_size = size
+                return b"x" * 262_145
+
+            def close(self):
+                self.closed = True
+
+        response = OversizedResponse()
+        with self.assertRaisesRegex(
+            plugin.GatewayClientError,
+            "registration service",
+        ):
+            plugin._read_photon_json_response(response)
+
+        self.assertEqual(response.read_size, 262_145)
+        self.assertTrue(response.closed)
+
     def setUp(self):
         # A deployed wallet plugin must always have an explicit Telegram
         # policy. Tests that exercise normal wallet handling opt into the

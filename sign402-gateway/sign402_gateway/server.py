@@ -64,6 +64,8 @@ BANKR_LLM_CREDITS_PURPOSE = "bankr_llm_credits_topup"
 BANKR_LLM_CREDITS_RESOURCE = "bankr://llm-credits/top-up"
 BANKR_LLM_CREDITS_RECEIVER = "bankr.llm"
 DEFAULT_NATIVE_ETH_WITHDRAW_GAS_RESERVE = Decimal("0.000001")
+MAX_REQUEST_BODY_BYTES = 1024 * 1024
+MAX_BASE_RPC_RESPONSE_BYTES = 1024 * 1024
 COINBASE_NATIVE_TOKEN_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 
 for package_dir in (SIGN402_BRIDGE_DIR, PAYMENT_EXECUTOR_DIR, LIVE_DEMO_DIR, DEMO_RESOURCE_SERVER_DIR):
@@ -460,6 +462,18 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "not_found"}, status=404)
 
     def do_POST(self) -> None:
+        try:
+            declared_length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            self._send_json({"error": "invalid_content_length"}, status=400)
+            return
+        if declared_length < 0:
+            self._send_json({"error": "invalid_content_length"}, status=400)
+            return
+        if declared_length > MAX_REQUEST_BODY_BYTES:
+            self._send_json({"error": "request_body_too_large"}, status=413)
+            return
+
         path = self.path.split("?", 1)[0]
         if path == "/approve-policy":
             self._handle_approve_policy()
@@ -5530,7 +5544,10 @@ def _base_rpc_call(method: str, params: list[Any]) -> Any:
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=30) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+        raw = response.read(MAX_BASE_RPC_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_BASE_RPC_RESPONSE_BYTES:
+        raise ValueError("Base RPC response is too large")
+    payload = json.loads(raw.decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("Base RPC returned non-object JSON")
     if payload.get("error") is not None:

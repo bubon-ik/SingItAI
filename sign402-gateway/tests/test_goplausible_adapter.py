@@ -12,6 +12,25 @@ from sign402_gateway.goplausible import (
 
 
 class GoPlausibleAdapterTests(unittest.TestCase):
+    def test_fetch_rejects_oversized_upstream_response(self):
+        class OversizedResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, size=-1):
+                return b"x" * 1_048_577
+
+        with self.assertRaisesRegex(ValueError, "response is too large"):
+            fetch_x402_payment_required(
+                "https://example.test/protected",
+                opener=Mock(return_value=OversizedResponse()),
+            )
+
     def test_normalizes_official_algorand_payment_requirements(self):
         payload = {
             "x402Version": 2,
@@ -166,7 +185,7 @@ class GoPlausibleAdapterTests(unittest.TestCase):
             def __exit__(self, exc_type, exc, tb):
                 return False
 
-            def read(self):
+            def read(self, size=-1):
                 return b"{}"
 
         opener = Mock(return_value=FakeResponse())
