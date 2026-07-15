@@ -419,6 +419,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 "/agent/llm-key/verify",
                 "/agent/llm-key/reconcile",
                 "/agent/llm-credits",
+                "/agent/approval-channel/select-existing",
                 "/agent/imessage/pairing",
                 "/agent/imessage/link",
                 "/agent/imessage/unlink",
@@ -564,6 +565,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if path == "/agent/llm-credits":
             self._handle_agent_llm_credits()
+            return
+        if path == "/agent/approval-channel/select-existing":
+            self._handle_agent_select_existing_approval_channel()
             return
         if path == "/agent/imessage/pairing":
             self._handle_agent_imessage_pairing()
@@ -1075,6 +1079,25 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=401)
         except Exception as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_select_existing_approval_channel(self) -> None:
+        try:
+            _require_imessage_approval_api_token(self)
+            payload = self._read_json()
+            result = self.server.imessage_approval_service.select_existing_channel(
+                _read_telegram_user_id(payload),
+                _read_required_text(payload, "channel"),
+            )
+            self._send_json(_without_private_key_material(result), status=200)
+        except ImessageApprovalApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except ImessageApprovalApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+        except Exception:
+            self._send_json(
+                {"ok": False, "error": "invalid approval channel selection"},
+                status=400,
+            )
 
     def _handle_agent_imessage_link(self) -> None:
         try:

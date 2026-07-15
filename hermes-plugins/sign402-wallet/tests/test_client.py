@@ -161,6 +161,7 @@ class GatewayClientTests(unittest.TestCase):
     def test_execute_imessage_maps_operations_to_expected_endpoints(self):
         cases = {
             "connect-imessage": "/agent/imessage/pairing",
+            "select-existing": "/agent/approval-channel/select-existing",
             "link": "/agent/imessage/link",
             "pending": "/agent/imessage/pending",
             "decision": "/agent/imessage/decision",

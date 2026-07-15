@@ -1636,6 +1636,55 @@ class GatewayServerTests(unittest.TestCase):
             "1045618308"
         )
 
+    def test_select_existing_approval_channel_uses_photon_auth(self):
+        server = DummyServer()
+        server.imessage_approval_service.select_existing_channel.return_value = {
+            "ok": True,
+            "selected": True,
+            "requiresPairing": False,
+            "channel": "imessage",
+            "telegramText": "iMessage selected for Sign402 approvals.",
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/approval-channel/select-existing",
+                {"telegramUserId": "1045618308", "channel": "imessage"},
+                server=server,
+                headers=self.photon_auth_headers(),
+            )
+
+        response = self.response_text(handler)
+        body = self.response_json(handler)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertTrue(body["selected"])
+        self.assertNotIn("phone", json.dumps(body).lower())
+        server.imessage_approval_service.select_existing_channel.assert_called_once_with(
+            "1045618308",
+            "imessage",
+        )
+
+    def test_select_existing_approval_channel_rejects_wallet_token(self):
+        server = DummyServer()
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/approval-channel/select-existing",
+                {"telegramUserId": "1045618308", "channel": "whatsapp"},
+                server=server,
+                headers=self.wallet_auth_headers(),
+            )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 401 Unauthorized", response)
+        self.assertEqual(
+            self.response_json(handler)["error"],
+            "invalid iMessage approval API token",
+        )
+        server.imessage_approval_service.select_existing_channel.assert_not_called()
+
     def test_imessage_link_endpoint_uses_trusted_photon_source(self):
         server = DummyServer()
         server.imessage_approval_service.link_photon_sender.return_value = {

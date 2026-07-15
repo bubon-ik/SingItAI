@@ -28,6 +28,7 @@ _OPERATION_PATHS = {
 }
 _IMESSAGE_OPERATION_PATHS = {
     "connect-imessage": "/agent/imessage/pairing",
+    "select-existing": "/agent/approval-channel/select-existing",
     "link": "/agent/imessage/link",
     "pending": "/agent/imessage/pending",
     "decision": "/agent/imessage/decision",
