@@ -19,18 +19,23 @@ the iMessage link still exists.
 
 ## Chosen Design
 
-Keep pairing and selection as separate operations:
+Keep pairing and selection separate internally while preserving the existing
+Telegram controls:
 
-- `Connect iMessage` and `Connect WhatsApp` remain first-time pairing actions.
-- Add an authenticated localhost operation that selects a requested channel
-  only when an `approval_channel_links` row already exists for the same trusted
-  Telegram user.
-- Add Telegram commands and persistent keyboard buttons for `Use iMessage` and
-  `Use WhatsApp`.
+- `Connect iMessage` and `Connect WhatsApp` remain the only user-facing actions
+  for both selecting and initially linking their respective channels.
+- The same existing commands and buttons first call an authenticated localhost
+  operation that selects a requested channel only when an
+  `approval_channel_links` row already exists for the same trusted Telegram
+  user.
+- If the requested channel is linked, it becomes active immediately and no
+  phone prompt or pairing code is created.
+- If the requested channel is not linked, the existing first-time connection
+  flow continues unchanged.
 - A successful selection updates only `approval_channel_preferences` and adds
   an audit event. It does not alter encrypted link records.
-- Selecting an unlinked or unsupported channel fails closed with a fixed,
-  non-sensitive Telegram message instructing the user to connect it first.
+- An unlinked channel continues into pairing; an unsupported channel fails
+  closed with a fixed, non-sensitive Telegram message.
 
 The selector uses the existing approval API token boundary. The Telegram user
 ID comes from the authenticated Telegram event; command arguments cannot
@@ -47,32 +52,32 @@ override it.
 
 ## Interfaces
 
-Gateway:
+Gateway internal operation:
 
-- `POST /agent/approval-channel/select`
+- `POST /agent/approval-channel/select-existing`
 - authenticated with the existing iMessage/approval API token
 - body: `telegramUserId`, `channel`
-- response identifies only the selected channel and safe Telegram text
+- response identifies only whether the channel was selected or still requires
+  pairing, plus safe Telegram text when selected
 
 Telegram:
 
-- `/use_imessage`
-- `/use_whatsapp`
-- buttons: `Use iMessage`, `Use WhatsApp`
+- existing `/connect_imessage` and `/connect_whatsapp` commands
+- existing `Connect iMessage` and `Connect WhatsApp` buttons
 
-The existing connect commands remain available for users who have not yet
-linked the requested channel.
+No additional commands or buttons are added.
 
 ## Data Flow
 
 1. The Telegram pre-dispatch hook captures the trusted Telegram identity.
-2. The selected command sends that trusted ID and the fixed channel value to
-   the localhost gateway.
-3. The gateway verifies the approval API token and validates the channel.
-4. The approval service checks that the same Telegram user owns a link for the
-   requested channel.
-5. In one SQLite transaction, it upserts the preference and records a
-   `channel_selected` audit event.
+2. The connect command sends that trusted ID and its fixed channel value to the
+   localhost selector before prompting for a phone or creating a code.
+3. The gateway verifies the approval API token, validates the channel, and
+   checks whether that Telegram user owns the requested link.
+4. When linked, one SQLite transaction upserts the preference and records a
+   `channel_selected` audit event. The command returns immediately.
+5. When unlinked, the selector reports `requiresPairing` and the plugin runs
+   the existing channel-specific connection flow.
 6. Future approvals resolve only the selected channel through the existing
    `_linked_approval_channels` path.
 
@@ -97,8 +102,9 @@ Gateway service tests cover:
 - both encrypted channel links remain after switching.
 
 HTTP tests cover authentication and fixed safe responses. Plugin tests cover
-trusted Telegram identity, both commands, both keyboard buttons, and error
-handling. The complete gateway and plugin suites must pass before deployment.
+trusted Telegram identity, selecting through both existing commands and
+buttons, falling back to first-time pairing, and error handling. The complete
+gateway and plugin suites must pass before deployment.
 
 Production verification uses the authenticated no-funds approval endpoint:
 select iMessage and approve once, then select WhatsApp and approve once. The
