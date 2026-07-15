@@ -186,6 +186,16 @@ class FakeClient:
         self.approval_calls.append((operation, payload))
         if self.error:
             raise self.error
+        if operation == "select-existing":
+            return self.approval_results.get(
+                operation,
+                {
+                    "ok": True,
+                    "selected": False,
+                    "requiresPairing": True,
+                    "channel": str(payload.get("channel") or "imessage"),
+                },
+            )
         return self.approval_results.get(operation, {"ok": True})
 
     def execute_paid_tool(self, tool, identity, *, user_access_token=None):
@@ -792,6 +802,10 @@ class PluginRegistrationTests(unittest.TestCase):
             client.approval_calls,
             [
                 (
+                    "select-existing",
+                    {"telegramUserId": "1045618308", "channel": "whatsapp"},
+                ),
+                (
                     "connect-imessage",
                     {"telegramUserId": "1045618308", "channel": "whatsapp"},
                 )
@@ -859,6 +873,133 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertIn("iMessage", text)
         self.assertIn("private pairing line", text)
         self.assertNotIn("+420111222333", text)
+
+    def test_connect_imessage_selects_existing_link_without_phone_prompt(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.approval_results["select-existing"] = {
+            "ok": True,
+            "selected": True,
+            "requiresPairing": False,
+            "channel": "imessage",
+            "telegramText": "iMessage selected for Sign402 approvals.",
+        }
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        with patch.dict(
+            plugin.os.environ,
+            {"SIGN402_PHOTON_AUTO_REGISTER_USERS": "1"},
+        ):
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "Connect iMessage",
+                    "1045618308",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(
+            gateway.adapters["telegram"].sent,
+            [("telegram-chat", "iMessage selected for Sign402 approvals.")],
+        )
+        self.assertEqual(
+            client.approval_calls,
+            [
+                (
+                    "select-existing",
+                    {"telegramUserId": "1045618308", "channel": "imessage"},
+                )
+            ],
+        )
+        self.assertEqual(client.imessage_calls, [])
+        self.assertNotIn("1045618308", plugin._IMESSAGE_CONNECT_SESSIONS)
+
+    def test_connect_whatsapp_selects_existing_link_without_pairing(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.approval_results["select-existing"] = {
+            "ok": True,
+            "selected": True,
+            "requiresPairing": False,
+            "channel": "whatsapp",
+            "telegramText": "WhatsApp selected for Sign402 approvals.",
+        }
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        result = context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent(
+                "Connect WhatsApp",
+                "1045618308",
+                platform="telegram",
+                chat_id="telegram-chat",
+            ),
+            gateway=gateway,
+        )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertEqual(
+            gateway.adapters["telegram"].sent,
+            [("telegram-chat", "WhatsApp selected for Sign402 approvals.")],
+        )
+        self.assertEqual(
+            client.approval_calls,
+            [
+                (
+                    "select-existing",
+                    {"telegramUserId": "1045618308", "channel": "whatsapp"},
+                )
+            ],
+        )
+
+    def test_connect_imessage_unlinked_falls_back_to_phone_prompt(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.approval_results["select-existing"] = {
+            "ok": True,
+            "selected": False,
+            "requiresPairing": True,
+            "channel": "imessage",
+        }
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        with patch.dict(
+            plugin.os.environ,
+            {"SIGN402_PHOTON_AUTO_REGISTER_USERS": "1"},
+        ):
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    "/connect_imessage telegramUserId=999",
+                    "1045618308",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertIn("phone number", gateway.adapters["telegram"].sent[0][1].lower())
+        self.assertEqual(
+            client.approval_calls,
+            [
+                (
+                    "select-existing",
+                    {"telegramUserId": "1045618308", "channel": "imessage"},
+                )
+            ],
+        )
+        self.assertNotIn("999", plugin._IMESSAGE_CONNECT_SESSIONS)
 
     def test_connect_imessage_auto_registers_phone_before_pairing(self):
         plugin = load_plugin()

@@ -72,8 +72,8 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "help", "description": "Show Sign402 commands"},
     {"command": "wallet", "description": "Show or create your Base wallet"},
     {"command": "balance", "description": "Show wallet balances"},
-    {"command": "connect_imessage", "description": "Link iMessage approvals"},
-    {"command": "connect_whatsapp", "description": "Link WhatsApp approvals"},
+    {"command": "connect_imessage", "description": "Select or link iMessage approvals"},
+    {"command": "connect_whatsapp", "description": "Select or link WhatsApp approvals"},
     {"command": "limits", "description": "Show or set spending limits"},
     {"command": "withdraw", "description": "Withdraw Base assets"},
     {"command": "bitrefill", "description": "Buy Bitrefill with a wallet token"},
@@ -222,6 +222,25 @@ def _build_handler(operation: str):
     return handler
 
 
+def _select_existing_approval_channel(
+    client: GatewayClient,
+    identity: TelegramIdentity,
+    channel: str,
+) -> str | None:
+    result = client.execute_approval(
+        "select-existing",
+        {"telegramUserId": identity.user_id, "channel": channel},
+    )
+    if result.get("selected") is True:
+        text = result.get("telegramText")
+        if not isinstance(text, str) or not text.strip():
+            raise GatewayClientError(_IMESSAGE_UNEXPECTED_ERROR_MESSAGE)
+        return text.strip()
+    if result.get("requiresPairing") is True:
+        return None
+    raise GatewayClientError(_IMESSAGE_UNEXPECTED_ERROR_MESSAGE)
+
+
 def _build_imessage_handler(operation: str):
     async def handler(_raw_args: str) -> str:
         identity = consume_gateway_identity()
@@ -230,6 +249,14 @@ def _build_imessage_handler(operation: str):
         try:
             client = _client_factory()
             channel = "whatsapp" if operation == "connect-whatsapp" else "imessage"
+            selected_text = await asyncio.to_thread(
+                _select_existing_approval_channel,
+                client,
+                identity,
+                channel,
+            )
+            if selected_text is not None:
+                return selected_text
             payload = {"telegramUserId": identity.user_id}
             if channel == "whatsapp":
                 payload["channel"] = "whatsapp"
@@ -406,8 +433,8 @@ def _help_text() -> str:
         "Sign402 commands\n\n"
         "/wallet - Create or show your Base wallet\n"
         "/balance - Show ETH, USDC, and SINGIT balances\n"
-        "/connect_imessage - Link iMessage approvals\n"
-        "/connect_whatsapp - Link WhatsApp approvals\n"
+        "/connect_imessage - Select or link iMessage approvals\n"
+        "/connect_whatsapp - Select or link WhatsApp approvals\n"
         "/limits - View or set spending limits\n"
         "/bitrefill <product> <amount> <country> <token> - Buy with a wallet token\n"
         "/last_purchase - Reveal your latest purchase\n"
@@ -1032,7 +1059,15 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
                 )
         elif command == "connect-imessage":
             channel = "imessage"
-            if _photon_auto_register_users_enabled():
+            client = _client_factory()
+            selected_text = _select_existing_approval_channel(
+                client,
+                identity,
+                channel,
+            )
+            if selected_text is not None:
+                text = selected_text
+            elif _photon_auto_register_users_enabled():
                 phone_number = str(args or "").strip()
                 if phone_number:
                     if not _is_e164_phone_number(phone_number):
@@ -1051,7 +1086,6 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
                     }
                     text = _imessage_phone_prompt(channel=channel)
             else:
-                client = _client_factory()
                 payload = {"telegramUserId": identity.user_id}
                 if channel != "imessage":
                     payload["channel"] = channel
@@ -1067,19 +1101,27 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
         elif command == "connect-whatsapp":
             channel = "whatsapp"
             client = _client_factory()
-            result = client.execute_approval(
-                "connect-imessage",
-                {"telegramUserId": identity.user_id, "channel": channel},
+            selected_text = _select_existing_approval_channel(
+                client,
+                identity,
+                channel,
             )
-            text = result.get("telegramText")
-            if not isinstance(text, str) or not text.strip():
-                text = _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
+            if selected_text is not None:
+                text = selected_text
             else:
-                text = _telegram_imessage_pairing_text(
-                    text,
-                    public_line=_approval_public_line(channel),
-                    channel=channel,
+                result = client.execute_approval(
+                    "connect-imessage",
+                    {"telegramUserId": identity.user_id, "channel": channel},
                 )
+                text = result.get("telegramText")
+                if not isinstance(text, str) or not text.strip():
+                    text = _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
+                else:
+                    text = _telegram_imessage_pairing_text(
+                        text,
+                        public_line=_approval_public_line(channel),
+                        channel=channel,
+                    )
         elif command in {"llm-buy", "llm-terms", "llm-credits"}:
             client = _client_factory()
             operation = {

@@ -100,11 +100,17 @@ Automatic provisioning is capped at three valid phone-number attempts per
 Telegram user per hour, with a beta-wide hourly guard, to protect the shared
 Photon number pool from abuse.
 
-`/connect_whatsapp` creates the same single-use pairing code without using
-Photon. The user sends it to `SIGN402_WHATSAPP_PUBLIC_LINE`; Hermes receives the
-signed Meta webhook through its official `whatsapp_cloud` adapter, and the
-plugin links the trusted Meta `wa_id`. Pairing WhatsApp makes it the user's sole
-active approval channel; pairing iMessage later switches the channel back.
+`/connect_imessage` and `/connect_whatsapp` first select the requested channel
+immediately when that Telegram wallet already has a corresponding link. They
+start pairing only when the requested channel has not been linked yet, so
+switching between existing iMessage and WhatsApp links never asks for another
+phone number or code and never removes the other link.
+
+For a first-time WhatsApp connection, `/connect_whatsapp` creates the same
+single-use pairing code without using Photon. The user sends it to
+`SIGN402_WHATSAPP_PUBLIC_LINE`; Hermes receives the signed Meta webhook through
+its official `whatsapp_cloud` adapter, and the plugin links the trusted Meta
+`wa_id`. Pairing WhatsApp makes it the user's sole active approval channel.
 
 Run the Hermes Cloud setup wizard before enabling WhatsApp:
 
