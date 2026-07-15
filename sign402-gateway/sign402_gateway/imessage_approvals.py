@@ -533,6 +533,57 @@ class ImessageApprovalService:
         with self.store.lock, self.store._database() as db:
             return self._active_channel_from_db(db, user_id)
 
+    def select_existing_channel(
+        self,
+        telegram_user_id: str,
+        channel: str,
+    ) -> dict[str, Any]:
+        user_id = _require_telegram_user_id(telegram_user_id)
+        approval_channel = _normalize_approval_channel(channel)
+        now = self._now()
+        with self.store.lock, self.store._database() as db:
+            linked = db.execute(
+                """
+                SELECT 1
+                FROM approval_channel_links
+                WHERE telegram_user_id = ? AND channel = ?
+                """,
+                (user_id, approval_channel),
+            ).fetchone()
+            if linked is None:
+                return {
+                    "ok": True,
+                    "selected": False,
+                    "requiresPairing": True,
+                    "channel": approval_channel,
+                }
+            db.execute(
+                """
+                INSERT INTO approval_channel_preferences (
+                    telegram_user_id, channel, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(telegram_user_id)
+                DO UPDATE SET channel = excluded.channel, updated_at = excluded.updated_at
+                """,
+                (user_id, approval_channel, now, now),
+            )
+            self._record_audit(
+                db,
+                telegram_user_id=user_id,
+                event_type="channel_selected",
+                status="selected",
+                metadata={"channel": approval_channel},
+            )
+        channel_label = _approval_channel_label(approval_channel)
+        return {
+            "ok": True,
+            "selected": True,
+            "requiresPairing": False,
+            "channel": approval_channel,
+            "telegramText": f"{channel_label} selected for Sign402 approvals.",
+        }
+
     def unlink_photon_sender(
         self,
         *,

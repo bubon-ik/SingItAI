@@ -211,6 +211,77 @@ class ImessageApprovalTests(unittest.TestCase):
         self.assertEqual(linked["channel"], "whatsapp")
         self.assertEqual(service.active_channel("1045618308"), "whatsapp")
 
+    def test_select_existing_channel_switches_preference_without_removing_links(self):
+        service, _wallet_service, store, _notifier = self.make_linked_service()
+        whatsapp_pairing = service.create_pairing("1045618308", channel="whatsapp")
+        service.link_sender(
+            whatsapp_pairing["code"],
+            "420777111222",
+            channel="whatsapp",
+        )
+
+        selected = service.select_existing_channel("1045618308", "imessage")
+
+        self.assertEqual(
+            selected,
+            {
+                "ok": True,
+                "selected": True,
+                "requiresPairing": False,
+                "channel": "imessage",
+                "telegramText": "iMessage selected for Sign402 approvals.",
+            },
+        )
+        self.assertEqual(service.active_channel("1045618308"), "imessage")
+        with store._database() as db:
+            channels = db.execute(
+                """
+                SELECT channel
+                FROM approval_channel_links
+                WHERE telegram_user_id = ?
+                ORDER BY channel
+                """,
+                ("1045618308",),
+            ).fetchall()
+        self.assertEqual([str(row["channel"]) for row in channels], ["imessage", "whatsapp"])
+
+    def test_select_existing_channel_is_idempotent(self):
+        service, _wallet_service, _store, _notifier = self.make_linked_service()
+
+        first = service.select_existing_channel("1045618308", "imessage")
+        second = service.select_existing_channel("1045618308", "imessage")
+
+        self.assertTrue(first["selected"])
+        self.assertEqual(second, first)
+        self.assertEqual(service.active_channel("1045618308"), "imessage")
+
+    def test_select_existing_channel_requires_pairing_when_unlinked(self):
+        service, wallet_service, _store = self.make_service()
+        wallet_service.create_wallet("1045618308")
+
+        result = service.select_existing_channel("1045618308", "whatsapp")
+
+        self.assertEqual(
+            result,
+            {
+                "ok": True,
+                "selected": False,
+                "requiresPairing": True,
+                "channel": "whatsapp",
+            },
+        )
+        self.assertIsNone(service.active_channel("1045618308"))
+
+    def test_select_existing_channel_rejects_unsupported_channel(self):
+        service, wallet_service, _store = self.make_service()
+        wallet_service.create_wallet("1045618308")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "approval channel must be imessage or whatsapp",
+        ):
+            service.select_existing_channel("1045618308", "telegram")
+
     def test_linking_whatsapp_switches_delivery_away_from_imessage(self):
         service, wallet_service, _store, notifier = self.make_linked_service()
         whatsapp_pairing = service.create_pairing("1045618308", channel="whatsapp")
