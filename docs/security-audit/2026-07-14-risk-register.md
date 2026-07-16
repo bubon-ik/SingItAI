@@ -9,8 +9,8 @@ WhatsApp Cloud, managed Base wallets, and Bitrefill.
 
 | Check | Evidence | Result |
 |---|---|---|
-| Gateway unit tests | `431` tests, Python 3.14, exit `0` | PASS |
-| Hermes Sign402 plugin tests | `118` tests in a clean environment, exit `0` | PASS |
+| Gateway unit tests | `444` tests, exit `0` | PASS |
+| Hermes Sign402 plugin tests | `122` tests in a clean environment, exit `0` | PASS |
 | CDP/x402 tests | `13` Node tests, exit `0` | PASS |
 | Risk-check tests | `2` Node tests, exit `0` | PASS |
 | Tracked secret-like paths | Only five `*.env.example` files | PASS |
@@ -34,8 +34,9 @@ WhatsApp Cloud, managed Base wallets, and Bitrefill.
 | SEC-006 | Medium | Hermes WhatsApp listener | VPS socket audit showed Hermes on `0.0.0.0:8090`; UFW blocked the port | A future firewall rule or colocated untrusted process could reach an origin intended only for Cloudflare Tunnel | FIXED | Set `WHATSAPP_CLOUD_WEBHOOK_HOST=127.0.0.1` and restart with the readiness-aware Hermes CLI | `ss` shows only `127.0.0.1:8090`; local and tunneled health return `200`; Hermes log confirms the loopback listener | Cloudflare remains the only intended public ingress; retain UFW default-deny |
 | SEC-007 | Medium | systemd service isolation | `sign402-gateway`, `hermes-gateway`, and `cloudflared` initially reported no sandboxing and unlimited memory | A compromised process retained a wider filesystem/kernel attack surface and could exhaust host memory | FIXED | Added compatible drop-ins: private tmp, no-new-privileges, read-only system paths, restrictive umask, task limits, and memory caps (1 GiB Sign402, 2 GiB Hermes, 256 MiB cloudflared); cloudflared additionally has strict system/home and empty capabilities | All services active; local and public health `200`; effective properties show the intended limits | Hermes user service cannot apply kernel capability directives, so those remain omitted there; home stays writable for state and Photon |
 | SEC-008 | High | Internet-facing SSH | Effective SSH config reported `PermitRootLogin yes`, `PasswordAuthentication yes`, `MaxAuthTries 6`, and `X11Forwarding yes` on public port 22; logs counted thousands of failed attempts | Credential stuffing or a stolen root password can obtain direct host control | FIXED | Installed the existing Mac ED25519 public key for `hermes`; disabled root/password/interactive auth and X11; reduced attempts to 3; limited users to `hermes` | `sshd -t` passed; effective config reports all hardened values; a fresh key-only session returned `ssh_hardened_ok` | Protect and back up the Mac private key; keep provider console as recovery and fail2ban active |
-| SEC-009 | High | Ubuntu kernel lifecycle | Running `6.8.0-106-generic` while `/var/run/reboot-required` exists | Installed kernel/security fixes are not active until reboot | CONFIRMED | Review pending packages, back up state, reboot in a controlled window, then verify all three services, tunnel, iMessage, and WhatsApp | Pending package list and controlled reboot | UFW and service isolation reduce exposure but do not replace kernel patch activation |
+| SEC-009 | High | Ubuntu kernel lifecycle | Host was running `6.8.0-106-generic` while `/var/run/reboot-required` existed; OpenSSH security updates were pending | Installed kernel/security fixes were not active until reboot | FIXED | Installed Ubuntu/OpenSSH updates and performed a controlled reboot after backup and service-enable checks | Host now runs `6.8.0-134-generic`; no reboot required; all three services active; internal/public health `200`; SSH hardening persisted | Continue unattended security updates and schedule reboot-required maintenance promptly |
 | SEC-010 | High | Cloudflare Tunnel credential storage | `/etc/systemd/system/cloudflared.service` was `0644` and contained the remotely managed tunnel token in `ExecStart` | Any local account or local file-read primitive could copy the token and impersonate the connector | FIXED | Moved the token to `/etc/cloudflared/tunnel.token` with `0600 root:root`; changed the non-secret unit to `--token-file`; rotated the token in Cloudflare and restarted the connector | Unit contains no plaintext `--token`; token file is `0600`; after rotation/restart the tunnel reached public health `200` | A root compromise can still read service credentials; retain Cloudflare MFA and periodic rotation |
+| SEC-011 | Low | Approval-channel selection | Existing Telegram `Connect iMessage` / `Connect WhatsApp` controls always entered pairing, even when that channel was already linked | A user with both channels linked could receive an “already linked” response instead of selecting the intended approval channel, causing approval availability and support failures | FIXED | Existing controls now select an already-linked channel first and start pairing only when no link exists; selection changes only the preference row and preserves both encrypted links | Gateway `444/444`; plugin `122/122`; production button selected WhatsApp, both links remained present, and no new pairing was created | The control label still says “Connect”; help text clarifies “Select or link” |
 
 ## Route/auth matrix
 
@@ -44,6 +45,7 @@ WhatsApp Cloud, managed Base wallets, and Bitrefill.
 | `/health`, Bitrefill search/list/product details | Public-safe, loopback service | No wallet mutation, private key, redemption, or approval decision |
 | `/agent/create-wallet` | Wallet service bearer | Creates/rotates per-user access material; private key fields are stripped |
 | User wallet, balance, limits, withdrawal, LLM, user x402, quote and wallet-Bitrefill routes | Wallet bearer **and** `X-Sign402-User-Token` | Token resolves authoritative Telegram user; mismatched body identity is rejected |
+| `/agent/approval-channel/select-existing` | Wallet service bearer | Selects only a channel already linked to the authoritative Telegram user; does not create, reveal, or replace link secrets |
 | `/agent/imessage/*` | Independent Photon/approval bearer | Hermes transports are trusted to bind sender identity and approval channel |
 | `/agent/test-imessage-approval` | Feature flag off by default plus Photon bearer | No-funds probe absent from normal production route list |
 | `/internal/fulfill-bitrefill`, `/internal/prepare-bitrefill-settlement` | Independent service secret | Fulfillment token is additionally hash-bound to a stored quote; legacy fulfillment defaults off |
@@ -53,18 +55,29 @@ WhatsApp Cloud, managed Base wallets, and Bitrefill.
 
 | Test | iMessage | WhatsApp | Evidence |
 |---|---|---|---|
+| Existing link retained | PASS | PASS | Production database retained both channel links after changing the preference |
+| Existing Telegram connect control selects channel | PASS | PASS | iMessage was selected through the authenticated selector; the existing WhatsApp button recorded `channel_selected` without creating a new pairing |
+| Fresh no-funds approval delivery | PASS | PASS | iMessage approval reached `approved`; WhatsApp template delivery succeeded |
+| Decision callback | PASS | PASS | iMessage decision was accepted; WhatsApp quick-reply callbacks reached Hermes and stale decisions failed closed with `404` after the two-minute TTL |
+| Webhook signature rejection | N/A | PASS | Invalid public signature returned `401`; `accepted` stayed `2`; `rejected_signature` increased from `1` to `2`; empty response contained no stack, path, or credential data |
+| Production purchase approval | PASS | PASS | Previous production approvals and the USD `0.10` Bitrefill purchase completed through the configured approval paths |
 
 ## Production changes and rollback
 
 | Change | Before | Command | Verification | Rollback |
 |---|---|---|---|---|
+| WhatsApp origin bind | `0.0.0.0:8090` | Set `WHATSAPP_CLOUD_WEBHOOK_HOST=127.0.0.1`; restart Hermes | Local and tunneled health `200`; `ss` shows loopback only | Restore the prior env value and restart Hermes |
+| Cloudflare token storage | Token embedded in world-readable unit | Move token to root-only token file and use `--token-file`; rotate token | Tunnel healthy; token absent from unit; token file `0600` | Generate a new connector token and reinstall the service |
+| SSH hardening | Root/password authentication enabled | Install ED25519 key; disable root/password/interactive auth; allow only `hermes` | Fresh key-only login succeeded; effective `sshd` configuration persisted after reboot | Use provider console to amend the hardening drop-in |
+| Service isolation | No sandboxing or resource caps | Add compatible systemd security drop-ins | All services active with effective memory/task/umask protections | Remove the relevant drop-in and reload systemd |
+| Existing approval-channel selection | Connect controls always started pairing | Deploy authenticated selector and update existing Telegram handlers | `444` gateway and `122` plugin tests; live selection preserved both links | Revert commits `fa8913f` and `e58e5ed`, redeploy plugin, restart services |
 
 ## Final gates
 
-- [ ] No open Critical findings
-- [ ] No open High findings
-- [ ] iMessage approval path verified
-- [ ] WhatsApp approval path verified
-- [ ] Public exposure verified
-- [ ] Secret and log redaction verified
-- [ ] Live purchase at or below USD 0.10 verified
+- [x] No open Critical findings
+- [x] No open High findings
+- [x] iMessage approval path verified
+- [x] WhatsApp approval path verified
+- [x] Public exposure verified
+- [x] Secret and log redaction verified
+- [x] Live purchase at or below USD 0.10 verified
