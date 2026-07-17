@@ -5,7 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SingIt - Spending limits your AI agent cannot break</title>
 <meta name="description" content="SingIt gives AI agents hardware-signed spending limits, approved by you in Telegram, WhatsApp, or iMessage. Payments settle over x402.">
-<link rel="icon" type="image/svg+xml" href="assets/singit-mark.svg">
+<meta property="og:title" content="SingIt: spending limits your AI agent cannot break">
+<meta property="og:description" content="Delegate a budget in chat, approve it once, and your agent pays on its own, inside hard limits.">
+<meta property="og:image" content="assets/singit-social-logo.png">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://api.fontshare.com/v2/css?f[]=clash-display@500,600&display=swap" rel="stylesheet">
@@ -78,6 +83,7 @@
       </div>
 
       <div class="hero-visual" data-hero-card>
+        <div class="float">
         <div class="bezel approval-bezel">
           <figure class="approval-card" aria-label="Example of a SingIt payment approval request">
             <div class="approval-head">
@@ -100,6 +106,7 @@
             </div>
             <p class="approval-foot">Strict mode: confirmed on your Firefly with a physical button press.</p>
           </figure>
+        </div>
         </div>
       </div>
     </div>
@@ -228,6 +235,7 @@
 
   <!-- ACTION -->
   <section class="cta">
+    <svg class="cta-watermark" aria-hidden="true"><use href="#singit-mark"/></svg>
     <div class="shell shell-narrow">
       <h2 data-reveal>Give your agent a budget, <em>not your keys.</em></h2>
       <p data-reveal>Built at Berlin Hack: a Telegram commerce agent, a payment gateway, and a $30 hardware signer, wired together in a weekend.</p>

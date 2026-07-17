@@ -36,6 +36,15 @@ main { overflow-x: clip; }
 
 ::selection { background: rgba(62, 207, 142, 0.32); }
 
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+.btn:focus-visible { outline-offset: 2px; border-radius: 999px; }
+
+section[id] { scroll-margin-top: 96px; }
+
 img, svg { display: block; }
 
 .shell { max-width: 1240px; margin: 0 auto; padding: 0 32px; }
@@ -155,7 +164,12 @@ h1 em, h2 em { font-style: normal; color: var(--accent); }
 .hero-sub { font-size: 18px; color: var(--text-soft); max-width: 38ch; margin-bottom: 40px; }
 .hero-cta { display: flex; gap: 14px; flex-wrap: wrap; }
 
-.hero-visual { position: relative; }
+.hero-visual { position: relative; perspective: 1100px; }
+.hero-visual .float { animation: card-float 7s ease-in-out infinite; }
+@keyframes card-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
 
 /* double-bezel shell */
 .bezel {
@@ -167,8 +181,9 @@ h1 em, h2 em { font-style: normal; color: var(--accent); }
 }
 
 .approval-bezel {
-  transform: rotate(2deg);
+  transform: rotate(2deg) rotateX(var(--ty, 0deg)) rotateY(var(--tx, 0deg));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 60px 120px -50px rgba(0, 0, 0, 0.9);
+  transition: transform 0.35s var(--ease-lux);
 }
 
 .approval-card {
@@ -208,6 +223,9 @@ h1 em, h2 em { font-style: normal; color: var(--accent); }
 .btn-reject:hover { border-color: rgba(255, 255, 255, 0.3); }
 
 .approval-foot { font-size: 12px; color: var(--text-faint); }
+.approval-card { transition: border-color 0.5s var(--ease-lux), box-shadow 0.5s var(--ease-lux); }
+.approval-card.is-approved { border-color: rgba(62, 207, 142, 0.45); box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.05), inset 0 0 40px rgba(62, 207, 142, 0.07); }
+.approval-card.is-rejected { border-color: rgba(224, 120, 86, 0.4); }
 .approval-card.is-approved .approval-foot::before { content: "Approved. Policy signed. "; color: var(--accent); font-weight: 600; }
 .approval-card.is-rejected .approval-foot::before { content: "Rejected. Nothing was signed. "; color: #e07856; font-weight: 600; }
 
@@ -279,7 +297,12 @@ h1 em, h2 em { font-style: normal; color: var(--accent); }
   color: var(--accent);
   font-family: var(--mono); font-size: 14px;
   margin-bottom: 16px;
+  transition: background-color 0.5s var(--ease-lux), color 0.5s var(--ease-lux),
+              border-color 0.5s var(--ease-lux);
 }
+.step.is-active { border-color: rgba(62, 207, 142, 0.25); }
+.step.is-active .step-num { background: var(--accent); border-color: var(--accent); color: #04130c; }
+.step { transition: border-color 0.5s var(--ease-lux); }
 .step h3 { font-size: 19px; font-weight: 600; margin-bottom: 8px; }
 .step p { font-size: 15px; color: var(--text-soft); max-width: 46ch; }
 
@@ -342,6 +365,7 @@ h1 em, h2 em { font-style: normal; color: var(--accent); }
   margin: 20px 0;
 }
 .marquee-track { display: flex; width: max-content; will-change: transform; animation: marquee 36s linear infinite; }
+.marquee:hover .marquee-track { animation-play-state: paused; }
 .marquee-track span {
   font-family: var(--display);
   font-size: clamp(1.4rem, 2.6vw, 2.2rem);
@@ -358,7 +382,16 @@ h1 em, h2 em { font-style: normal; color: var(--accent); }
 }
 
 /* ---------- cta ---------- */
-.cta { padding: 180px 0 170px; text-align: center; }
+.cta { padding: 180px 0 170px; text-align: center; position: relative; overflow: hidden; }
+.cta-watermark {
+  position: absolute;
+  width: 720px; height: 720px;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -46%);
+  color: rgba(62, 207, 142, 0.045);
+  pointer-events: none;
+}
+.cta .shell { position: relative; }
 .cta h2 { font-size: clamp(2.4rem, 5vw, 4.4rem); line-height: 1.06; max-width: 18ch; margin: 0 auto 26px; }
 .cta p { font-size: 17px; color: var(--text-soft); max-width: 52ch; margin: 0 auto 44px; }
 
@@ -401,5 +434,6 @@ h1 em, h2 em { font-style: normal; color: var(--accent); }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .marquee-track { animation: none; }
+  .hero-visual .float { animation: none; }
   * { transition-duration: 0.01ms !important; }
 }

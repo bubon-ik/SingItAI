@@ -16,6 +16,23 @@
   }
 
   var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 3D tilt on the approval card: pointer position drives --tx/--ty.
+  var bezel = document.querySelector('.approval-bezel');
+  if (bezel && !reduce && window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+    bezel.addEventListener('pointermove', function (e) {
+      var r = bezel.getBoundingClientRect();
+      var x = (e.clientX - r.left) / r.width - 0.5;
+      var y = (e.clientY - r.top) / r.height - 0.5;
+      bezel.style.setProperty('--tx', (x * 7).toFixed(2) + 'deg');
+      bezel.style.setProperty('--ty', (y * -7).toFixed(2) + 'deg');
+    });
+    bezel.addEventListener('pointerleave', function () {
+      bezel.style.setProperty('--tx', '0deg');
+      bezel.style.setProperty('--ty', '0deg');
+    });
+  }
+
   if (reduce || typeof gsap === 'undefined') return;
 
   // Init motion only while the page is actually visible. In hidden or
@@ -68,11 +85,17 @@
     }
   });
 
-  // Steps: heavy fade-up as each card enters.
+  // Steps: heavy fade-up as each card enters, active number while in focus band.
   gsap.utils.toArray('[data-step]').forEach(function (el) {
     gsap.from(el, {
       y: 56, opacity: 0, duration: 0.9, ease: lux,
       scrollTrigger: { trigger: el, start: 'top 88%' }
+    });
+    ScrollTrigger.create({
+      trigger: el,
+      start: 'top 62%',
+      end: 'bottom 38%',
+      toggleClass: { targets: el, className: 'is-active' }
     });
   });
 
