@@ -16,6 +16,18 @@
   }
 
   var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // Spotlight border on bento cells: cursor position feeds the CSS gradient.
+  if (!reduce && window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
+    document.querySelectorAll('.cell').forEach(function (cell) {
+      cell.addEventListener('pointermove', function (e) {
+        var r = cell.getBoundingClientRect();
+        cell.style.setProperty('--mx', (e.clientX - r.left) + 'px');
+        cell.style.setProperty('--my', (e.clientY - r.top) + 'px');
+      });
+    });
+  }
+
   if (reduce || typeof gsap === 'undefined') return;
 
   // Init motion only while the page is actually visible. In hidden or
