@@ -4,12 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SingIt - Spending limits your AI agent cannot break</title>
-<meta name="description" content="SingIt gives AI agents hardware-signed spending limits, approved by you in Telegram, WhatsApp, or iMessage. Payments settle over x402 on Algorand.">
-<meta property="og:title" content="SingIt: spending limits your AI agent cannot break">
-<meta property="og:description" content="Delegate a budget in chat, approve it once, and your agent pays on its own, inside hard limits.">
-<meta property="og:image" content="assets/singit-social-logo.png">
-<meta property="og:type" content="website">
-<meta name="twitter:card" content="summary_large_image">
+<meta name="description" content="SingIt gives AI agents hardware-signed spending limits, approved by you in Telegram, WhatsApp, or iMessage. Payments settle over x402.">
 <link rel="icon" type="image/svg+xml" href="assets/singit-mark.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -95,8 +90,8 @@
             <p class="approval-msg">Your agent <b>hermes-demo</b> wants a spending policy:</p>
             <dl class="approval-rows">
               <div><dt>Merchant</dt><dd>demo-merchant.local</dd></div>
-              <div><dt>Max per payment</dt><dd>0.05 ALGO</dd></div>
-              <div><dt>Total budget</dt><dd>1.00 ALGO</dd></div>
+              <div><dt>Max per payment</dt><dd>0.05 USDC</dd></div>
+              <div><dt>Total budget</dt><dd>1.00 USDC</dd></div>
               <div><dt>Expires</dt><dd>Today, 18:00</dd></div>
             </dl>
             <div class="approval-actions">
@@ -114,7 +109,7 @@
   <section class="problem">
     <div class="shell shell-narrow">
       <p class="scrub-text" data-scrub>x402 crossed 169M agent payments. Every one of them was signed with keys a human handed to a machine. One bad prompt, one hijacked tool, and the wallet is gone.</p>
-      <div class="bad-stack" data-batch>
+      <div class="bad-grid" data-batch>
         <div class="bad-item">
           <h3>Hand over your keys</h3>
           <p>The agent owns the wallet. Forever, or until the first exploit.</p>
@@ -143,8 +138,8 @@
 <pre><code>{
   <span class="k">"agent"</span>:         <span class="v">"hermes-demo"</span>,
   <span class="k">"merchant"</span>:      <span class="v">"demo-merchant.local"</span>,
-  <span class="k">"maxPerPayment"</span>: <span class="v">"0.05 ALGO"</span>,
-  <span class="k">"budget"</span>:        <span class="v">"1.00 ALGO"</span>,
+  <span class="k">"maxPerPayment"</span>: <span class="v">"0.05 USDC"</span>,
+  <span class="k">"budget"</span>:        <span class="v">"1.00 USDC"</span>,
   <span class="k">"expiresAt"</span>:     <span class="v">"2026-07-12T18:00Z"</span>,
   <span class="k">"nonce"</span>:         <span class="v">"berlin-demo-001"</span>
 }</code></pre>
@@ -167,7 +162,7 @@
         <li class="step" data-step>
           <span class="step-num" aria-hidden="true">3</span>
           <h3>Pay</h3>
-          <p>The agent settles x402 payments on Algorand on its own, as long as they fit the policy.</p>
+          <p>The agent settles x402 payments on its own, as long as they fit the policy.</p>
         </li>
         <li class="step" data-step>
           <span class="step-num" aria-hidden="true">4</span>
@@ -227,7 +222,7 @@
   <!-- marquee -->
   <div class="marquee" aria-hidden="true">
     <div class="marquee-track">
-      <span>x402 <i>/</i> Algorand <i>/</i> Firefly <i>/</i> Telegram <i>/</i> WhatsApp <i>/</i> iMessage <i>/</i> </span><span>x402 <i>/</i> Algorand <i>/</i> Firefly <i>/</i> Telegram <i>/</i> WhatsApp <i>/</i> iMessage <i>/</i> </span>
+      <span>x402 <i>/</i> Firefly <i>/</i> Telegram <i>/</i> WhatsApp <i>/</i> iMessage <i>/</i> </span><span>x402 <i>/</i> Firefly <i>/</i> Telegram <i>/</i> WhatsApp <i>/</i> iMessage <i>/</i> </span>
     </div>
   </div>
 
