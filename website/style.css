@@ -75,7 +75,7 @@ h1 em, h2 em { font-style: normal; color: var(--accent); }
   padding: 14px 15px 14px 26px;
   border-radius: 999px; border: 1px solid transparent;
   cursor: pointer; text-decoration: none; white-space: nowrap;
-  transition: transform 0.5s var(--ease-lux), background-color 0.5s var(--ease-lux),
+  transition: background-color 0.5s var(--ease-lux),
               border-color 0.5s var(--ease-lux), color 0.5s var(--ease-lux);
 }
 .btn:active { transform: scale(0.98); }
@@ -121,6 +121,13 @@ h1 em, h2 em { font-style: normal; color: var(--accent); }
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 24px 60px -30px rgba(0, 0, 0, 0.8);
+  transition: padding 0.5s var(--ease-lux), background-color 0.5s var(--ease-lux),
+              gap 0.5s var(--ease-lux);
+}
+.nav-pill.is-scrolled {
+  padding: 7px 7px 7px 16px;
+  gap: 22px;
+  background: rgba(10, 12, 11, 0.82);
 }
 
 .brand {
@@ -161,6 +168,18 @@ h1 em, h2 em { font-style: normal; color: var(--accent); }
   line-height: 1.1;
   margin-bottom: 26px;
 }
+/* word-mask reveal: outer clips, inner slides up from below the line */
+.w-mask {
+  display: inline-block;
+  overflow: hidden;
+  vertical-align: bottom;
+  padding-bottom: 0.09em;
+  margin-bottom: -0.09em;
+}
+.w-mask .w { display: inline-block; }
+/* watchdog fallback: rAF frozen, show everything statically */
+.motion-dead .scrub-text .w { opacity: 1; }
+.motion-dead .marquee-track { animation: marquee 36s linear infinite; }
 .hero-sub { font-size: 18px; color: var(--text-soft); max-width: 38ch; margin-bottom: 40px; }
 .hero-cta { display: flex; gap: 14px; flex-wrap: wrap; }
 
@@ -366,6 +385,8 @@ h1 em, h2 em { font-style: normal; color: var(--accent); }
 }
 .marquee-track { display: flex; width: max-content; will-change: transform; animation: marquee 36s linear infinite; }
 .marquee:hover .marquee-track { animation-play-state: paused; }
+/* GSAP takes over the marquee when motion inits */
+.js-marquee .marquee-track { animation: none; }
 .marquee-track span {
   font-family: var(--display);
   font-size: clamp(1.4rem, 2.6vw, 2.2rem);
