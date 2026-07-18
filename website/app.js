@@ -91,12 +91,15 @@
     gsap.from('[data-hero-reveal] > :not(h1)', {
       y: 40, opacity: 0, duration: 1.1, ease: lux, stagger: 0.09, delay: 0.3
     });
+    // The proof artifact arrives as the user scrolls past the statement,
+    // then the policy request assembles row by row inside it.
     gsap.from('[data-hero-card]', {
-      y: 70, opacity: 0, rotate: 5, duration: 1.4, ease: lux, delay: 0.4
+      y: 90, opacity: 0, rotate: 4, duration: 1.3, ease: lux,
+      scrollTrigger: { trigger: '.proof', start: 'top 82%' }
     });
-    // The policy request assembles row by row inside the card.
     gsap.from('.approval-rows > div', {
-      opacity: 0, x: 18, duration: 0.6, ease: lux, stagger: 0.09, delay: 1
+      opacity: 0, x: 18, duration: 0.6, ease: lux, stagger: 0.09,
+      scrollTrigger: { trigger: '.proof', start: 'top 70%' }
     });
 
     // Ambient orbs drift at different speeds while scrolling (depth).
