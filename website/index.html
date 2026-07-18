@@ -99,8 +99,9 @@
             <p class="approval-msg">Your agent <b>research-agent</b> wants a spending policy:</p>
             <dl class="approval-rows">
               <div><dt>Merchant</dt><dd>api.websearch.dev</dd></div>
-              <div><dt>Max per payment</dt><dd>0.05 USDC</dd></div>
-              <div><dt>Total budget</dt><dd>1.00 USDC</dd></div>
+              <div><dt>Max per payment</dt><dd>$0.05</dd></div>
+              <div><dt>Total budget</dt><dd>$1.00</dd></div>
+              <div><dt>Pay with</dt><dd>any token</dd></div>
               <div><dt>Expires</dt><dd>Today, 18:00</dd></div>
             </dl>
             <div class="approval-actions">
@@ -148,8 +149,9 @@
 <pre><code>{
   <span class="k">"agent"</span>:         <span class="v">"research-agent"</span>,
   <span class="k">"merchant"</span>:      <span class="v">"api.websearch.dev"</span>,
-  <span class="k">"maxPerPayment"</span>: <span class="v">"0.05 USDC"</span>,
-  <span class="k">"budget"</span>:        <span class="v">"1.00 USDC"</span>,
+  <span class="k">"maxPerPayment"</span>: <span class="v">"$0.05"</span>,
+  <span class="k">"budget"</span>:        <span class="v">"$1.00"</span>,
+  <span class="k">"payToken"</span>:      <span class="v">"any"</span>,
   <span class="k">"expiresAt"</span>:     <span class="v">"2026-07-18T18:00Z"</span>,
   <span class="k">"nonce"</span>:         <span class="v">"policy-7d41"</span>
 }</code></pre>
@@ -198,7 +200,7 @@
         </div>
         <div class="buy-row">
           <h3>Pay-per-use APIs</h3>
-          <p>Any x402 endpoint on the open web, settled per request in USDC.</p>
+          <p>Any x402 endpoint on the open web, paid per request with whatever token you hold.</p>
         </div>
       </div>
       <p class="buy-note" data-reveal>No KYC. No card on file. <em>A wallet and a chat is all it takes.</em></p>
