@@ -28,12 +28,12 @@
 - Consumes: the approved `1254 x 1254` source PNG.
 - Produces: an immutable `1200 x 630` PNG used by the page metadata in Task 2.
 
-- [ ] **Step 1: Generate a crop that preserves the artwork**
+- [x] **Step 1: Generate a crop that preserves the artwork**
 
 Run:
 
 ```bash
-sips --cropToHeightWidth 658 1254 --cropOffset 206 0 \
+sips --cropToHeightWidth 658 1254 --cropOffset 285 0 \
   '/Users/mp/Downloads/Jul 6, 2026, 05_45_29 PM.png' \
   --out website/assets/singit-social-preview-v2.png
 sips --resampleHeightWidth 630 1200 website/assets/singit-social-preview-v2.png
@@ -41,7 +41,7 @@ sips --resampleHeightWidth 630 1200 website/assets/singit-social-preview-v2.png
 
 Expected: only empty black space above and below the visible mark is removed; the mark itself remains intact and proportional.
 
-- [ ] **Step 2: Verify dimensions and inspect the result**
+- [x] **Step 2: Verify dimensions and inspect the result**
 
 Run:
 
@@ -67,7 +67,7 @@ Open the result with the workspace image viewer and confirm balanced black spaci
 - Consumes: `website/assets/singit-social-preview-v2.png` from Task 1.
 - Produces: absolute Open Graph and Twitter image metadata discoverable by link-preview crawlers.
 
-- [ ] **Step 1: Replace the legacy metadata block**
+- [x] **Step 1: Replace the legacy metadata block**
 
 Replace the existing Open Graph image and Twitter-card declarations with:
 
@@ -85,7 +85,7 @@ Replace the existing Open Graph image and Twitter-card declarations with:
 <meta name="twitter:image:alt" content="SingIt circuit-check mark on a black background">
 ```
 
-- [ ] **Step 2: Verify the local metadata and diff**
+- [x] **Step 2: Verify the local metadata and diff**
 
 Run:
 
@@ -97,7 +97,7 @@ git diff -- website/index.html
 
 Expected: all image references use the absolute versioned production URL, dimensions are `1200 x 630`, and no whitespace errors are reported.
 
-- [ ] **Step 3: Commit the implementation**
+- [x] **Step 3: Commit the implementation**
 
 Run:
 
