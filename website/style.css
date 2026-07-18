@@ -179,7 +179,6 @@ h1 em, h2 em { font-style: normal; color: var(--accent); }
 .w-mask .w { display: inline-block; }
 /* watchdog fallback: rAF frozen, show everything statically */
 .motion-dead .scrub-text .w { opacity: 1; }
-.motion-dead .marquee-track { animation: marquee 36s linear infinite; }
 .hero-sub { font-size: 18px; color: var(--text-soft); max-width: 38ch; margin-bottom: 40px; }
 .hero-cta { display: flex; gap: 14px; flex-wrap: wrap; }
 
@@ -375,33 +374,6 @@ h1 em, h2 em { font-style: normal; color: var(--accent); }
 }
 .cell-d .cell-mono { margin-top: 8px; font-size: 13px; }
 
-/* ---------- marquee ---------- */
-.marquee {
-  overflow: hidden;
-  border-top: 1px solid var(--hairline);
-  border-bottom: 1px solid var(--hairline);
-  padding: 26px 0;
-  margin: 20px 0;
-}
-.marquee-track { display: flex; width: max-content; will-change: transform; animation: marquee 36s linear infinite; }
-.marquee:hover .marquee-track { animation-play-state: paused; }
-/* GSAP takes over the marquee when motion inits */
-.js-marquee .marquee-track { animation: none; }
-.marquee-track span {
-  font-family: var(--display);
-  font-size: clamp(1.4rem, 2.6vw, 2.2rem);
-  font-weight: 500;
-  color: var(--text-faint);
-  white-space: nowrap;
-  padding-right: 0.6em;
-}
-.marquee-track i { font-style: normal; color: rgba(62, 207, 142, 0.5); padding: 0 0.35em; }
-
-@keyframes marquee {
-  from { transform: translateX(0); }
-  to   { transform: translateX(-50%); }
-}
-
 /* ---------- cta ---------- */
 .cta { padding: 180px 0 170px; text-align: center; position: relative; overflow: hidden; }
 .cta-watermark {
@@ -454,7 +426,6 @@ h1 em, h2 em { font-style: normal; color: var(--accent); }
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
-  .marquee-track { animation: none; }
   .hero-visual .float { animation: none; }
   * { transition-duration: 0.01ms !important; }
 }

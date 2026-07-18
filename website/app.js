@@ -67,7 +67,7 @@
       gsap.set(['.nav-pill', '[data-hero-reveal] > *', '[data-hero-card]',
         '.approval-rows > div', '.terminal > *', '[data-step]',
         '[data-batch] > *', '[data-reveal]', '.cta-watermark',
-        '.orb-a', '.orb-b', '.orb-c', '.marquee-track',
+        '.orb-a', '.orb-b', '.orb-c',
         '.hero h1 .w', '[data-scrub] .w'], { clearProps: 'all' });
     }, 2500);
 
@@ -181,22 +181,6 @@
         scrollTrigger: { trigger: el, start: 'top 88%' }
       });
     });
-
-    // Kinetic marquee: GSAP-driven, accelerates with scroll velocity.
-    var track = document.querySelector('.marquee-track');
-    if (track) {
-      document.querySelector('.marquee').classList.add('js-marquee');
-      var marqueeTween = gsap.to(track, { xPercent: -50, ease: 'none', duration: 40, repeat: -1 });
-      ScrollTrigger.create({
-        onUpdate: function (self) {
-          var boost = Math.min(Math.abs(self.getVelocity()) / 260, 5);
-          if (boost > 1) {
-            marqueeTween.timeScale(boost);
-            gsap.to(marqueeTween, { timeScale: 1, duration: 1.2, overwrite: true, ease: 'power2.out' });
-          }
-        }
-      });
-    }
 
     // CTA watermark slowly rotates through the section (depth).
     gsap.fromTo('.cta-watermark', { rotate: -10 }, {
