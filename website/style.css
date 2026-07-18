@@ -284,6 +284,16 @@ h1 em, h2 em { font-style: normal; color: var(--accent); }
   align-items: start;
 }
 .how-pin h2 { font-size: clamp(2.2rem, 3.6vw, 3.2rem); margin-bottom: 36px; }
+@media (min-width: 961px) {
+  /* fill the pinned viewport height so the artifact sits centered,
+     no dead space under the terminal */
+  .how-pin {
+    min-height: calc(100dvh - 192px);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+}
 
 .terminal-bezel { border-radius: 22px; padding: 6px; }
 .terminal {
@@ -300,7 +310,7 @@ h1 em, h2 em { font-style: normal; color: var(--accent); }
 .terminal .v { color: #d9c98a; }
 .terminal-note { font-size: 13px; color: var(--text-soft); margin-top: 14px; }
 
-.steps { list-style: none; display: grid; gap: 20px; padding-top: 90px; }
+.steps { list-style: none; display: grid; gap: 18px; }
 .step {
   background: var(--glass);
   border: 1px solid var(--hairline);
