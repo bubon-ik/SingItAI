@@ -1894,7 +1894,8 @@ def build_approval_client_from_env(
 
 
 def build_bitrefill_client_from_env(env: dict[str, str] | None = None):
-    from .bitrefill import LiveBitrefillClient, TestBitrefillClient
+    from .bitrefill import TestBitrefillClient
+    from .bitrefill_mcp import McpBitrefillClient
 
     values = os.environ if env is None else env
     mode = values.get("SIGN402_BITREFILL_MODE", "test").strip().lower()
@@ -1904,14 +1905,8 @@ def build_bitrefill_client_from_env(env: dict[str, str] | None = None):
         if not values.get("BITREFILL_API_KEY", "").strip():
             raise ValueError("BITREFILL_API_KEY is required in live Bitrefill mode")
         payment_method = values.get("SIGN402_BITREFILL_PAYMENT_METHOD", "balance").strip().lower()
-        refund_address = (
-            values.get("SIGN402_BITREFILL_REFUND_ADDRESS", "").strip()
-            or values.get("SIGN402_TREASURY_REFUND_ADDRESS", "").strip()
-        )
         treasury_client = None
         if payment_method == "usdc_base":
-            if not refund_address:
-                raise ValueError("SIGN402_BITREFILL_REFUND_ADDRESS is required for usdc_base")
             treasury_mode = values.get("SIGN402_BITREFILL_USDC_TREASURY_MODE", "bankr_wallet").strip().lower()
             if treasury_mode == "cdp_wallet":
                 treasury_client = CdpWalletClient(
@@ -1923,18 +1918,17 @@ def build_bitrefill_client_from_env(env: dict[str, str] | None = None):
                 treasury_client = BankrTreasuryClient()
             else:
                 raise ValueError(f"unsupported SIGN402_BITREFILL_USDC_TREASURY_MODE: {treasury_mode}")
-        return LiveBitrefillClient(
+        return McpBitrefillClient(
             api_key=values["BITREFILL_API_KEY"],
-            base_url=values.get(
-                "SIGN402_BITREFILL_BASE_URL",
-                "https://api.bitrefill.com/v2",
+            mcp_url=values.get(
+                "SIGN402_BITREFILL_MCP_URL",
+                "https://api.bitrefill.com/mcp",
             ),
             max_purchase_usd=values.get("SIGN402_BITREFILL_LIVE_MAX_USD", "5.00"),
             max_invoice_overage_bps=int(
                 values.get("SIGN402_BITREFILL_LIVE_MAX_INVOICE_OVERAGE_BPS", "500")
             ),
             payment_method=payment_method,
-            refund_address=refund_address,
             treasury_client=treasury_client,
         )
     raise ValueError(f"unsupported SIGN402_BITREFILL_MODE: {mode}")

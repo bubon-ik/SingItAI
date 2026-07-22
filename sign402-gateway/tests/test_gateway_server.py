@@ -9,7 +9,8 @@ from pathlib import Path
 from unittest.mock import ANY, Mock, patch
 
 from sign402_gateway.bankr_llm_purchase import BankrLlmError
-from sign402_gateway.bitrefill import LiveBitrefillClient, TestBitrefillClient
+from sign402_gateway.bitrefill import TestBitrefillClient
+from sign402_gateway.bitrefill_mcp import McpBitrefillClient
 from sign402_gateway.user_wallets import BASE_NATIVE_ETH_ASSET_ID
 from sign402_gateway.server import (
     AgentStateStore,
@@ -223,14 +224,15 @@ class GatewayServerTests(unittest.TestCase):
             {
                 "SIGN402_BITREFILL_MODE": "live",
                 "BITREFILL_API_KEY": "test_key",
-                "SIGN402_BITREFILL_BASE_URL": "https://bitrefill.example/v2",
+                "SIGN402_BITREFILL_MCP_URL": "https://bitrefill.example/mcp",
                 "SIGN402_BITREFILL_LIVE_MAX_USD": "3.50",
             }
         )
 
-        self.assertIsInstance(client, LiveBitrefillClient)
-        self.assertEqual(client.base_url, "https://bitrefill.example/v2")
+        self.assertIsInstance(client, McpBitrefillClient)
         self.assertEqual(str(client.max_purchase_usd), "3.50")
+        self.assertNotIn("test_key", repr(client))
+        self.assertNotIn("test_key", repr(client._call_tool))
 
     def test_bitrefill_client_factory_builds_usdc_base_live_client_with_treasury(self):
         client = build_bitrefill_client_from_env(
@@ -238,36 +240,23 @@ class GatewayServerTests(unittest.TestCase):
                 "SIGN402_BITREFILL_MODE": "live",
                 "BITREFILL_API_KEY": "test_key",
                 "SIGN402_BITREFILL_PAYMENT_METHOD": "usdc_base",
-                "SIGN402_TREASURY_REFUND_ADDRESS": "0xTreasuryRefund",
             }
         )
 
-        self.assertIsInstance(client, LiveBitrefillClient)
+        self.assertIsInstance(client, McpBitrefillClient)
         self.assertEqual(client.payment_method, "usdc_base")
-        self.assertEqual(client.refund_address, "0xTreasuryRefund")
         self.assertIsInstance(client.treasury_client, BankrTreasuryClient)
 
-    def test_bitrefill_client_factory_accepts_bitrefill_refund_address_alias(self):
+    def test_bitrefill_client_factory_ignores_removed_rest_base_url(self):
         client = build_bitrefill_client_from_env(
             {
                 "SIGN402_BITREFILL_MODE": "live",
                 "BITREFILL_API_KEY": "test_key",
-                "SIGN402_BITREFILL_PAYMENT_METHOD": "usdc_base",
-                "SIGN402_BITREFILL_REFUND_ADDRESS": "0xUserRefund",
+                "SIGN402_BITREFILL_BASE_URL": "http://localhost:9999/v2",
             }
         )
 
-        self.assertEqual(client.refund_address, "0xUserRefund")
-
-    def test_bitrefill_client_factory_requires_refund_address_for_usdc_base(self):
-        with self.assertRaisesRegex(ValueError, "SIGN402_BITREFILL_REFUND_ADDRESS"):
-            build_bitrefill_client_from_env(
-                {
-                    "SIGN402_BITREFILL_MODE": "live",
-                    "BITREFILL_API_KEY": "test_key",
-                    "SIGN402_BITREFILL_PAYMENT_METHOD": "usdc_base",
-                }
-            )
+        self.assertIsInstance(client, McpBitrefillClient)
 
     def test_bitrefill_client_factory_rejects_unknown_mode(self):
         with self.assertRaisesRegex(ValueError, "unsupported SIGN402_BITREFILL_MODE"):
@@ -734,7 +723,6 @@ class GatewayServerTests(unittest.TestCase):
                 "BITREFILL_API_KEY": "test_key",
                 "SIGN402_BITREFILL_PAYMENT_METHOD": "usdc_base",
                 "SIGN402_BITREFILL_USDC_TREASURY_MODE": "cdp_wallet",
-                "SIGN402_TREASURY_REFUND_ADDRESS": "0xTreasuryRefund",
                 "SIGN402_CDP_X402_SERVICE_DIR": "/tmp/cdp",
             }
         )
