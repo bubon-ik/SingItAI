@@ -186,7 +186,12 @@ class McpBitrefillClient:
                 "per_page": 100,
             }
             payload = self._call_tool("search-products", arguments)
-            products.extend(self._normalize_product_rows(payload))
+            products.extend(
+                self._normalize_product_rows(
+                    payload,
+                    fallback_country=country_code,
+                )
+            )
         products = self._filter_products(
             products,
             countries=countries,
@@ -217,7 +222,10 @@ class McpBitrefillClient:
         if type_text:
             arguments["type"] = type_text
         payload = self._call_tool("search-products", arguments)
-        products = self._normalize_product_rows(payload)
+        products = self._normalize_product_rows(
+            payload,
+            fallback_country=arguments["country"],
+        )
         countries = [arguments["country"]] if arguments["country"] else []
         return self._filter_products(
             products,
@@ -582,7 +590,12 @@ class McpBitrefillClient:
             checkpoint["treasuryPayment"] = deepcopy(treasury_payment)
         callback(checkpoint)
 
-    def _normalize_product_rows(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    def _normalize_product_rows(
+        self,
+        payload: dict[str, Any],
+        *,
+        fallback_country: str = "",
+    ) -> list[dict[str, Any]]:
         rows = payload.get("products")
         if rows is None:
             rows = payload.get("data")
@@ -590,11 +603,25 @@ class McpBitrefillClient:
             rows = rows.get("products", [])
         if not isinstance(rows, list):
             raise ValueError("Bitrefill MCP product list is missing")
-        return [self._normalize_product(raw) for raw in rows if isinstance(raw, dict)]
+        return [
+            self._normalize_product(raw, fallback_country=fallback_country)
+            for raw in rows
+            if isinstance(raw, dict)
+        ]
 
-    def _normalize_product(self, raw: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_product(
+        self,
+        raw: dict[str, Any],
+        *,
+        fallback_country: str = "",
+    ) -> dict[str, Any]:
         product_id = str(
-            raw.get("product_id") or raw.get("productId") or raw.get("id") or ""
+            raw.get("product_id")
+            or raw.get("productId")
+            or raw.get("id")
+            or raw.get("_id")
+            or raw.get("slug")
+            or ""
         ).strip()
         if not product_id:
             raise ValueError("Bitrefill product id is missing")
@@ -602,22 +629,68 @@ class McpBitrefillClient:
         recipient_type = str(
             raw.get("recipient_type") or raw.get("recipientType") or "none"
         ).strip().lower()
-        product_type = str(
-            raw.get("product_type") or raw.get("productType") or ""
-        ).strip().lower() or _infer_product_type(product_id, name, recipient_type)
+        raw_product_type = str(
+            raw.get("product_type")
+            or raw.get("productType")
+            or raw.get("type")
+            or ""
+        ).strip().lower()
+        product_type = {
+            "giftcard": "gift_card",
+            "giftcards": "gift_card",
+            "gift_card": "gift_card",
+            "refill": "phone_refill",
+            "refills": "phone_refill",
+            "esims": "esim",
+        }.get(raw_product_type, raw_product_type)
+        if not product_type:
+            product_type = _infer_product_type(product_id, name, recipient_type)
+        raw_categories = raw.get("categories")
+        categories = (
+            [
+                str(value).strip().lower()
+                for value in raw_categories
+                if str(value).strip()
+            ]
+            if isinstance(raw_categories, list)
+            else []
+        )
         category = str(raw.get("category") or "").strip().lower()
+        if not category and categories:
+            category = categories[0]
         if not category:
             category = "refill" if product_type == "phone_refill" else product_type
         currency = str(raw.get("currency") or "USD").strip().upper()
         country = str(
-            raw.get("country") or raw.get("country_code") or raw.get("countryCode") or ""
+            raw.get("country")
+            or raw.get("country_code")
+            or raw.get("countryCode")
+            or ""
         ).strip().upper()
+        raw_countries = raw.get("countries")
+        countries = (
+            [
+                str(value).strip().upper()
+                for value in raw_countries
+                if str(value).strip()
+            ]
+            if isinstance(raw_countries, list)
+            else []
+        )
+        fallback_country_text = str(fallback_country).strip().upper()
+        if not country and fallback_country_text in countries:
+            country = fallback_country_text
+        elif not country and countries:
+            country = countries[0]
+        elif not country:
+            country = fallback_country_text
         return {
             "productId": product_id,
             "name": name,
             "country": country,
             "currency": currency,
             "category": category,
+            "categories": categories or [category],
             "productType": product_type,
             "recipientType": recipient_type,
             "requiredRecipientFields": _recipient_fields(recipient_type),
@@ -657,6 +730,8 @@ class McpBitrefillClient:
             price = (
                 package.get("price_usd")
                 or package.get("priceUsd")
+                or package.get("payment_price")
+                or package.get("paymentPrice")
                 or package.get("price")
                 or package.get("amount")
                 or value
@@ -701,6 +776,13 @@ class McpBitrefillClient:
             product
             for product in products
             if (not country_set or product["country"] in country_set)
-            and (not category_set or product["category"] in category_set)
+            and (
+                not category_set
+                or bool(
+                    category_set.intersection(
+                        product.get("categories", [product["category"]])
+                    )
+                )
+            )
             and (not type_text or product["productType"] == type_text)
         ]

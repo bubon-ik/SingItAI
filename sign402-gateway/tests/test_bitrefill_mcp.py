@@ -167,6 +167,110 @@ class FakeMcpCaller:
 
 
 class BitrefillMcpCatalogTests(unittest.TestCase):
+    def test_search_accepts_production_mcp_product_shape(self):
+        caller = FakeMcpCaller(
+            [
+                {
+                    "products": [
+                        {
+                            "_id": "steam-usa",
+                            "slug": "steam-usa",
+                            "name": "Steam USD",
+                            "countries": [],
+                            "currency": "USD",
+                            "categories": ["games", "game-stores"],
+                            "type": "giftcards",
+                            "in_stock": True,
+                        }
+                    ],
+                    "found": 1,
+                }
+            ]
+        )
+        client = McpBitrefillClient(api_key="key_123", call_tool=caller)
+
+        products = client.search_products(
+            query="Steam",
+            country="US",
+            category="games",
+            product_type="gift_card",
+            include_test_products=False,
+        )
+
+        self.assertEqual(len(products), 1)
+        self.assertEqual(products[0]["productId"], "steam-usa")
+        self.assertEqual(products[0]["country"], "US")
+        self.assertEqual(products[0]["category"], "games")
+        self.assertEqual(products[0]["productType"], "gift_card")
+
+    def test_search_does_not_assign_requested_country_to_other_country_product(self):
+        caller = FakeMcpCaller(
+            [
+                {
+                    "products": [
+                        {
+                            "_id": "bitrefill-esim-europe",
+                            "name": "Europe eSIM",
+                            "countries": ["AT", "DE", "CZ"],
+                            "currency": "USD",
+                            "categories": ["esim"],
+                            "type": "esims",
+                        }
+                    ]
+                }
+            ]
+        )
+        client = McpBitrefillClient(api_key="key_123", call_tool=caller)
+
+        products = client.search_products(
+            query="eSIM",
+            country="US",
+            category="esim",
+            product_type="esim",
+            include_test_products=False,
+        )
+
+        self.assertEqual(products, [])
+
+    def test_details_use_production_mcp_payment_price(self):
+        caller = FakeMcpCaller(
+            [
+                {
+                    "id": "steam-usa",
+                    "name": "Steam USD",
+                    "country_code": "US",
+                    "currency": "USD",
+                    "categories": ["games", "game-stores"],
+                    "recipient_type": "none",
+                    "packages": [
+                        {
+                            "package_value": "50",
+                            "package_currency": "USD",
+                            "payment_price": "54.06",
+                            "payment_currency": "USD",
+                        }
+                    ],
+                }
+            ]
+        )
+        client = McpBitrefillClient(
+            api_key="key_123",
+            max_purchase_usd="60.00",
+            call_tool=caller,
+        )
+
+        details = client.get_product_details(product_id="steam-usa", country="US")
+
+        self.assertEqual(details["category"], "games")
+        self.assertEqual(
+            details["packages"][0],
+            {
+                "packageId": "steam-usa<&>50",
+                "value": "50",
+                "priceUsd": "54.06",
+            },
+        )
+
     def test_search_uses_mcp_and_normalizes_products(self):
         caller = FakeMcpCaller(
             [
