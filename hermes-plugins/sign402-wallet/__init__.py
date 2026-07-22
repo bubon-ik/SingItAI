@@ -51,6 +51,7 @@ _PHOTON_MAX_RESPONSE_BYTES = 256 * 1024
 _USER_ACCESS_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 _USER_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 5 * 60
 _USER_ACCESS_TOKEN_CACHE_MAX_USERS = 4096
+_TELEGRAM_OPERATION_MAX_USERS = 4096
 _TELEGRAM_PAID_TOOL_STARTED_MESSAGE = (
     "Sign402 purchase started. Approve it in your selected approval channel; "
     "I'll post the result here."
@@ -185,6 +186,9 @@ _PHOTON_USER_PHONE_CACHE: dict[str, str] = {}
 _PHOTON_REGISTRATION_ATTEMPTS_BY_USER: dict[str, list[float]] = {}
 _PHOTON_REGISTRATION_ATTEMPTS_GLOBAL: list[float] = []
 _PHOTON_REGISTRATION_ATTEMPTS_LOCK = threading.RLock()
+_TELEGRAM_OPERATION_GENERATIONS: dict[str, int] = {}
+_TELEGRAM_ACTIVE_OPERATIONS: dict[str, tuple[int, str]] = {}
+_TELEGRAM_OPERATION_LOCK = threading.RLock()
 
 
 def _default_background_runner(callback: Callable[[], None]) -> None:
@@ -946,6 +950,7 @@ def _handle_telegram_global_navigation_message(*, event, source, gateway):
     text = str(getattr(event, "text", "") or "").strip()
     if _normalize_button_text(text) != "back":
         return None
+    _invalidate_telegram_operation(str(identity.user_id))
     _BITREFILL_SESSIONS.pop(str(identity.user_id), None)
     _WITHDRAW_SESSIONS.pop(str(identity.user_id), None)
     _IMESSAGE_CONNECT_SESSIONS.pop(str(identity.user_id), None)
@@ -1222,9 +1227,10 @@ def _handle_telegram_bitrefill_wizard_message(*, event, source, gateway):
     text = str(getattr(event, "text", "") or "").strip()
     if not text:
         return None
-    normalized = _normalize_button_text(text)
+    normalized = _canonical_button_text(text)
     stage = str(session.get("stage") or "")
     if normalized == "back":
+        _invalidate_telegram_operation(user_id)
         if stage in {"select-category", "select-product"} and session.get("source") == "catalog":
             if stage == "select-product":
                 _send_bitrefill_category_prompt(identity=identity, source=source, gateway=gateway)
@@ -1972,7 +1978,8 @@ def _handle_telegram_withdraw_wizard_message(*, event, source, gateway):
         return None
 
     text = str(getattr(event, "text", "") or "").strip()
-    if _normalize_button_text(text) == "back":
+    if _canonical_button_text(text) == "back":
+        _invalidate_telegram_operation(user_id)
         _WITHDRAW_SESSIONS.pop(user_id, None)
         _send_fixed_reply(
             gateway,
@@ -2821,6 +2828,69 @@ def _telegram_public_command(event, source) -> str | None:
 
 def _normalize_button_text(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "").strip().lower().replace("_", " "))
+
+
+def _canonical_button_text(text: str) -> str:
+    normalized_lines = [
+        _normalize_button_text(line)
+        for line in str(text or "").splitlines()
+        if str(line).strip()
+    ]
+    if normalized_lines and all(
+        line == normalized_lines[0] for line in normalized_lines
+    ):
+        return normalized_lines[0]
+    return _normalize_button_text(text)
+
+
+def _reserve_telegram_operation(user_id: str, action: str) -> int | None:
+    user_key = str(user_id)
+    action_key = str(action)
+    with _TELEGRAM_OPERATION_LOCK:
+        if user_key in _TELEGRAM_ACTIVE_OPERATIONS:
+            return None
+        if (
+            user_key not in _TELEGRAM_OPERATION_GENERATIONS
+            and len(_TELEGRAM_OPERATION_GENERATIONS) >= _TELEGRAM_OPERATION_MAX_USERS
+        ):
+            for tracked_user_id in tuple(_TELEGRAM_OPERATION_GENERATIONS):
+                if tracked_user_id not in _TELEGRAM_ACTIVE_OPERATIONS:
+                    _TELEGRAM_OPERATION_GENERATIONS.pop(tracked_user_id, None)
+                    break
+            if len(_TELEGRAM_OPERATION_GENERATIONS) >= _TELEGRAM_OPERATION_MAX_USERS:
+                return None
+        generation = _TELEGRAM_OPERATION_GENERATIONS.get(user_key, 0) + 1
+        _TELEGRAM_OPERATION_GENERATIONS[user_key] = generation
+        _TELEGRAM_ACTIVE_OPERATIONS[user_key] = (generation, action_key)
+        return generation
+
+
+def _telegram_operation_is_current(user_id: str, generation: int) -> bool:
+    user_key = str(user_id)
+    with _TELEGRAM_OPERATION_LOCK:
+        return (
+            _TELEGRAM_OPERATION_GENERATIONS.get(user_key) == int(generation)
+            and _TELEGRAM_ACTIVE_OPERATIONS.get(user_key, (None, ""))[0]
+            == int(generation)
+        )
+
+
+def _finish_telegram_operation(user_id: str, generation: int) -> bool:
+    user_key = str(user_id)
+    with _TELEGRAM_OPERATION_LOCK:
+        if not _telegram_operation_is_current(user_key, generation):
+            return False
+        _TELEGRAM_ACTIVE_OPERATIONS.pop(user_key, None)
+        return True
+
+
+def _invalidate_telegram_operation(user_id: str) -> None:
+    user_key = str(user_id)
+    with _TELEGRAM_OPERATION_LOCK:
+        _TELEGRAM_OPERATION_GENERATIONS[user_key] = (
+            _TELEGRAM_OPERATION_GENERATIONS.get(user_key, 0) + 1
+        )
+        _TELEGRAM_ACTIVE_OPERATIONS.pop(user_key, None)
 
 
 def _telegram_command_args(event) -> str:

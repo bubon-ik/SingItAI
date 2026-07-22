@@ -1583,6 +1583,49 @@ class PluginRegistrationTests(unittest.TestCase):
             ("gift", "1", "US", "USDC"),
         )
 
+    def test_bitrefill_batched_double_tap_is_one_button_press(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        plugin._background_runner = lambda callback: callback()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        def dispatch(text):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    text,
+                    "1045618308",
+                    username="AlpskyKnedlik",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(dispatch("Buy Bitrefill"), plugin._SKIP_RESULT)
+        before = len(gateway.adapters["telegram"].sent)
+
+        self.assertEqual(
+            dispatch("Change Country\nChange Country"),
+            plugin._SKIP_RESULT,
+        )
+
+        self.assertEqual(len(gateway.adapters["telegram"].sent), before + 1)
+        self.assertIn(
+            "Send a two-letter country code",
+            gateway.adapters["telegram"].sent[-1][1],
+        )
+
+    def test_telegram_operation_reservation_is_single_flight(self):
+        plugin = load_plugin()
+
+        first = plugin._reserve_telegram_operation("user-1", "balance")
+
+        self.assertIsInstance(first, int)
+        self.assertIsNone(
+            plugin._reserve_telegram_operation("user-1", "balance")
+        )
+
     def test_bitrefill_wizard_requires_token_button_before_purchase(self):
         plugin = load_plugin()
         context = FakeContext()
