@@ -1040,20 +1040,28 @@ def _start_telegram_background_operation(
     started_text: str,
     source,
     gateway,
-    work: Callable[[], tuple[str, dict | None]],
+    work: Callable[[int], tuple[str, dict | None]],
+    prepare: Callable[[int], None] | None = None,
+    recover: Callable[[int], None] | None = None,
 ) -> dict:
     user_id = str(identity.user_id)
     generation = _reserve_telegram_operation(user_id, action)
     if generation is None:
         return dict(_SKIP_RESULT)
+    if prepare is not None:
+        prepare(generation)
     _send_fixed_reply(gateway, source, started_text)
 
     def execute() -> None:
         try:
-            text, reply_markup = work()
+            text, reply_markup = work(generation)
         except GatewayClientError as exc:
+            if recover is not None and _telegram_operation_is_current(user_id, generation):
+                recover(generation)
             text, reply_markup = exc.user_message, None
         except Exception as exc:
+            if recover is not None and _telegram_operation_is_current(user_id, generation):
+                recover(generation)
             logger.warning(
                 "Unexpected Sign402 Telegram background action failure action=%s error=%s",
                 action,
@@ -1221,7 +1229,11 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
             started_text=_TELEGRAM_PUBLIC_COMMAND_STARTED_MESSAGES[command],
             source=source,
             gateway=gateway,
-            work=lambda: _telegram_public_command_result(command, args, identity),
+            work=lambda _generation: _telegram_public_command_result(
+                command,
+                args,
+                identity,
+            ),
         )
     try:
         if command == "start":
@@ -1429,6 +1441,73 @@ def _handle_telegram_bitrefill_wizard_message(*, event, source, gateway):
     stage = str(session.get("stage") or "")
     if normalized == "back":
         _invalidate_telegram_operation(user_id)
+        if stage == "loading-catalog":
+            _send_bitrefill_category_prompt(
+                identity=identity,
+                source=source,
+                gateway=gateway,
+            )
+            return dict(_SKIP_RESULT)
+        if stage == "loading-search":
+            country = _bitrefill_country(user_id)
+            _BITREFILL_SESSIONS[user_id] = {
+                "stage": "awaiting-search",
+                "country": country,
+            }
+            _send_fixed_reply(
+                gateway,
+                source,
+                f"What do you want to buy in {country}?\n\nExample: amazon, playstation, mobile",
+                reply_markup=_reply_keyboard((("Change Country", "Back"),)),
+            )
+            return dict(_SKIP_RESULT)
+        if stage in {"loading-product", "loading-payment-tokens"}:
+            previous = session.get("returnSession")
+            if isinstance(previous, dict):
+                _BITREFILL_SESSIONS[user_id] = previous
+            else:
+                _open_bitrefill_menu(identity=identity, source=source, gateway=gateway)
+                return dict(_SKIP_RESULT)
+            previous_stage = str(previous.get("stage") or "")
+            if previous_stage == "select-product" and previous.get("source") == "catalog":
+                products = _normalize_bitrefill_products(previous.get("products"))
+                _send_fixed_reply(
+                    gateway,
+                    source,
+                    _format_bitrefill_catalog_page(
+                        str(previous.get("country") or _bitrefill_country(user_id)),
+                        str(previous.get("category") or "all"),
+                        int(previous.get("start") or 0),
+                        products,
+                    ),
+                    reply_markup=_bitrefill_catalog_reply_keyboard(
+                        len(products),
+                        has_previous=bool(previous.get("hasPrevious")),
+                        has_next=bool(previous.get("hasNext")),
+                    ),
+                )
+            elif previous_stage == "select-product":
+                products = _normalize_bitrefill_products(previous.get("products"))
+                _send_fixed_reply(
+                    gateway,
+                    source,
+                    _format_bitrefill_search_results(
+                        str(previous.get("query") or "products"),
+                        str(previous.get("country") or _bitrefill_country(user_id)),
+                        products,
+                    ),
+                    reply_markup=_numbered_reply_keyboard(len(products)),
+                )
+            elif previous_stage == "select-package":
+                packages = _normalize_bitrefill_packages(previous.get("packages"))
+                product = previous.get("product") if isinstance(previous.get("product"), dict) else {}
+                _send_fixed_reply(
+                    gateway,
+                    source,
+                    _format_bitrefill_packages(product, packages),
+                    reply_markup=_numbered_reply_keyboard(len(packages)),
+                )
+            return dict(_SKIP_RESULT)
         if stage in {"select-category", "select-product"} and session.get("source") == "catalog":
             if stage == "select-product":
                 _send_bitrefill_category_prompt(identity=identity, source=source, gateway=gateway)
@@ -1444,13 +1523,16 @@ def _handle_telegram_bitrefill_wizard_message(*, event, source, gateway):
             )
         return dict(_SKIP_RESULT)
     if normalized == "change country":
+        _invalidate_telegram_operation(user_id)
         _BITREFILL_SESSIONS[user_id] = {"stage": "awaiting-country"}
         _send_bitrefill_country_prompt(gateway, source)
         return dict(_SKIP_RESULT)
     if normalized == "browse catalog":
+        _invalidate_telegram_operation(user_id)
         _send_bitrefill_category_prompt(identity=identity, source=source, gateway=gateway)
         return dict(_SKIP_RESULT)
     if normalized == "search products":
+        _invalidate_telegram_operation(user_id)
         country = _bitrefill_country(user_id)
         _BITREFILL_SESSIONS[user_id] = {"stage": "awaiting-search", "country": country}
         _send_fixed_reply(
@@ -1459,6 +1541,8 @@ def _handle_telegram_bitrefill_wizard_message(*, event, source, gateway):
             f"What do you want to buy in {country}?\n\nExample: amazon, playstation, mobile",
             reply_markup=_reply_keyboard((("Change Country", "Back"),)),
         )
+        return dict(_SKIP_RESULT)
+    if stage.startswith("loading-") or stage == "purchasing":
         return dict(_SKIP_RESULT)
 
     try:
@@ -1600,7 +1684,8 @@ def _handle_bitrefill_country_input(*, identity: TelegramIdentity, text: str, so
 
 
 def _handle_bitrefill_search_input(*, identity: TelegramIdentity, query: str, source, gateway):
-    country = _bitrefill_country(str(identity.user_id))
+    user_id = str(identity.user_id)
+    country = _bitrefill_country(user_id)
     clean_query = str(query or "").strip()
     if len(clean_query) < 2:
         _send_fixed_reply(
@@ -1610,39 +1695,63 @@ def _handle_bitrefill_search_input(*, identity: TelegramIdentity, query: str, so
             reply_markup=_reply_keyboard((("Change Country", "Back"),)),
         )
         return dict(_SKIP_RESULT)
-    client = _client_factory()
-    result = client.search_bitrefill_products(
-        query=clean_query,
-        country=country,
-        search_all_countries=True,
-        include_test_products=False,
-    )
-    products = _normalize_bitrefill_products(result.get("products"))
-    if not products:
-        _BITREFILL_SESSIONS[str(identity.user_id)] = {
+
+    def prepare(generation: int) -> None:
+        _BITREFILL_SESSIONS[user_id] = {
+            "stage": "loading-search",
+            "country": country,
+            "query": clean_query,
+            "operationGeneration": generation,
+        }
+
+    def work(generation: int) -> tuple[str, dict | None]:
+        client = _client_factory()
+        result = client.search_bitrefill_products(
+            query=clean_query,
+            country=country,
+            search_all_countries=True,
+            include_test_products=False,
+        )
+        products = _normalize_bitrefill_products(result.get("products"))
+        if not _telegram_operation_is_current(user_id, generation):
+            return "", None
+        if not products:
+            _BITREFILL_SESSIONS[user_id] = {
+                "stage": "awaiting-search",
+                "country": country,
+            }
+            return (
+                f"No Bitrefill products found for \"{clean_query}\" in {country}.\n\nTry another search.",
+                _reply_keyboard((("Change Country", "Back"),)),
+            )
+        limited = products[:_BITREFILL_MAX_SEARCH_RESULTS]
+        _BITREFILL_SESSIONS[user_id] = {
+            "stage": "select-product",
+            "country": country,
+            "query": clean_query,
+            "products": limited,
+        }
+        return (
+            _format_bitrefill_search_results(clean_query, country, limited),
+            _numbered_reply_keyboard(len(limited)),
+        )
+
+    def recover(_generation: int) -> None:
+        _BITREFILL_SESSIONS[user_id] = {
             "stage": "awaiting-search",
             "country": country,
         }
-        _send_fixed_reply(
-            gateway,
-            source,
-            f"No Bitrefill products found for \"{clean_query}\" in {country}.\n\nTry another search.",
-            reply_markup=_reply_keyboard((("Change Country", "Back"),)),
-        )
-        return dict(_SKIP_RESULT)
-    limited = products[:_BITREFILL_MAX_SEARCH_RESULTS]
-    _BITREFILL_SESSIONS[str(identity.user_id)] = {
-        "stage": "select-product",
-        "country": country,
-        "products": limited,
-    }
-    _send_fixed_reply(
-        gateway,
-        source,
-        _format_bitrefill_search_results(clean_query, country, limited),
-        reply_markup=_numbered_reply_keyboard(len(limited)),
+
+    return _start_telegram_background_operation(
+        identity=identity,
+        action="bitrefill:search",
+        started_text="Searching products…",
+        source=source,
+        gateway=gateway,
+        work=work,
+        prepare=prepare,
+        recover=recover,
     )
-    return dict(_SKIP_RESULT)
 
 
 def _handle_bitrefill_category_input(*, identity: TelegramIdentity, text: str, source, gateway):
@@ -1702,57 +1811,85 @@ def _send_bitrefill_catalog_page(
     source,
     gateway,
 ):
-    country = _bitrefill_country(str(identity.user_id))
-    client = _client_factory()
-    result = client.list_bitrefill_products(
-        country=country,
-        category=category,
-        start=start,
-        limit=_BITREFILL_CATALOG_PAGE_SIZE,
-        include_international=True,
-        include_test_products=False,
-    )
-    products = _normalize_bitrefill_products(result.get("products"))
-    has_previous = bool(result.get("hasPrevious"))
-    has_next = bool(result.get("hasNext"))
-    if not products:
-        _BITREFILL_SESSIONS[str(identity.user_id)] = {
+    user_id = str(identity.user_id)
+    country = _bitrefill_country(user_id)
+
+    def prepare(generation: int) -> None:
+        _BITREFILL_SESSIONS[user_id] = {
+            "stage": "loading-catalog",
+            "source": "catalog",
+            "country": country,
+            "category": category,
+            "start": start,
+            "operationGeneration": generation,
+        }
+
+    def work(generation: int) -> tuple[str, dict | None]:
+        client = _client_factory()
+        result = client.list_bitrefill_products(
+            country=country,
+            category=category,
+            start=start,
+            limit=_BITREFILL_CATALOG_PAGE_SIZE,
+            include_international=True,
+            include_test_products=False,
+        )
+        products = _normalize_bitrefill_products(result.get("products"))
+        if not _telegram_operation_is_current(user_id, generation):
+            return "", None
+        has_previous = bool(result.get("hasPrevious"))
+        has_next = bool(result.get("hasNext"))
+        if not products:
+            _BITREFILL_SESSIONS[user_id] = {
+                "stage": "select-category",
+                "source": "catalog",
+                "country": country,
+            }
+            return (
+                "No products found in this category. Choose another category.",
+                _reply_keyboard(_BITREFILL_CATEGORY_BUTTONS),
+            )
+        _BITREFILL_SESSIONS[user_id] = {
+            "stage": "select-product",
+            "source": "catalog",
+            "country": country,
+            "category": category,
+            "start": start,
+            "hasPrevious": has_previous,
+            "hasNext": has_next,
+            "products": products,
+        }
+        return (
+            _format_bitrefill_catalog_page(country, category, start, products),
+            _bitrefill_catalog_reply_keyboard(
+                len(products),
+                has_previous=has_previous,
+                has_next=has_next,
+            ),
+        )
+
+    def recover(_generation: int) -> None:
+        _BITREFILL_SESSIONS[user_id] = {
             "stage": "select-category",
             "source": "catalog",
             "country": country,
         }
-        _send_fixed_reply(
-            gateway,
-            source,
-            "No products found in this category. Choose another category.",
-            reply_markup=_reply_keyboard(_BITREFILL_CATEGORY_BUTTONS),
-        )
-        return dict(_SKIP_RESULT)
-    _BITREFILL_SESSIONS[str(identity.user_id)] = {
-        "stage": "select-product",
-        "source": "catalog",
-        "country": country,
-        "category": category,
-        "start": start,
-        "hasPrevious": has_previous,
-        "hasNext": has_next,
-        "products": products,
-    }
-    _send_fixed_reply(
-        gateway,
-        source,
-        _format_bitrefill_catalog_page(country, category, start, products),
-        reply_markup=_bitrefill_catalog_reply_keyboard(
-            len(products),
-            has_previous=has_previous,
-            has_next=has_next,
-        ),
+
+    return _start_telegram_background_operation(
+        identity=identity,
+        action="bitrefill:catalog",
+        started_text="Loading catalog…",
+        source=source,
+        gateway=gateway,
+        work=work,
+        prepare=prepare,
+        recover=recover,
     )
-    return dict(_SKIP_RESULT)
 
 
 def _handle_bitrefill_product_choice(*, identity: TelegramIdentity, text: str, source, gateway):
-    session = _BITREFILL_SESSIONS.get(str(identity.user_id), {})
+    user_id = str(identity.user_id)
+    session = _BITREFILL_SESSIONS.get(user_id, {})
     products = session.get("products") if isinstance(session.get("products"), list) else []
     index = _parse_choice_index(text, len(products))
     if index is None:
@@ -1766,33 +1903,59 @@ def _handle_bitrefill_product_choice(*, identity: TelegramIdentity, text: str, s
     product = products[index]
     country = str(product.get("country") or session.get("country") or "").strip().upper()
     if not re.fullmatch(r"[A-Z]{2}", country):
-        country = _bitrefill_country(str(identity.user_id))
+        country = _bitrefill_country(user_id)
     product_id = str(product.get("productId") or product.get("id") or "").strip()
-    client = _client_factory()
-    details = client.get_bitrefill_product(product_id=product_id, country=country)
-    packages = _normalize_bitrefill_packages(details.get("packages"))
-    if not packages:
-        _send_fixed_reply(
-            gateway,
-            source,
-            "This Bitrefill product has no available packages right now. Try another product.",
-            reply_markup=_reply_keyboard((("Search Products", "Back"),)),
+    return_session = dict(session)
+
+    def prepare(generation: int) -> None:
+        _BITREFILL_SESSIONS[user_id] = {
+            "stage": "loading-product",
+            "country": country,
+            "productId": product_id,
+            "returnSession": return_session,
+            "operationGeneration": generation,
+        }
+
+    def work(generation: int) -> tuple[str, dict | None]:
+        client = _client_factory()
+        details = client.get_bitrefill_product(
+            product_id=product_id,
+            country=country,
         )
-        return dict(_SKIP_RESULT)
-    limited_packages = packages[:_BITREFILL_MAX_PACKAGES]
-    _BITREFILL_SESSIONS[str(identity.user_id)] = {
-        "stage": "select-package",
-        "country": country,
-        "product": details,
-        "packages": limited_packages,
-    }
-    _send_fixed_reply(
-        gateway,
-        source,
-        _format_bitrefill_packages(details, limited_packages),
-        reply_markup=_numbered_reply_keyboard(len(limited_packages)),
+        packages = _normalize_bitrefill_packages(details.get("packages"))
+        if not _telegram_operation_is_current(user_id, generation):
+            return "", None
+        if not packages:
+            _BITREFILL_SESSIONS[user_id] = return_session
+            return (
+                "This Bitrefill product has no available packages right now. Try another product.",
+                _reply_keyboard((("Search Products", "Back"),)),
+            )
+        limited_packages = packages[:_BITREFILL_MAX_PACKAGES]
+        _BITREFILL_SESSIONS[user_id] = {
+            "stage": "select-package",
+            "country": country,
+            "product": details,
+            "packages": limited_packages,
+        }
+        return (
+            _format_bitrefill_packages(details, limited_packages),
+            _numbered_reply_keyboard(len(limited_packages)),
+        )
+
+    def recover(_generation: int) -> None:
+        _BITREFILL_SESSIONS[user_id] = return_session
+
+    return _start_telegram_background_operation(
+        identity=identity,
+        action="bitrefill:product",
+        started_text="Loading product…",
+        source=source,
+        gateway=gateway,
+        work=work,
+        prepare=prepare,
+        recover=recover,
     )
-    return dict(_SKIP_RESULT)
 
 
 def _handle_bitrefill_package_choice(*, identity: TelegramIdentity, text: str, source, gateway):
@@ -1890,38 +2053,59 @@ def _open_bitrefill_payment_token_selection(
     gateway,
 ) -> None:
     user_id = str(identity.user_id)
-    try:
+    return_session = dict(_BITREFILL_SESSIONS.get(user_id, {}))
+
+    def prepare(generation: int) -> None:
+        _BITREFILL_SESSIONS[user_id] = {
+            "stage": "loading-payment-tokens",
+            "country": country,
+            "product": product,
+            "package": package,
+            "recipient": dict(recipient or {}),
+            "returnSession": return_session,
+            "operationGeneration": generation,
+        }
+
+    def work(generation: int) -> tuple[str, dict | None]:
         client = _client_factory()
         user_access_token = _user_access_token(client, identity)
         result = client.withdraw_tokens(identity, user_access_token=user_access_token)
-    except GatewayClientError as exc:
-        _send_fixed_reply(gateway, source, exc.user_message)
-        return
-    tokens = _normalize_withdraw_tokens(
-        result.get("tokens") if isinstance(result, dict) else []
-    )
-    if not tokens:
-        _BITREFILL_SESSIONS.pop(user_id, None)
-        _send_fixed_reply(
-            gateway,
-            source,
-            "No funded Base wallet tokens are available for this Bitrefill purchase.",
-            reply_markup=_telegram_main_menu_reply_markup(),
+        tokens = _normalize_withdraw_tokens(
+            result.get("tokens") if isinstance(result, dict) else []
         )
-        return
-    _BITREFILL_SESSIONS[user_id] = {
-        "stage": "select-payment-token",
-        "country": country,
-        "product": product,
-        "package": package,
-        "recipient": dict(recipient or {}),
-        "paymentTokens": tokens,
-    }
-    _send_fixed_reply(
-        gateway,
-        source,
-        _format_bitrefill_payment_tokens(tokens),
-        reply_markup=_withdraw_reply_keyboard(tokens),
+        if not _telegram_operation_is_current(user_id, generation):
+            return "", None
+        if not tokens:
+            _BITREFILL_SESSIONS.pop(user_id, None)
+            return (
+                "No funded Base wallet tokens are available for this Bitrefill purchase.",
+                _telegram_main_menu_reply_markup(),
+            )
+        _BITREFILL_SESSIONS[user_id] = {
+            "stage": "select-payment-token",
+            "country": country,
+            "product": product,
+            "package": package,
+            "recipient": dict(recipient or {}),
+            "paymentTokens": tokens,
+        }
+        return (
+            _format_bitrefill_payment_tokens(tokens),
+            _withdraw_reply_keyboard(tokens),
+        )
+
+    def recover(_generation: int) -> None:
+        _BITREFILL_SESSIONS[user_id] = return_session
+
+    _start_telegram_background_operation(
+        identity=identity,
+        action="bitrefill:payment-tokens",
+        started_text="Loading payment options…",
+        source=source,
+        gateway=gateway,
+        work=work,
+        prepare=prepare,
+        recover=recover,
     )
 
 
@@ -1966,21 +2150,37 @@ def _start_bitrefill_purchase_from_wizard(
     source,
     gateway,
 ) -> None:
+    user_id = str(identity.user_id)
+    generation = _reserve_telegram_operation(user_id, "bitrefill:purchase")
+    if generation is None:
+        return
     product_id = str(product.get("productId") or product.get("id") or "").strip()
     package_id = str(package.get("packageId") or package.get("id") or "").strip()
+    previous_session = dict(_BITREFILL_SESSIONS.get(user_id, {}))
+    _BITREFILL_SESSIONS[user_id] = {
+        "stage": "purchasing",
+        "previousSession": previous_session,
+        "operationGeneration": generation,
+    }
     _send_fixed_reply(gateway, source, _TELEGRAM_BITREFILL_STARTED_MESSAGE)
-    _run_in_background(
-        lambda: _execute_telegram_bitrefill_request(
-            product_id=product_id,
-            package_id=package_id,
-            country=country,
-            recipient=recipient,
-            payment_token=payment_token,
-            identity=identity,
-            source=source,
-            gateway=gateway,
+    try:
+        _run_in_background(
+            lambda: _execute_telegram_bitrefill_request(
+                product_id=product_id,
+                package_id=package_id,
+                country=country,
+                recipient=recipient,
+                payment_token=payment_token,
+                identity=identity,
+                source=source,
+                gateway=gateway,
+                operation_generation=generation,
+            )
         )
-    )
+    except Exception:
+        _finish_telegram_operation(user_id, generation)
+        _BITREFILL_SESSIONS[user_id] = previous_session
+        raise
 
 
 def _normalize_bitrefill_products(raw_products) -> list[dict]:
@@ -2130,39 +2330,51 @@ def _handle_telegram_paid_tool_request(*, tool: str, source, gateway):
 
 def _open_withdraw_flow(*, identity: TelegramIdentity, source, gateway) -> None:
     user_id = str(identity.user_id)
-    try:
+
+    def prepare(generation: int) -> None:
+        _WITHDRAW_SESSIONS[user_id] = {
+            "step": "loading-tokens",
+            "operationGeneration": generation,
+        }
+
+    def work(generation: int) -> tuple[str, dict | None]:
         client = _client_factory()
         token = _user_access_token(client, identity)
         result = client.withdraw_tokens(identity, user_access_token=token)
-    except GatewayClientError as exc:
-        _send_fixed_reply(gateway, source, exc.user_message)
-        return
-    except Exception as exc:
-        logger.warning("Unexpected Sign402 withdraw token lookup error=%s", type(exc).__name__)
-        _send_fixed_reply(gateway, source, _UNEXPECTED_ERROR_MESSAGE)
-        return
-
-    tokens = _normalize_withdraw_tokens(result.get("tokens") if isinstance(result, dict) else [])
-    if not tokens:
-        text = (
-            str(result.get("telegramText") or "").strip()
-            if isinstance(result, dict)
-            else ""
+        tokens = _normalize_withdraw_tokens(
+            result.get("tokens") if isinstance(result, dict) else []
         )
-        _send_fixed_reply(
-            gateway,
-            source,
-            text or "No Base asset balances are available to withdraw yet.",
-            reply_markup=_telegram_main_menu_reply_markup(),
+        if not _telegram_operation_is_current(user_id, generation):
+            return "", None
+        if not tokens:
+            text = (
+                str(result.get("telegramText") or "").strip()
+                if isinstance(result, dict)
+                else ""
+            )
+            _WITHDRAW_SESSIONS.pop(user_id, None)
+            return (
+                text or "No Base asset balances are available to withdraw yet.",
+                _telegram_main_menu_reply_markup(),
+            )
+        _WITHDRAW_SESSIONS[user_id] = {"step": "token", "tokens": tokens}
+        return (
+            _format_withdraw_tokens(tokens),
+            _withdraw_reply_keyboard(tokens),
         )
-        return
 
-    _WITHDRAW_SESSIONS[user_id] = {"step": "token", "tokens": tokens}
-    _send_fixed_reply(
-        gateway,
-        source,
-        _format_withdraw_tokens(tokens),
-        reply_markup=_withdraw_reply_keyboard(tokens),
+    def recover(_generation: int) -> None:
+        _WITHDRAW_SESSIONS.pop(user_id, None)
+
+    _start_telegram_background_operation(
+        identity=identity,
+        action="withdraw:tokens",
+        started_text="Loading assets…",
+        source=source,
+        gateway=gateway,
+        work=work,
+        prepare=prepare,
+        recover=recover,
     )
 
 
@@ -2506,7 +2718,9 @@ def _execute_telegram_bitrefill_request(
     identity: TelegramIdentity,
     source,
     gateway,
+    operation_generation: int | None = None,
 ) -> None:
+    user_id = str(identity.user_id)
     try:
         client = _client_factory()
         token = _user_access_token(client, identity)
@@ -2519,21 +2733,29 @@ def _execute_telegram_bitrefill_request(
             payment_token=payment_token,
             user_access_token=token,
         )
-        _BITREFILL_SESSIONS.pop(str(identity.user_id), None)
+        _BITREFILL_SESSIONS.pop(user_id, None)
         _send_fixed_reply(gateway, source, text)
     except GatewayClientError as exc:
+        session = _BITREFILL_SESSIONS.get(user_id, {})
+        previous_session = (
+            session.get("previousSession")
+            if session.get("stage") == "purchasing"
+            else session
+        )
+        if isinstance(previous_session, dict):
+            _BITREFILL_SESSIONS[user_id] = previous_session
         _send_fixed_reply(
             gateway,
             source,
             exc.user_message,
             reply_markup=_withdraw_reply_keyboard(
                 _normalize_withdraw_tokens(
-                    _BITREFILL_SESSIONS.get(str(identity.user_id), {}).get(
+                    _BITREFILL_SESSIONS.get(user_id, {}).get(
                         "paymentTokens"
                     )
                 )
             )
-            if _BITREFILL_SESSIONS.get(str(identity.user_id), {}).get("stage")
+            if _BITREFILL_SESSIONS.get(user_id, {}).get("stage")
             == "select-payment-token"
             else _telegram_main_menu_reply_markup(),
         )
@@ -2543,6 +2765,9 @@ def _execute_telegram_bitrefill_request(
             type(exc).__name__,
         )
         _send_fixed_reply(gateway, source, _UNEXPECTED_ERROR_MESSAGE)
+    finally:
+        if operation_generation is not None:
+            _finish_telegram_operation(user_id, operation_generation)
 
 
 def _execute_telegram_llm_request(

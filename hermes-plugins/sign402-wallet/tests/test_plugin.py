@@ -1665,6 +1665,116 @@ class PluginRegistrationTests(unittest.TestCase):
             gateway.adapters["telegram"].sent[-1][1],
         )
 
+    def test_bitrefill_catalog_load_is_background_single_flight_and_cancellable(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        callbacks = []
+        plugin._client_factory = lambda: client
+        plugin._background_runner = callbacks.append
+        plugin.register(context)
+        callbacks.clear()
+        gateway = FakeGateway(adapter_key="telegram")
+
+        def dispatch(text):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    text,
+                    "1045618308",
+                    username="AlpskyKnedlik",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        dispatch("Buy Bitrefill")
+        dispatch("Browse Catalog")
+
+        self.assertEqual(dispatch("All"), plugin._SKIP_RESULT)
+        self.assertEqual(client.bitrefill_list_calls, [])
+        self.assertEqual(len(callbacks), 1)
+        self.assertIn("Loading catalog", gateway.adapters["telegram"].sent[-1][1])
+
+        self.assertEqual(dispatch("All"), plugin._SKIP_RESULT)
+        self.assertEqual(len(callbacks), 1)
+
+        self.assertEqual(dispatch("Back"), plugin._SKIP_RESULT)
+        self.assertIn(
+            "Choose a Bitrefill category",
+            gateway.adapters["telegram"].sent[-1][1],
+        )
+        sent_before_completion = list(gateway.adapters["telegram"].sent)
+
+        callbacks[0]()
+
+        self.assertEqual(len(client.bitrefill_list_calls), 1)
+        self.assertEqual(
+            gateway.adapters["telegram"].sent,
+            sent_before_completion,
+        )
+
+    def test_bitrefill_search_details_and_payment_options_are_background_reads(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        callbacks = []
+        plugin._client_factory = lambda: client
+        plugin._background_runner = callbacks.append
+        plugin.register(context)
+        callbacks.clear()
+        gateway = FakeGateway(adapter_key="telegram")
+
+        def dispatch(text):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    text,
+                    "1045618308",
+                    username="AlpskyKnedlik",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        dispatch("Buy Bitrefill")
+        dispatch("Search Products")
+
+        self.assertEqual(dispatch("amazon"), plugin._SKIP_RESULT)
+        self.assertEqual(client.bitrefill_search_calls, [])
+        self.assertIn("Searching products", gateway.adapters["telegram"].sent[-1][1])
+        callbacks.pop(0)()
+        self.assertEqual(len(client.bitrefill_search_calls), 1)
+
+        self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
+        self.assertEqual(client.bitrefill_product_calls, [])
+        self.assertIn("Loading product", gateway.adapters["telegram"].sent[-1][1])
+        callbacks.pop(0)()
+        self.assertEqual(len(client.bitrefill_product_calls), 1)
+
+        self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
+        self.assertEqual(client.withdraw_tokens_calls, [])
+        self.assertIn(
+            "Loading payment options",
+            gateway.adapters["telegram"].sent[-1][1],
+        )
+        callbacks.pop(0)()
+        self.assertEqual(len(client.withdraw_tokens_calls), 1)
+        self.assertIn(
+            "Choose a token to pay with",
+            gateway.adapters["telegram"].sent[-1][1],
+        )
+
+        self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
+        self.assertEqual(client.bitrefill_calls, [])
+        self.assertEqual(len(callbacks), 1)
+
+        self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
+        self.assertEqual(len(callbacks), 1)
+
+        callbacks.pop(0)()
+        self.assertEqual(len(client.bitrefill_calls), 1)
+
     def test_telegram_operation_reservation_is_single_flight(self):
         plugin = load_plugin()
 
@@ -1925,6 +2035,42 @@ class PluginRegistrationTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_withdraw_asset_lookup_runs_once_in_background(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        callbacks = []
+        plugin._client_factory = lambda: client
+        plugin._background_runner = callbacks.append
+        plugin.register(context)
+        callbacks.clear()
+        gateway = FakeGateway(adapter_key="telegram")
+
+        def dispatch(text):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    text,
+                    "1045618308",
+                    username="AlpskyKnedlik",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(dispatch("Withdraw"), plugin._SKIP_RESULT)
+        self.assertEqual(client.withdraw_tokens_calls, [])
+        self.assertEqual(len(callbacks), 1)
+        self.assertIn("Loading assets", gateway.adapters["telegram"].sent[-1][1])
+
+        self.assertEqual(dispatch("Withdraw"), plugin._SKIP_RESULT)
+        self.assertEqual(len(callbacks), 1)
+
+        callbacks[0]()
+
+        self.assertEqual(len(client.withdraw_tokens_calls), 1)
+        self.assertIn("Choose an asset", gateway.adapters["telegram"].sent[-1][1])
 
     def test_withdraw_normalizer_accepts_native_eth_only_with_native_marker(self):
         plugin = load_plugin()
