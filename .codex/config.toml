@@ -1,0 +1,20 @@
+[mcp_servers.bitrefill]
+url = "https://api.bitrefill.com/mcp"
+auth = "oauth"
+enabled = true
+required = false
+startup_timeout_sec = 20
+tool_timeout_sec = 120
+default_tools_approval_mode = "writes"
+enabled_tools = [
+  "search-products",
+  "get-product-details",
+  "buy-products",
+  "submit-prepayment-step",
+  "list-invoices",
+  "get-invoice-by-id",
+  "update-order",
+]
+
+[mcp_servers.bitrefill.tools."buy-products"]
+approval_mode = "prompt"
