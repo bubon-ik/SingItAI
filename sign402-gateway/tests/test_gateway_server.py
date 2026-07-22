@@ -2694,6 +2694,74 @@ class GatewayServerTests(unittest.TestCase):
         self.assertEqual(body["limits"]["dailyCapAtomic"], 500000000)
         self.assertTrue(body["limits"]["userConfigured"])
 
+    def test_agent_spending_limits_rejects_user_limits_above_operator_ceiling(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server.user_spend_limit_store = UserSpendLimitStore(Path(tmpdir) / "limits.json")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SIGN402_USER_WALLET_CEILING_ATOMIC_PER_TX": "50000000",
+                    "SIGN402_USER_WALLET_CEILING_DAILY_ATOMIC": "100000000",
+                },
+            ):
+                with patch("sys.stderr", io.StringIO()):
+                    handler = self.make_handler(
+                        "/agent/spending-limits",
+                        {
+                            "telegramUserId": "1045618308",
+                            "maxPerTxUsdc": "100",
+                            "dailyCapUsdc": "500",
+                        },
+                        server=server,
+                        headers=self.llm_auth_headers(),
+                    )
+
+        response = self.response_text(handler)
+        body = json.loads(response.split("\r\n\r\n", 1)[1])
+
+        self.assertIn("HTTP/1.0 400", response)
+        self.assertFalse(body["ok"])
+        self.assertIn("operator ceiling", body["error"])
+
+    def test_agent_spending_limits_clamps_stored_limits_to_lowered_ceiling(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = UserSpendLimitStore(Path(tmpdir) / "limits.json")
+            server.user_spend_limit_store = store
+            store.set_limit_settings(
+                "1045618308",
+                max_per_tx_atomic=100_000_000,
+                daily_cap_atomic=500_000_000,
+                operator_max_per_tx_atomic=10000,
+                operator_daily_cap_atomic=100000,
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SIGN402_USER_WALLET_CEILING_ATOMIC_PER_TX": "50000000",
+                    "SIGN402_USER_WALLET_CEILING_DAILY_ATOMIC": "100000000",
+                },
+            ):
+                with patch("sys.stderr", io.StringIO()):
+                    handler = self.make_handler(
+                        "/agent/spending-limits",
+                        {"telegramUserId": "1045618308"},
+                        server=server,
+                        headers=self.llm_auth_headers(),
+                    )
+
+        response = self.response_text(handler)
+        body = json.loads(response.split("\r\n\r\n", 1)[1])
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertEqual(body["limits"]["maxPerTxAtomic"], 50000000)
+        self.assertEqual(body["limits"]["dailyCapAtomic"], 100000000)
+
     def test_agent_spending_limits_requires_the_callers_per_user_token(self):
         server = DummyServer()
         with tempfile.TemporaryDirectory() as tmpdir:

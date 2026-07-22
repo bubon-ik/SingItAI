@@ -806,6 +806,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             telegram_user_id = _require_authenticated_user(self, payload)
             operator_limits = _operator_user_wallet_limits()
+            operator_ceilings = _operator_user_wallet_ceilings()
             if _payload_has_spending_limit_update(payload):
                 max_per_tx_atomic = _read_usdc_limit_atomic(payload, "maxPerTx")
                 daily_cap_atomic = _read_usdc_limit_atomic(payload, "dailyCap")
@@ -815,6 +816,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                     daily_cap_atomic=daily_cap_atomic,
                     operator_max_per_tx_atomic=operator_limits["maxPerTxAtomic"],
                     operator_daily_cap_atomic=operator_limits["dailyCapAtomic"],
+                    operator_ceiling_per_tx_atomic=operator_ceilings["ceilingPerTxAtomic"],
+                    operator_ceiling_daily_atomic=operator_ceilings["ceilingDailyAtomic"],
                 )
                 updated = True
             else:
@@ -822,6 +825,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                     telegram_user_id,
                     operator_max_per_tx_atomic=operator_limits["maxPerTxAtomic"],
                     operator_daily_cap_atomic=operator_limits["dailyCapAtomic"],
+                    operator_ceiling_per_tx_atomic=operator_ceilings["ceilingPerTxAtomic"],
+                    operator_ceiling_daily_atomic=operator_ceilings["ceilingDailyAtomic"],
                 )
                 updated = False
             self._send_json(
@@ -4068,6 +4073,8 @@ class UserSpendLimitStore:
         *,
         operator_max_per_tx_atomic: int | None,
         operator_daily_cap_atomic: int | None,
+        operator_ceiling_per_tx_atomic: int | None = None,
+        operator_ceiling_daily_atomic: int | None = None,
     ) -> dict[str, Any]:
         user_id = str(telegram_user_id)
         with self.lock:
@@ -4081,6 +4088,13 @@ class UserSpendLimitStore:
         user_daily_cap = _optional_int(user_limits.get("dailyCapAtomic"))
         max_per_tx = user_max_per_tx if user_max_per_tx is not None else operator_max_per_tx_atomic
         daily_cap = user_daily_cap if user_daily_cap is not None else operator_daily_cap_atomic
+        # Operator ceilings are a hard maximum a user may never exceed. Clamp on
+        # read too, so a stored user limit can never exceed a ceiling the
+        # operator lowered after the user configured their own limit.
+        if operator_ceiling_per_tx_atomic is not None and max_per_tx is not None:
+            max_per_tx = min(max_per_tx, operator_ceiling_per_tx_atomic)
+        if operator_ceiling_daily_atomic is not None and daily_cap is not None:
+            daily_cap = min(daily_cap, operator_ceiling_daily_atomic)
         return {
             "telegramUserId": user_id,
             "maxPerTxAtomic": max_per_tx,
@@ -4089,6 +4103,8 @@ class UserSpendLimitStore:
             "dailyCapUsdc": _format_usdc_atomic(daily_cap),
             "operatorMaxPerTxAtomic": operator_max_per_tx_atomic,
             "operatorDailyCapAtomic": operator_daily_cap_atomic,
+            "operatorCeilingPerTxAtomic": operator_ceiling_per_tx_atomic,
+            "operatorCeilingDailyAtomic": operator_ceiling_daily_atomic,
             "userMaxPerTxAtomic": user_max_per_tx,
             "userDailyCapAtomic": user_daily_cap,
             "userConfigured": user_max_per_tx is not None or user_daily_cap is not None,
@@ -4102,6 +4118,8 @@ class UserSpendLimitStore:
         daily_cap_atomic: int,
         operator_max_per_tx_atomic: int | None,
         operator_daily_cap_atomic: int | None,
+        operator_ceiling_per_tx_atomic: int | None = None,
+        operator_ceiling_daily_atomic: int | None = None,
     ) -> dict[str, Any]:
         if max_per_tx_atomic <= 0:
             raise ValueError("max per transaction limit must be greater than zero")
@@ -4109,6 +4127,26 @@ class UserSpendLimitStore:
             raise ValueError("daily spending limit must be greater than zero")
         if daily_cap_atomic < max_per_tx_atomic:
             raise ValueError("daily spending limit must be at least the per-transaction limit")
+        # Operator defaults (operator_max/daily) are starting values a user may
+        # raise; operator ceilings are a hard maximum they may not. Enforced at
+        # write time; limit_settings additionally re-clamps on read so a later
+        # lowered ceiling still wins over a previously stored user limit.
+        if (
+            operator_ceiling_per_tx_atomic is not None
+            and max_per_tx_atomic > operator_ceiling_per_tx_atomic
+        ):
+            raise ValueError(
+                "max per transaction limit exceeds the operator ceiling "
+                f"{_format_usdc_atomic(operator_ceiling_per_tx_atomic)} USDC"
+            )
+        if (
+            operator_ceiling_daily_atomic is not None
+            and daily_cap_atomic > operator_ceiling_daily_atomic
+        ):
+            raise ValueError(
+                "daily spending limit exceeds the operator ceiling "
+                f"{_format_usdc_atomic(operator_ceiling_daily_atomic)} USDC"
+            )
 
         user_id = str(telegram_user_id)
         with self.lock:
@@ -4127,6 +4165,8 @@ class UserSpendLimitStore:
             user_id,
             operator_max_per_tx_atomic=operator_max_per_tx_atomic,
             operator_daily_cap_atomic=operator_daily_cap_atomic,
+            operator_ceiling_per_tx_atomic=operator_ceiling_per_tx_atomic,
+            operator_ceiling_daily_atomic=operator_ceiling_daily_atomic,
         )
 
     def spent_today_atomic(self, telegram_user_id: str, *, asset: str, network: str) -> int:
@@ -5334,6 +5374,23 @@ def _operator_user_wallet_limits() -> dict[str, int | None]:
     }
 
 
+def _operator_user_wallet_ceilings() -> dict[str, int | None]:
+    """Hard maximums users may never exceed, unlike the raiseable defaults.
+
+    Unset (the default) means no ceiling, preserving pre-ceiling behavior.
+    """
+    return {
+        "ceilingPerTxAtomic": _user_wallet_atomic_limit(
+            "SIGN402_USER_WALLET_CEILING_ATOMIC_PER_TX",
+            "",
+        ),
+        "ceilingDailyAtomic": _user_wallet_atomic_limit(
+            "SIGN402_USER_WALLET_CEILING_DAILY_ATOMIC",
+            "",
+        ),
+    }
+
+
 def _format_usdc_atomic(value: int | None) -> str:
     if value is None:
         return "unlimited"
@@ -5391,10 +5448,13 @@ def _enforce_user_wallet_spend_limits(
     payment_requirements: dict[str, Any],
 ) -> None:
     operator_limits = _operator_user_wallet_limits()
+    operator_ceilings = _operator_user_wallet_ceilings()
     limits = server.user_spend_limit_store.limit_settings(
         telegram_user_id,
         operator_max_per_tx_atomic=operator_limits["maxPerTxAtomic"],
         operator_daily_cap_atomic=operator_limits["dailyCapAtomic"],
+        operator_ceiling_per_tx_atomic=operator_ceilings["ceilingPerTxAtomic"],
+        operator_ceiling_daily_atomic=operator_ceilings["ceilingDailyAtomic"],
     )
     max_per_tx = limits.get("maxPerTxAtomic")
     daily_cap = limits.get("dailyCapAtomic")
