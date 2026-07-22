@@ -14,26 +14,8 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
-if [[ -z "${SIGN402_BITREFILL_REFUND_ADDRESS:-}" && -z "${SIGN402_TREASURY_REFUND_ADDRESS:-}" ]]; then
-  CDP_ENV_FILE="$ROOT_DIR/cdp-x402-service/.env"
-  if [[ -f "$CDP_ENV_FILE" ]]; then
-    CDP_REFUND_LINE="$(grep '^CDP_EVM_ACCOUNT_ADDRESS=' "$CDP_ENV_FILE" | tail -n 1 || true)"
-    CDP_REFUND_ADDRESS="${CDP_REFUND_LINE#*=}"
-    CDP_REFUND_ADDRESS="${CDP_REFUND_ADDRESS%\"}"
-    CDP_REFUND_ADDRESS="${CDP_REFUND_ADDRESS#\"}"
-    CDP_REFUND_ADDRESS="${CDP_REFUND_ADDRESS%\'}"
-    CDP_REFUND_ADDRESS="${CDP_REFUND_ADDRESS#\'}"
-    if [[ -n "$CDP_REFUND_ADDRESS" ]]; then
-      export SIGN402_BITREFILL_REFUND_ADDRESS="$CDP_REFUND_ADDRESS"
-    fi
-  fi
-fi
-
 missing=()
 [[ -n "${BITREFILL_API_KEY:-}" ]] || missing+=("BITREFILL_API_KEY")
-if [[ -z "${SIGN402_BITREFILL_REFUND_ADDRESS:-}" && -z "${SIGN402_TREASURY_REFUND_ADDRESS:-}" ]]; then
-  missing+=("SIGN402_BITREFILL_REFUND_ADDRESS")
-fi
 [[ -n "${FIREFLY_PORT:-}" ]] || missing+=("FIREFLY_PORT")
 
 if (( ${#missing[@]} > 0 )); then
@@ -43,6 +25,7 @@ if (( ${#missing[@]} > 0 )); then
 fi
 
 export SIGN402_BITREFILL_MODE="${SIGN402_BITREFILL_MODE:-live}"
+export SIGN402_BITREFILL_MCP_URL="${SIGN402_BITREFILL_MCP_URL:-https://api.bitrefill.com/mcp}"
 export SIGN402_BITREFILL_PAYMENT_METHOD="${SIGN402_BITREFILL_PAYMENT_METHOD:-usdc_base}"
 export SIGN402_BITREFILL_USDC_TREASURY_MODE="${SIGN402_BITREFILL_USDC_TREASURY_MODE:-cdp_wallet}"
 export SIGN402_BITREFILL_PRICING_MODE="${SIGN402_BITREFILL_PRICING_MODE:-bankr_real_rate}"

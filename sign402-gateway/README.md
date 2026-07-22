@@ -318,8 +318,11 @@ http://127.0.0.1:8099
 This is the production checkout direction for Telegram/consumer purchases:
 
 ```text
-user/embedded wallet SINGIT -> CDP wallet swap to USDC -> Bitrefill USDC/Base invoice
+Hermes/Telegram -> Sign402 Gateway -> Bitrefill eCommerce MCP -> Base USDC payment -> protected redemption
 ```
+
+The user/embedded wallet funds the purchase as SINGIT, and the configured CDP
+wallet swaps it to USDC before the gateway pays the MCP-issued Base invoice.
 
 Create the local live env file:
 
@@ -332,11 +335,14 @@ Fill:
 
 ```text
 BITREFILL_API_KEY=...
-SIGN402_BITREFILL_REFUND_ADDRESS=0x...
 FIREFLY_PORT=/dev/cu.usbmodem11301
 ```
 
-If `SIGN402_BITREFILL_REFUND_ADDRESS` is omitted, the run script uses `CDP_EVM_ACCOUNT_ADDRESS` from `../cdp-x402-service/.env`.
+Live catalog, quote, purchase, and invoice-status requests use Bitrefill MCP at
+`https://api.bitrefill.com/mcp/<BITREFILL_API_KEY>`. The key-bearing URL is
+constructed only inside the MCP client and is redacted from its representation.
+There is no Bitrefill REST fallback. To use another compatible HTTPS endpoint,
+set `SIGN402_BITREFILL_MCP_URL` to its base URL without the API-key suffix.
 
 Start the gateway in wallet-native mode:
 
@@ -355,11 +361,23 @@ The script sets the important checkout mode:
 
 ```text
 SIGN402_BITREFILL_MODE=live
+SIGN402_BITREFILL_MCP_URL=https://api.bitrefill.com/mcp
 SIGN402_BITREFILL_PAYMENT_METHOD=usdc_base
 SIGN402_BITREFILL_USDC_TREASURY_MODE=cdp_wallet
 SIGN402_BITREFILL_PRICING_SOURCE=cdp_wallet
 SIGN402_BITREFILL_FUNDING_MODE=cdp_wallet_swap
 ```
+
+With `SIGN402_BITREFILL_PAYMENT_METHOD=usdc_base`, the MCP invoice payment
+requirements are validated as USDC on Base Mainnet before the configured CDP or
+Bankr treasury transfers the exact approved amount. With `balance`, Bitrefill
+uses the balance associated with `BITREFILL_API_KEY` and no treasury transfer is
+made. Existing Firefly approval, quote expiry, purchase caps, replay protection,
+and order persistence still wrap the MCP purchase.
+
+Automated tests use injected MCP responses and never purchase anything. Run a
+real low-value smoke purchase only manually, with explicit user confirmation,
+after checking the live cap and treasury balance.
 
 Quote a Bitrefill product:
 

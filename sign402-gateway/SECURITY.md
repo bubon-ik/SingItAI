@@ -78,9 +78,9 @@ for a short, operator-controlled diagnostic session, then remove it again.
 ## End-to-end verification checklist
 
 Prerequisites: `SIGN402_WALLET_MASTER_KEY`, `SIGN402_WALLET_API_TOKEN`,
-`SIGN402_PHOTON_API_TOKEN`, CDP wallet credentials, `BITREFILL_API_KEY` (for
-live mode), a funded Base wallet, and either the iMessage sidecar or signed
-Hermes WhatsApp Cloud adapter running.
+`SIGN402_PHOTON_API_TOKEN`, CDP wallet credentials, `BITREFILL_API_KEY` (used
+only by the live Bitrefill MCP client), a funded Base wallet, and either the
+iMessage sidecar or signed Hermes WhatsApp Cloud adapter running.
 
 1. **Create wallet** — `/start` (or `/wallet`) in Telegram. Expect a Base
    address and a per-user token issued server-side.
