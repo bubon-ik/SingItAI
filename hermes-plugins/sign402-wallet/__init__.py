@@ -1210,6 +1210,8 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
     if identity is None:
         _send_fixed_reply(gateway, source, _TELEGRAM_ONLY_MESSAGE)
         return dict(_SKIP_RESULT)
+    if command == "help" or (command == "bitrefill" and not str(args or "").strip()):
+        _invalidate_telegram_operation(str(identity.user_id))
     if command in _TELEGRAM_PUBLIC_COMMAND_STARTED_MESSAGES:
         if command in {"limits", "set-limits"} and _parse_limit_args(command, args) is None:
             _send_fixed_reply(gateway, source, _LIMITS_USAGE)

@@ -1279,12 +1279,16 @@ class PluginRegistrationTests(unittest.TestCase):
         )
         self.assertIn("Bitrefill", gateway.adapters["telegram"].sent[-1][1])
 
+        self.assertEqual(dispatch("Buy Bitrefill"), plugin._SKIP_RESULT)
+        self.assertIn("Bitrefill", gateway.adapters["telegram"].sent[-1][1])
+        sent_before_stale_completion = list(gateway.adapters["telegram"].sent)
+
         callbacks[0]()
 
         self.assertEqual(len(client.calls), 1)
         self.assertEqual(
-            gateway.adapters["telegram"].sent[-1],
-            ("telegram-chat", "Balance ready."),
+            gateway.adapters["telegram"].sent,
+            sent_before_stale_completion,
         )
 
     def test_help_direct_reply_includes_reply_keyboard(self):
