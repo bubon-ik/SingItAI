@@ -319,7 +319,7 @@ class BitrefillMcpCatalogTests(unittest.TestCase):
             ],
         )
 
-    def test_list_searches_each_country_then_filters_and_slices(self):
+    def test_list_translates_rest_international_country_for_mcp(self):
         caller = FakeMcpCaller(
             [
                 {
@@ -365,8 +365,21 @@ class BitrefillMcpCatalogTests(unittest.TestCase):
 
         self.assertEqual([item["productId"] for item in products], ["food-global"])
         self.assertEqual(
-            [arguments["country"] for _, arguments in caller.calls],
-            ["CZ", "XI"],
+            [arguments for _, arguments in caller.calls],
+            [
+                {
+                    "query": "*",
+                    "country": "CZ",
+                    "include_test_products": False,
+                    "per_page": 100,
+                },
+                {
+                    "query": "*",
+                    "country": "",
+                    "include_test_products": False,
+                    "per_page": 100,
+                },
+            ],
         )
 
     def test_details_use_mcp_package_value_and_usd_price(self):

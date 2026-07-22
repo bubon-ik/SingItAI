@@ -180,8 +180,10 @@ class McpBitrefillClient:
         ] or [""]
         products: list[dict[str, Any]] = []
         for country_code in countries:
+            mcp_country = "" if country_code == "XI" else country_code
             arguments: dict[str, Any] = {
-                "country": country_code,
+                "query": "*",
+                "country": mcp_country,
                 "include_test_products": bool(include_test_products),
                 "per_page": 100,
             }
