@@ -30,6 +30,7 @@ def load_plugin():
     module = importlib.util.module_from_spec(spec)
     sys.modules[PACKAGE_NAME] = module
     spec.loader.exec_module(module)
+    module._background_runner = lambda callback: callback()
     return module
 
 
@@ -582,8 +583,8 @@ class PluginRegistrationTests(unittest.TestCase):
             {"action": "skip", "reason": "sign402-imessage-handled"},
         )
         self.assertEqual(
-            gateway.adapters["telegram"].sent,
-            [("telegram-chat", "gateway telegram text")],
+            gateway.adapters["telegram"].sent[-1],
+            ("telegram-chat", "gateway telegram text"),
         )
         self.assertEqual(client.calls, [])
         self.assertEqual(client.create_wallet_calls, ["1045618308"])
@@ -684,8 +685,8 @@ class PluginRegistrationTests(unittest.TestCase):
             {"action": "skip", "reason": "sign402-imessage-handled"},
         )
         self.assertEqual(
-            gateway.adapters["telegram"].sent,
-            [("telegram-chat", "Code: SECRET-CODE")],
+            gateway.adapters["telegram"].sent[-1],
+            ("telegram-chat", "Code: SECRET-CODE"),
         )
         self.assertIn(("last-purchase", "user-access-token"), client.execute_tokens)
 
@@ -713,8 +714,8 @@ class PluginRegistrationTests(unittest.TestCase):
             {"action": "skip", "reason": "sign402-imessage-handled"},
         )
         self.assertEqual(
-            gateway.adapters["telegram"].sent,
-            [("telegram-chat", safe_message)],
+            gateway.adapters["telegram"].sent[-1],
+            ("telegram-chat", safe_message),
         )
 
     def test_registers_imessage_commands(self):
@@ -754,8 +755,8 @@ class PluginRegistrationTests(unittest.TestCase):
             {"action": "skip", "reason": "sign402-imessage-handled"},
         )
         self.assertEqual(
-            gateway.adapters["telegram"].sent,
-            [("telegram-chat", "Send ABCDEFGH to iMessage")],
+            gateway.adapters["telegram"].sent[-1],
+            ("telegram-chat", "Send ABCDEFGH to iMessage"),
         )
         self.assertEqual(
             client.imessage_calls,
@@ -796,7 +797,7 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertEqual(result, plugin._SKIP_RESULT)
         self.assertIn(
             "+15551431969",
-            gateway.adapters["telegram"].sent[0][1],
+            gateway.adapters["telegram"].sent[-1][1],
         )
         self.assertEqual(
             client.approval_calls,
@@ -835,7 +836,7 @@ class PluginRegistrationTests(unittest.TestCase):
             )
 
         self.assertEqual(result, plugin._SKIP_RESULT)
-        text = gateway.adapters["telegram"].sent[0][1]
+        text = gateway.adapters["telegram"].sent[-1][1]
         self.assertIn("+420123456789", text)
         self.assertIn("ABCDEFGH", text)
         self.assertIn("send", text.lower())
@@ -867,7 +868,7 @@ class PluginRegistrationTests(unittest.TestCase):
 
         self.assertEqual(result, plugin._SKIP_RESULT)
         self.assertEqual(client.imessage_calls, [])
-        text = gateway.adapters["telegram"].sent[0][1]
+        text = gateway.adapters["telegram"].sent[-1][1]
         self.assertIn("phone number", text.lower())
         self.assertIn("+420", text)
         self.assertIn("iMessage", text)
@@ -905,8 +906,8 @@ class PluginRegistrationTests(unittest.TestCase):
 
         self.assertEqual(result, plugin._SKIP_RESULT)
         self.assertEqual(
-            gateway.adapters["telegram"].sent,
-            [("telegram-chat", "iMessage selected for Sign402 approvals.")],
+            gateway.adapters["telegram"].sent[-1],
+            ("telegram-chat", "iMessage selected for Sign402 approvals."),
         )
         self.assertEqual(
             client.approval_calls,
@@ -947,8 +948,8 @@ class PluginRegistrationTests(unittest.TestCase):
 
         self.assertEqual(result, plugin._SKIP_RESULT)
         self.assertEqual(
-            gateway.adapters["telegram"].sent,
-            [("telegram-chat", "WhatsApp selected for Sign402 approvals.")],
+            gateway.adapters["telegram"].sent[-1],
+            ("telegram-chat", "WhatsApp selected for Sign402 approvals."),
         )
         self.assertEqual(
             client.approval_calls,
@@ -989,7 +990,7 @@ class PluginRegistrationTests(unittest.TestCase):
             )
 
         self.assertEqual(result, plugin._SKIP_RESULT)
-        self.assertIn("phone number", gateway.adapters["telegram"].sent[0][1].lower())
+        self.assertIn("phone number", gateway.adapters["telegram"].sent[-1][1].lower())
         self.assertEqual(
             client.approval_calls,
             [
@@ -1146,7 +1147,7 @@ class PluginRegistrationTests(unittest.TestCase):
             result,
             {"action": "skip", "reason": "sign402-imessage-handled"},
         )
-        text = gateway.adapters["telegram"].sent[0][1]
+        text = gateway.adapters["telegram"].sent[-1][1]
 
         self.assertIn("Welcome to Sign402.", text)
         self.assertIn("Your Base agent wallet:\n0xabc", text)
@@ -1183,7 +1184,7 @@ class PluginRegistrationTests(unittest.TestCase):
             {"action": "skip", "reason": "sign402-imessage-handled"},
         )
         self.assertEqual(client.create_wallet_calls, ["1045618308"])
-        self.assertIn("Welcome to Sign402.", gateway.adapters["telegram"].sent[0][1])
+        self.assertIn("Welcome to Sign402.", gateway.adapters["telegram"].sent[-1][1])
 
     def test_help_is_answered_with_pilot_commands(self):
         plugin = load_plugin()
@@ -1236,6 +1237,54 @@ class PluginRegistrationTests(unittest.TestCase):
                 FakeEvent("Connect iMessage", "1045618308").source,
             ),
             "connect-imessage",
+        )
+
+    def test_balance_button_runs_once_in_background_without_blocking_navigation(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient(result="Balance ready.")
+        callbacks = []
+        plugin._client_factory = lambda: client
+        plugin._background_runner = callbacks.append
+        plugin.register(context)
+        callbacks.clear()
+        gateway = FakeGateway(adapter_key="telegram")
+
+        def dispatch(text, user_id="1045618308", chat_id="telegram-chat"):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    text,
+                    user_id,
+                    username="AlpskyKnedlik",
+                    platform="telegram",
+                    chat_id=chat_id,
+                ),
+                gateway=gateway,
+            )
+
+        self.assertEqual(dispatch("Balance"), plugin._SKIP_RESULT)
+        self.assertEqual(callbacks.__len__(), 1)
+        self.assertEqual(client.calls, [])
+        self.assertIn(
+            "Checking balance",
+            gateway.adapters["telegram"].sent[-1][1],
+        )
+
+        self.assertEqual(dispatch("Balance"), plugin._SKIP_RESULT)
+        self.assertEqual(callbacks.__len__(), 1)
+
+        self.assertEqual(
+            dispatch("Buy Bitrefill", "2045618308", "other-chat"),
+            plugin._SKIP_RESULT,
+        )
+        self.assertIn("Bitrefill", gateway.adapters["telegram"].sent[-1][1])
+
+        callbacks[0]()
+
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(
+            gateway.adapters["telegram"].sent[-1],
+            ("telegram-chat", "Balance ready."),
         )
 
     def test_help_direct_reply_includes_reply_keyboard(self):
@@ -2170,8 +2219,8 @@ class PluginRegistrationTests(unittest.TestCase):
             [("connect-imessage", {"telegramUserId": "1045618308"})],
         )
         self.assertEqual(
-            gateway.adapters["telegram"].sent,
-            [("telegram-chat", "Send ABCDEFGH to iMessage")],
+            gateway.adapters["telegram"].sent[-1],
+            ("telegram-chat", "Send ABCDEFGH to iMessage"),
         )
 
     def test_limits_shows_current_limits_from_trusted_identity(self):
@@ -2203,8 +2252,8 @@ class PluginRegistrationTests(unittest.TestCase):
             [("1045618308", "AlpskyKnedlik", None, None, "user-access-token")],
         )
         self.assertEqual(
-            gateway.adapters["telegram"].sent,
-            [("telegram-chat", "Current spending limits.")],
+            gateway.adapters["telegram"].sent[-1],
+            ("telegram-chat", "Current spending limits."),
         )
 
     def test_set_limits_updates_limits_from_trusted_identity(self):
@@ -2244,8 +2293,8 @@ class PluginRegistrationTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            gateway.adapters["telegram"].sent,
-            [("telegram-chat", "Spending limits updated.")],
+            gateway.adapters["telegram"].sent[-1],
+            ("telegram-chat", "Spending limits updated."),
         )
 
     def test_limits_with_two_numbers_updates_limits(self):

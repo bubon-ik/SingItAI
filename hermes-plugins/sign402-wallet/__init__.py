@@ -68,6 +68,19 @@ _TELEGRAM_WITHDRAW_STARTED_MESSAGE = (
     "Withdrawal started. Approve it in your selected approval channel; "
     "I'll post the result here."
 )
+_TELEGRAM_PUBLIC_COMMAND_STARTED_MESSAGES = {
+    "start": "Loading wallet…",
+    "wallet": "Loading wallet…",
+    "balance": "Checking balance…",
+    "last-purchase": "Loading last purchase…",
+    "limits": "Loading spending limits…",
+    "set-limits": "Updating spending limits…",
+    "connect-imessage": "Loading approval settings…",
+    "connect-whatsapp": "Loading approval settings…",
+    "llm-buy": "Preparing LLM credits…",
+    "llm-terms": "Updating LLM terms…",
+    "llm-credits": "Checking LLM credits…",
+}
 _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "start", "description": "Set up your Sign402 wallet"},
     {"command": "help", "description": "Show Sign402 commands"},
@@ -1020,11 +1033,196 @@ def _handle_telegram_imessage_registration_message(*, event, source, gateway):
         return dict(_SKIP_RESULT)
 
 
+def _start_telegram_background_operation(
+    *,
+    identity: TelegramIdentity,
+    action: str,
+    started_text: str,
+    source,
+    gateway,
+    work: Callable[[], tuple[str, dict | None]],
+) -> dict:
+    user_id = str(identity.user_id)
+    generation = _reserve_telegram_operation(user_id, action)
+    if generation is None:
+        return dict(_SKIP_RESULT)
+    _send_fixed_reply(gateway, source, started_text)
+
+    def execute() -> None:
+        try:
+            text, reply_markup = work()
+        except GatewayClientError as exc:
+            text, reply_markup = exc.user_message, None
+        except Exception as exc:
+            logger.warning(
+                "Unexpected Sign402 Telegram background action failure action=%s error=%s",
+                action,
+                type(exc).__name__,
+            )
+            text, reply_markup = _UNEXPECTED_ERROR_MESSAGE, None
+        if not _finish_telegram_operation(user_id, generation):
+            logger.debug(
+                "Discarding stale Sign402 Telegram action result action=%s user=%s",
+                action,
+                user_id,
+            )
+            return
+        _send_fixed_reply(
+            gateway,
+            source,
+            text,
+            reply_markup=reply_markup,
+        )
+
+    try:
+        _run_in_background(execute)
+    except Exception as exc:
+        _finish_telegram_operation(user_id, generation)
+        logger.warning(
+            "Could not schedule Sign402 Telegram action action=%s error=%s",
+            action,
+            type(exc).__name__,
+        )
+        _send_fixed_reply(gateway, source, _UNEXPECTED_ERROR_MESSAGE)
+    return dict(_SKIP_RESULT)
+
+
+def _telegram_public_command_result(
+    command: str,
+    args: str,
+    identity: TelegramIdentity,
+) -> tuple[str, dict | None]:
+    client = _client_factory()
+    if command == "start":
+        text = _start_text(
+            _create_wallet_text(client, identity),
+            support_id=identity.user_id,
+        )
+    elif command == "wallet":
+        text = _create_wallet_text(client, identity)
+    elif command in {"balance", "last-purchase"}:
+        text = client.execute(
+            command,
+            identity,
+            user_access_token=_user_access_token(client, identity),
+        )
+    elif command in {"limits", "set-limits"}:
+        parsed_limits = _parse_limit_args(command, args)
+        if parsed_limits is None:
+            return _LIMITS_USAGE, _telegram_main_menu_reply_markup()
+        max_per_tx_usdc, daily_cap_usdc = parsed_limits
+        text = client.execute_spending_limits(
+            identity,
+            max_per_tx_usdc=max_per_tx_usdc,
+            daily_cap_usdc=daily_cap_usdc,
+            user_access_token=_user_access_token(client, identity),
+        )
+    elif command == "connect-imessage":
+        channel = "imessage"
+        selected_text = _select_existing_approval_channel(
+            client,
+            identity,
+            channel,
+        )
+        if selected_text is not None:
+            text = selected_text
+        elif _photon_auto_register_users_enabled():
+            phone_number = str(args or "").strip()
+            if phone_number and not _is_e164_phone_number(phone_number):
+                text = _imessage_phone_prompt(channel=channel)
+            elif phone_number:
+                text = _connect_imessage_after_phone_registration(
+                    identity=identity,
+                    phone_number=phone_number,
+                    channel=channel,
+                )
+                _IMESSAGE_CONNECT_SESSIONS.pop(str(identity.user_id), None)
+            else:
+                _IMESSAGE_CONNECT_SESSIONS[str(identity.user_id)] = {
+                    "stage": "awaiting-phone",
+                    "channel": channel,
+                }
+                text = _imessage_phone_prompt(channel=channel)
+        else:
+            result = client.execute_imessage(
+                "connect-imessage",
+                {"telegramUserId": identity.user_id},
+            )
+            text = result.get("telegramText")
+            if not isinstance(text, str) or not text.strip():
+                text = _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
+            else:
+                text = _telegram_imessage_pairing_text(text, channel=channel)
+    elif command == "connect-whatsapp":
+        channel = "whatsapp"
+        selected_text = _select_existing_approval_channel(
+            client,
+            identity,
+            channel,
+        )
+        if selected_text is not None:
+            text = selected_text
+        else:
+            result = client.execute_approval(
+                "connect-imessage",
+                {"telegramUserId": identity.user_id, "channel": channel},
+            )
+            text = result.get("telegramText")
+            if not isinstance(text, str) or not text.strip():
+                text = _IMESSAGE_UNEXPECTED_ERROR_MESSAGE
+            else:
+                text = _telegram_imessage_pairing_text(
+                    text,
+                    public_line=_approval_public_line(channel),
+                    channel=channel,
+                )
+    elif command in {"llm-buy", "llm-terms", "llm-credits"}:
+        operation = {
+            "llm-buy": "start",
+            "llm-terms": "accept-terms",
+            "llm-credits": "credits",
+        }[command]
+        payload = _llm_operation_payload(operation, args)
+        if payload is None:
+            return _llm_usage(operation), _telegram_main_menu_reply_markup()
+        result = client.execute_llm(
+            operation,
+            identity,
+            payload=payload,
+            user_access_token=_user_access_token(client, identity),
+        )
+        text = _llm_result_text(result)
+    else:
+        raise ValueError("unsupported Telegram background command")
+    return str(text), _telegram_main_menu_reply_markup()
+
+
 def _handle_telegram_public_command_request(*, command: str, args: str = "", source, gateway):
     identity = consume_gateway_identity() or _identity_from_telegram_source(source)
     if identity is None:
         _send_fixed_reply(gateway, source, _TELEGRAM_ONLY_MESSAGE)
         return dict(_SKIP_RESULT)
+    if command in _TELEGRAM_PUBLIC_COMMAND_STARTED_MESSAGES:
+        if command in {"limits", "set-limits"} and _parse_limit_args(command, args) is None:
+            _send_fixed_reply(gateway, source, _LIMITS_USAGE)
+            return dict(_SKIP_RESULT)
+        if command in {"llm-buy", "llm-terms", "llm-credits"}:
+            operation = {
+                "llm-buy": "start",
+                "llm-terms": "accept-terms",
+                "llm-credits": "credits",
+            }[command]
+            if _llm_operation_payload(operation, args) is None:
+                _send_fixed_reply(gateway, source, _llm_usage(operation))
+                return dict(_SKIP_RESULT)
+        return _start_telegram_background_operation(
+            identity=identity,
+            action=f"command:{command}",
+            started_text=_TELEGRAM_PUBLIC_COMMAND_STARTED_MESSAGES[command],
+            source=source,
+            gateway=gateway,
+            work=lambda: _telegram_public_command_result(command, args, identity),
+        )
     try:
         if command == "start":
             client = _client_factory()
@@ -2847,8 +3045,14 @@ def _reserve_telegram_operation(user_id: str, action: str) -> int | None:
     user_key = str(user_id)
     action_key = str(action)
     with _TELEGRAM_OPERATION_LOCK:
-        if user_key in _TELEGRAM_ACTIVE_OPERATIONS:
-            return None
+        active = _TELEGRAM_ACTIVE_OPERATIONS.get(user_key)
+        if active is not None:
+            if active[1] == action_key:
+                return None
+            _TELEGRAM_OPERATION_GENERATIONS[user_key] = (
+                _TELEGRAM_OPERATION_GENERATIONS.get(user_key, 0) + 1
+            )
+            _TELEGRAM_ACTIVE_OPERATIONS.pop(user_key, None)
         if (
             user_key not in _TELEGRAM_OPERATION_GENERATIONS
             and len(_TELEGRAM_OPERATION_GENERATIONS) >= _TELEGRAM_OPERATION_MAX_USERS
