@@ -6,7 +6,9 @@ requires-python = ">=3.11"
 dependencies = [
   "cryptography>=42.0.0",
   "eth-account>=0.13.0",
-  "pyserial>=3.5"
+  "mcp>=1.27,<2",
+  "pyserial>=3.5",
+  "toons>=0.7,<1",
 ]
 
 [project.scripts]
