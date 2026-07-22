@@ -21,9 +21,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ./sign402-gateway
       - name: Gateway unit tests
-        run: python -m unittest discover -s sign402-gateway/tests -t sign402-gateway
+        working-directory: sign402-gateway
+        run: python -m unittest discover -s tests
       - name: Hermes plugin unit tests
-        run: python -m unittest discover -s hermes-plugins/sign402-wallet/tests -t hermes-plugins/sign402-wallet
+        working-directory: hermes-plugins/sign402-wallet
+        run: python -m unittest discover -s tests
 
   python-audit:
     runs-on: ubuntu-latest
