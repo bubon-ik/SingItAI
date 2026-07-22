@@ -1,8 +1,13 @@
 import unittest
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from sign402_gateway.bitrefill_mcp import McpToolCaller, decode_mcp_tool_result
+from sign402_gateway.bitrefill_mcp import (
+    McpBitrefillClient,
+    McpToolCaller,
+    decode_mcp_tool_result,
+)
 
 
 class FakeText:
@@ -143,6 +148,261 @@ class BitrefillMcpTransportTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("key_123", repr(caller))
         self.assertNotIn("api.bitrefill.com", repr(caller))
+
+
+class FakeMcpCaller:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def __call__(self, name, arguments):
+        self.calls.append((name, deepcopy(arguments)))
+        if not self.responses:
+            raise AssertionError(f"unexpected MCP call: {name}")
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return deepcopy(response)
+
+
+class BitrefillMcpCatalogTests(unittest.TestCase):
+    def test_search_uses_mcp_and_normalizes_products(self):
+        caller = FakeMcpCaller(
+            [
+                {
+                    "products": [
+                        {
+                            "product_id": "steam-usa",
+                            "name": "Steam USA",
+                            "country": "US",
+                            "currency": "USD",
+                            "recipient_type": "none",
+                            "category": "games",
+                            "in_stock": True,
+                        }
+                    ]
+                }
+            ]
+        )
+        client = McpBitrefillClient(api_key="key_123", call_tool=caller)
+
+        products = client.search_products(
+            query="Steam",
+            country="US",
+            category="games",
+            product_type="gift_card",
+            include_test_products=False,
+        )
+
+        self.assertEqual(products[0]["productId"], "steam-usa")
+        self.assertEqual(products[0]["country"], "US")
+        self.assertEqual(products[0]["productType"], "gift_card")
+        self.assertEqual(
+            caller.calls,
+            [
+                (
+                    "search-products",
+                    {
+                        "query": "Steam",
+                        "country": "US",
+                        "category": "games",
+                        "type": "gift_card",
+                        "include_test_products": False,
+                        "per_page": 100,
+                    },
+                )
+            ],
+        )
+
+    def test_list_searches_each_country_then_filters_and_slices(self):
+        caller = FakeMcpCaller(
+            [
+                {
+                    "products": [
+                        {
+                            "product_id": "food-cz",
+                            "name": "Food CZ",
+                            "country": "CZ",
+                            "category": "food",
+                            "currency": "CZK",
+                        },
+                        {
+                            "product_id": "games-cz",
+                            "name": "Games CZ",
+                            "country": "CZ",
+                            "category": "games",
+                            "currency": "CZK",
+                        },
+                    ]
+                },
+                {
+                    "products": [
+                        {
+                            "product_id": "food-global",
+                            "name": "Food Global",
+                            "country": "XI",
+                            "category": "food",
+                            "currency": "USD",
+                        }
+                    ]
+                },
+            ]
+        )
+        client = McpBitrefillClient(api_key="key_123", call_tool=caller)
+
+        products = client.list_products(
+            country="CZ,XI",
+            category="food,restaurants",
+            start=1,
+            limit=1,
+            include_test_products=False,
+        )
+
+        self.assertEqual([item["productId"] for item in products], ["food-global"])
+        self.assertEqual(
+            [arguments["country"] for _, arguments in caller.calls],
+            ["CZ", "XI"],
+        )
+
+    def test_details_use_mcp_package_value_and_usd_price(self):
+        caller = FakeMcpCaller(
+            [
+                {
+                    "product_id": "steam-usa",
+                    "name": "Steam USA",
+                    "country": "US",
+                    "currency": "USD",
+                    "recipient_type": "none",
+                    "packages": [
+                        {
+                            "package_id": "steam-usa<&>50",
+                            "package_value": "50",
+                            "price": "50.25",
+                        }
+                    ],
+                }
+            ]
+        )
+        client = McpBitrefillClient(api_key="key_123", call_tool=caller)
+
+        details = client.get_product_details(product_id="steam-usa", country="US")
+
+        self.assertEqual(
+            details["packages"][0],
+            {
+                "packageId": "steam-usa<&>50",
+                "value": "50",
+                "priceUsd": "50.25",
+            },
+        )
+        self.assertEqual(
+            caller.calls,
+            [
+                (
+                    "get-product-details",
+                    {"product_id": "steam-usa", "currency": "USD"},
+                )
+            ],
+        )
+
+    def test_details_expose_range_minimum_recipient_and_prepayment(self):
+        caller = FakeMcpCaller(
+            [
+                {
+                    "product_id": "prepaid-visa-usa",
+                    "name": "Prepaid Visa USA",
+                    "country_code": "US",
+                    "currency": "USD",
+                    "recipient_type": "email",
+                    "range": {"min": "10", "max": "100", "step": "5"},
+                    "prepayment": {"step": 1},
+                }
+            ]
+        )
+        client = McpBitrefillClient(api_key="key_123", call_tool=caller)
+
+        details = client.get_product_details(
+            product_id="prepaid-visa-usa",
+            country="US",
+        )
+
+        self.assertEqual(details["packages"][0]["value"], "10")
+        self.assertEqual(details["requiredRecipientFields"], ["email"])
+        self.assertTrue(details["requiresPrepayment"])
+
+    def test_details_reject_country_mismatch(self):
+        caller = FakeMcpCaller(
+            [
+                {
+                    "product_id": "steam-usa",
+                    "name": "Steam USA",
+                    "country": "US",
+                    "currency": "USD",
+                    "packages": [],
+                }
+            ]
+        )
+        client = McpBitrefillClient(api_key="key_123", call_tool=caller)
+
+        with self.assertRaisesRegex(ValueError, "requested country"):
+            client.get_product_details(product_id="steam-usa", country="CZ")
+
+    def test_quote_validates_recipient_cap_and_prepayment(self):
+        phone_product = {
+            "product_id": "tmobile-usa",
+            "name": "T-Mobile USA",
+            "country": "US",
+            "currency": "USD",
+            "recipient_type": "phone_number",
+            "packages": [
+                {
+                    "package_id": "tmobile-usa<&>5",
+                    "package_value": "5",
+                    "price": "5.00",
+                }
+            ],
+        }
+        client = McpBitrefillClient(
+            api_key="key_123",
+            max_purchase_usd="5.00",
+            call_tool=FakeMcpCaller([phone_product, phone_product]),
+        )
+
+        with self.assertRaisesRegex(ValueError, "recipient.phone is required"):
+            client.quote_product(
+                product_id="tmobile-usa",
+                package_id="5",
+                country="US",
+                recipient={},
+            )
+
+        quote = client.quote_product(
+            product_id="tmobile-usa",
+            package_id="tmobile-usa<&>5",
+            country="US",
+            recipient={"phone": "+12025550123"},
+        )
+        self.assertEqual(quote["packageValue"], "5")
+        self.assertEqual(quote["priceUsd"], "5.00")
+
+        prepayment_client = McpBitrefillClient(
+            api_key="key_123",
+            call_tool=FakeMcpCaller(
+                [
+                    {
+                        **phone_product,
+                        "prepayment": {"step": 1},
+                    }
+                ]
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "prepayment form"):
+            prepayment_client.quote_product(
+                product_id="tmobile-usa",
+                package_id="5",
+                country="US",
+                recipient={"phone": "+12025550123"},
+            )
 
 
 if __name__ == "__main__":
