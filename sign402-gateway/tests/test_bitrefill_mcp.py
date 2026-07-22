@@ -8,6 +8,7 @@ from sign402_gateway.bitrefill_mcp import (
     McpToolCaller,
     decode_mcp_tool_result,
 )
+from sign402_gateway.bankr_swap import BASE_USDC_MAINNET
 
 
 class FakeText:
@@ -403,6 +404,258 @@ class BitrefillMcpCatalogTests(unittest.TestCase):
                 country="US",
                 recipient={"phone": "+12025550123"},
             )
+
+
+APPROVED_QUOTE = {
+    "quoteId": "quote_live_1",
+    "productId": "steam-usa",
+    "name": "Steam USA",
+    "productType": "gift_card",
+    "packageId": "steam-usa<&>50",
+    "packageValue": "50",
+    "priceUsd": "50.00",
+    "recipientType": "none",
+}
+
+
+class FakeTreasuryClient:
+    def __init__(self):
+        self.transfers = []
+
+    def transfer_usdc(self, *, to_address, amount, chain="base"):
+        self.transfers.append(
+            {"to_address": to_address, "amount": amount, "chain": chain}
+        )
+        return {"ok": True, "txId": "0xUSDC"}
+
+
+class BitrefillMcpPurchaseTests(unittest.TestCase):
+    def test_balance_purchase_uses_buy_and_invoice_mcp_tools(self):
+        caller = FakeMcpCaller(
+            [
+                {"invoice_id": "inv_1", "status": "complete"},
+                {
+                    "invoice_id": "inv_1",
+                    "status": "complete",
+                    "orders": [
+                        {
+                            "order_id": "ord_1",
+                            "status": "delivered",
+                            "redemption_available": True,
+                            "redemption_info": {"code": "SECRET-CODE"},
+                        }
+                    ],
+                },
+            ]
+        )
+        checkpoints = []
+        client = McpBitrefillClient(
+            api_key="key_123",
+            max_purchase_usd="50.00",
+            call_tool=caller,
+        )
+
+        result = client.buy_product(
+            quote=APPROVED_QUOTE,
+            recipient={},
+            checkpoint_callback=checkpoints.append,
+        )
+
+        self.assertEqual(
+            [name for name, _ in caller.calls],
+            ["buy-products", "get-invoice-by-id"],
+        )
+        self.assertEqual(
+            caller.calls[0][1],
+            {
+                "cart_items": [
+                    {"product_id": "steam-usa", "package_id": "50"}
+                ],
+                "payment_method": "balance",
+                "return_payment_link": False,
+            },
+        )
+        self.assertEqual(result["provider"], "bitrefill-mcp")
+        self.assertEqual(result["invoiceId"], "inv_1")
+        self.assertEqual(result["orderId"], "ord_1")
+        self.assertEqual(result["redemption"]["value"]["code"], "SECRET-CODE")
+        self.assertEqual(checkpoints[0]["invoiceId"], "inv_1")
+        self.assertNotIn("SECRET-CODE", str(checkpoints))
+
+    def test_purchase_maps_committed_recipient_to_refill_input(self):
+        caller = FakeMcpCaller(
+            [
+                {"invoice_id": "inv_phone", "status": "complete"},
+                {
+                    "invoice_id": "inv_phone",
+                    "status": "complete",
+                    "orders": [
+                        {"order_id": "ord_phone", "status": "delivered"}
+                    ],
+                },
+            ]
+        )
+        client = McpBitrefillClient(
+            api_key="key_123",
+            max_purchase_usd="50.00",
+            call_tool=caller,
+        )
+
+        client.buy_product(
+            quote={
+                **APPROVED_QUOTE,
+                "productId": "tmobile-usa",
+                "productType": "phone_refill",
+                "recipientType": "phone_number",
+            },
+            recipient={"phone": "+12025550123"},
+        )
+
+        self.assertEqual(
+            caller.calls[0][1]["cart_items"][0]["refill_input"],
+            "+12025550123",
+        )
+
+    def test_refresh_uses_get_invoice_tool(self):
+        caller = FakeMcpCaller(
+            [
+                {
+                    "invoice_id": "inv_1",
+                    "status": "complete",
+                    "orders": [
+                        {
+                            "order_id": "ord_1",
+                            "status": "delivered",
+                            "redemption_info": {"code": "SECRET-CODE"},
+                        }
+                    ],
+                }
+            ]
+        )
+        client = McpBitrefillClient(api_key="key_123", call_tool=caller)
+
+        result = client.refresh_purchase(
+            {"invoiceId": "inv_1", "orderId": "ord_1"},
+            APPROVED_QUOTE,
+        )
+
+        self.assertEqual(
+            caller.calls,
+            [("get-invoice-by-id", {"invoice_id": "inv_1"})],
+        )
+        self.assertEqual(result["status"], "delivered")
+
+
+class BitrefillMcpUsdcPurchaseTests(unittest.TestCase):
+    def _client(self, caller, treasury, **overrides):
+        return McpBitrefillClient(
+            api_key="key_123",
+            max_purchase_usd=overrides.pop("max_purchase_usd", "55.00"),
+            max_invoice_overage_bps=overrides.pop("max_invoice_overage_bps", 500),
+            payment_method="usdc_base",
+            treasury_client=treasury,
+            invoice_poll_attempts=overrides.pop("invoice_poll_attempts", 2),
+            invoice_poll_interval_seconds=0,
+            call_tool=caller,
+            **overrides,
+        )
+
+    def _payment_info(self, **overrides):
+        payment = {
+            "address": "0xBitrefill",
+            "amount": "50.01",
+            "currency": "USDC",
+            "network": "base",
+            "contract_address": BASE_USDC_MAINNET,
+        }
+        payment.update(overrides)
+        return payment
+
+    def test_valid_base_usdc_purchase_transfers_once_then_polls(self):
+        caller = FakeMcpCaller(
+            [
+                {
+                    "invoice_id": "inv_2",
+                    "status": "unpaid",
+                    "payment_info": self._payment_info(),
+                },
+                {
+                    "invoice_id": "inv_2",
+                    "status": "complete",
+                    "orders": [
+                        {
+                            "order_id": "ord_2",
+                            "status": "delivered",
+                            "redemption_info": {"code": "SECRET-CODE"},
+                        }
+                    ],
+                },
+            ]
+        )
+        treasury = FakeTreasuryClient()
+        client = self._client(caller, treasury)
+
+        result = client.buy_product(quote=APPROVED_QUOTE, recipient={})
+
+        self.assertEqual(
+            treasury.transfers,
+            [
+                {
+                    "to_address": "0xBitrefill",
+                    "amount": "50.01",
+                    "chain": "base",
+                }
+            ],
+        )
+        self.assertFalse(caller.calls[0][1]["return_payment_link"])
+        self.assertEqual(result["treasuryPayment"]["txId"], "0xUSDC")
+
+    def test_invalid_payment_requirements_never_transfer(self):
+        invalid_cases = {
+            "above live cap": self._payment_info(amount="56"),
+            "above quote overage": self._payment_info(amount="53"),
+            "wrong currency": self._payment_info(currency="USDT"),
+            "wrong network": self._payment_info(network="ethereum"),
+            "wrong contract": self._payment_info(contract_address="0xWrong"),
+            "missing address": self._payment_info(address=""),
+        }
+        for label, payment_info in invalid_cases.items():
+            with self.subTest(label=label):
+                caller = FakeMcpCaller(
+                    [
+                        {
+                            "invoice_id": "inv_bad",
+                            "status": "unpaid",
+                            "payment_info": payment_info,
+                        }
+                    ]
+                )
+                treasury = FakeTreasuryClient()
+                client = self._client(caller, treasury)
+
+                with self.assertRaises(ValueError):
+                    client.buy_product(quote=APPROVED_QUOTE, recipient={})
+
+                self.assertEqual(treasury.transfers, [])
+
+    def test_terminal_invoice_error_stops_polling(self):
+        caller = FakeMcpCaller(
+            [
+                {
+                    "invoice_id": "inv_denied",
+                    "status": "unpaid",
+                    "payment_info": self._payment_info(),
+                },
+                {"invoice_id": "inv_denied", "status": "denied", "orders": []},
+            ]
+        )
+        treasury = FakeTreasuryClient()
+        client = self._client(caller, treasury)
+
+        with self.assertRaisesRegex(ValueError, "denied"):
+            client.buy_product(quote=APPROVED_QUOTE, recipient={})
+
+        self.assertEqual(len(caller.calls), 2)
 
 
 if __name__ == "__main__":
