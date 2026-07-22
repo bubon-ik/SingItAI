@@ -31,6 +31,7 @@ SIGN402_WALLET_API_TOKEN=<same value configured for sign402-gateway>
 SIGN402_PHOTON_API_TOKEN=<same value configured for sign402-gateway>
 SIGN402_TELEGRAM_SIGN402_ONLY=1
 SIGN402_TELEGRAM_ALLOWED_USERS=*
+HERMES_TELEGRAM_TEXT_BATCH_DELAY_SECONDS=0.08
 TELEGRAM_ALLOWED_USERS=<operator Telegram ID>
 SIGN402_IMESSAGE_PUBLIC_LINE=<public Sign402 iMessage number or contact>
 SIGN402_WHATSAPP_PUBLIC_LINE=<public Meta WhatsApp Business number or wa.me link>
@@ -84,6 +85,10 @@ agent. An unset `SIGN402_TELEGRAM_ALLOWED_USERS` falls back to the private
 `TELEGRAM_ALLOWED_USERS` setting. If neither policy is set, Telegram wallet
 traffic is denied by default. A wildcard Sign402 policy also forces
 Sign402-only handling as a defensive fallback if the mode flag is omitted.
+
+`HERMES_TELEGRAM_TEXT_BATCH_DELAY_SECONDS=0.08` uses Hermes's supported minimum
+quiet period for short Telegram messages and buttons. Long messages near
+Telegram's 4096-character split boundary keep their separate aggregation delay.
 
 `SIGN402_IMESSAGE_PUBLIC_LINE` is shown in the `/connect_imessage` response
 when automatic Photon registration is disabled. It identifies the shared line
