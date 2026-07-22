@@ -25,6 +25,8 @@ DEFAULT_IMESSAGE_APPROVAL_STORE_PATH = (
 PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 PAIRING_CODE_LENGTH = 8
 PAIRING_TTL_SECONDS = 10 * 60
+LINK_ATTEMPT_LIMIT = 10
+LINK_ATTEMPT_WINDOW_SECONDS = 10 * 60
 TEST_APPROVAL_TTL_SECONDS = 2 * 60
 PURCHASE_APPROVAL_TTL_SECONDS = 10 * 60
 SUPPORTED_APPROVAL_CHANNELS = frozenset({"imessage", "whatsapp"})
@@ -294,6 +296,8 @@ class ImessageApprovalService:
             float(purchase_approval_poll_interval),
         )
         self._fernet = _build_fernet(self.master_key)
+        self._link_failures: dict[str, list[float]] = {}
+        self._link_failures_lock = threading.Lock()
 
     def create_pairing(
         self,
@@ -391,6 +395,8 @@ class ImessageApprovalService:
         now = self._now()
         code_digest = self._digest(f"pairing:{code_value}")
         photon_digest = self._identity_digest(requested_channel, normalized_sender)
+        if self._link_attempts_exhausted(photon_digest, now):
+            return _link_failed()
         encrypted_photon = self._fernet.encrypt(
             normalized_sender.encode("utf-8")
         ).decode("ascii")
@@ -405,11 +411,13 @@ class ImessageApprovalService:
                 (code_digest, now),
             ).fetchone()
             if row is None:
+                self._record_link_failure(photon_digest, now)
                 return _link_failed()
 
             user_id = str(row["telegram_user_id"])
             approval_channel = _normalize_approval_channel(row["channel"])
             if approval_channel != requested_channel:
+                self._record_link_failure(photon_digest, now)
                 return _link_failed()
             channel_label = _approval_channel_label(approval_channel)
             existing_user = db.execute(
@@ -1419,6 +1427,25 @@ class ImessageApprovalService:
             value.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
+
+    def _link_attempts_exhausted(self, photon_digest: str, now: int) -> bool:
+        """True when a sender burned too many bad pairing codes recently.
+
+        Codes have 2^40 entropy, so this guard exists to make online guessing
+        wholly impractical rather than merely infeasible.
+        """
+        cutoff = now - LINK_ATTEMPT_WINDOW_SECONDS
+        with self._link_failures_lock:
+            failures = [t for t in self._link_failures.get(photon_digest, []) if t > cutoff]
+            self._link_failures[photon_digest] = failures
+            return len(failures) >= LINK_ATTEMPT_LIMIT
+
+    def _record_link_failure(self, photon_digest: str, now: int) -> None:
+        cutoff = now - LINK_ATTEMPT_WINDOW_SECONDS
+        with self._link_failures_lock:
+            failures = [t for t in self._link_failures.get(photon_digest, []) if t > cutoff]
+            failures.append(now)
+            self._link_failures[photon_digest] = failures
 
     def _identity_digest(self, channel: str, sender_user_id: str) -> str:
         approval_channel = _normalize_approval_channel(channel)

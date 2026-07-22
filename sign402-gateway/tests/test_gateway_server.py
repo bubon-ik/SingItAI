@@ -13,6 +13,7 @@ from sign402_gateway.bitrefill import TestBitrefillClient
 from sign402_gateway.bitrefill_mcp import McpBitrefillClient
 from sign402_gateway.user_wallets import BASE_NATIVE_ETH_ASSET_ID
 from sign402_gateway.server import (
+    _USER_RATE_LIMITER,
     AgentStateStore,
     BankrCliX402PaymentClient,
     BankrLlmCreditsTopUpClient,
@@ -177,6 +178,8 @@ class GatewayServerTests(unittest.TestCase):
     )
 
     def setUp(self):
+        # Per-user rate limiting is process-global; isolate tests from each other.
+        _USER_RATE_LIMITER.reset()
         # Older tests exercise the local Firefly/demo endpoints intentionally.
         # Production coverage below explicitly disables this opt-in mode.
         self._legacy_env = patch.dict(
@@ -2693,6 +2696,62 @@ class GatewayServerTests(unittest.TestCase):
         self.assertEqual(body["limits"]["maxPerTxAtomic"], 100000000)
         self.assertEqual(body["limits"]["dailyCapAtomic"], 500000000)
         self.assertTrue(body["limits"]["userConfigured"])
+
+    def test_authenticated_requests_are_rate_limited_per_user(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server.user_spend_limit_store = UserSpendLimitStore(Path(tmpdir) / "limits.json")
+
+            with patch.dict(os.environ, {"SIGN402_USER_REQUESTS_PER_MINUTE": "3"}):
+                responses = []
+                for _ in range(4):
+                    with patch("sys.stderr", io.StringIO()):
+                        handler = self.make_handler(
+                            "/agent/spending-limits",
+                            {"telegramUserId": "1045618308"},
+                            server=server,
+                            headers=self.llm_auth_headers(),
+                        )
+                    responses.append(self.response_text(handler))
+
+        for ok_response in responses[:3]:
+            self.assertIn("HTTP/1.0 200 OK", ok_response)
+        self.assertIn("HTTP/1.0 400", responses[3])
+        self.assertIn("Too many wallet requests", responses[3])
+
+    def test_purchase_rate_limit_blocks_wallet_bitrefill_buy(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
+        server.firefly_busy = False
+        server.bitrefill_wallet_purchase_runner = Mock(
+            return_value={"ok": True, "quoteId": "quote_1"}
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "SIGN402_USER_PURCHASES_PER_HOUR": "1",
+                "SIGN402_USER_REQUESTS_PER_MINUTE": "100",
+            },
+        ):
+            with patch("sys.stderr", io.StringIO()):
+                first = self.make_handler(
+                    "/agent/buy-wallet-bitrefill",
+                    {"quoteId": "quote_1", "telegramUserId": "1045618308"},
+                    server=server,
+                    headers=self.llm_auth_headers(),
+                )
+                second = self.make_handler(
+                    "/agent/buy-wallet-bitrefill",
+                    {"quoteId": "quote_2", "telegramUserId": "1045618308"},
+                    server=server,
+                    headers=self.llm_auth_headers(),
+                )
+
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(first))
+        self.assertIn("Too many purchase attempts", self.response_text(second))
+        server.bitrefill_wallet_purchase_runner.assert_called_once()
 
     def test_agent_spending_limits_rejects_user_limits_above_operator_ceiling(self):
         server = DummyServer()

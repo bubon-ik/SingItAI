@@ -862,6 +862,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             user_id = _require_authenticated_user(self, payload)
+            _enforce_user_purchase_rate(user_id)
             amount = _read_positive_amount(payload, "amount")
             to_address = _read_evm_address(payload, "toAddress")
             token_address = _read_withdraw_asset(payload, "tokenAddress")
@@ -1005,6 +1006,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                     "Bankr LLM purchase service is not configured"
                 )
             if operation == "start":
+                _enforce_user_purchase_rate(user_id)
                 result = service.start(
                     telegram_user_id=user_id,
                     amount_usd=_read_required_text(payload, "amountUsd"),
@@ -1352,6 +1354,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             user_id = _require_authenticated_user(
                 self, {"telegramUserId": telegram_user_id}
             )
+            _enforce_user_purchase_rate(user_id)
             payment_context = _tool_payment_context(tool, payload)
             request_body = tool.get("requestBody") if isinstance(tool.get("requestBody"), dict) else None
             raw_payment_required = fetch_x402_payment_required(
@@ -1574,6 +1577,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             user_id = ""
             if str(payload.get("telegramUserId", "") or "").strip():
                 user_id = _require_authenticated_user(self, payload)
+                _enforce_user_purchase_rate(user_id)
                 payload = {**payload, "telegramUserId": user_id}
             elif not self._legacy_operator_request_allowed():
                 return
@@ -4428,6 +4432,75 @@ def _read_hash(payload: dict[str, Any], key: str) -> str:
     return value
 
 
+class RateLimitExceededError(ValueError):
+    """Raised when a per-user request or purchase budget is exhausted."""
+
+
+class SlidingWindowRateLimiter:
+    """Thread-safe in-memory sliding-window limiter keyed by (scope, key)."""
+
+    def __init__(self):
+        self._events: dict[tuple[str, str], list[float]] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, scope: str, key: str, *, limit: int, window_seconds: float) -> bool:
+        now = time.monotonic()
+        bucket_key = (scope, str(key))
+        cutoff = now - window_seconds
+        with self._lock:
+            events = [t for t in self._events.get(bucket_key, []) if t > cutoff]
+            if len(events) >= limit:
+                self._events[bucket_key] = events
+                return False
+            events.append(now)
+            self._events[bucket_key] = events
+            return True
+
+    def reset(self) -> None:
+        with self._lock:
+            self._events.clear()
+
+
+_USER_RATE_LIMITER = SlidingWindowRateLimiter()
+
+DEFAULT_USER_REQUESTS_PER_MINUTE = "60"
+DEFAULT_USER_PURCHASES_PER_HOUR = "20"
+
+
+def _rate_limit_setting(env_name: str, default_value: str) -> int | None:
+    raw = os.getenv(env_name, default_value).strip()
+    if not raw:
+        return None
+    value = int(raw)
+    return value if value > 0 else None
+
+
+def _enforce_user_request_rate(user_id: str) -> None:
+    limit = _rate_limit_setting(
+        "SIGN402_USER_REQUESTS_PER_MINUTE",
+        DEFAULT_USER_REQUESTS_PER_MINUTE,
+    )
+    if limit is None:
+        return
+    if not _USER_RATE_LIMITER.allow("requests", user_id, limit=limit, window_seconds=60.0):
+        raise RateLimitExceededError(
+            "Too many wallet requests. Please wait a minute and try again."
+        )
+
+
+def _enforce_user_purchase_rate(user_id: str) -> None:
+    limit = _rate_limit_setting(
+        "SIGN402_USER_PURCHASES_PER_HOUR",
+        DEFAULT_USER_PURCHASES_PER_HOUR,
+    )
+    if limit is None:
+        return
+    if not _USER_RATE_LIMITER.allow("purchases", user_id, limit=limit, window_seconds=3600.0):
+        raise RateLimitExceededError(
+            "Too many purchase attempts this hour. Please try again later."
+        )
+
+
 def _read_telegram_user_id(payload: dict[str, Any]) -> str:
     for key in ("telegramUserId", "telegram_user_id", "userId"):
         value = str(payload.get(key, "") or "").strip()
@@ -4469,7 +4542,9 @@ def _require_authenticated_user(
     token = str(handler.headers.get("X-Sign402-User-Token", "") or "").strip()
     if not token:
         raise WalletApiAuthError("per-user access token is required")
-    return _authenticated_user_id(handler, payload)
+    user_id = _authenticated_user_id(handler, payload)
+    _enforce_user_request_rate(user_id)
+    return user_id
 
 
 def _read_photon_user_id(payload: dict[str, Any]) -> str:

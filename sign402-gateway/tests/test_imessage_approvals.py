@@ -136,6 +136,23 @@ class ImessageApprovalTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("No Base agent wallet", result["telegramText"])
 
+    def test_link_attempts_lock_out_after_too_many_bad_codes(self):
+        service, wallet_service, _store = self.make_service()
+        wallet_service.create_wallet("1045618308")
+        pairing = service.create_pairing("1045618308")
+
+        for _ in range(10):
+            failed = service.link_photon_sender("AAAAAAA2", "+15551234567")
+            self.assertFalse(failed["ok"])
+
+        # Even the correct code is refused while the sender is locked out.
+        locked = service.link_photon_sender(pairing["code"], "+15551234567")
+        self.assertFalse(locked["ok"])
+
+        # A different sender is unaffected and can still link normally.
+        other = service.link_photon_sender(pairing["code"], "+15559876543")
+        self.assertTrue(other["ok"])
+
     def test_pairing_code_is_single_use(self):
         service, wallet_service, _store = self.make_service()
         wallet_service.create_wallet("1045618308")
