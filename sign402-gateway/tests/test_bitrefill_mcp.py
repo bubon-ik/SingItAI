@@ -610,6 +610,37 @@ class BitrefillMcpUsdcPurchaseTests(unittest.TestCase):
         self.assertFalse(caller.calls[0][1]["return_payment_link"])
         self.assertEqual(result["treasuryPayment"]["txId"], "0xUSDC")
 
+    def test_documented_minimal_payment_info_is_accepted(self):
+        caller = FakeMcpCaller(
+            [
+                {
+                    "invoice_id": "inv_minimal",
+                    "status": "unpaid",
+                    "payment_info": {
+                        "address": "0xBitrefill",
+                        "altcoinPrice": "50.01",
+                        "currency": "USDC",
+                    },
+                },
+                {
+                    "invoice_id": "inv_minimal",
+                    "status": "complete",
+                    "orders": [
+                        {"order_id": "ord_minimal", "status": "delivered"}
+                    ],
+                },
+            ]
+        )
+        treasury = FakeTreasuryClient()
+
+        result = self._client(caller, treasury).buy_product(
+            quote=APPROVED_QUOTE,
+            recipient={},
+        )
+
+        self.assertEqual(result["status"], "delivered")
+        self.assertEqual(treasury.transfers[0]["amount"], "50.01")
+
     def test_invalid_payment_requirements_never_transfer(self):
         invalid_cases = {
             "above live cap": self._payment_info(amount="56"),

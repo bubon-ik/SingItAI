@@ -417,14 +417,17 @@ class McpBitrefillClient:
             or payment.get("chainId")
             or ""
         ).strip().lower()
-        if network not in {"base", "base-mainnet", "8453"}:
+        if network and network not in {"base", "base-mainnet", "8453"}:
             raise ValueError("Bitrefill MCP payment network is not Base Mainnet")
         contract_address = str(
             payment.get("contract_address")
             or payment.get("contractAddress")
             or ""
         ).strip()
-        if contract_address.casefold() != BASE_USDC_MAINNET.casefold():
+        if (
+            contract_address
+            and contract_address.casefold() != BASE_USDC_MAINNET.casefold()
+        ):
             raise ValueError("Bitrefill MCP payment token is not Base USDC")
         raw_amount = (
             payment.get("amount")

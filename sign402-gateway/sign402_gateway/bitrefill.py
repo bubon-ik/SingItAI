@@ -4,7 +4,6 @@ from decimal import Decimal
 from typing import Any, Callable, Protocol
 
 
-
 class BitrefillClient(Protocol):
     def list_products(
         self,
