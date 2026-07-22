@@ -1,0 +1,56 @@
+name: Security gate
+
+on:
+  push:
+    branches: [main, x402Bnkr]
+  pull_request:
+  schedule:
+    # Weekly rescan so newly published advisories surface without a push.
+    - cron: "0 6 * * 1"
+
+jobs:
+  gateway-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install gateway
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ./sign402-gateway
+      - name: Gateway unit tests
+        run: python -m unittest discover -s sign402-gateway/tests -t sign402-gateway
+      - name: Hermes plugin unit tests
+        run: python -m unittest discover -s hermes-plugins/sign402-wallet/tests -t hermes-plugins/sign402-wallet
+
+  python-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: pip-audit gateway dependencies
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          pip install -e ./sign402-gateway
+          pip-audit --skip-editable
+
+  node-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: cdp-x402-service audit and tests
+        working-directory: cdp-x402-service
+        run: |
+          npm ci
+          npm audit --audit-level=moderate
+          npm test
+      - name: singit-risk-check audit
+        working-directory: singit-risk-check
+        run: npm audit --audit-level=moderate
