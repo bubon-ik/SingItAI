@@ -517,6 +517,7 @@ class WalletBitrefillPurchaseRunner:
         source_wallet_provider: Callable[[str], str] | None = None,
         now_provider: Callable[[], int] = now_epoch,
         fulfillment_token_provider: Callable[[], str] = lambda: secrets.token_urlsafe(32),
+        enforce_spend: Callable[[str, dict[str, Any]], None] | None = None,
     ):
         self.store = store
         self.approval_client = approval_client
@@ -525,6 +526,7 @@ class WalletBitrefillPurchaseRunner:
         self.source_wallet_provider = source_wallet_provider
         self.now_provider = now_provider
         self.fulfillment_token_provider = fulfillment_token_provider
+        self.enforce_spend = enforce_spend
 
     def __call__(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.buy(payload)
@@ -548,6 +550,8 @@ class WalletBitrefillPurchaseRunner:
         commitment = build_purchase_commitment(quote, recipient=recipient)
         payment_hash = hash_purchase_commitment(commitment)
         telegram_user_id = str(payload.get("telegramUserId", "") or "").strip()
+        if telegram_user_id and self.enforce_spend is not None:
+            self.enforce_spend(telegram_user_id, quote)
         source_wallet = ""
         if telegram_user_id and self.source_wallet_provider is not None:
             source_wallet = str(self.source_wallet_provider(telegram_user_id) or "").strip()

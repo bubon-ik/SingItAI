@@ -862,6 +862,49 @@ class BitrefillRunnerTests(unittest.TestCase):
             self.assertIn("Spent: 105 SINGIT", result["telegramText"])
             self.assertIn("Transfer tx: https://basescan.org/tx/0xUSERTRANSFER", result["telegramText"])
 
+    def test_wallet_runner_enforces_spend_limits_before_approval_and_payment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            quote_service = BitrefillQuoteService(
+                bitrefill_client=TestBitrefillClient(),
+                store=store,
+                singit_usd_price_provider=lambda: "0.01",
+                quote_id_provider=lambda: "quote_wallet_1",
+                now_provider=lambda: 1_719_000_000,
+            )
+            quote_service.quote(
+                {"productId": "test-gift-card-link", "packageId": "1", "country": "US"}
+            )
+            approval = Mock()
+            fulfillment = Mock()
+            user_funding = Mock()
+
+            def enforce_spend(user_id, quote):
+                raise ValueError("daily spending cap exceeded")
+
+            runner = WalletBitrefillPurchaseRunner(
+                store=store,
+                approval_client=approval,
+                fulfillment_runner=fulfillment,
+                user_funding_runner=user_funding,
+                now_provider=lambda: 1_719_000_001,
+                enforce_spend=enforce_spend,
+            )
+
+            with self.assertRaisesRegex(ValueError, "daily spending cap exceeded"):
+                runner.buy(
+                    {
+                        "quoteId": "quote_wallet_1",
+                        "recipient": {"email": "buyer@example.com"},
+                        "telegramUserId": "1045618308",
+                    }
+                )
+
+            approval.assert_not_called()
+            user_funding.assert_not_called()
+            fulfillment.assert_not_called()
+            self.assertEqual(store.get_quote("quote_wallet_1")["state"], "QUOTED")
+
     def test_wallet_runner_rejects_unconfirmed_checkout_before_fulfillment(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")

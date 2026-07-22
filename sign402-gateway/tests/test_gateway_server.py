@@ -167,6 +167,9 @@ class GatewayServerTests(unittest.TestCase):
             "/agent/inspect-llm-credits-topup",
             "/agent/top-up-llm-credits",
             "/agent/quote-bitrefill",
+            "/agent/search-bitrefill",
+            "/agent/list-bitrefill-products",
+            "/agent/get-bitrefill-product",
             "/agent/buy-bitrefill",
             "/agent/buy-wallet-bitrefill",
             "/agent/get-bitrefill-order",
@@ -4306,6 +4309,67 @@ class GatewayServerTests(unittest.TestCase):
         self.assertIn("HTTP/1.0 200 OK", response)
         self.assertIn('"productId": "test-phone-refill"', response)
         server.bitrefill_product_details_service.assert_called_once_with(payload)
+
+    def test_agent_search_bitrefill_accepts_wallet_api_token(self):
+        server = DummyServer()
+        server.bitrefill_search_service = Mock(return_value={"ok": True, "products": []})
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/search-bitrefill",
+                {"query": "phone", "country": "US"},
+                server=server,
+                headers={"Authorization": "Bearer test-wallet-token"},
+            )
+
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(handler))
+        server.bitrefill_search_service.assert_called_once()
+
+    def test_agent_catalog_endpoints_reject_unauthenticated_requests(self):
+        for path in (
+            "/agent/search-bitrefill",
+            "/agent/list-bitrefill-products",
+            "/agent/get-bitrefill-product",
+        ):
+            with self.subTest(path=path):
+                server = DummyServer()
+                server.bitrefill_search_service = Mock()
+                server.bitrefill_product_details_service = Mock()
+
+                with patch("sys.stderr", io.StringIO()):
+                    handler = self.make_handler(
+                        path,
+                        {"query": "phone", "country": "US"},
+                        server=server,
+                        headers={},
+                    )
+
+                self.assertIn("HTTP/1.0 401", self.response_text(handler))
+                server.bitrefill_search_service.assert_not_called()
+                server.bitrefill_catalog_service.assert_not_called()
+                server.bitrefill_product_details_service.assert_not_called()
+
+    def test_agent_catalog_endpoints_hidden_without_legacy_mode_or_token(self):
+        server = DummyServer()
+        server.bitrefill_search_service = Mock()
+
+        with patch.dict(
+            os.environ,
+            {
+                "SIGN402_ENABLE_LEGACY_PAYMENT_EXECUTOR": "",
+                "SIGN402_LEGACY_OPERATOR_API_TOKEN": "",
+            },
+        ):
+            with patch("sys.stderr", io.StringIO()):
+                handler = self.make_handler(
+                    "/agent/search-bitrefill",
+                    {"query": "phone", "country": "US"},
+                    server=server,
+                    headers={},
+                )
+
+        self.assertIn("HTTP/1.0 404", self.response_text(handler))
+        server.bitrefill_search_service.assert_not_called()
 
     def test_agent_buy_bitrefill_acquires_firefly_and_uses_runner(self):
         server = DummyServer()

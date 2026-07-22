@@ -10,6 +10,9 @@
     "serve": "node src/index.mjs serve-seller",
     "test": "node --test"
   },
+  "overrides": {
+    "axios": "^1.18.1"
+  },
   "dependencies": {
     "@coinbase/cdp-sdk": "^1.51.0",
     "@coinbase/x402": "^2.1.0",

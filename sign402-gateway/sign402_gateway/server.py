@@ -1516,6 +1516,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=400)
 
     def _handle_agent_search_bitrefill(self) -> None:
+        if not self._bitrefill_catalog_request_allowed():
+            return
         try:
             payload = self._read_json()
             result = self.server.bitrefill_search_service(payload)
@@ -1524,6 +1526,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=400)
 
     def _handle_agent_list_bitrefill_products(self) -> None:
+        if not self._bitrefill_catalog_request_allowed():
+            return
         try:
             payload = self._read_json()
             result = self.server.bitrefill_catalog_service(payload)
@@ -1532,6 +1536,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=400)
 
     def _handle_agent_get_bitrefill_product(self) -> None:
+        if not self._bitrefill_catalog_request_allowed():
+            return
         try:
             payload = self._read_json()
             result = self.server.bitrefill_product_details_service(payload)
@@ -1738,6 +1744,15 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=401)
             return False
         return True
+
+    def _bitrefill_catalog_request_allowed(self) -> bool:
+        """Catalog endpoints proxy the operator's Bitrefill API key, so they
+        require either the wallet API token or a legacy operator token."""
+        try:
+            _require_wallet_api_token(self)
+            return True
+        except (WalletApiTokenNotConfiguredError, WalletApiAuthError):
+            return self._legacy_operator_request_allowed()
 
     def _acquire_firefly(self) -> bool:
         lock = getattr(self.server, "firefly_lock", None)
@@ -2209,6 +2224,14 @@ def build_server(
         source_wallet_provider=lambda user_id: _managed_wallet_address(
             user_wallet_service,
             user_id,
+        ),
+        # `server` is bound later in this scope; the closure resolves it at
+        # call time, so spend limits are re-checked at buy time (not only at
+        # quote time, which a direct /agent/buy-wallet-bitrefill call skips).
+        enforce_spend=lambda user_id, quote: _enforce_user_wallet_spend_limits(
+            server,
+            user_id,
+            _bitrefill_spend_requirement(quote["priceUsd"]),
         ),
     )
     x402_inspector = ExternalX402Inspector()
