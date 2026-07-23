@@ -1,5 +1,8 @@
 import json
+import os
 import tempfile
+import threading
+import time
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -170,6 +173,255 @@ class FakeMcpCaller:
 
 
 class BitrefillMcpCatalogTests(unittest.TestCase):
+    def test_catalog_read_succeeds_when_persistence_path_is_unwritable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            blocked_parent = Path(tmpdir) / "blocked"
+            blocked_parent.write_text("not a directory", encoding="utf-8")
+            caller = FakeMcpCaller(
+                [
+                    {
+                        "products": [
+                            {
+                                "product_id": "live-nl",
+                                "name": "Live Netherlands",
+                                "country": "NL",
+                                "category": "shopping",
+                                "currency": "EUR",
+                            }
+                        ]
+                    }
+                ]
+            )
+            client = McpBitrefillClient(
+                api_key="key_123",
+                call_tool=caller,
+                catalog_cache_path=blocked_parent / "catalog.json",
+            )
+
+            products = client.list_products(
+                country="NL",
+                category="",
+                start=0,
+                limit=8,
+                include_test_products=False,
+            )
+
+        self.assertEqual([row["productId"] for row in products], ["live-nl"])
+
+    def test_catalog_uses_read_caller_and_details_use_live_commerce_caller(self):
+        catalog_caller = FakeMcpCaller(
+            [
+                {
+                    "products": [
+                        {
+                            "product_id": "catalog-nl",
+                            "name": "Catalog Netherlands",
+                            "country": "NL",
+                            "category": "shopping",
+                            "currency": "EUR",
+                        }
+                    ]
+                }
+            ]
+        )
+        commerce_caller = FakeMcpCaller(
+            [
+                {
+                    "product_id": "catalog-nl",
+                    "name": "Catalog Netherlands",
+                    "country": "NL",
+                    "category": "shopping",
+                    "currency": "EUR",
+                    "packages": [
+                        {
+                            "package_value": "25",
+                            "payment_price": "26.00",
+                        }
+                    ],
+                }
+            ]
+        )
+        client = McpBitrefillClient(
+            api_key="key_123",
+            call_tool=commerce_caller,
+            catalog_call_tool=catalog_caller,
+        )
+
+        products = client.list_products(
+            country="NL",
+            category="",
+            start=0,
+            limit=8,
+            include_test_products=False,
+        )
+        details = client.get_product_details(product_id="catalog-nl", country="NL")
+
+        self.assertEqual([row["productId"] for row in products], ["catalog-nl"])
+        self.assertEqual(details["packages"][0]["priceUsd"], "26.00")
+        self.assertEqual([name for name, _ in catalog_caller.calls], ["search-products"])
+        self.assertEqual(
+            [name for name, _ in commerce_caller.calls],
+            ["get-product-details"],
+        )
+
+    def test_catalog_cache_settings_and_short_timeout_come_from_environment(self):
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            os.environ,
+            {
+                "SIGN402_BITREFILL_CATALOG_CACHE_TTL_SECONDS": "321",
+                "SIGN402_BITREFILL_CATALOG_TIMEOUT_SECONDS": "7",
+                "SIGN402_BITREFILL_CATALOG_CACHE_PATH": str(
+                    Path(tmpdir) / "catalog.json"
+                ),
+            },
+        ), patch(
+            "sign402_gateway.bitrefill_mcp.McpToolCaller",
+            side_effect=lambda *args, **kwargs: Mock(),
+        ) as caller_factory:
+            client = McpBitrefillClient(api_key="key_123")
+
+        self.assertEqual(client.catalog_cache_ttl_seconds, 321.0)
+        self.assertEqual(client.catalog_cache_path, Path(tmpdir) / "catalog.json")
+        self.assertEqual(caller_factory.call_count, 2)
+        self.assertEqual(caller_factory.call_args_list[0].kwargs, {})
+        self.assertEqual(
+            caller_factory.call_args_list[1].kwargs,
+            {"timeout_seconds": 7.0},
+        )
+
+    def test_concurrent_cold_catalog_requests_are_single_flight(self):
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+        call_lock = threading.Lock()
+        payload = {
+            "products": [
+                {
+                    "product_id": "shared-nl",
+                    "name": "Shared Netherlands",
+                    "country": "NL",
+                    "category": "shopping",
+                    "currency": "EUR",
+                }
+            ]
+        }
+
+        def blocking_caller(name, arguments):
+            with call_lock:
+                calls.append((name, deepcopy(arguments)))
+            started.set()
+            release.wait(1.0)
+            return deepcopy(payload)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = McpBitrefillClient(
+                api_key="key_123",
+                call_tool=blocking_caller,
+                catalog_cache_path=Path(tmpdir) / "catalog.json",
+            )
+            results = []
+            errors = []
+
+            def load():
+                try:
+                    results.append(
+                        client.list_products(
+                            country="NL",
+                            category="",
+                            start=0,
+                            limit=8,
+                            include_test_products=False,
+                        )
+                    )
+                except Exception as exc:
+                    errors.append(exc)
+
+            first = threading.Thread(target=load)
+            second = threading.Thread(target=load)
+            first.start()
+            self.assertTrue(started.wait(0.5))
+            second.start()
+            time.sleep(0.05)
+            release.set()
+            first.join(1.0)
+            second.join(1.0)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(
+            [[row["productId"] for row in result] for result in results],
+            [["shared-nl"], ["shared-nl"]],
+        )
+        self.assertEqual(len(calls), 1)
+
+    def test_stale_catalog_returns_immediately_and_failed_refresh_preserves_it(self):
+        clock = {"now": 1000.0}
+        callbacks = []
+        caller = FakeMcpCaller(
+            [
+                {
+                    "products": [
+                        {
+                            "product_id": "cached-nl",
+                            "name": "Cached Netherlands",
+                            "country": "NL",
+                            "category": "shopping",
+                            "currency": "EUR",
+                        }
+                    ]
+                },
+                ValueError("upstream unavailable"),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = McpBitrefillClient(
+                api_key="key_123",
+                call_tool=caller,
+                catalog_cache_path=Path(tmpdir) / "catalog.json",
+                catalog_cache_ttl_seconds=600,
+                catalog_refresh_runner=callbacks.append,
+                now_provider=lambda: clock["now"],
+            )
+            client.list_products(
+                country="NL",
+                category="",
+                start=0,
+                limit=8,
+                include_test_products=False,
+            )
+            clock["now"] = 1601.0
+
+            started = time.monotonic()
+            stale = client.list_products(
+                country="NL",
+                category="",
+                start=0,
+                limit=8,
+                include_test_products=False,
+            )
+            elapsed = time.monotonic() - started
+
+            self.assertLess(elapsed, 0.05)
+            self.assertEqual([row["productId"] for row in stale], ["cached-nl"])
+            self.assertEqual(len(caller.calls), 1)
+            self.assertEqual(len(callbacks), 1)
+
+            callbacks.pop(0)()
+            stale_after_failure = client.list_products(
+                country="NL",
+                category="",
+                start=0,
+                limit=8,
+                include_test_products=False,
+            )
+
+        self.assertEqual(
+            [row["productId"] for row in stale_after_failure],
+            ["cached-nl"],
+        )
+        self.assertEqual(len(caller.calls), 2)
+        self.assertEqual(len(callbacks), 1)
+
     def test_catalog_cache_ignores_oversized_persistence(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             cache_path = Path(tmpdir) / "catalog.json"

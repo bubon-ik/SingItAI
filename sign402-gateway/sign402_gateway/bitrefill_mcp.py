@@ -26,6 +26,12 @@ MAX_CATALOG_CACHE_ENTRIES = 256
 MAX_CATALOG_PRODUCTS_PER_ENTRY = 200
 
 
+class _CatalogFlight:
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.error: Exception | None = None
+
+
 def decode_mcp_tool_result(
     result: Any,
     *,
@@ -139,8 +145,11 @@ class McpBitrefillClient:
         invoice_poll_interval_seconds: float = 5.0,
         sleeper: Any | None = None,
         call_tool: Any | None = None,
-        catalog_cache_ttl_seconds: float = 600.0,
+        catalog_call_tool: Any | None = None,
+        catalog_cache_ttl_seconds: float | None = None,
+        catalog_timeout_seconds: float | None = None,
         catalog_cache_path: str | Path | None = None,
+        catalog_refresh_runner: Any | None = None,
         now_provider: Any | None = None,
     ):
         key = str(api_key).strip()
@@ -165,21 +174,61 @@ class McpBitrefillClient:
         self.invoice_poll_interval_seconds = float(invoice_poll_interval_seconds)
         if self.invoice_poll_interval_seconds < 0:
             raise ValueError("invoice_poll_interval_seconds must be non-negative")
-        self.catalog_cache_ttl_seconds = float(catalog_cache_ttl_seconds)
+        cache_ttl = (
+            catalog_cache_ttl_seconds
+            if catalog_cache_ttl_seconds is not None
+            else os.environ.get(
+                "SIGN402_BITREFILL_CATALOG_CACHE_TTL_SECONDS",
+                "600",
+            )
+        )
+        self.catalog_cache_ttl_seconds = float(cache_ttl)
         if self.catalog_cache_ttl_seconds <= 0:
             raise ValueError("catalog_cache_ttl_seconds must be positive")
+        catalog_timeout = (
+            catalog_timeout_seconds
+            if catalog_timeout_seconds is not None
+            else os.environ.get("SIGN402_BITREFILL_CATALOG_TIMEOUT_SECONDS", "8")
+        )
+        self.catalog_timeout_seconds = float(catalog_timeout)
+        if self.catalog_timeout_seconds <= 0:
+            raise ValueError("catalog_timeout_seconds must be positive")
+        configured_cache_path = catalog_cache_path
+        if configured_cache_path is None:
+            configured_cache_path = os.environ.get(
+                "SIGN402_BITREFILL_CATALOG_CACHE_PATH"
+            )
+        if (
+            configured_cache_path is None
+            and call_tool is None
+            and catalog_call_tool is None
+        ):
+            configured_cache_path = "~/.sign402/bitrefill-catalog-cache.json"
         self.catalog_cache_path = (
-            Path(catalog_cache_path).expanduser()
-            if catalog_cache_path is not None
+            Path(configured_cache_path).expanduser()
+            if configured_cache_path is not None
             else None
         )
         self._now = now_provider or time.time
         self._catalog_lock = threading.RLock()
         self._catalog_cache: dict[tuple[str, bool], dict[str, Any]] = {}
+        self._catalog_flights: dict[tuple[str, bool], _CatalogFlight] = {}
+        self._catalog_refresh_runner = (
+            catalog_refresh_runner or self._default_catalog_refresh_runner
+        )
         self._load_catalog_cache()
         self.sleeper = sleeper or time.sleep
         server_url = f"{base_url}/{urllib.parse.quote(key, safe='')}"
         self._call_tool = call_tool or McpToolCaller(server_url)
+        if catalog_call_tool is not None:
+            self._catalog_call_tool = catalog_call_tool
+        elif call_tool is not None:
+            self._catalog_call_tool = call_tool
+        else:
+            self._catalog_call_tool = McpToolCaller(
+                server_url,
+                timeout_seconds=self.catalog_timeout_seconds,
+            )
 
     def __repr__(self) -> str:
         return (
@@ -227,35 +276,130 @@ class McpBitrefillClient:
     ) -> list[dict[str, Any]]:
         normalized_country = str(country).strip().upper()
         key = (normalized_country, bool(include_test_products))
+        stale_products: list[dict[str, Any]] | None = None
+        refresh_flight: _CatalogFlight | None = None
+        cold_flight: _CatalogFlight | None = None
+        cold_owner = False
         with self._catalog_lock:
             cached = self._catalog_cache.get(key)
-            if (
-                cached is not None
-                and self._now() - float(cached["storedAt"])
-                <= self.catalog_cache_ttl_seconds
-            ):
-                return deepcopy(cached["products"])
+            if cached is not None:
+                cached_products = deepcopy(cached["products"])
+                if (
+                    self._now() - float(cached["storedAt"])
+                    <= self.catalog_cache_ttl_seconds
+                ):
+                    return cached_products
+                stale_products = cached_products
+                if key not in self._catalog_flights:
+                    refresh_flight = _CatalogFlight()
+                    self._catalog_flights[key] = refresh_flight
+            else:
+                cold_flight = self._catalog_flights.get(key)
+                if cold_flight is None:
+                    cold_flight = _CatalogFlight()
+                    self._catalog_flights[key] = cold_flight
+                    cold_owner = True
+        if stale_products is not None:
+            if refresh_flight is not None:
+                try:
+                    self._catalog_refresh_runner(
+                        lambda: self._refresh_catalog_snapshot(key, refresh_flight)
+                    )
+                except Exception:
+                    self._finish_catalog_flight(key, refresh_flight)
+            return stale_products
 
+        if cold_flight is None:
+            raise RuntimeError("catalog flight was not initialized")
+        if not cold_owner:
+            if not cold_flight.event.wait(self.catalog_timeout_seconds + 1.0):
+                raise ValueError("Bitrefill catalog request timed out")
+            if cold_flight.error is not None:
+                raise cold_flight.error
+            with self._catalog_lock:
+                completed = self._catalog_cache.get(key)
+                if completed is None:
+                    raise ValueError("Bitrefill catalog request failed")
+                return deepcopy(completed["products"])
+        try:
+            products = self._fetch_catalog_snapshot(
+                normalized_country,
+                include_test_products=include_test_products,
+            )
+            self._store_catalog_snapshot(key, products)
+            return products
+        except Exception as exc:
+            cold_flight.error = exc
+            raise
+        finally:
+            self._finish_catalog_flight(key, cold_flight)
+
+    def _fetch_catalog_snapshot(
+        self,
+        country: str,
+        *,
+        include_test_products: bool,
+    ) -> list[dict[str, Any]]:
         arguments: dict[str, Any] = {
             "query": "*",
-            "country": normalized_country,
+            "country": country,
             "include_test_products": bool(include_test_products),
             "per_page": 100,
         }
-        payload = self._call_tool("search-products", arguments)
+        payload = self._catalog_call_tool("search-products", arguments)
         products = self._normalize_product_rows(
             payload,
-            fallback_country=normalized_country or "XI",
+            fallback_country=country or "XI",
         )
         for product in products:
             product["packages"] = []
+        return products
+
+    def _store_catalog_snapshot(
+        self,
+        key: tuple[str, bool],
+        products: list[dict[str, Any]],
+    ) -> None:
         with self._catalog_lock:
             self._catalog_cache[key] = {
                 "storedAt": float(self._now()),
                 "products": deepcopy(products),
             }
             self._persist_catalog_cache()
-        return products
+
+    def _refresh_catalog_snapshot(
+        self,
+        key: tuple[str, bool],
+        flight: _CatalogFlight,
+    ) -> None:
+        try:
+            products = self._fetch_catalog_snapshot(
+                key[0],
+                include_test_products=key[1],
+            )
+            self._store_catalog_snapshot(key, products)
+        except Exception as exc:
+            flight.error = exc
+        finally:
+            self._finish_catalog_flight(key, flight)
+
+    def _finish_catalog_flight(
+        self,
+        key: tuple[str, bool],
+        flight: _CatalogFlight,
+    ) -> None:
+        with self._catalog_lock:
+            if self._catalog_flights.get(key) is flight:
+                self._catalog_flights.pop(key, None)
+            flight.event.set()
+
+    @staticmethod
+    def _default_catalog_refresh_runner(callback: Any) -> None:
+        threading.Thread(
+            target=callback,
+            name="bitrefill-catalog-refresh",
+            daemon=True,
+        ).start()
 
     def _load_catalog_cache(self) -> None:
         if self.catalog_cache_path is None or not self.catalog_cache_path.exists():
@@ -328,7 +472,10 @@ class McpBitrefillClient:
     def _persist_catalog_cache(self) -> None:
         if self.catalog_cache_path is None:
             return
-        self.catalog_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.catalog_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return
         entries = [
             {
                 "country": country,
