@@ -2224,6 +2224,112 @@ class PluginRegistrationTests(unittest.TestCase):
             [europe_esim],
         )
 
+    def test_bitrefill_search_reports_no_exact_match_for_irrelevant_results(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.bitrefill_search_result = {
+            "ok": True,
+            "products": [
+                {
+                    "productId": "bitrefill-esim-europe",
+                    "name": "Bitrefill eSIM Europe",
+                    "country": "AT",
+                    "productType": "esim",
+                }
+            ],
+        }
+        plugin._client_factory = lambda: client
+        plugin._background_runner = lambda callback: callback()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        def dispatch(text):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    text,
+                    "1045618308",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        dispatch("Buy Bitrefill")
+        dispatch("Search Products")
+        dispatch("Biterfill gift card")
+
+        response = gateway.adapters["telegram"].sent[-1][1]
+        self.assertIn("No exact Bitrefill products found", response)
+        self.assertNotIn("Bitrefill eSIM Europe", response)
+        self.assertEqual(
+            plugin._BITREFILL_SESSIONS["1045618308"],
+            {"stage": "awaiting-search", "country": "CZ"},
+        )
+
+    def test_bitrefill_search_stores_only_exact_company_matches(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.bitrefill_search_result = {
+            "ok": True,
+            "products": [
+                {
+                    "productId": "bitrefill-esim-europe",
+                    "name": "Bitrefill eSIM Europe",
+                    "country": "AT",
+                    "productType": "esim",
+                },
+                {
+                    "productId": "amazon-nl",
+                    "name": "Amazon.nl Netherlands",
+                    "country": "NL",
+                    "productType": "gift_card",
+                },
+            ],
+        }
+        client.bitrefill_product_result = {
+            "ok": True,
+            "productId": "amazon-nl",
+            "name": "Amazon.nl Netherlands",
+            "country": "NL",
+            "requiredRecipientFields": [],
+            "packages": [
+                {
+                    "packageId": "amazon-nl<&>10",
+                    "value": "10",
+                    "priceUsd": "10.00",
+                }
+            ],
+        }
+        plugin._client_factory = lambda: client
+        plugin._background_runner = lambda callback: callback()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        def dispatch(text):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    text,
+                    "1045618308",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        dispatch("Buy Bitrefill")
+        dispatch("Search Products")
+        dispatch("Amazon")
+
+        response = gateway.adapters["telegram"].sent[-1][1]
+        self.assertIn("1. Amazon.nl Netherlands", response)
+        self.assertNotIn("Bitrefill eSIM Europe", response)
+
+        dispatch("1")
+
+        self.assertEqual(client.bitrefill_product_calls, [("amazon-nl", "NL")])
+
     def test_bitrefill_global_search_uses_selected_products_real_country(self):
         plugin = load_plugin()
         context = FakeContext()

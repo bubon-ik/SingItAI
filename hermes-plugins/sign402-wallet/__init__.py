@@ -1747,7 +1747,10 @@ def _handle_bitrefill_search_input(*, identity: TelegramIdentity, query: str, so
             search_all_countries=True,
             include_test_products=False,
         )
-        products = _normalize_bitrefill_products(result.get("products"))
+        products = _filter_bitrefill_search_products(
+            clean_query,
+            _normalize_bitrefill_products(result.get("products")),
+        )
         if not _telegram_operation_is_current(user_id, generation):
             return "", None
         if not products:
@@ -1756,7 +1759,10 @@ def _handle_bitrefill_search_input(*, identity: TelegramIdentity, query: str, so
                 "country": country,
             }
             return (
-                f"No Bitrefill products found for \"{clean_query}\" in {country}.\n\nTry another search.",
+                (
+                    f"No exact Bitrefill products found for \"{clean_query}\" "
+                    f"in {country}.\n\nTry another company name."
+                ),
                 _reply_keyboard((("Change Country", "Back"),)),
             )
         limited = products[:_BITREFILL_MAX_SEARCH_RESULTS]
