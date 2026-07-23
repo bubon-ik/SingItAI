@@ -1852,6 +1852,85 @@ class PluginRegistrationTests(unittest.TestCase):
             gateway.adapters["telegram"].sent[-1][1],
         )
 
+    def test_browse_catalog_schedules_nonblocking_country_warmup(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        callbacks = []
+        plugin._client_factory = lambda: client
+        plugin._background_runner = callbacks.append
+        plugin.register(context)
+        callbacks.clear()
+        gateway = FakeGateway(adapter_key="telegram")
+
+        def dispatch(text):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    text,
+                    "1045618308",
+                    username="AlpskyKnedlik",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        dispatch("Buy Bitrefill")
+        sent_before = len(gateway.adapters["telegram"].sent)
+
+        self.assertEqual(dispatch("Browse Catalog"), plugin._SKIP_RESULT)
+
+        self.assertEqual(len(gateway.adapters["telegram"].sent), sent_before + 1)
+        self.assertIn(
+            "Choose a Bitrefill category",
+            gateway.adapters["telegram"].sent[-1][1],
+        )
+        self.assertEqual(client.bitrefill_list_calls, [])
+        self.assertEqual(len(callbacks), 1)
+
+        callbacks.pop(0)()
+
+        self.assertEqual(
+            client.bitrefill_list_calls,
+            [("CZ", "all", 0, 8, True, False)],
+        )
+
+    def test_catalog_warmup_failure_keeps_category_prompt_and_session(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.error = plugin.GatewayClientError("unavailable")
+        callbacks = []
+        plugin._client_factory = lambda: client
+        plugin._background_runner = callbacks.append
+        plugin.register(context)
+        callbacks.clear()
+        gateway = FakeGateway(adapter_key="telegram")
+
+        def dispatch(text):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    text,
+                    "1045618308",
+                    username="AlpskyKnedlik",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        dispatch("Buy Bitrefill")
+        dispatch("Browse Catalog")
+        sent_before = list(gateway.adapters["telegram"].sent)
+
+        callbacks.pop(0)()
+
+        self.assertEqual(gateway.adapters["telegram"].sent, sent_before)
+        self.assertEqual(
+            plugin._BITREFILL_SESSIONS["1045618308"]["stage"],
+            "select-category",
+        )
+
     def test_bitrefill_catalog_load_is_background_single_flight_and_cancellable(self):
         plugin = load_plugin()
         context = FakeContext()
@@ -1877,9 +1956,15 @@ class PluginRegistrationTests(unittest.TestCase):
 
         dispatch("Buy Bitrefill")
         dispatch("Browse Catalog")
+        self.assertEqual(len(callbacks), 1)
+        callbacks.pop(0)()
+        self.assertEqual(
+            client.bitrefill_list_calls,
+            [("CZ", "all", 0, 8, True, False)],
+        )
 
         self.assertEqual(dispatch("All"), plugin._SKIP_RESULT)
-        self.assertEqual(client.bitrefill_list_calls, [])
+        self.assertEqual(len(client.bitrefill_list_calls), 1)
         self.assertEqual(len(callbacks), 1)
         self.assertIn("Loading catalog", gateway.adapters["telegram"].sent[-1][1])
 
@@ -1895,7 +1980,11 @@ class PluginRegistrationTests(unittest.TestCase):
 
         callbacks[0]()
 
-        self.assertEqual(len(client.bitrefill_list_calls), 1)
+        self.assertEqual(len(client.bitrefill_list_calls), 2)
+        self.assertEqual(
+            client.bitrefill_list_calls[0],
+            client.bitrefill_list_calls[1],
+        )
         self.assertEqual(
             gateway.adapters["telegram"].sent,
             sent_before_completion,

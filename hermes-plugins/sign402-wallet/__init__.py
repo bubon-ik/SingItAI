@@ -1668,6 +1668,24 @@ def _send_bitrefill_category_prompt(*, identity: TelegramIdentity, source, gatew
         f"Choose a Bitrefill category for {country}.\n\nProducts from {country} and international catalog are included.",
         reply_markup=_reply_keyboard(_BITREFILL_CATEGORY_BUTTONS),
     )
+    _run_in_background(lambda: _warm_bitrefill_catalog(country))
+
+
+def _warm_bitrefill_catalog(country: str) -> None:
+    try:
+        _client_factory().list_bitrefill_products(
+            country=country,
+            category="all",
+            start=0,
+            limit=_BITREFILL_CATALOG_PAGE_SIZE,
+            include_international=True,
+            include_test_products=False,
+        )
+    except Exception as exc:
+        logger.info(
+            "Bitrefill catalog warm-up skipped error=%s",
+            type(exc).__name__,
+        )
 
 
 def _handle_bitrefill_country_input(*, identity: TelegramIdentity, text: str, source, gateway):
