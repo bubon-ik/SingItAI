@@ -178,9 +178,10 @@ class McpBitrefillClient:
             for item in str(country).split(",")
             if item.strip()
         ] or [""]
+        local_countries = [item for item in countries if item != "XI"]
+        mcp_countries = local_countries or [""]
         products: list[dict[str, Any]] = []
-        for country_code in countries:
-            mcp_country = "" if country_code == "XI" else country_code
+        for mcp_country in mcp_countries:
             arguments: dict[str, Any] = {
                 "query": "*",
                 "country": mcp_country,
@@ -191,7 +192,7 @@ class McpBitrefillClient:
             products.extend(
                 self._normalize_product_rows(
                     payload,
-                    fallback_country=country_code,
+                    fallback_country=mcp_country or "XI",
                 )
             )
         products = self._filter_products(
