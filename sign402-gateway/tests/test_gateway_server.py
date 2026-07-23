@@ -668,6 +668,19 @@ class GatewayServerTests(unittest.TestCase):
         )
 
         self.assertIsInstance(pricer.quote_client, BankrWalletApiClient)
+        self.assertEqual(pricer.buffer_bps, 0)
+
+    def test_real_rate_pricer_env_builder_ignores_legacy_pricing_buffer(self):
+        pricer = build_real_rate_pricer_from_env(
+            {
+                "SIGN402_BITREFILL_PRICING_MODE": "bankr_real_rate",
+                "SIGN402_MAX_SINGIT_PER_BITREFILL_ORDER": "1000000",
+                "SIGN402_BITREFILL_USDC_BUFFER_BPS": "1000",
+                "BANKR_API_KEY": "test_key",
+            }
+        )
+
+        self.assertEqual(pricer.buffer_bps, 0)
 
     def test_bitrefill_funding_runner_env_builder_uses_bankr_wallet_api_swap(self):
         runner = build_bitrefill_funding_runner_from_env(

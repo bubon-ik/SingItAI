@@ -16,7 +16,7 @@ class RealRateSingitPricer:
         from_token: str,
         to_token: str = "USDC",
         chain: str = "base",
-        buffer_bps: int = 1000,
+        buffer_bps: int = 0,
         max_singit: str = "1000000",
         search_iterations: int = 8,
     ):
@@ -39,11 +39,7 @@ class RealRateSingitPricer:
     ) -> dict[str, Any]:
         token = str(from_token or self.from_token)
         token_decimals = int(decimals) if decimals is not None else SINGIT_DECIMALS
-        amount_quantum = (
-            Decimal(1).scaleb(-token_decimals)
-            if decimals is not None
-            else Decimal("1")
-        )
+        amount_quantum = Decimal(1).scaleb(-token_decimals)
         amount_cap = (
             Decimal(str(max_amount))
             if max_amount is not None

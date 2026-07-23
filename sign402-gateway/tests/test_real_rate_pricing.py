@@ -208,23 +208,24 @@ class RealRatePricingTests(unittest.TestCase):
             pricer.price_for_usdc("0.10")
 
 
-    def test_finds_required_singit_for_target_usdc_with_buffer(self):
+    def test_finds_required_singit_for_target_usdc_with_no_application_buffer(self):
         client = LinearQuoteClient(Decimal("0.01"))
         pricer = RealRateSingitPricer(
             quote_client=client,
             from_token="0xc2c1e0b7C401e6217193732272444D928646eba3",
             to_token="USDC",
             chain="base",
-            buffer_bps=1000,
+            buffer_bps=0,
             max_singit="1000",
         )
 
-        result = pricer.price_for_usdc("0.10")
+        result = pricer.price_for_usdc("0.102")
 
         self.assertEqual(result["pricingMode"], "bankr_real_rate")
-        self.assertGreaterEqual(Decimal(result["expectedUsdc"]), Decimal("0.11"))
-        self.assertLessEqual(Decimal(result["requiredSingit"]), Decimal("11.01"))
-        self.assertEqual(result["requiredSingitAtomic"], "11000000000000000000")
+        self.assertEqual(result["targetUsdc"], "0.102")
+        self.assertEqual(result["bufferedTargetUsdc"], "0.102000")
+        self.assertGreaterEqual(Decimal(result["expectedUsdc"]), Decimal("0.102"))
+        self.assertEqual(result["requiredSingitAtomic"], "10200000000000000000")
 
     def test_price_for_usdc_accepts_per_call_token_and_decimals(self):
         client = LinearQuoteClient(Decimal("0.01"))

@@ -2012,7 +2012,7 @@ def build_real_rate_pricer_from_env(env: dict[str, str] | None = None):
         from_token=values.get("SIGN402_BANKR_SWAP_FROM_TOKEN", DEFAULT_SINGIT_TOKEN_ADDRESS),
         to_token=values.get("SIGN402_BANKR_SWAP_TO_TOKEN", "USDC"),
         chain=values.get("SIGN402_BANKR_SWAP_CHAIN", "base"),
-        buffer_bps=int(values.get("SIGN402_BITREFILL_USDC_BUFFER_BPS", "1000")),
+        buffer_bps=0,
         max_singit=max_singit,
     )
 

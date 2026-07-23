@@ -63,11 +63,11 @@ class FixedRealRatePricer:
         return {
             "pricingMode": "bankr_real_rate",
             "targetUsdc": str(target_usdc),
-            "bufferedTargetUsdc": "0.11",
+            "bufferedTargetUsdc": str(target_usdc),
             "requiredSingit": "25000",
             "requiredSingitAtomic": "25000000000000000000000",
-            "expectedUsdc": "0.111",
-            "minUsdc": "0.109",
+            "expectedUsdc": str(target_usdc),
+            "minUsdc": str(target_usdc),
         }
 
 
@@ -80,11 +80,11 @@ class FixedWalletTokenPricer:
         return {
             "pricingMode": "bankr_real_rate",
             "targetUsdc": str(target_usdc),
-            "bufferedTargetUsdc": "0.11",
+            "bufferedTargetUsdc": str(target_usdc),
             "requiredAmount": "0.11",
             "requiredAmountAtomic": "110000",
-            "expectedUsdc": "0.111",
-            "minUsdc": "0.109",
+            "expectedUsdc": str(target_usdc),
+            "minUsdc": str(target_usdc),
         }
 
 
@@ -228,7 +228,7 @@ class BitrefillRunnerTests(unittest.TestCase):
                 pricer.calls,
                 [
                     (
-                        "1.00",
+                        "1.02",
                         {
                             "from_token": "0x1111111111111111111111111111111111111111",
                             "decimals": 18,
@@ -283,9 +283,13 @@ class BitrefillRunnerTests(unittest.TestCase):
 
             pricer.price_for_usdc.assert_not_called()
             self.assertEqual(quote["paymentTokenSymbol"], "USDC")
-            self.assertEqual(quote["paymentTokenAmount"], "1")
-            self.assertEqual(quote["maxPaymentTokenAtomic"], "1000000")
-            self.assertEqual(quote["requiredUsdc"], "1")
+            self.assertEqual(quote["serviceFeeBps"], 200)
+            self.assertEqual(quote["serviceFeeUsd"], "0.02")
+            self.assertEqual(quote["totalUsd"], "1.02")
+            self.assertEqual(quote["paymentTokenAmount"], "1.02")
+            self.assertEqual(quote["maxPaymentTokenAtomic"], "1020000")
+            self.assertEqual(quote["requiredUsdc"], "1.02")
+            self.assertEqual(quote["bufferedTargetUsdc"], "1.02")
 
     def test_quote_service_rejects_direct_usdc_when_wallet_balance_is_too_low(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -856,10 +860,10 @@ class BitrefillRunnerTests(unittest.TestCase):
             self.assertIn("Action: BUY BITREFILL", context_lines)
             self.assertIn("Product: Test Gift Card Link", context_lines)
             self.assertIn("Cost: 1 USD", context_lines)
-            self.assertIn("Max spend: 105 SINGIT", context_lines)
+            self.assertIn("Max spend: 102 SINGIT", context_lines)
             self.assertIn("Paid from: 0xAc4a...f45C", context_lines)
             self.assertIn("Expires: 2 minutes", context_lines)
-            self.assertIn("Spent: 105 SINGIT", result["telegramText"])
+            self.assertIn("Spent: 102 SINGIT", result["telegramText"])
             self.assertIn("Transfer tx: https://basescan.org/tx/0xUSERTRANSFER", result["telegramText"])
 
     def test_wallet_runner_enforces_spend_limits_before_approval_and_payment(self):

@@ -155,12 +155,12 @@ class BitrefillQuoteTests(unittest.TestCase):
             },
             pricing={
                 "pricingMode": "bankr_real_rate",
-                "targetUsdc": "0.10",
-                "bufferedTargetUsdc": "0.11",
+                "targetUsdc": "0.102",
+                "bufferedTargetUsdc": "0.102",
                 "requiredSingit": "25000",
                 "requiredSingitAtomic": "25000000000000000000000",
-                "expectedUsdc": "0.111",
-                "minUsdc": "0.109",
+                "expectedUsdc": "0.102",
+                "minUsdc": "0.102",
             },
             quote_id="quote_real_1",
             now_epoch=1_719_000_000,
@@ -170,7 +170,9 @@ class BitrefillQuoteTests(unittest.TestCase):
         self.assertEqual(quote["pricingMode"], "bankr_real_rate")
         self.assertEqual(quote["singitAmount"], "25000")
         self.assertEqual(quote["maxSingitAtomic"], "25000000000000000000000")
-        self.assertEqual(quote["requiredUsdc"], "0.10")
+        self.assertEqual(quote["serviceFeeUsd"], "0.002")
+        self.assertEqual(quote["totalUsd"], "0.102")
+        self.assertEqual(quote["requiredUsdc"], "0.102")
         self.assertIn("real-rate", quote["quoteText"])
 
     def test_build_real_rate_quote_binds_selected_payment_token(self):
@@ -192,12 +194,12 @@ class BitrefillQuoteTests(unittest.TestCase):
             },
             pricing={
                 "pricingMode": "bankr_real_rate",
-                "targetUsdc": "0.10",
-                "bufferedTargetUsdc": "0.11",
+                "targetUsdc": "0.102",
+                "bufferedTargetUsdc": "0.102",
                 "requiredAmount": "0.11",
                 "requiredAmountAtomic": "110000",
-                "expectedUsdc": "0.111",
-                "minUsdc": "0.109",
+                "expectedUsdc": "0.102",
+                "minUsdc": "0.102",
             },
             payment_token={
                 "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",

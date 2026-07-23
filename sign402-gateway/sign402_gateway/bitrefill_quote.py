@@ -112,8 +112,9 @@ def build_real_rate_quote(
     if str(request.get("packageId", "")).strip() != package_id:
         raise ValueError("selected Bitrefill package does not match request")
     price_usd = Decimal(str(product.get("priceUsd", product.get("packageValue", ""))))
-    if price_usd <= 0:
-        raise ValueError("product priceUsd must be positive")
+    service_fee_usd, total_usd = calculate_service_fee(price_usd)
+    if Decimal(str(pricing["targetUsdc"])) != total_usd:
+        raise ValueError("pricing targetUsdc must equal Bitrefill totalUsd")
     required_amount_key = "requiredAmount" if payment_token is not None else "requiredSingit"
     required_atomic_key = (
         "requiredAmountAtomic" if payment_token is not None else "requiredSingitAtomic"
@@ -138,6 +139,9 @@ def build_real_rate_quote(
         "currency": str(product.get("currency", "USD")),
         "packageValue": value,
         "priceUsd": f"{price_usd:.2f}",
+        "serviceFeeBps": SERVICE_FEE_BPS,
+        "serviceFeeUsd": format_decimal(service_fee_usd),
+        "totalUsd": format_decimal(total_usd),
         "pricingMode": "bankr_real_rate",
         "requiredUsdc": str(pricing["targetUsdc"]),
         "bufferedTargetUsdc": str(pricing["bufferedTargetUsdc"]),

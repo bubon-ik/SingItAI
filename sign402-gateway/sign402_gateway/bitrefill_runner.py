@@ -12,6 +12,7 @@ from .bitrefill_quote import (
     build_purchase_commitment,
     build_quote,
     build_real_rate_quote,
+    calculate_service_fee,
     hash_purchase_commitment,
     new_quote_id,
     now_epoch,
@@ -264,6 +265,8 @@ class BitrefillQuoteService:
             country=str(payload.get("country", "US")),
             recipient=recipient,
         )
+        _, total_usd = calculate_service_fee(product["priceUsd"])
+        total_usd_text = format_decimal(total_usd)
         if self.real_rate_pricer is not None:
             user_id = str(payload.get("telegramUserId", "")).strip()
             payment_token = None
@@ -283,19 +286,19 @@ class BitrefillQuoteService:
                 )
                 if pricing_address.casefold() == BASE_USDC_MAINNET.casefold():
                     pricing = _price_direct_usdc(
-                        product["priceUsd"],
+                        total_usd_text,
                         decimals=payment_token["decimals"],
                         balance=payment_token["balance"],
                     )
                 else:
                     pricing = self.real_rate_pricer.price_for_usdc(
-                        product["priceUsd"],
+                        total_usd_text,
                         from_token=pricing_address,
                         decimals=payment_token["decimals"],
                         max_amount=payment_token["balance"],
                     )
             else:
-                pricing = self.real_rate_pricer.price_for_usdc(product["priceUsd"])
+                pricing = self.real_rate_pricer.price_for_usdc(total_usd_text)
             quote = build_real_rate_quote(
                 request=payload,
                 product=product,
