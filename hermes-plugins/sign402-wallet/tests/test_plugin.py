@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import sys
+import threading
+import time
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -352,9 +354,43 @@ class FakeClient:
         return self.withdraw_result
 
 
-class FakeAdapter:
+class ControlledTelegramBot:
     def __init__(self):
+        self.calls = []
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def send_message(self, **kwargs):
+        self.calls.append(kwargs)
+        self.started.set()
+        await self.release.wait()
+        return object()
+
+
+class PerChatControlledTelegramBot:
+    def __init__(self):
+        self.calls = []
+        self.started = {}
+        self.release = {}
+
+    def started_event(self, chat_id):
+        return self.started.setdefault(str(chat_id), asyncio.Event())
+
+    def release_event(self, chat_id):
+        return self.release.setdefault(str(chat_id), asyncio.Event())
+
+    async def send_message(self, **kwargs):
+        chat_id = str(kwargs["chat_id"])
+        self.calls.append((chat_id, kwargs["text"], kwargs.get("reply_markup")))
+        self.started_event(chat_id).set()
+        await self.release_event(chat_id).wait()
+        return object()
+
+
+class FakeAdapter:
+    def __init__(self, bot=None):
         self.sent = []
+        self._bot = bot
 
     async def send(self, chat_id, text):
         self.sent.append((chat_id, text))
@@ -400,9 +436,156 @@ class FakePairingStore:
 
 
 class FakeGateway:
-    def __init__(self, adapter_key="photon"):
-        self.adapters = {adapter_key: FakeAdapter()}
+    def __init__(self, adapter_key="photon", adapter=None):
+        self.adapters = {adapter_key: adapter or FakeAdapter()}
         self.pairing_store = FakePairingStore()
+
+
+class TelegramAsyncReplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_button_dispatch_does_not_wait_for_slow_telegram_send(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        callbacks = []
+        plugin._background_runner = callbacks.append
+        plugin.register(context)
+        bot = ControlledTelegramBot()
+        gateway = FakeGateway(adapter_key="telegram", adapter=FakeAdapter(bot))
+
+        def slow_opener(_request, timeout):
+            self.assertEqual(timeout, plugin._TELEGRAM_SEND_TIMEOUT_SECONDS)
+            time.sleep(0.15)
+            return FakeTelegramResponse()
+
+        plugin._telegram_api_opener = slow_opener
+        with patch.dict(
+            plugin.os.environ,
+            {
+                "SIGN402_TELEGRAM_ALLOWED_USERS": "*",
+                "TELEGRAM_BOT_TOKEN": "telegram-token",
+            },
+        ):
+            started = asyncio.get_running_loop().time()
+            result = context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent("Balance", "1045618308", chat_id="telegram-chat"),
+                gateway=gateway,
+            )
+            elapsed = asyncio.get_running_loop().time() - started
+
+        self.assertEqual(result, plugin._SKIP_RESULT)
+        self.assertLess(elapsed, 0.05)
+        await asyncio.wait_for(bot.started.wait(), timeout=0.2)
+        self.assertEqual(bot.calls[0]["text"], "Checking balance…")
+        bot.release.set()
+        await asyncio.sleep(0)
+
+    async def test_replies_are_ordered_per_chat_without_cross_chat_blocking(self):
+        plugin = load_plugin()
+        bot = PerChatControlledTelegramBot()
+        gateway = FakeGateway(adapter_key="telegram", adapter=FakeAdapter(bot))
+        source_a = FakeSource(FakePlatform("telegram"), "user-a", chat_id="chat-a")
+        source_b = FakeSource(FakePlatform("telegram"), "user-b", chat_id="chat-b")
+
+        plugin._send_fixed_reply(gateway, source_a, "first")
+        plugin._send_fixed_reply(gateway, source_a, "second")
+        await asyncio.wait_for(bot.started_event("chat-a").wait(), timeout=0.2)
+        self.assertEqual(
+            [text for chat, text, _ in bot.calls if chat == "chat-a"],
+            ["first"],
+        )
+
+        plugin._send_fixed_reply(gateway, source_b, "other chat")
+        await asyncio.wait_for(bot.started_event("chat-b").wait(), timeout=0.2)
+        self.assertIn(("chat-b", "other chat", None), bot.calls)
+
+        bot.release_event("chat-b").set()
+        bot.release_event("chat-a").set()
+        for _ in range(10):
+            if len([call for call in bot.calls if call[0] == "chat-a"]) == 2:
+                break
+            await asyncio.sleep(0)
+        self.assertEqual(
+            [text for chat, text, _ in bot.calls if chat == "chat-a"],
+            ["first", "second"],
+        )
+
+    async def test_background_thread_schedules_on_captured_gateway_loop(self):
+        plugin = load_plugin()
+        bot = PerChatControlledTelegramBot()
+        gateway = FakeGateway(adapter_key="telegram", adapter=FakeAdapter(bot))
+        source = FakeSource(FakePlatform("telegram"), "user-a", chat_id="chat-a")
+
+        plugin._send_fixed_reply(gateway, source, "loop reply")
+        await asyncio.wait_for(bot.started_event("chat-a").wait(), timeout=0.2)
+
+        worker = threading.Thread(
+            target=plugin._send_fixed_reply,
+            args=(gateway, source, "thread reply"),
+        )
+        worker.start()
+        worker.join(timeout=0.2)
+        self.assertFalse(worker.is_alive())
+
+        bot.release_event("chat-a").set()
+        for _ in range(10):
+            if len(bot.calls) == 2:
+                break
+            await asyncio.sleep(0)
+        self.assertEqual([call[1] for call in bot.calls], ["loop reply", "thread reply"])
+
+    async def test_active_bot_send_preserves_reply_keyboard_without_direct_http(self):
+        plugin = load_plugin()
+        bot = ControlledTelegramBot()
+        gateway = FakeGateway(adapter_key="telegram", adapter=FakeAdapter(bot))
+        source = FakeSource(FakePlatform("telegram"), "user-a", chat_id="chat-a")
+        requests = []
+        plugin._telegram_api_opener = lambda request, timeout: requests.append(
+            (request, timeout)
+        )
+
+        plugin._send_fixed_reply(
+            gateway,
+            source,
+            "Choose",
+            reply_markup=plugin._reply_keyboard((("One", "Two"),)),
+        )
+        await asyncio.wait_for(bot.started.wait(), timeout=0.2)
+
+        self.assertEqual(bot.calls[0]["chat_id"], "chat-a")
+        self.assertEqual(bot.calls[0]["text"], "Choose")
+        self.assertIsNotNone(bot.calls[0]["reply_markup"])
+        self.assertEqual(requests, [])
+        bot.release.set()
+        await asyncio.sleep(0)
+
+    async def test_direct_fallback_runs_outside_gateway_event_loop(self):
+        plugin = load_plugin()
+        adapter = FakeAdapter()
+        gateway = FakeGateway(adapter_key="telegram", adapter=adapter)
+        source = FakeSource(FakePlatform("telegram"), "user-a", chat_id="chat-a")
+        request_finished = threading.Event()
+
+        def slow_opener(_request, timeout):
+            self.assertEqual(timeout, plugin._TELEGRAM_SEND_TIMEOUT_SECONDS)
+            time.sleep(0.15)
+            request_finished.set()
+            return FakeTelegramResponse()
+
+        plugin._telegram_api_opener = slow_opener
+        with patch.dict(
+            plugin.os.environ,
+            {"TELEGRAM_BOT_TOKEN": "telegram-token"},
+        ):
+            started = asyncio.get_running_loop().time()
+            plugin._send_fixed_reply(gateway, source, "Fallback reply")
+            elapsed = asyncio.get_running_loop().time() - started
+            self.assertLess(elapsed, 0.05)
+            completed = await asyncio.wait_for(
+                asyncio.to_thread(request_finished.wait, 0.4),
+                timeout=0.5,
+            )
+
+        self.assertTrue(completed)
+        self.assertEqual(adapter.sent, [])
 
 
 class PaidToolIntentTests(unittest.TestCase):

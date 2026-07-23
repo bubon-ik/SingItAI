@@ -202,6 +202,9 @@ _PHOTON_REGISTRATION_ATTEMPTS_LOCK = threading.RLock()
 _TELEGRAM_OPERATION_GENERATIONS: dict[str, int] = {}
 _TELEGRAM_ACTIVE_OPERATIONS: dict[str, tuple[int, str]] = {}
 _TELEGRAM_OPERATION_LOCK = threading.RLock()
+_TELEGRAM_DELIVERY_LOOP: asyncio.AbstractEventLoop | None = None
+_TELEGRAM_DELIVERY_LOOP_LOCK = threading.RLock()
+_TELEGRAM_SEND_TAILS: dict[str, asyncio.Task] = {}
 
 
 def _default_background_runner(callback: Callable[[], None]) -> None:
@@ -2938,12 +2941,23 @@ def _imessage_text(result: dict) -> str:
 
 
 def _send_fixed_reply(gateway, source, text: str, *, reply_markup: dict | None = None) -> None:
+    if _is_telegram_source(source) and _schedule_telegram_reply(
+        gateway,
+        source,
+        text,
+        reply_markup=reply_markup,
+    ):
+        return
     if _is_telegram_source(source) and _send_telegram_reply_direct(
         source,
         text,
         reply_markup=reply_markup,
     ):
         return
+    _send_via_gateway_adapter(gateway, source, text)
+
+
+def _send_via_gateway_adapter(gateway, source, text: str) -> None:
     if gateway is None:
         return
     adapters = getattr(gateway, "adapters", {}) or {}
@@ -2965,6 +2979,156 @@ def _send_fixed_reply(gateway, source, text: str, *, reply_markup: dict | None =
     else:
         task = loop.create_task(coroutine)
         task.add_done_callback(_log_send_task_failure)
+
+
+def _schedule_telegram_reply(
+    gateway,
+    source,
+    text: str,
+    *,
+    reply_markup: dict | None = None,
+) -> bool:
+    global _TELEGRAM_DELIVERY_LOOP
+
+    adapter = _telegram_adapter(gateway, source)
+    chat_id = str(
+        getattr(source, "chat_id", "")
+        or getattr(source, "user_id", "")
+        or ""
+    )
+    if adapter is None or not chat_id:
+        return False
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        with _TELEGRAM_DELIVERY_LOOP_LOCK:
+            loop = _TELEGRAM_DELIVERY_LOOP
+        if loop is None or not loop.is_running():
+            return False
+        loop.call_soon_threadsafe(
+            _enqueue_telegram_reply_on_loop,
+            loop,
+            adapter,
+            source,
+            chat_id,
+            str(text),
+            reply_markup,
+        )
+        return True
+    with _TELEGRAM_DELIVERY_LOOP_LOCK:
+        _TELEGRAM_DELIVERY_LOOP = loop
+    _enqueue_telegram_reply_on_loop(
+        loop,
+        adapter,
+        source,
+        chat_id,
+        str(text),
+        reply_markup,
+    )
+    return True
+
+
+def _telegram_adapter(gateway, source):
+    if gateway is None:
+        return None
+    adapters = getattr(gateway, "adapters", {}) or {}
+    adapter = adapters.get("telegram")
+    if adapter is None:
+        adapter = adapters.get(getattr(source, "platform", None))
+    return adapter
+
+
+def _enqueue_telegram_reply_on_loop(
+    loop,
+    adapter,
+    source,
+    chat_id: str,
+    text: str,
+    reply_markup: dict | None,
+) -> None:
+    previous = _TELEGRAM_SEND_TAILS.get(chat_id)
+
+    async def deliver() -> None:
+        if previous is not None:
+            try:
+                await asyncio.shield(previous)
+            except Exception:
+                pass
+        await _send_telegram_reply_async(
+            adapter,
+            source,
+            chat_id,
+            text,
+            reply_markup=reply_markup,
+        )
+
+    task = loop.create_task(deliver())
+    _TELEGRAM_SEND_TAILS[chat_id] = task
+
+    def finished(done_task) -> None:
+        if _TELEGRAM_SEND_TAILS.get(chat_id) is done_task:
+            _TELEGRAM_SEND_TAILS.pop(chat_id, None)
+        _log_send_task_failure(done_task)
+
+    task.add_done_callback(finished)
+
+
+async def _send_telegram_reply_async(
+    adapter,
+    source,
+    chat_id: str,
+    text: str,
+    *,
+    reply_markup: dict | None,
+) -> None:
+    bot = getattr(adapter, "_bot", None)
+    send_message = getattr(bot, "send_message", None)
+    if callable(send_message):
+        markup = _telegram_reply_markup_object(reply_markup)
+        for chunk in _telegram_message_chunks(text):
+            await send_message(
+                chat_id=chat_id,
+                text=chunk,
+                reply_markup=markup,
+                disable_web_page_preview=True,
+            )
+        return
+    sent = await asyncio.to_thread(
+        _send_telegram_reply_direct,
+        source,
+        text,
+        reply_markup=reply_markup,
+    )
+    if not sent:
+        send = getattr(adapter, "send", None)
+        if callable(send):
+            await send(chat_id, text)
+
+
+def _telegram_reply_markup_object(reply_markup: dict | None):
+    if reply_markup is None:
+        return None
+    try:
+        from telegram import ReplyKeyboardMarkup
+    except ImportError:
+        return reply_markup
+    keyboard = [
+        [
+            str(button.get("text", ""))
+            if isinstance(button, dict)
+            else str(button)
+            for button in row
+        ]
+        for row in reply_markup.get("keyboard", [])
+        if isinstance(row, list)
+    ]
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard,
+        resize_keyboard=bool(reply_markup.get("resize_keyboard", False)),
+        one_time_keyboard=bool(reply_markup.get("one_time_keyboard", False)),
+        input_field_placeholder=reply_markup.get("input_field_placeholder"),
+        is_persistent=bool(reply_markup.get("is_persistent", False)),
+    )
 
 
 def _send_telegram_reply_direct(
@@ -3117,6 +3281,8 @@ def _telegram_message_chunks(text: str) -> list[str]:
 
 
 def _log_send_task_failure(task) -> None:
+    if task.cancelled():
+        return
     try:
         task.result()
     except Exception as exc:
