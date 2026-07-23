@@ -1515,7 +1515,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 _enforce_user_wallet_spend_limits(
                     self.server,
                     user_id,
-                    _bitrefill_spend_requirement(result["priceUsd"]),
+                    _bitrefill_spend_requirement(
+                        result.get("totalUsd") or result["priceUsd"]
+                    ),
                 )
             self._send_json(result)
         except WalletApiAuthError as exc:
@@ -1606,7 +1608,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                             user_id,
                             {"id": "bitrefill"},
                             "bitrefill",
-                            _bitrefill_spend_requirement(result["priceUsd"]),
+                            _bitrefill_spend_requirement(
+                                result.get("totalUsd") or result["priceUsd"]
+                            ),
                             result,
                         )
                 else:
@@ -2240,7 +2244,7 @@ def build_server(
         enforce_spend=lambda user_id, quote: _enforce_user_wallet_spend_limits(
             server,
             user_id,
-            _bitrefill_spend_requirement(quote["priceUsd"]),
+            _bitrefill_spend_requirement(quote.get("totalUsd") or quote["priceUsd"]),
         ),
     )
     x402_inspector = ExternalX402Inspector()

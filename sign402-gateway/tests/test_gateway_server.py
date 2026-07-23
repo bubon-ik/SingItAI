@@ -4637,9 +4637,14 @@ class GatewayServerTests(unittest.TestCase):
         server = DummyServer()
         server.user_wallet_api_token = "wallet-token-secret-value"
         server.user_wallet_service.resolve_telegram_user_id = Mock(return_value="1045618308")
-        # $5.00 = 5_000_000 atomic USDC, far above the 0.01 USDC operator cap.
+        # Product cost is below the 0.01 USDC cap, but the complete charge is above it.
         server.bitrefill_quote_service = Mock(
-            return_value={"ok": True, "priceUsd": "5.00", "quoteId": "q1"}
+            return_value={
+                "ok": True,
+                "priceUsd": "0.009",
+                "totalUsd": "0.011",
+                "quoteId": "q1",
+            }
         )
 
         with patch("sys.stderr", io.StringIO()):
@@ -4664,7 +4669,13 @@ class GatewayServerTests(unittest.TestCase):
         server.user_event_store = Mock()
         server.user_wallet_service.resolve_telegram_user_id = Mock(return_value="1045618308")
         server.bitrefill_wallet_purchase_runner = Mock(
-            return_value={"ok": True, "quoteId": "q1", "priceUsd": "0.005", "txId": "0xTX"}
+            return_value={
+                "ok": True,
+                "quoteId": "q1",
+                "priceUsd": "0.005",
+                "totalUsd": "0.0051",
+                "txId": "0xTX",
+            }
         )
 
         with patch("sys.stderr", io.StringIO()):
@@ -4681,7 +4692,7 @@ class GatewayServerTests(unittest.TestCase):
         self.assertIn("HTTP/1.0 200 OK", self.response_text(handler))
         server.user_spend_limit_store.record_successful_spend.assert_called_once()
         kwargs = server.user_spend_limit_store.record_successful_spend.call_args.kwargs
-        self.assertEqual(kwargs["amount_atomic"], 5000)  # 0.005 USDC
+        self.assertEqual(kwargs["amount_atomic"], 5100)  # 0.0051 USDC
 
     def test_internal_fulfill_bitrefill_requires_service_secret(self):
         server = DummyServer()

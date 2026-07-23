@@ -879,7 +879,9 @@ def _bitrefill_approval_context_lines(
     lines = [
         "Action: BUY BITREFILL",
         f"Product: {str(quote.get('productName', quote.get('productId', '')))}",
-        f"Cost: {_format_amount(str(quote.get('priceUsd', '')))} USD",
+        f"Product price: {_format_amount(str(quote.get('priceUsd', '')))} USD",
+        f"Service fee (2%): {_format_amount(str(quote.get('serviceFeeUsd', '')))} USD",
+        f"Total: {_format_amount(str(quote.get('totalUsd', '')))} USD",
     ]
     if payment_symbol and payment_amount:
         lines.extend(

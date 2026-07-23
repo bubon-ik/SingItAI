@@ -132,16 +132,23 @@ class BitrefillRunnerTests(unittest.TestCase):
             {
                 "productName": "Bitrefill Gift Card",
                 "priceUsd": "1.00",
+                "serviceFeeBps": 200,
+                "serviceFeeUsd": "0.02",
+                "totalUsd": "1.02",
                 "paymentTokenSymbol": "USDC",
-                "paymentTokenAmount": "1.10",
+                "paymentTokenAmount": "1.02",
                 "expiresAtEpoch": 220,
             },
             source_wallet="0x1111111111111111111111111111111111111111",
             now_epoch_value=100,
         )
 
+        self.assertIn("Product price: 1 USD", lines)
+        self.assertIn("Service fee (2%): 0.02 USD", lines)
+        self.assertIn("Total: 1.02 USD", lines)
+        self.assertNotIn("Cost: 1 USD", lines)
         self.assertIn("Payment token: USDC", lines)
-        self.assertIn("Maximum spend: 1.1 USDC", lines)
+        self.assertIn("Maximum spend: 1.02 USDC", lines)
 
     def test_wallet_payment_token_resolver_uses_server_inventory_metadata(self):
         resolver = WalletPaymentTokenResolver(
@@ -859,7 +866,9 @@ class BitrefillRunnerTests(unittest.TestCase):
             context_lines = approval.call_args.kwargs["context_lines"]
             self.assertIn("Action: BUY BITREFILL", context_lines)
             self.assertIn("Product: Test Gift Card Link", context_lines)
-            self.assertIn("Cost: 1 USD", context_lines)
+            self.assertIn("Product price: 1 USD", context_lines)
+            self.assertIn("Service fee (2%): 0.02 USD", context_lines)
+            self.assertIn("Total: 1.02 USD", context_lines)
             self.assertIn("Max spend: 102 SINGIT", context_lines)
             self.assertIn("Paid from: 0xAc4a...f45C", context_lines)
             self.assertIn("Expires: 2 minutes", context_lines)
