@@ -344,6 +344,27 @@ constructed only inside the MCP client and is redacted from its representation.
 There is no Bitrefill REST fallback. To use another compatible HTTPS endpoint,
 set `SIGN402_BITREFILL_MCP_URL` to its base URL without the API-key suffix.
 
+Catalog browsing uses a durable 10-minute stale-while-revalidate cache. One
+country snapshot serves all category filters and pages locally. A fresh or
+stale snapshot returns immediately; a stale snapshot triggers one background
+refresh, and refresh failures keep the last successful public catalog. Product
+details, package prices, availability checks, invoices, purchases, payment,
+fulfillment, and redemption data always bypass this cache and remain live MCP
+requests.
+
+The non-secret catalog settings are:
+
+```text
+SIGN402_BITREFILL_CATALOG_CACHE_TTL_SECONDS=600
+SIGN402_BITREFILL_CATALOG_TIMEOUT_SECONDS=8
+SIGN402_BITREFILL_CATALOG_CACHE_PATH=~/.sign402/bitrefill-catalog-cache.json
+```
+
+The persistent file contains only normalized public product-list metadata. It
+is size-bounded, written atomically with user-only permissions, and never
+contains the Bitrefill key, recipient data, invoices, purchase responses,
+product-detail prices, or redemption values.
+
 Start the gateway in wallet-native mode:
 
 ```bash

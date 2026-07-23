@@ -172,6 +172,18 @@ For direct commands, include the wallet token symbol or contract address:
 Example: `/bitrefill bitrefill-giftcard-usd 1 US USDC`. If duplicate unverified
 tokens share a symbol, use the contract address instead.
 
+## Bitrefill catalog responsiveness
+
+Opening `Browse Catalog` sends the category keyboard first and then silently
+warms the selected country's catalog in a background worker. Selecting `All`,
+another category, or a later page reuses the gateway's country snapshot, so
+Telegram button processing never waits for the warm-up itself. A warm-up error
+does not change the user's wizard session or send an extra failure message.
+
+This optimization applies only to browsing. Selecting a product still loads
+its current details and packages, and every price check and purchase remains a
+live Bitrefill MCP request.
+
 ## Install
 
 From the server checkout as the `hermes` user:
