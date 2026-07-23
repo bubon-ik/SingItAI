@@ -1,5 +1,8 @@
+import json
+import tempfile
 import unittest
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -167,6 +170,254 @@ class FakeMcpCaller:
 
 
 class BitrefillMcpCatalogTests(unittest.TestCase):
+    def test_catalog_cache_ignores_oversized_persistence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = Path(tmpdir) / "catalog.json"
+            cache_path.write_bytes(b"x" * (5 * 1024 * 1024 + 1))
+            caller = FakeMcpCaller(
+                [
+                    {
+                        "products": [
+                            {
+                                "product_id": "live-nl",
+                                "name": "Live Netherlands",
+                                "country": "NL",
+                                "category": "shopping",
+                                "currency": "EUR",
+                            }
+                        ]
+                    }
+                ]
+            )
+
+            client = McpBitrefillClient(
+                api_key="key_123",
+                call_tool=caller,
+                catalog_cache_path=cache_path,
+                now_provider=lambda: 1000.0,
+            )
+            products = client.list_products(
+                country="NL",
+                category="",
+                start=0,
+                limit=8,
+                include_test_products=False,
+            )
+
+        self.assertEqual([row["productId"] for row in products], ["live-nl"])
+        self.assertEqual(len(caller.calls), 1)
+
+    def test_catalog_cache_ignores_invalid_persistence(self):
+        poisoned_product = {
+            "productId": "poisoned",
+            "name": "Poisoned",
+            "country": "NL",
+            "currency": "EUR",
+            "category": "shopping",
+            "categories": ["shopping"],
+            "productType": "gift_card",
+            "recipientType": "none",
+            "requiredRecipientFields": [],
+            "packages": [],
+            "inStock": True,
+            "requiresPrepayment": False,
+        }
+        invalid_payloads = {
+            "malformed": "{not-json",
+            "future timestamp": json.dumps(
+                {
+                    "version": 1,
+                    "entries": [
+                        {
+                            "country": "NL",
+                            "includeTestProducts": False,
+                            "storedAt": 2000.0,
+                            "products": [poisoned_product],
+                        }
+                    ],
+                }
+            ),
+            "too many products": json.dumps(
+                {
+                    "version": 1,
+                    "entries": [
+                        {
+                            "country": "NL",
+                            "includeTestProducts": False,
+                            "storedAt": 1000.0,
+                            "products": [poisoned_product] * 201,
+                        }
+                    ],
+                }
+            ),
+        }
+
+        for label, contents in invalid_payloads.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmpdir:
+                cache_path = Path(tmpdir) / "catalog.json"
+                cache_path.write_text(contents, encoding="utf-8")
+                caller = FakeMcpCaller(
+                    [
+                        {
+                            "products": [
+                                {
+                                    "product_id": "live-nl",
+                                    "name": "Live Netherlands",
+                                    "country": "NL",
+                                    "category": "shopping",
+                                    "currency": "EUR",
+                                }
+                            ]
+                        }
+                    ]
+                )
+
+                client = McpBitrefillClient(
+                    api_key="key_123",
+                    call_tool=caller,
+                    catalog_cache_path=cache_path,
+                    catalog_cache_ttl_seconds=600,
+                    now_provider=lambda: 1000.0,
+                )
+                products = client.list_products(
+                    country="NL",
+                    category="",
+                    start=0,
+                    limit=8,
+                    include_test_products=False,
+                )
+
+            self.assertEqual([row["productId"] for row in products], ["live-nl"])
+            self.assertEqual(len(caller.calls), 1)
+
+    def test_catalog_snapshot_survives_client_reconstruction(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = Path(tmpdir) / "catalog.json"
+            first_caller = FakeMcpCaller(
+                [
+                    {
+                        "products": [
+                            {
+                                "product_id": "cached-nl",
+                                "name": "Cached Netherlands",
+                                "country": "NL",
+                                "category": "shopping",
+                                "currency": "EUR",
+                            }
+                        ]
+                    }
+                ]
+            )
+            first_client = McpBitrefillClient(
+                api_key="key_123",
+                call_tool=first_caller,
+                catalog_cache_path=cache_path,
+                catalog_cache_ttl_seconds=600,
+                now_provider=lambda: 1000.0,
+            )
+            first_client.list_products(
+                country="NL",
+                category="",
+                start=0,
+                limit=8,
+                include_test_products=False,
+            )
+
+            second_caller = FakeMcpCaller([])
+            second_client = McpBitrefillClient(
+                api_key="key_123",
+                call_tool=second_caller,
+                catalog_cache_path=cache_path,
+                catalog_cache_ttl_seconds=600,
+                now_provider=lambda: 1000.0,
+            )
+            products = second_client.list_products(
+                country="NL",
+                category="",
+                start=0,
+                limit=8,
+                include_test_products=False,
+            )
+
+        self.assertEqual([row["productId"] for row in products], ["cached-nl"])
+        self.assertEqual(second_caller.calls, [])
+
+    def test_list_reuses_one_fresh_country_snapshot_for_categories_and_pages(self):
+        caller = FakeMcpCaller(
+            [
+                {
+                    "products": [
+                        {
+                            "product_id": "p1",
+                            "name": "Food One",
+                            "country": "NL",
+                            "category": "food",
+                            "currency": "EUR",
+                        },
+                        {
+                            "product_id": "p2",
+                            "name": "Games Two",
+                            "country": "NL",
+                            "category": "games",
+                            "currency": "EUR",
+                        },
+                        {
+                            "product_id": "p3",
+                            "name": "Food Three",
+                            "country": "NL",
+                            "category": "restaurants",
+                            "currency": "EUR",
+                        },
+                        {
+                            "product_id": "p4",
+                            "name": "Shopping Four",
+                            "country": "NL",
+                            "category": "shopping",
+                            "currency": "EUR",
+                        },
+                    ]
+                }
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = McpBitrefillClient(
+                api_key="key_123",
+                call_tool=caller,
+                catalog_cache_path=Path(tmpdir) / "catalog.json",
+                catalog_cache_ttl_seconds=600,
+                now_provider=lambda: 1000.0,
+            )
+
+            first = client.list_products(
+                country="NL,XI",
+                category="",
+                start=0,
+                limit=2,
+                include_test_products=False,
+            )
+            food = client.list_products(
+                country="NL,XI",
+                category="food,restaurants",
+                start=0,
+                limit=8,
+                include_test_products=False,
+            )
+            second_page = client.list_products(
+                country="NL,XI",
+                category="",
+                start=2,
+                limit=2,
+                include_test_products=False,
+            )
+
+        self.assertEqual([row["productId"] for row in first], ["p1", "p2"])
+        self.assertEqual([row["productId"] for row in food], ["p1", "p3"])
+        self.assertEqual(
+            [row["productId"] for row in second_page],
+            ["p3", "p4"],
+        )
+        self.assertEqual(len(caller.calls), 1)
+
     def test_search_accepts_production_mcp_product_shape(self):
         caller = FakeMcpCaller(
             [

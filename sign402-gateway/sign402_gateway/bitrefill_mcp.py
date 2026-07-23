@@ -1,9 +1,14 @@
 import asyncio
 import json
+import math
+import os
+import tempfile
+import threading
 import time
 import urllib.parse
 from copy import deepcopy
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -16,6 +21,9 @@ from .bitrefill import _infer_product_type, _money, _recipient_fields
 
 
 MAX_MCP_RESPONSE_BYTES = 1024 * 1024
+MAX_CATALOG_CACHE_BYTES = 5 * 1024 * 1024
+MAX_CATALOG_CACHE_ENTRIES = 256
+MAX_CATALOG_PRODUCTS_PER_ENTRY = 200
 
 
 def decode_mcp_tool_result(
@@ -131,6 +139,9 @@ class McpBitrefillClient:
         invoice_poll_interval_seconds: float = 5.0,
         sleeper: Any | None = None,
         call_tool: Any | None = None,
+        catalog_cache_ttl_seconds: float = 600.0,
+        catalog_cache_path: str | Path | None = None,
+        now_provider: Any | None = None,
     ):
         key = str(api_key).strip()
         if not key:
@@ -154,6 +165,18 @@ class McpBitrefillClient:
         self.invoice_poll_interval_seconds = float(invoice_poll_interval_seconds)
         if self.invoice_poll_interval_seconds < 0:
             raise ValueError("invoice_poll_interval_seconds must be non-negative")
+        self.catalog_cache_ttl_seconds = float(catalog_cache_ttl_seconds)
+        if self.catalog_cache_ttl_seconds <= 0:
+            raise ValueError("catalog_cache_ttl_seconds must be positive")
+        self.catalog_cache_path = (
+            Path(catalog_cache_path).expanduser()
+            if catalog_cache_path is not None
+            else None
+        )
+        self._now = now_provider or time.time
+        self._catalog_lock = threading.RLock()
+        self._catalog_cache: dict[tuple[str, bool], dict[str, Any]] = {}
+        self._load_catalog_cache()
         self.sleeper = sleeper or time.sleep
         server_url = f"{base_url}/{urllib.parse.quote(key, safe='')}"
         self._call_tool = call_tool or McpToolCaller(server_url)
@@ -182,17 +205,10 @@ class McpBitrefillClient:
         mcp_countries = local_countries or [""]
         products: list[dict[str, Any]] = []
         for mcp_country in mcp_countries:
-            arguments: dict[str, Any] = {
-                "query": "*",
-                "country": mcp_country,
-                "include_test_products": bool(include_test_products),
-                "per_page": 100,
-            }
-            payload = self._call_tool("search-products", arguments)
             products.extend(
-                self._normalize_product_rows(
-                    payload,
-                    fallback_country=mcp_country or "XI",
+                self._catalog_snapshot(
+                    mcp_country,
+                    include_test_products=include_test_products,
                 )
             )
         products = self._filter_products(
@@ -202,6 +218,158 @@ class McpBitrefillClient:
             product_type="",
         )
         return products[int(start) : int(start) + int(limit)]
+
+    def _catalog_snapshot(
+        self,
+        country: str,
+        *,
+        include_test_products: bool,
+    ) -> list[dict[str, Any]]:
+        normalized_country = str(country).strip().upper()
+        key = (normalized_country, bool(include_test_products))
+        with self._catalog_lock:
+            cached = self._catalog_cache.get(key)
+            if (
+                cached is not None
+                and self._now() - float(cached["storedAt"])
+                <= self.catalog_cache_ttl_seconds
+            ):
+                return deepcopy(cached["products"])
+
+        arguments: dict[str, Any] = {
+            "query": "*",
+            "country": normalized_country,
+            "include_test_products": bool(include_test_products),
+            "per_page": 100,
+        }
+        payload = self._call_tool("search-products", arguments)
+        products = self._normalize_product_rows(
+            payload,
+            fallback_country=normalized_country or "XI",
+        )
+        for product in products:
+            product["packages"] = []
+        with self._catalog_lock:
+            self._catalog_cache[key] = {
+                "storedAt": float(self._now()),
+                "products": deepcopy(products),
+            }
+            self._persist_catalog_cache()
+        return products
+
+    def _load_catalog_cache(self) -> None:
+        if self.catalog_cache_path is None or not self.catalog_cache_path.exists():
+            return
+        try:
+            if self.catalog_cache_path.stat().st_size > MAX_CATALOG_CACHE_BYTES:
+                return
+            payload = json.loads(self.catalog_cache_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            return
+        entries = payload.get("entries")
+        if not isinstance(entries, list) or len(entries) > MAX_CATALOG_CACHE_ENTRIES:
+            return
+        now = float(self._now())
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            country = str(entry.get("country") or "").strip().upper()
+            if country and (
+                len(country) != 2 or not country.isascii() or not country.isalpha()
+            ):
+                continue
+            include_test_products = entry.get("includeTestProducts")
+            if not isinstance(include_test_products, bool):
+                continue
+            stored_at = entry.get("storedAt")
+            if isinstance(stored_at, bool) or not isinstance(stored_at, (int, float)):
+                continue
+            stored_at = float(stored_at)
+            if not math.isfinite(stored_at) or stored_at < 0 or stored_at > now:
+                continue
+            products = entry.get("products")
+            if (
+                not isinstance(products, list)
+                or len(products) > MAX_CATALOG_PRODUCTS_PER_ENTRY
+                or any(not self._valid_cached_product(product) for product in products)
+            ):
+                continue
+            self._catalog_cache[(country, include_test_products)] = {
+                "storedAt": stored_at,
+                "products": deepcopy(products),
+            }
+
+    @staticmethod
+    def _valid_cached_product(product: Any) -> bool:
+        if not isinstance(product, dict):
+            return False
+        if not str(product.get("productId") or "").strip():
+            return False
+        if not isinstance(product.get("categories"), list):
+            return False
+        return all(
+            isinstance(product.get(key), expected_type)
+            for key, expected_type in (
+                ("name", str),
+                ("country", str),
+                ("currency", str),
+                ("category", str),
+                ("productType", str),
+                ("recipientType", str),
+                ("requiredRecipientFields", list),
+                ("packages", list),
+                ("inStock", bool),
+                ("requiresPrepayment", bool),
+            )
+        )
+
+    def _persist_catalog_cache(self) -> None:
+        if self.catalog_cache_path is None:
+            return
+        self.catalog_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        entries = [
+            {
+                "country": country,
+                "includeTestProducts": include_test_products,
+                "storedAt": entry["storedAt"],
+                "products": entry["products"],
+            }
+            for (country, include_test_products), entry in self._catalog_cache.items()
+        ]
+        if len(entries) > MAX_CATALOG_CACHE_ENTRIES:
+            return
+        try:
+            encoded = json.dumps(
+                {"version": 1, "entries": entries},
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            return
+        if len(encoded) > MAX_CATALOG_CACHE_BYTES:
+            return
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=self.catalog_cache_path.parent,
+                prefix=f".{self.catalog_cache_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                temporary.write(encoded)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            temporary_path.chmod(0o600)
+            os.replace(temporary_path, self.catalog_cache_path)
+        except OSError:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def search_products(
         self,
