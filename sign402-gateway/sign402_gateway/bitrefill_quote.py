@@ -11,7 +11,15 @@ from .numeric import format_decimal
 
 SINGIT_DECIMALS = 18
 DEFAULT_QUOTE_TTL_SECONDS = 120
-DEFAULT_MARGIN_BPS = 500
+SERVICE_FEE_BPS = 200
+
+
+def calculate_service_fee(price_usd: Any) -> tuple[Decimal, Decimal]:
+    price = Decimal(str(price_usd))
+    if price <= 0:
+        raise ValueError("product priceUsd must be positive")
+    fee = price * Decimal(SERVICE_FEE_BPS) / Decimal(10_000)
+    return fee, price + fee
 
 
 def new_quote_id() -> str:
@@ -31,7 +39,6 @@ def build_quote(
     request: dict[str, Any],
     product: dict[str, Any],
     singit_usd_price: str,
-    margin_bps: int = DEFAULT_MARGIN_BPS,
     quote_id: str | None = None,
     now_epoch: int | None = None,
     ttl_seconds: int = DEFAULT_QUOTE_TTL_SECONDS,
@@ -49,14 +56,12 @@ def build_quote(
 
     price_usd = Decimal(str(product.get("priceUsd", value)))
     singit_price = Decimal(str(singit_usd_price))
-    if price_usd <= 0:
-        raise ValueError("product priceUsd must be positive")
+    service_fee_usd, total_usd = calculate_service_fee(price_usd)
     if singit_price <= 0:
         raise ValueError("singit_usd_price must be positive")
 
-    multiplier = Decimal(10_000 + margin_bps) / Decimal(10_000)
-    singit_amount = (price_usd / singit_price * multiplier).quantize(
-        Decimal("1"),
+    singit_amount = (total_usd / singit_price).quantize(
+        Decimal(1).scaleb(-SINGIT_DECIMALS),
         rounding=ROUND_CEILING,
     )
     max_singit_atomic = int(singit_amount * (Decimal(10) ** SINGIT_DECIMALS))
@@ -75,7 +80,9 @@ def build_quote(
         "packageValue": value,
         "priceUsd": f"{price_usd:.2f}",
         "singitUsdPrice": str(singit_price),
-        "marginBps": int(margin_bps),
+        "serviceFeeBps": SERVICE_FEE_BPS,
+        "serviceFeeUsd": format_decimal(service_fee_usd),
+        "totalUsd": format_decimal(total_usd),
         "singitAmount": format_decimal(singit_amount),
         "maxSingitAtomic": str(max_singit_atomic),
         "createdAtEpoch": started_at,
@@ -188,6 +195,14 @@ def build_purchase_commitment(
         "recipientCommitment": recipient_commitment(recipient or {}),
         "expiresAt": str(quote["expiresAt"]),
     }
+    if quote.get("serviceFeeBps") is not None:
+        commitment.update(
+            {
+                "serviceFeeBps": int(quote["serviceFeeBps"]),
+                "serviceFeeUsd": str(quote["serviceFeeUsd"]),
+                "totalUsd": str(quote["totalUsd"]),
+            }
+        )
     if quote.get("maxPaymentTokenAtomic") is not None:
         commitment.update(
             {
