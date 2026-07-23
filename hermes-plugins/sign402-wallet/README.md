@@ -87,7 +87,9 @@ traffic is denied by default. A wildcard Sign402 policy also forces
 Sign402-only handling as a defensive fallback if the mode flag is omitted.
 
 `HERMES_TELEGRAM_TEXT_BATCH_DELAY_SECONDS=0.08` uses Hermes's supported minimum
-quiet period for short Telegram messages and buttons. Long messages near
+quiet period for short Telegram messages and buttons. Sign402 replies are
+scheduled through Hermes's active asynchronous Telegram client, so Telegram
+network stalls never block gateway button dispatch. Long messages near
 Telegram's 4096-character split boundary keep their separate aggregation delay.
 
 `SIGN402_IMESSAGE_PUBLIC_LINE` is shown in the `/connect_imessage` response
