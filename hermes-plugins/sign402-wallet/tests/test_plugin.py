@@ -2168,6 +2168,62 @@ class PluginRegistrationTests(unittest.TestCase):
             ],
         )
 
+    def test_bitrefill_search_filter_matches_company_and_ignores_generic_words(self):
+        plugin = load_plugin()
+        amazon = {
+            "productId": "amazon-nl",
+            "name": "Amazon.nl Netherlands",
+            "country": "NL",
+            "productType": "gift_card",
+        }
+        products = [
+            {
+                "productId": "bitrefill-esim-europe",
+                "name": "Bitrefill eSIM Europe",
+                "country": "AT",
+                "productType": "esim",
+            },
+            amazon,
+        ]
+
+        self.assertEqual(
+            plugin._filter_bitrefill_search_products("Amazon gift card", products),
+            [amazon],
+        )
+        self.assertEqual(
+            plugin._filter_bitrefill_search_products("Biterfill gift card", products),
+            [],
+        )
+
+    def test_bitrefill_search_filter_keeps_only_matching_esims(self):
+        plugin = load_plugin()
+        europe_esim = {
+            "productId": "bitrefill-esim-europe",
+            "name": "Bitrefill eSIM Europe",
+            "country": "AT",
+            "productType": "esim",
+        }
+        products = [
+            {
+                "productId": "amazon-nl",
+                "name": "Amazon.nl Netherlands",
+                "country": "NL",
+                "productType": "gift_card",
+            },
+            europe_esim,
+            {
+                "productId": "bitrefill-esim-usa",
+                "name": "Bitrefill eSIM USA",
+                "country": "US",
+                "productType": "esim",
+            },
+        ]
+
+        self.assertEqual(
+            plugin._filter_bitrefill_search_products("eSIM Europe", products),
+            [europe_esim],
+        )
+
     def test_bitrefill_global_search_uses_selected_products_real_country(self):
         plugin = load_plugin()
         context = FakeContext()

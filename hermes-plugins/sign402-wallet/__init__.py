@@ -119,6 +119,18 @@ _BITREFILL_DEFAULT_COUNTRY = "CZ"
 _BITREFILL_MAX_SEARCH_RESULTS = 5
 _BITREFILL_MAX_PACKAGES = 8
 _BITREFILL_CATALOG_PAGE_SIZE = 8
+_BITREFILL_GENERIC_SEARCH_TERMS = frozenset(
+    {
+        "gift",
+        "gifts",
+        "card",
+        "cards",
+        "giftcard",
+        "giftcards",
+        "voucher",
+        "vouchers",
+    }
+)
 _BITREFILL_MENU_BUTTONS = (
     ("Browse Catalog", "Search Products"),
     ("Change Country",),
@@ -2218,6 +2230,59 @@ def _normalize_bitrefill_products(raw_products) -> list[dict]:
         if product_id and name:
             products.append(product)
     return products
+
+
+def _bitrefill_search_tokens(value: str) -> list[str]:
+    normalized = re.sub(
+        r"\be[\W_]*sim\b",
+        " esim ",
+        str(value or "").casefold(),
+    )
+    return re.findall(r"[^\W_]+", normalized, flags=re.UNICODE)
+
+
+def _bitrefill_compact_search_text(value: str) -> str:
+    return "".join(_bitrefill_search_tokens(value))
+
+
+def _bitrefill_product_is_esim(product: dict) -> bool:
+    product_type = str(
+        product.get("productType") or product.get("category") or ""
+    )
+    return (
+        _bitrefill_compact_search_text(product_type) == "esim"
+        or "esim"
+        in _bitrefill_compact_search_text(str(product.get("name") or ""))
+    )
+
+
+def _filter_bitrefill_search_products(
+    query: str,
+    products: list[dict],
+) -> list[dict]:
+    query_tokens = _bitrefill_search_tokens(query)
+    esim_intent = "esim" in query_tokens
+    meaningful_terms = [
+        token
+        for token in query_tokens
+        if token not in _BITREFILL_GENERIC_SEARCH_TERMS and token != "esim"
+    ]
+    if not meaningful_terms and not esim_intent:
+        return []
+
+    matches: list[dict] = []
+    for product in products:
+        if esim_intent and not _bitrefill_product_is_esim(product):
+            continue
+        product_name = _bitrefill_compact_search_text(
+            str(product.get("name") or "")
+        )
+        if all(
+            _bitrefill_compact_search_text(term) in product_name
+            for term in meaningful_terms
+        ):
+            matches.append(product)
+    return matches
 
 
 def _normalize_bitrefill_packages(raw_packages) -> list[dict]:
