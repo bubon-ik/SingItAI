@@ -5,6 +5,7 @@ import stat
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -23,7 +24,7 @@ def test_cipher():
 
 
 def raw_metadata(path: Path, quote_id: str) -> dict:
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db:
         value = db.execute(
             "SELECT metadata_json FROM bitrefill_orders WHERE quote_id = ?",
             (quote_id,),
@@ -108,7 +109,7 @@ class CommerceStoreTests(unittest.TestCase):
                 {"quoteId": "q1", "productId": "p1", "expiresAtEpoch": 999}
             )
             legacy = {"recipient": {"email": "legacy@example.com"}}
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db, db:
                 db.execute(
                     "UPDATE bitrefill_orders SET metadata_json = ? "
                     "WHERE quote_id = ?",
@@ -134,7 +135,32 @@ class CommerceStoreTests(unittest.TestCase):
                 "encryptedRecipient": "not-ciphertext",
                 "recipient": {"email": "legacy@example.com"},
             }
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db, db:
+                db.execute(
+                    "UPDATE bitrefill_orders SET metadata_json = ? "
+                    "WHERE quote_id = ?",
+                    (json.dumps(seeded), "q1"),
+                )
+
+            with self.assertRaises(SensitiveStateDecryptionError) as captured:
+                store.get_quote("q1")
+            self.assertNotIn(
+                "legacy@example.com",
+                str(captured.exception),
+            )
+
+    def test_null_encrypted_recipient_never_falls_back_to_legacy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.sqlite3"
+            store = BitrefillCommerceStore(path, cipher=test_cipher())
+            store.save_quote(
+                {"quoteId": "q1", "productId": "p1", "expiresAtEpoch": 999}
+            )
+            seeded = {
+                "encryptedRecipient": None,
+                "recipient": {"email": "legacy@example.com"},
+            }
+            with closing(sqlite3.connect(path)) as db, db:
                 db.execute(
                     "UPDATE bitrefill_orders SET metadata_json = ? "
                     "WHERE quote_id = ?",
@@ -205,7 +231,7 @@ class CommerceStoreTests(unittest.TestCase):
                 {"quoteId": "q1", "productId": "p1", "expiresAtEpoch": 999}
             )
             legacy = {"recipient": {"email": "legacy@example.com"}}
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db, db:
                 db.execute(
                     "UPDATE bitrefill_orders SET metadata_json = ? "
                     "WHERE quote_id = ?",
@@ -216,7 +242,7 @@ class CommerceStoreTests(unittest.TestCase):
                 store.try_mark_fulfilling("q1")
 
             self.assertEqual(raw_metadata(path, "q1"), legacy)
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db:
                 state = db.execute(
                     "SELECT state FROM bitrefill_orders WHERE quote_id = ?",
                     ("q1",),

@@ -230,8 +230,8 @@ class BitrefillCommerceStore:
 
     def _decoded_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
         decoded = deepcopy(metadata)
-        encrypted = decoded.pop("encryptedRecipient", None)
-        if encrypted is not None:
+        if "encryptedRecipient" in decoded:
+            encrypted = decoded.pop("encryptedRecipient")
             if self.cipher is None:
                 raise SensitiveStateError(
                     "SIGN402_WALLET_MASTER_KEY is required "
