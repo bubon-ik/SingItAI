@@ -2186,7 +2186,10 @@ def build_server(
     )
     user_spend_limit_store = UserSpendLimitStore(user_spend_limit_store_path)
     agent_state_store = AgentStateStore(agent_state_path)
-    bitrefill_commerce_store = BitrefillCommerceStore(bitrefill_commerce_store_path)
+    bitrefill_commerce_store = BitrefillCommerceStore(
+        bitrefill_commerce_store_path,
+        cipher=sensitive_state_cipher,
+    )
     user_wallet_service = build_wallet_service_from_env(
         env=dict(os.environ),
         store_path=user_wallet_store_path,

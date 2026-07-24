@@ -1,10 +1,20 @@
+from copy import deepcopy
 import json
+import os
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
+
+from .secure_state import (
+    SensitiveStateCipher,
+    SensitiveStateConfigurationError,
+    SensitiveStateError,
+    ensure_private_directory,
+    ensure_private_file,
+)
 
 
 STATE_ORDER = {
@@ -26,11 +36,26 @@ STATE_ORDER = {
 
 
 class BitrefillCommerceStore:
-    def __init__(self, path: Path):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        cipher: SensitiveStateCipher | None = None,
+    ):
         self.path = path
+        self.cipher = cipher
         self.lock = threading.Lock()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(self.path.parent)
+        self._prepare_private_database_file()
         self._init_db()
+        ensure_private_file(self.path)
+
+    def require_sensitive_state_cipher(self) -> None:
+        if self.cipher is None:
+            raise SensitiveStateConfigurationError(
+                "SIGN402_WALLET_MASTER_KEY is required "
+                "for managed-wallet Bitrefill purchases"
+            )
 
     def save_quote(self, quote: dict[str, Any]) -> None:
         quote_id = str(quote["quoteId"])
@@ -60,7 +85,9 @@ class BitrefillCommerceStore:
             "quoteId": row["quote_id"],
             "state": row["state"],
             "quote": json.loads(row["quote_json"]),
-            "metadata": json.loads(row["metadata_json"] or "{}"),
+            "metadata": self._decoded_metadata(
+                json.loads(row["metadata_json"] or "{}")
+            ),
         }
 
     def advance_state(
@@ -81,15 +108,23 @@ class BitrefillCommerceStore:
             old_state = str(row["state"])
             if STATE_ORDER[new_state] < STATE_ORDER[old_state]:
                 raise ValueError("cannot move order state backward")
-            merged = json.loads(row["metadata_json"] or "{}")
-            merged.update(metadata or {})
+            existing = json.loads(row["metadata_json"] or "{}")
+            if "recipient" in existing:
+                raise SensitiveStateError(
+                    "legacy plaintext recipient must be migrated "
+                    "before updating Bitrefill order state"
+                )
+            update = self._encoded_metadata_update(metadata or {})
+            if "encryptedRecipient" in update:
+                existing.pop("recipient", None)
+            existing.update(update)
             db.execute(
                 """
                 UPDATE bitrefill_orders
                 SET state = ?, metadata_json = ?, updated_at = ?
                 WHERE quote_id = ?
                 """,
-                (new_state, _dumps(merged), int(time.time()), quote_id),
+                (new_state, _dumps(existing), int(time.time()), quote_id),
             )
 
     def checkpoint(self, quote_id: str, metadata: dict[str, Any]) -> None:
@@ -100,15 +135,23 @@ class BitrefillCommerceStore:
             ).fetchone()
             if row is None:
                 raise ValueError("quote not found")
-            merged = json.loads(row["metadata_json"] or "{}")
-            merged.update(metadata)
+            existing = json.loads(row["metadata_json"] or "{}")
+            if "recipient" in existing:
+                raise SensitiveStateError(
+                    "legacy plaintext recipient must be migrated "
+                    "before updating Bitrefill order state"
+                )
+            update = self._encoded_metadata_update(metadata or {})
+            if "encryptedRecipient" in update:
+                existing.pop("recipient", None)
+            existing.update(update)
             db.execute(
                 """
                 UPDATE bitrefill_orders
                 SET metadata_json = ?, updated_at = ?
                 WHERE quote_id = ?
                 """,
-                (_dumps(merged), int(time.time()), quote_id),
+                (_dumps(existing), int(time.time()), quote_id),
             )
 
     def try_mark_fulfilling(self, quote_id: str) -> bool:
@@ -128,18 +171,75 @@ class BitrefillCommerceStore:
                 UPDATE bitrefill_orders
                 SET state = 'FULFILLING', updated_at = ?
                 WHERE quote_id = ? AND state IN ({placeholders})
+                AND json_type(metadata_json, '$.recipient') IS NULL
                 """,
                 (int(time.time()), quote_id, *claimable_states),
             )
             if cursor.rowcount == 1:
                 return True
             row = db.execute(
-                "SELECT 1 FROM bitrefill_orders WHERE quote_id = ?",
+                "SELECT state, metadata_json FROM bitrefill_orders WHERE quote_id = ?",
                 (quote_id,),
             ).fetchone()
             if row is None:
                 raise ValueError("quote not found")
+            metadata = json.loads(row["metadata_json"] or "{}")
+            if "recipient" in metadata:
+                raise SensitiveStateError(
+                    "legacy plaintext recipient must be migrated "
+                    "before updating Bitrefill order state"
+                )
             return False
+
+    def _prepare_private_database_file(self) -> None:
+        if self.path.exists():
+            ensure_private_file(self.path)
+            return
+        try:
+            fd = os.open(
+                self.path,
+                os.O_CREAT | os.O_EXCL | os.O_RDWR,
+                0o600,
+            )
+        except FileExistsError:
+            ensure_private_file(self.path)
+        else:
+            os.close(fd)
+            ensure_private_file(self.path)
+
+    def _encoded_metadata_update(
+        self,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        update = deepcopy(metadata)
+        if "encryptedRecipient" in update:
+            raise SensitiveStateError(
+                "encryptedRecipient is reserved for the commerce store"
+            )
+        if "recipient" in update:
+            if self.cipher is None:
+                raise SensitiveStateError(
+                    "SIGN402_WALLET_MASTER_KEY is required "
+                    "to persist Bitrefill recipient state"
+                )
+            recipient = update.pop("recipient")
+            if not isinstance(recipient, dict):
+                raise ValueError("recipient must be an object")
+            update["encryptedRecipient"] = self.cipher.encrypt_json(recipient)
+        return update
+
+    def _decoded_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        decoded = deepcopy(metadata)
+        encrypted = decoded.pop("encryptedRecipient", None)
+        if encrypted is not None:
+            if self.cipher is None:
+                raise SensitiveStateError(
+                    "SIGN402_WALLET_MASTER_KEY is required "
+                    "to read Bitrefill recipient state"
+                )
+            decoded.pop("recipient", None)
+            decoded["recipient"] = self.cipher.decrypt_json(str(encrypted))
+        return decoded
 
     def _init_db(self) -> None:
         with self._database() as db:

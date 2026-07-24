@@ -550,6 +550,7 @@ class WalletBitrefillPurchaseRunner:
             self.store.advance_state(quote_id, "QUOTE_EXPIRED")
             raise ValueError("quote expired")
 
+        self.store.require_sensitive_state_cipher()
         commitment = build_purchase_commitment(quote, recipient=recipient)
         payment_hash = hash_purchase_commitment(commitment)
         telegram_user_id = str(payload.get("telegramUserId", "") or "").strip()

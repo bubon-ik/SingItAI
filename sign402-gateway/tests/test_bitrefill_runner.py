@@ -4,6 +4,8 @@ import hashlib
 from pathlib import Path
 from unittest.mock import ANY, Mock
 
+from cryptography.fernet import Fernet
+
 from sign402_gateway.bitrefill import TestBitrefillClient
 from sign402_gateway.bitrefill_runner import (
     BITREFILL_BROWSE_CATEGORIES,
@@ -20,6 +22,20 @@ from sign402_gateway.bitrefill_runner import (
     lookup_bitrefill_order,
 )
 from sign402_gateway.commerce_store import BitrefillCommerceStore
+from sign402_gateway.secure_state import (
+    SensitiveStateCipher,
+    SensitiveStateConfigurationError,
+)
+
+
+TEST_STATE_KEY = Fernet.generate_key().decode("ascii")
+
+
+def test_store(path: Path) -> BitrefillCommerceStore:
+    return BitrefillCommerceStore(
+        path,
+        cipher=SensitiveStateCipher(TEST_STATE_KEY),
+    )
 
 
 class PendingThenDeliveredBitrefillClient:
@@ -127,6 +143,46 @@ class FakeUserFundingRunner:
 
 
 class BitrefillRunnerTests(unittest.TestCase):
+    def test_wallet_purchase_without_cipher_fails_before_approval_or_funding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = BitrefillCommerceStore(
+                Path(tmp) / "orders.sqlite3"
+            )
+            store.save_quote(
+                {
+                    "quoteId": "q1",
+                    "productId": "p1",
+                    "productName": "Product",
+                    "expiresAtEpoch": 999,
+                }
+            )
+            approval = Mock()
+            funding = Mock()
+            fulfillment = Mock()
+            runner = WalletBitrefillPurchaseRunner(
+                store=store,
+                approval_client=approval,
+                user_funding_runner=funding,
+                fulfillment_runner=fulfillment,
+                now_provider=lambda: 1,
+            )
+
+            with self.assertRaises(
+                SensitiveStateConfigurationError
+            ):
+                runner(
+                    {
+                        "quoteId": "q1",
+                        "telegramUserId": "u",
+                        "recipient": {"email": "buyer@example.com"},
+                    }
+                )
+
+            approval.assert_not_called()
+            funding.assert_not_called()
+            fulfillment.assert_not_called()
+            self.assertEqual(store.get_quote("q1")["state"], "QUOTED")
+
     def test_bitrefill_approval_names_selected_token_and_amount(self):
         lines = _bitrefill_approval_context_lines(
             {
@@ -192,7 +248,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_quote_service_prices_authenticated_users_selected_wallet_token(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             pricer = FixedWalletTokenPricer()
             resolver = WalletPaymentTokenResolver(
                 lambda user_id: {
@@ -247,7 +303,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_quote_service_uses_usdc_directly_without_requesting_a_swap_quote(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             pricer = Mock()
             pricer.price_for_usdc.side_effect = AssertionError(
                 "USDC must not be quoted against itself"
@@ -302,7 +358,7 @@ class BitrefillRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
-                store=BitrefillCommerceStore(Path(tmp) / "orders.sqlite3"),
+                store=test_store(Path(tmp) / "orders.sqlite3"),
                 singit_usd_price_provider=lambda: "0.01",
                 real_rate_pricer=FixedWalletTokenPricer(),
                 payment_token_resolver=WalletPaymentTokenResolver(
@@ -338,7 +394,7 @@ class BitrefillRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
-                store=BitrefillCommerceStore(Path(tmp) / "orders.sqlite3"),
+                store=test_store(Path(tmp) / "orders.sqlite3"),
                 singit_usd_price_provider=lambda: "0.01",
                 real_rate_pricer=FixedWalletTokenPricer(),
                 payment_token_resolver=WalletPaymentTokenResolver(
@@ -492,7 +548,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_quote_service_quotes_selected_phone_refill(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -515,7 +571,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_quote_service_saves_quote(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -531,7 +587,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_quote_service_uses_configured_ttl(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -548,7 +604,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_quote_service_can_use_real_rate_pricer(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -571,7 +627,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_runner_requires_firefly_before_bankr(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -604,7 +660,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_runner_checks_reserve_before_firefly_or_bankr(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -637,7 +693,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_runner_calls_bankr_after_firefly_approval(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -686,7 +742,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_runner_blocks_bitrefill_fulfillment_without_verified_singit_settlement(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -727,7 +783,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_runner_fulfills_bitrefill_only_after_verified_singit_settlement(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -773,7 +829,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_runner_rejects_expired_quote_before_firefly_or_bankr(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -801,7 +857,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_wallet_runner_fulfills_without_bankr_x402_payment(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -877,7 +933,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_wallet_runner_enforces_spend_limits_before_approval_and_payment(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -920,7 +976,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_wallet_runner_rejects_unconfirmed_checkout_before_fulfillment(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -961,7 +1017,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_runner_rejects_replay_of_non_quoted_order_before_firefly_or_bankr(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -989,7 +1045,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_runner_marks_reconciliation_required_when_bankr_call_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -1023,7 +1079,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_fulfillment_runner_buys_once_and_rejects_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -1065,7 +1121,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_fulfillment_runner_returns_token_aware_atomic_amount(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             store.save_quote(
                 {
                     "quoteId": "quote_token_1",
@@ -1110,7 +1166,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_fulfillment_rejects_quote_that_expires_before_provider_purchase(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -1137,7 +1193,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_fulfillment_rejects_token_not_bound_to_quote(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -1168,7 +1224,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_fulfillment_uses_firefly_approved_recipient_from_store(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -1218,7 +1274,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_fulfillment_swaps_singit_before_bitrefill_purchase(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             store.save_quote(
                 {
                     "quoteId": "quote_1",
@@ -1265,7 +1321,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_fulfillment_does_not_buy_bitrefill_when_swap_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             store.save_quote(
                 {
                     "quoteId": "quote_1",
@@ -1305,7 +1361,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_settlement_preparation_returns_real_rate_pricing_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             store.save_quote(
                 {
                     "quoteId": "quote_1",
@@ -1339,7 +1395,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_order_lookup_redacts_private_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             store.save_quote(
                 {
                     "quoteId": "quote_1",
@@ -1373,7 +1429,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_order_lookup_can_reveal_redemption_when_recipient_matches(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             store.save_quote(
                 {
                     "quoteId": "quote_1",
@@ -1417,7 +1473,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_order_lookup_requires_fulfillment_token_when_no_recipient_stored(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             store.save_quote(
                 {
                     "quoteId": "quote_1",
@@ -1468,7 +1524,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_pending_order_refreshes_without_repurchase(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -1509,7 +1565,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_order_lookup_rejects_redemption_reveal_for_wrong_recipient(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             store.save_quote(
                 {
                     "quoteId": "quote_1",
@@ -1544,7 +1600,7 @@ class BitrefillRunnerTests(unittest.TestCase):
 
     def test_fulfillment_records_provider_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store = test_store(Path(tmp) / "orders.sqlite3")
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
