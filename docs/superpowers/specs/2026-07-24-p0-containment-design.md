@@ -123,7 +123,11 @@ failure returns no partial value and raises a redacted state error.
 
 ### User purchase persistence
 
-`UserPurchaseStore` receives a `SensitiveStateCipher`.
+`UserPurchaseStore` receives an optional `SensitiveStateCipher`. A
+catalog/test-only server may start without a master key, but any write
+containing a fulfillment token and any read of an encrypted token fails
+closed when the cipher is absent. A non-empty invalid key still fails during
+gateway construction.
 
 For new writes:
 
@@ -145,6 +149,14 @@ For reads:
 `clear_fulfillment_token()` removes both the encrypted and legacy field. It
 uses the private atomic writer, so clearing a token cannot reset the file to
 world-readable permissions.
+
+Because `user-purchases.json` contains all users in one JSON object, a normal
+write would reserialize every legacy plaintext token through the temporary
+file. Therefore every write scans the complete post-update document and fails
+closed if any top-level legacy `fulfillmentToken` remains. Clearing a legacy
+token is allowed only when the resulting document contains no other legacy
+plaintext tokens. This keeps legacy reads available without silently migrating
+or re-persisting bearer values.
 
 This package intentionally does not bulk-migrate the existing
 `user-purchases.json`. A later controlled operational step will migrate it
@@ -184,7 +196,10 @@ raw SQLite JSON and temporary files, not only public return values.
 New recipient dictionaries are encrypted with `SensitiveStateCipher` and
 stored as `encryptedRecipient`. Store reads decrypt them into the current
 in-memory `recipient` shape. Existing legacy plaintext `recipient` metadata is
-read for compatibility but is not rewritten automatically.
+read for compatibility but is not rewritten automatically. Any state update
+for a row that still contains a legacy plaintext recipient fails closed before
+SQLite writes or journals that metadata again. The controlled migration must
+encrypt such rows before normal state transitions resume.
 
 `fulfillmentTokenHash` remains a one-way SHA-256 value and does not need
 encryption.
@@ -236,6 +251,7 @@ The paused route set is:
 /agent/llm-key/start
 /agent/llm-key/verify
 /agent/llm-key/reconcile
+/internal/fulfill-bitrefill
 ```
 
 After validating `Content-Length` and resolving the request path, but before
@@ -262,12 +278,16 @@ The following remain available while paused:
 - withdrawal-token inventory;
 - LLM credit balance;
 - approval-channel and messaging administration;
-- legacy inspect endpoints.
+- legacy inspect endpoints;
+- authenticated internal settlement preparation (it validates and returns
+  bounds but does not execute a transfer or provider purchase).
 
 The route set is a conservative containment boundary. In particular,
 `llm-key/reconcile` is blocked because its current state-dependent behavior can
 resume a transfer. A later reconciliation design may split observation from
 fund movement and make the read-only portion available during incidents.
+The legacy internal fulfillment route is also blocked because, when explicitly
+enabled, it can invoke the treasury-funded Bitrefill purchase runner.
 
 ### Configuration
 
@@ -283,7 +303,8 @@ user message remain unchanged.
 The gateway builder passes `SIGN402_WALLET_MASTER_KEY` to the sensitive stores.
 Catalog-only and other non-sensitive test components do not need a cipher.
 Any configured managed-wallet purchase path that could persist bearer values
-fails closed when the key is missing or invalid.
+fails closed before approval, wallet decryption, funding, or provider calls
+when the key is missing or invalid.
 
 ## Error Handling
 
@@ -351,6 +372,7 @@ The tests must include the previously missed paths:
 - legacy `/execute-payment`;
 - legacy treasury tool/x402 purchases;
 - legacy Bitrefill purchase.
+- legacy internal Bitrefill fulfillment.
 
 ### Regression
 
