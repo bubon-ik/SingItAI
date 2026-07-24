@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -8,9 +9,17 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import ANY, Mock, patch
 
+from cryptography.fernet import Fernet
+
 from sign402_gateway.bankr_llm_purchase import BankrLlmError
 from sign402_gateway.bitrefill import TestBitrefillClient
 from sign402_gateway.bitrefill_mcp import McpBitrefillClient
+from sign402_gateway.secure_state import (
+    SensitiveStateCipher,
+    SensitiveStateConfigurationError,
+    SensitiveStateDecryptionError,
+    SensitiveStateError,
+)
 from sign402_gateway.user_wallets import BASE_NATIVE_ETH_ASSET_ID
 from sign402_gateway.server import (
     _USER_RATE_LIMITER,
@@ -31,6 +40,7 @@ from sign402_gateway.server import (
     ExternalX402Buyer,
     Sign402GatewayHandler,
     SingitSettlementVerifier,
+    UserPurchaseStore,
     UserSpendLimitStore,
     UserWalletBaseX402PaymentClient,
     UserWalletTokenTransferClient,
@@ -138,6 +148,215 @@ class FakeSocket:
 
 
 class GatewayServerTests(unittest.TestCase):
+    def state_cipher(self):
+        return SensitiveStateCipher(Fernet.generate_key().decode("ascii"))
+
+    def test_user_purchase_store_encrypts_token_at_rest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state" / "user-purchases.json"
+            store = UserPurchaseStore(path, cipher=self.state_cipher())
+            event = {
+                "ok": True,
+                "quoteId": "q1",
+                "fulfillmentToken": "reveal_secret_1",
+            }
+
+            observed_temp_documents: list[str] = []
+            real_replace = os.replace
+
+            def inspect_then_replace(source, target):
+                observed_temp_documents.append(
+                    Path(source).read_text(encoding="utf-8")
+                )
+                real_replace(source, target)
+
+            with patch(
+                "sign402_gateway.secure_state.os.replace",
+                side_effect=inspect_then_replace,
+            ):
+                returned = store.write("1045618308", event)
+            raw = path.read_text(encoding="utf-8")
+            persisted = json.loads(raw)["1045618308"]
+
+            self.assertIs(returned, event)
+            self.assertNotIn("reveal_secret_1", raw)
+            self.assertNotIn(
+                "reveal_secret_1",
+                "".join(observed_temp_documents),
+            )
+            self.assertNotIn("fulfillmentToken", persisted)
+            self.assertIn("encryptedFulfillmentToken", persisted)
+            self.assertEqual(store.read("1045618308"), event)
+            self.assertNotIn(
+                "encryptedFulfillmentToken",
+                store.read("1045618308"),
+            )
+            self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_user_purchase_store_reads_legacy_without_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-purchases.json"
+            legacy = (
+                '{"1045618308":{"ok":true,"quoteId":"q1",'
+                '"fulfillmentToken":"legacy_secret"}}\n'
+            )
+            path.write_text(legacy, encoding="utf-8")
+            store = UserPurchaseStore(path, cipher=self.state_cipher())
+
+            loaded = store.read("1045618308")
+
+            self.assertEqual(loaded["fulfillmentToken"], "legacy_secret")
+            self.assertEqual(path.read_text(encoding="utf-8"), legacy)
+
+    def test_user_purchase_store_refuses_to_copy_other_legacy_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-purchases.json"
+            legacy = (
+                '{"legacy-user":{"ok":true,'
+                '"fulfillmentToken":"legacy_secret"}}\n'
+            )
+            path.write_text(legacy, encoding="utf-8")
+            before = path.read_bytes()
+            store = UserPurchaseStore(path, cipher=self.state_cipher())
+
+            with self.assertRaisesRegex(
+                SensitiveStateError,
+                "legacy plaintext fulfillment tokens must be migrated",
+            ):
+                store.write(
+                    "new-user",
+                    {"ok": True, "fulfillmentToken": "new_secret"},
+                )
+
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(list(path.parent.glob("*.tmp")), [])
+
+    def test_user_purchase_store_invalid_envelope_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-purchases.json"
+            path.write_text(
+                '{"u":{"encryptedFulfillmentToken":"not-ciphertext"}}\n',
+                encoding="utf-8",
+            )
+            store = UserPurchaseStore(path, cipher=self.state_cipher())
+
+            with self.assertRaises(SensitiveStateDecryptionError):
+                store.read("u")
+
+    def test_user_purchase_store_token_write_without_cipher_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-purchases.json"
+            store = UserPurchaseStore(path)
+
+            with self.assertRaises(
+                SensitiveStateConfigurationError
+            ):
+                store.write(
+                    "u",
+                    {
+                        "ok": True,
+                        "fulfillmentToken": "reveal_secret",
+                    },
+                )
+
+            self.assertFalse(path.exists())
+
+    def test_user_purchase_store_encrypted_read_without_cipher_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-purchases.json"
+            UserPurchaseStore(
+                path,
+                cipher=self.state_cipher(),
+            ).write(
+                "u",
+                {
+                    "ok": True,
+                    "fulfillmentToken": "reveal_secret",
+                },
+            )
+
+            with self.assertRaises(
+                SensitiveStateConfigurationError
+            ):
+                UserPurchaseStore(path).read("u")
+
+    def test_user_purchase_store_clear_removes_both_token_formats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-purchases.json"
+            store = UserPurchaseStore(path, cipher=self.state_cipher())
+            store.write(
+                "u",
+                {"ok": True, "fulfillmentToken": "reveal_secret"},
+            )
+            seeded = json.loads(path.read_text(encoding="utf-8"))
+            seeded["u"]["fulfillmentToken"] = "legacy_secret"
+            path.write_text(
+                json.dumps(seeded) + "\n",
+                encoding="utf-8",
+            )
+
+            store.clear_fulfillment_token("u")
+
+            raw = path.read_text(encoding="utf-8")
+            self.assertNotIn("reveal_secret", raw)
+            self.assertNotIn("legacy_secret", raw)
+            self.assertNotIn("encryptedFulfillmentToken", raw)
+            self.assertNotIn("fulfillmentToken", store.read("u"))
+
+    def test_user_purchase_store_clears_last_legacy_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-purchases.json"
+            path.write_text(
+                '{"u":{"ok":true,"fulfillmentToken":"legacy_secret"}}\n',
+                encoding="utf-8",
+            )
+            store = UserPurchaseStore(path, cipher=self.state_cipher())
+
+            store.clear_fulfillment_token("u")
+
+            self.assertNotIn(
+                "legacy_secret",
+                path.read_text(encoding="utf-8"),
+            )
+            self.assertNotIn("fulfillmentToken", store.read("u"))
+
+    def test_user_purchase_store_clear_refuses_to_copy_other_legacy_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-purchases.json"
+            original = (
+                '{"u":{"encryptedFulfillmentToken":"not-read"},'
+                '"other":{"fulfillmentToken":"other_legacy_secret"}}\n'
+            )
+            path.write_text(original, encoding="utf-8")
+            store = UserPurchaseStore(path, cipher=self.state_cipher())
+
+            with self.assertRaises(SensitiveStateError):
+                store.clear_fulfillment_token("u")
+
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
+
+    def test_user_spend_limit_store_writes_private_state(self):
+        previous_umask = os.umask(0o022)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "state" / "limits.json"
+                store = UserSpendLimitStore(path)
+                store.set_limit_settings(
+                    "u",
+                    max_per_tx_atomic=10,
+                    daily_cap_atomic=100,
+                    operator_max_per_tx_atomic=None,
+                    operator_daily_cap_atomic=None,
+                )
+                self.assertEqual(
+                    stat.S_IMODE(path.parent.stat().st_mode),
+                    0o700,
+                )
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        finally:
+            os.umask(previous_umask)
+
     def test_base_rpc_rejects_oversized_response(self):
         class OversizedResponse:
             def __enter__(self):

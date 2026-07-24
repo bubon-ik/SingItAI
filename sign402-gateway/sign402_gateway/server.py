@@ -94,6 +94,12 @@ from .bankr_llm_purchase import (
 from .numeric import format_decimal
 from .goplausible import fetch_x402_paid_resource, fetch_x402_payment_required, normalize_x402_payment_required
 from .real_rate_pricing import RealRateSingitPricer
+from .secure_state import (
+    SensitiveStateCipher,
+    SensitiveStateConfigurationError,
+    SensitiveStateError,
+    atomic_write_private_json,
+)
 from .user_wallets import (
     BASE_NATIVE_ETH_ASSET_ID,
     DEFAULT_USER_WALLET_STORE_PATH,
@@ -2164,8 +2170,20 @@ def build_server(
     x402_payment_signature_builder = build_x402_payment_signature_builder(payment_executor_dir)
     base_payment_client = CdpBaseX402PaymentClient(cdp_x402_service_dir)
     bankr_x402_payment_client = BankrCliX402PaymentClient()
+    sensitive_state_key = os.environ.get(
+        "SIGN402_WALLET_MASTER_KEY",
+        "",
+    ).strip()
+    sensitive_state_cipher = (
+        SensitiveStateCipher(sensitive_state_key)
+        if sensitive_state_key
+        else None
+    )
     event_store = LatestEventStore(event_store_path)
-    user_event_store = UserPurchaseStore(event_store_path.parent / "user-purchases.json")
+    user_event_store = UserPurchaseStore(
+        event_store_path.parent / "user-purchases.json",
+        cipher=sensitive_state_cipher,
+    )
     user_spend_limit_store = UserSpendLimitStore(user_spend_limit_store_path)
     agent_state_store = AgentStateStore(agent_state_path)
     bitrefill_commerce_store = BitrefillCommerceStore(bitrefill_commerce_store_path)
@@ -4020,9 +4038,15 @@ class UserPurchaseStore:
     back only through the token-gated /agent/last-purchase.
     """
 
-    def __init__(self, path: Path):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        cipher: SensitiveStateCipher | None = None,
+    ) -> None:
         self.path = path
         self.lock = threading.Lock()
+        self.cipher = cipher
 
     def _read_all_unlocked(self) -> dict[str, Any]:
         if not self.path.exists():
@@ -4030,24 +4054,78 @@ class UserPurchaseStore:
         payload = json.loads(self.path.read_text(encoding="utf-8"))
         return payload if isinstance(payload, dict) else {}
 
-    def write(self, telegram_user_id: str, event: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _assert_no_legacy_tokens(data: dict[str, Any]) -> None:
+        if any(
+            isinstance(item, dict) and "fulfillmentToken" in item
+            for item in data.values()
+        ):
+            raise SensitiveStateError(
+                "legacy plaintext fulfillment tokens must be migrated "
+                "before updating user purchase state"
+            )
+
+    def _persisted_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        persisted = dict(event)
+        persisted.pop("encryptedFulfillmentToken", None)
+        if "fulfillmentToken" in persisted:
+            if self.cipher is None:
+                raise SensitiveStateConfigurationError(
+                    "SIGN402_WALLET_MASTER_KEY is required "
+                    "to persist fulfillment tokens"
+                )
+            token = str(persisted.pop("fulfillmentToken"))
+            persisted["encryptedFulfillmentToken"] = self.cipher.encrypt_text(token)
+        return persisted
+
+    def write(
+        self,
+        telegram_user_id: str,
+        event: dict[str, Any],
+    ) -> dict[str, Any]:
         key = str(telegram_user_id)
         with self.lock:
             data = self._read_all_unlocked()
-            data[key] = event
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-            temp_path.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            temp_path.replace(self.path)
+            data[key] = self._persisted_event(event)
+            self._assert_no_legacy_tokens(data)
+            atomic_write_private_json(self.path, data)
             return event
 
     def read(self, telegram_user_id: str) -> dict[str, Any] | None:
         with self.lock:
             value = self._read_all_unlocked().get(str(telegram_user_id))
-            return value if isinstance(value, dict) else None
+            if not isinstance(value, dict):
+                return None
+            event = dict(value)
+            encrypted = event.pop("encryptedFulfillmentToken", None)
+            if encrypted is not None:
+                if self.cipher is None:
+                    raise SensitiveStateConfigurationError(
+                        "SIGN402_WALLET_MASTER_KEY is required "
+                        "to read encrypted fulfillment tokens"
+                    )
+                event.pop("fulfillmentToken", None)
+                event["fulfillmentToken"] = self.cipher.decrypt_text(str(encrypted))
+            return event
+
+    def clear_fulfillment_token(self, telegram_user_id: str) -> None:
+        key = str(telegram_user_id)
+        with self.lock:
+            data = self._read_all_unlocked()
+            event = data.get(key)
+            if not isinstance(event, dict):
+                return
+            if (
+                "fulfillmentToken" not in event
+                and "encryptedFulfillmentToken" not in event
+            ):
+                return
+            cleaned = dict(event)
+            cleaned.pop("fulfillmentToken", None)
+            cleaned.pop("encryptedFulfillmentToken", None)
+            data[key] = cleaned
+            self._assert_no_legacy_tokens(data)
+            atomic_write_private_json(self.path, data)
 
 
 class UserSpendLimitStore:
@@ -4067,13 +4145,7 @@ class UserSpendLimitStore:
         return payload if isinstance(payload, dict) else {"records": [], "limits": {}}
 
     def _write_all_unlocked(self, data: dict[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        temp_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        temp_path.replace(self.path)
+        atomic_write_private_json(self.path, data)
 
     def limit_settings(
         self,
