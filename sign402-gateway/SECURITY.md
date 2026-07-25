@@ -75,6 +75,23 @@ The `/agent/test-imessage-approval` probe is disabled by default as well. It is
 not part of the user product; enable `SIGN402_ENABLE_TEST_ENDPOINTS=true` only
 for a short, operator-controlled diagnostic session, then remove it again.
 
+## P0 containment controls
+
+- New sensitive JSON and SQLite state uses private filesystem modes: directories
+  are `0700` and files are `0600`.
+- New fulfillment tokens and recipients are Fernet-encrypted with
+  `SIGN402_WALLET_MASTER_KEY`.
+- Provider snapshots are strict allowlists of the fields required for order
+  status and reconciliation; raw provider responses are not durable state.
+- Redemption is fetched only after authorization and is never persisted.
+- Legacy plaintext state remains read-compatible, but updates fail closed until
+  a separately controlled migration is completed.
+- Setting `SIGN402_PURCHASES_PAUSED` blocks every transaction-oriented route,
+  including LLM verify/reconcile and legacy routes, before its request body is
+  read or a handler is dispatched.
+- This code package does not migrate or rotate live state. Any such operation
+  requires a separately reviewed, operator-controlled migration.
+
 ## End-to-end verification checklist
 
 Prerequisites: `SIGN402_WALLET_MASTER_KEY`, `SIGN402_WALLET_API_TOKEN`,
