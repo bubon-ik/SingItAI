@@ -19,8 +19,19 @@ with shared bearer tokens:
 - **Per-user access tokens.** On wallet creation the gateway mints a per-user
   token (only its SHA-256 hash is stored). Wallet reads and purchases send it as
   `X-Sign402-User-Token`; the gateway derives the user id from the token and
-  rejects a body `telegramUserId` that disagrees (`_authenticated_user_id`). A
-  leaked shared token therefore cannot act as an arbitrary user.
+  rejects a body `telegramUserId` that disagrees (`_authenticated_user_id`).
+  This blocks a single per-user token from acting as a *different* user.
+  **It does not by itself contain a leaked shared token:** because the trusted
+  plugin must be able to re-mint a token for a returning user after a restart,
+  `/agent/create-wallet` will issue a per-user token for any `telegramUserId`
+  presented with the shared token. Treat `SIGN402_WALLET_API_TOKEN` as a fully
+  privileged server-side secret — a holder can read any user's balances/limits
+  (funds still require an on-device approval, and Bitrefill redemption codes are
+  revealable only once; see below).
+- **Redemption codes are single-reveal.** A Bitrefill redemption code is fetched
+  with a stored reveal token. The first `/agent/last-purchase` that reveals the
+  code clears that token (`UserPurchaseStore.clear_fulfillment_token`), so the
+  code cannot be re-fetched afterward by any later per-user token.
 - **Pairing binds phone ↔ Telegram.** An approver phone is linked only after the
   user enters a pairing code that was delivered to them on their authenticated
   Telegram account.
