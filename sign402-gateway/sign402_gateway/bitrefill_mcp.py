@@ -779,11 +779,27 @@ class McpBitrefillClient:
                 f"${format(quoted_price, 'f')} by more than "
                 f"{self.max_invoice_overage_bps} bps"
             )
-        return self.treasury_client.transfer_usdc(
+        transfer = self.treasury_client.transfer_usdc(
             to_address=address,
             amount=format(payment_amount, "f"),
             chain="base",
         )
+        if not isinstance(transfer, dict):
+            raise ValueError("Bitrefill treasury transfer result is invalid")
+        transaction_hash = str(
+            transfer.get("txId")
+            or transfer.get("transactionHash")
+            or transfer.get("hash")
+            or ""
+        ).strip()
+        if not transaction_hash:
+            raise ValueError("Bitrefill treasury transfer hash is missing")
+        return {
+            "txId": transaction_hash,
+            "network": "base",
+            "asset": "USDC",
+            "amount": format(payment_amount, "f"),
+        }
 
     def _poll_invoice(self, invoice_id: str) -> dict[str, Any]:
         last_invoice: dict[str, Any] = {"invoice_id": invoice_id}
@@ -857,6 +873,7 @@ class McpBitrefillClient:
         result: dict[str, Any] = {
             "ok": True,
             "provider": "bitrefill-mcp",
+            "paymentMethod": self.payment_method,
             "orderId": order_id,
             "invoiceId": self._invoice_id(invoice),
             "status": status,
@@ -892,18 +909,14 @@ class McpBitrefillClient:
         if not isinstance(payment, dict):
             payment = invoice.get("paymentInfo")
         if isinstance(payment, dict):
-            checkpoint["paymentInfo"] = {
-                key: deepcopy(payment[key])
-                for key in (
-                    "address",
-                    "amount",
-                    "currency",
-                    "network",
-                    "contract_address",
-                    "contractAddress",
-                )
-                if key in payment
-            }
+            checkpoint["paymentInfo"] = {}
+            if "amount" in payment:
+                checkpoint["paymentInfo"]["amount"] = deepcopy(payment["amount"])
+            asset = payment.get("asset", payment.get("currency"))
+            if asset is not None:
+                checkpoint["paymentInfo"]["asset"] = deepcopy(asset)
+            if "network" in payment:
+                checkpoint["paymentInfo"]["network"] = deepcopy(payment["network"])
         if treasury_payment is not None:
             checkpoint["treasuryPayment"] = deepcopy(treasury_payment)
         callback(checkpoint)

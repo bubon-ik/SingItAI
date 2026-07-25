@@ -92,17 +92,16 @@ def lookup_bitrefill_order(
     provider_result = metadata.get("bitrefill")
     if not isinstance(provider_result, dict):
         provider_result = {}
-    if record["state"] == "BITREFILL_PURCHASED" and bitrefill_client is not None and provider_result:
-        refreshed_provider_result = bitrefill_client.refresh_purchase(provider_result, quote)
-        store.advance_state(quote_id, "BITREFILL_PURCHASED", {"bitrefill": refreshed_provider_result})
-        if _provider_is_delivered(refreshed_provider_result, quote):
-            store.advance_state(quote_id, "DELIVERED")
-        record = store.get_quote(quote_id)
-        metadata = record["metadata"]
-        provider_result = metadata.get("bitrefill")
-        if not isinstance(provider_result, dict):
-            provider_result = {}
-    result = {
+    persisted_status = str(
+        provider_result.get("status", record["state"].lower())
+    )
+    public_status = persisted_status
+    if (
+        persisted_status.strip().lower() == "delivered"
+        and record["state"] != "DELIVERED"
+    ):
+        public_status = record["state"].lower()
+    status_result = {
         "ok": True,
         "quoteId": record["quoteId"],
         "state": record["state"],
@@ -110,25 +109,55 @@ def lookup_bitrefill_order(
         "productName": quote.get("productName"),
         "packageValue": quote.get("packageValue"),
         "orderId": provider_result.get("orderId"),
-        "status": provider_result.get("status", record["state"].lower()),
+        "status": public_status,
     }
-    if include_redemption:
-        stored_recipient = metadata.get("recipient") if isinstance(metadata, dict) else {}
-        if not isinstance(stored_recipient, dict):
-            stored_recipient = {}
-        recipient_ok = bool(stored_recipient) and recipient == stored_recipient
-        token_ok = _fulfillment_token_matches(metadata, fulfillment_token)
-        if not (recipient_ok or token_ok):
-            if stored_recipient:
-                raise ValueError("recipient does not match order")
-            raise ValueError("valid fulfillmentToken is required to reveal redemption")
-        redemption = provider_result.get("redemption")
-        if redemption is not None:
-            result["redemption"] = deepcopy(redemption)
-            result["telegramText"] = _bitrefill_delivery_telegram_text(
-                quote,
-                redemption=redemption,
-            )
+    if not include_redemption:
+        return status_result
+
+    stored_recipient = metadata.get("recipient")
+    recipient_ok = (
+        isinstance(stored_recipient, dict)
+        and bool(stored_recipient)
+        and recipient == stored_recipient
+    )
+    token_ok = _fulfillment_token_matches(metadata, fulfillment_token)
+    if not (recipient_ok or token_ok):
+        if stored_recipient:
+            raise ValueError("recipient does not match order")
+        raise ValueError("valid fulfillmentToken is required to reveal redemption")
+
+    if (
+        bitrefill_client is None
+        or not str(provider_result.get("invoiceId") or "").strip()
+    ):
+        return {**status_result, "redemptionUnavailable": True}
+    try:
+        refreshed = bitrefill_client.refresh_purchase(provider_result, quote)
+        if not isinstance(refreshed, dict):
+            raise ValueError("Bitrefill refresh must return an object")
+        store.checkpoint(quote_id, {"bitrefill": refreshed})
+    except Exception:
+        return {**status_result, "redemptionUnavailable": True}
+
+    redemption = refreshed.get("redemption")
+    provider_delivered = _provider_is_delivered(refreshed, quote)
+    if not provider_delivered or not _redemption_detail_text(redemption):
+        return {
+            **status_result,
+            "redemptionAvailable": False,
+        }
+    store.advance_state(quote_id, "DELIVERED", {})
+    result = {
+        **status_result,
+        "state": "DELIVERED",
+        "orderId": refreshed.get("orderId", status_result["orderId"]),
+        "status": refreshed.get("status", "delivered"),
+        "redemption": deepcopy(redemption),
+    }
+    result["telegramText"] = _bitrefill_delivery_telegram_text(
+        quote,
+        redemption=redemption,
+    )
     return result
 
 
@@ -450,13 +479,13 @@ class BitrefillPurchaseRunner:
                 self.bankr_resource_url,
                 request_body=bankr_body,
             )
-        except Exception as exc:
+        except Exception:
             self.store.advance_state(
                 quote_id,
                 "RECONCILIATION_REQUIRED",
-                {"bankrError": str(exc)},
+                {"bankrError": "Bankr payment request failed"},
             )
-            raise
+            raise ValueError("Bankr payment request failed") from None
         if self.settlement_verifier is not None or self.fulfillment_runner is not None:
             if self.settlement_verifier is None or self.fulfillment_runner is None:
                 raise ValueError("settlement_verifier and fulfillment_runner must be configured together")
@@ -473,13 +502,20 @@ class BitrefillPurchaseRunner:
                 bitrefill_result = self.fulfillment_runner(
                     {"quoteId": quote_id, "fulfillmentToken": fulfillment_token}
                 )
-            except Exception as exc:
+            except Exception:
                 self.store.advance_state(
                     quote_id,
                     "RECONCILIATION_REQUIRED",
-                    {"bankr": bankr_result, "singitSettlementError": str(exc)},
+                    {
+                        "bankr": bankr_result,
+                        "singitSettlementError": (
+                            "Bitrefill settlement or fulfillment failed"
+                        ),
+                    },
                 )
-                raise
+                raise ValueError(
+                    "Bitrefill settlement or fulfillment failed"
+                ) from None
             return {
                 "ok": bool(bankr_result.get("ok", False)) and bool(bitrefill_result.get("ok", False)),
                 "decision": "approved_and_executed",
@@ -612,13 +648,18 @@ class WalletBitrefillPurchaseRunner:
                     quote=quote,
                     recipient=recipient,
                 )
-        except Exception as exc:
+        except Exception:
             self.store.advance_state(
                 quote_id,
                 "RECONCILIATION_REQUIRED",
-                {"walletCheckout": {**wallet_checkout, "fundingError": str(exc)}},
+                {
+                    "walletCheckout": {
+                        **wallet_checkout,
+                        "fundingError": "Managed-wallet funding request failed",
+                    }
+                },
             )
-            raise
+            raise ValueError("Managed-wallet funding request failed") from None
 
         fulfillment_token = self.fulfillment_token_provider()
         token_hash = hashlib.sha256(fulfillment_token.encode("utf-8")).hexdigest()
@@ -637,13 +678,18 @@ class WalletBitrefillPurchaseRunner:
             bitrefill_result = self.fulfillment_runner(
                 {"quoteId": quote_id, "fulfillmentToken": fulfillment_token}
             )
-        except Exception as exc:
+        except Exception:
             self.store.advance_state(
                 quote_id,
                 "RECONCILIATION_REQUIRED",
-                {"walletCheckout": {**wallet_checkout, "fulfillmentError": str(exc)}},
+                {
+                    "walletCheckout": {
+                        **wallet_checkout,
+                        "fulfillmentError": "Bitrefill fulfillment request failed",
+                    }
+                },
             )
-            raise
+            raise ValueError("Bitrefill fulfillment request failed") from None
 
         return {
             "ok": bool(bitrefill_result.get("ok", False)),
@@ -765,13 +811,13 @@ class BitrefillFulfillmentRunner:
                     "FULFILLING",
                     {"bankrSwap": funding_result},
                 )
-            except Exception as exc:
+            except Exception:
                 self.store.advance_state(
                     quote_id,
                     "RECONCILIATION_REQUIRED",
-                    {"fundingError": str(exc)},
+                    {"fundingError": "Bitrefill funding request failed"},
                 )
-                raise
+                raise ValueError("Bitrefill funding request failed") from None
 
         try:
             result = self.bitrefill_client.buy_product(
@@ -786,13 +832,13 @@ class BitrefillFulfillmentRunner:
                     {"bitrefillCheckpoint": checkpoint},
                 ),
             )
-        except Exception as exc:
+        except Exception:
             self.store.advance_state(
                 quote_id,
                 "FULFILLMENT_FAILED",
-                {"fulfillmentError": str(exc)},
+                {"fulfillmentError": "Bitrefill provider request failed"},
             )
-            raise
+            raise ValueError("Bitrefill provider request failed") from None
         self.store.advance_state(quote_id, "BITREFILL_PURCHASED", {"bitrefill": result})
         if _provider_is_delivered(result, record["quote"]):
             self.store.advance_state(quote_id, "DELIVERED", {})

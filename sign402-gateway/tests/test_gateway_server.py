@@ -2801,6 +2801,7 @@ class GatewayServerTests(unittest.TestCase):
                 "ok": True,
                 "quoteId": "quote_wallet_1",
                 "state": "DELIVERED",
+                "redemption": {"value": {"code": "SECRET-CODE"}},
                 "telegramText": "✅ Bitrefill Gift Card (USD) $0.1 is ready.\nCode: SECRET-CODE",
             }
         )
@@ -2826,6 +2827,82 @@ class GatewayServerTests(unittest.TestCase):
             include_redemption=True,
             fulfillment_token="reveal_secret_1",
         )
+        server.user_event_store.clear_fulfillment_token.assert_called_once_with(
+            "1045618308"
+        )
+
+    def test_agent_last_purchase_does_not_clear_token_for_empty_redemption(self):
+        server = self._bitrefill_last_purchase_server(
+            {"redemption": {"value": ""}, "state": "BITREFILL_PURCHASED"}
+        )
+        body = self._agent_last_purchase_body(server)
+        self.assertIn("still processing", body["telegramText"])
+        server.user_event_store.clear_fulfillment_token.assert_not_called()
+
+    def test_agent_last_purchase_does_not_clear_token_when_refresh_is_unavailable(self):
+        server = self._bitrefill_last_purchase_server(
+            {"redemptionUnavailable": True, "state": "BITREFILL_PURCHASED"}
+        )
+        body = self._agent_last_purchase_body(server)
+        self.assertIn("still processing", body["telegramText"])
+        server.user_event_store.clear_fulfillment_token.assert_not_called()
+
+    def test_agent_last_purchase_does_not_clear_token_for_ready_text_without_redemption(self):
+        server = self._bitrefill_last_purchase_server(
+            {
+                "state": "DELIVERED",
+                "telegramText": "✅ Gift Card is ready.\nCode: READY-LOOKING",
+            }
+        )
+        body = self._agent_last_purchase_body(server)
+        self.assertIn("still processing", body["telegramText"])
+        server.user_event_store.clear_fulfillment_token.assert_not_called()
+
+    def test_agent_last_purchase_after_reveal_hides_code(self):
+        server = self._bitrefill_last_purchase_server({})
+        event = server.user_event_store.read.return_value
+        event.pop("fulfillmentToken")
+
+        body = self._agent_last_purchase_body(server)
+
+        self.assertIn("already delivered", body["telegramText"])
+        self.assertNotIn("SECRET-CODE", body["telegramText"])
+        server.bitrefill_order_lookup.assert_not_called()
+        server.user_event_store.clear_fulfillment_token.assert_not_called()
+
+    def _bitrefill_last_purchase_server(self, order):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
+        server.user_event_store = Mock()
+        server.user_event_store.read.return_value = {
+            "ok": True,
+            "decision": "approved_and_fulfilled",
+            "quoteId": "quote_wallet_1",
+            "productName": "Gift Card",
+            "fulfillmentToken": "reveal_secret_1",
+            "bitrefill": {"orderId": "order_1"},
+        }
+        server.bitrefill_order_lookup = Mock(
+            return_value={
+                "ok": True,
+                "quoteId": "quote_wallet_1",
+                "orderId": "order_1",
+                **order,
+            }
+        )
+        return server
+
+    def _agent_last_purchase_body(self, server):
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/last-purchase",
+                {"telegramUserId": "1045618308"},
+                server=server,
+                headers=self.llm_auth_headers(),
+            )
+        response = self.response_text(handler)
+        self.assertIn("HTTP/1.0 200 OK", response)
+        return json.loads(response.split("\r\n\r\n", 1)[1])
 
     def test_agent_last_purchase_isolated_per_user(self):
         server = DummyServer()

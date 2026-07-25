@@ -774,6 +774,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             bitrefill_response = _last_bitrefill_purchase_response(
                 self.server,
                 event,
+                telegram_user_id,
             )
             if bitrefill_response is not None:
                 self._send_json(bitrefill_response)
@@ -5977,19 +5978,38 @@ def _without_fulfillment_token(result: dict[str, Any]) -> dict[str, Any]:
 def _last_bitrefill_purchase_response(
     server: Any,
     event: dict[str, Any],
+    telegram_user_id: str,
 ) -> dict[str, Any] | None:
     quote_id = str(event.get("quoteId", "") or "").strip()
-    fulfillment_token = str(event.get("fulfillmentToken", "") or "").strip()
-    if not quote_id or not fulfillment_token or "bitrefill" not in event:
+    if not quote_id or "bitrefill" not in event:
         return None
+    fulfillment_token = str(event.get("fulfillmentToken", "") or "").strip()
+    if not fulfillment_token:
+        product_name = str(
+            event.get("productName") or "Your Bitrefill order"
+        )
+        return {
+            "ok": True,
+            "telegramText": (
+                f"{product_name} was already delivered. For security its "
+                "redemption code can only be revealed once — check where "
+                "you saved it."
+            ),
+            "quoteId": quote_id,
+        }
 
     order = server.bitrefill_order_lookup(
         quote_id,
         include_redemption=True,
         fulfillment_token=fulfillment_token,
     )
+    redemption = order.get("redemption")
+    has_redemption = _has_nonempty_redemption_value(redemption)
     telegram_text = order.get("telegramText")
-    if not isinstance(telegram_text, str) or not telegram_text.strip():
+    has_reveal_text = isinstance(telegram_text, str) and bool(
+        telegram_text.strip()
+    )
+    if not has_redemption or not has_reveal_text:
         product_name = str(
             order.get("productName")
             or event.get("productName")
@@ -5998,7 +6018,7 @@ def _last_bitrefill_purchase_response(
         telegram_text = (
             f"{product_name} is still processing. Try /last_purchase again in a minute."
         )
-    return {
+    response = {
         "ok": True,
         "telegramText": telegram_text.strip(),
         "quoteId": quote_id,
@@ -6006,6 +6026,23 @@ def _last_bitrefill_purchase_response(
         "state": order.get("state"),
         "status": order.get("status"),
     }
+    if has_redemption and has_reveal_text:
+        server.user_event_store.clear_fulfillment_token(telegram_user_id)
+    return response
+
+
+def _has_nonempty_redemption_value(redemption: Any) -> bool:
+    if not isinstance(redemption, dict) or "value" not in redemption:
+        return False
+
+    def has_value(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(has_value(item) for item in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(has_value(item) for item in value)
+        return bool(str(value or "").strip())
+
+    return has_value(redemption["value"])
 
 
 def _managed_wallet_address(wallet_service: Any, telegram_user_id: str) -> str:

@@ -233,7 +233,20 @@ class TestBitrefillClient:
         provider_result: dict[str, Any],
         quote: dict[str, Any],
     ) -> dict[str, Any]:
-        return deepcopy(provider_result)
+        refreshed = deepcopy(provider_result)
+        refreshed.update(
+            {
+                "ok": True,
+                "provider": "bitrefill-test",
+                "status": "delivered",
+                "redemption": {
+                    "type": "test",
+                    "label": "Bitrefill test fulfillment",
+                    "value": "TEST-REDEMPTION-NO-VALUE",
+                },
+            }
+        )
+        return refreshed
 
 
 DryRunBitrefillClient = TestBitrefillClient

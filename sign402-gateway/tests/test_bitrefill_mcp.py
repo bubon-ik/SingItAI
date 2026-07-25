@@ -1043,10 +1043,23 @@ class BitrefillMcpPurchaseTests(unittest.TestCase):
     def test_balance_purchase_uses_buy_and_invoice_mcp_tools(self):
         caller = FakeMcpCaller(
             [
-                {"invoice_id": "inv_1", "status": "complete"},
                 {
                     "invoice_id": "inv_1",
                     "status": "complete",
+                    "payment_link": "MARKER-PAYMENT-LINK",
+                    "command": "MARKER-COMMAND",
+                    "stdout": "MARKER-STDOUT",
+                    "stderr": "MARKER-STDERR",
+                    "credentials": "MARKER-CREDENTIALS",
+                },
+                {
+                    "invoice_id": "inv_1",
+                    "status": "complete",
+                    "payment_link": "MARKER-PAYMENT-LINK",
+                    "command": "MARKER-COMMAND",
+                    "stdout": "MARKER-STDOUT",
+                    "stderr": "MARKER-STDERR",
+                    "credentials": "MARKER-CREDENTIALS",
                     "orders": [
                         {
                             "order_id": "ord_1",
@@ -1086,11 +1099,21 @@ class BitrefillMcpPurchaseTests(unittest.TestCase):
             },
         )
         self.assertEqual(result["provider"], "bitrefill-mcp")
+        self.assertEqual(result["paymentMethod"], "balance")
         self.assertEqual(result["invoiceId"], "inv_1")
         self.assertEqual(result["orderId"], "ord_1")
         self.assertEqual(result["redemption"]["value"]["code"], "SECRET-CODE")
         self.assertEqual(checkpoints[0]["invoiceId"], "inv_1")
         self.assertNotIn("SECRET-CODE", str(checkpoints))
+        for marker in (
+            "MARKER-PAYMENT-LINK",
+            "MARKER-COMMAND",
+            "MARKER-STDOUT",
+            "MARKER-STDERR",
+            "MARKER-CREDENTIALS",
+        ):
+            self.assertNotIn(marker, str(checkpoints))
+            self.assertNotIn(marker, str(result))
 
     def test_purchase_maps_committed_recipient_to_refill_input(self):
         caller = FakeMcpCaller(

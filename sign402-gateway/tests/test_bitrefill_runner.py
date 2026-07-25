@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import hashlib
+import json
 from pathlib import Path
 from unittest.mock import ANY, Mock
 
@@ -72,6 +73,26 @@ class PendingThenDeliveredBitrefillClient:
                 "value": {"code": "READY-123"},
             },
         }
+
+
+class RefreshBitrefillClient:
+    def __init__(self, result=None, error=None):
+        self.result = result
+        self.error = error
+        self.refresh_calls = 0
+
+    def refresh_purchase(self, provider_result, quote):
+        self.refresh_calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+def sqlite_text(path: Path) -> str:
+    return "\n".join(
+        sidecar.read_bytes().decode("utf-8", errors="ignore")
+        for sidecar in path.parent.glob(f"{path.name}*")
+    )
 
 
 class FixedRealRatePricer:
@@ -768,7 +789,10 @@ class BitrefillRunnerTests(unittest.TestCase):
             expected_hash = runner.payment_hash_for_quote(quote, recipient={})
             firefly.approve_payment_hash.return_value = {"approved": True, "approvedHash": expected_hash}
 
-            with self.assertRaisesRegex(ValueError, "SINGIT settlement transaction hash is missing"):
+            with self.assertRaisesRegex(
+                ValueError,
+                "Bitrefill settlement or fulfillment failed",
+            ):
                 runner.buy({"quoteId": "quote_1"})
 
             bankr.assert_called_once()
@@ -778,7 +802,7 @@ class BitrefillRunnerTests(unittest.TestCase):
             self.assertEqual(record["state"], "RECONCILIATION_REQUIRED")
             self.assertEqual(
                 record["metadata"]["singitSettlementError"],
-                "SINGIT settlement transaction hash is missing",
+                "Bitrefill settlement or fulfillment failed",
             )
 
     def test_runner_fulfills_bitrefill_only_after_verified_singit_settlement(self):
@@ -1043,9 +1067,10 @@ class BitrefillRunnerTests(unittest.TestCase):
             firefly.approve_payment_hash.assert_not_called()
             bankr.assert_not_called()
 
-    def test_runner_marks_reconciliation_required_when_bankr_call_fails(self):
+    def test_bankr_payment_failure_is_redacted(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = test_store(Path(tmp) / "orders.sqlite3")
+            path = Path(tmp) / "orders.sqlite3"
+            store = test_store(path)
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -1055,7 +1080,7 @@ class BitrefillRunnerTests(unittest.TestCase):
             )
             quote = quote_service.quote({"productId": "test-gift-card-link", "packageId": "1", "country": "US"})
             firefly = Mock()
-            bankr = Mock(side_effect=RuntimeError("bankr timeout"))
+            bankr = Mock(side_effect=RuntimeError("BANKR-SECRET-MARKER"))
             runner = BitrefillPurchaseRunner(
                 store=store,
                 firefly=firefly,
@@ -1070,12 +1095,174 @@ class BitrefillRunnerTests(unittest.TestCase):
                 "approvedHash": expected_hash,
             }
 
-            with self.assertRaisesRegex(RuntimeError, "bankr timeout"):
+            with self.assertRaises(ValueError) as captured:
                 runner.buy({"quoteId": "quote_1"})
 
             record = store.get_quote("quote_1")
             self.assertEqual(record["state"], "RECONCILIATION_REQUIRED")
-            self.assertEqual(record["metadata"]["bankrError"], "bankr timeout")
+            self.assertEqual(
+                record["metadata"]["bankrError"],
+                "Bankr payment request failed",
+            )
+            self.assertNotIn("BANKR-SECRET-MARKER", str(captured.exception))
+            self.assertNotIn("BANKR-SECRET-MARKER", sqlite_text(path))
+
+    def test_settlement_failure_is_redacted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.sqlite3"
+            store = test_store(path)
+            quote_service = BitrefillQuoteService(
+                bitrefill_client=TestBitrefillClient(),
+                store=store,
+                singit_usd_price_provider=lambda: "0.01",
+                quote_id_provider=lambda: "quote_1",
+                now_provider=lambda: 1_719_000_000,
+            )
+            quote = quote_service.quote(
+                {
+                    "productId": "test-gift-card-link",
+                    "packageId": "1",
+                    "country": "US",
+                }
+            )
+            firefly = Mock()
+            runner = BitrefillPurchaseRunner(
+                store=store,
+                firefly=firefly,
+                bankr_payment_client=Mock(return_value={"ok": True}),
+                bankr_resource_url="https://x402.bankr.bot/wallet/buy-bitrefill",
+                settlement_verifier=Mock(
+                    side_effect=RuntimeError("SETTLEMENT-SECRET-MARKER")
+                ),
+                fulfillment_runner=Mock(),
+                now_provider=lambda: 1_719_000_001,
+                fulfillment_token_provider=lambda: "fulfill_secret_1",
+            )
+            expected_hash = runner.payment_hash_for_quote(quote, recipient={})
+            firefly.approve_payment_hash.return_value = {
+                "approved": True,
+                "approvedHash": expected_hash,
+            }
+
+            with self.assertRaises(ValueError) as captured:
+                runner.buy({"quoteId": "quote_1"})
+
+            self.assertEqual(
+                store.get_quote("quote_1")["metadata"]["singitSettlementError"],
+                "Bitrefill settlement or fulfillment failed",
+            )
+            self.assertNotIn("SETTLEMENT-SECRET-MARKER", str(captured.exception))
+            self.assertNotIn("SETTLEMENT-SECRET-MARKER", sqlite_text(path))
+
+    def test_wallet_funding_failure_is_redacted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.sqlite3"
+            store = test_store(path)
+            quote_service = BitrefillQuoteService(
+                bitrefill_client=TestBitrefillClient(),
+                store=store,
+                singit_usd_price_provider=lambda: "0.01",
+                quote_id_provider=lambda: "quote_1",
+                now_provider=lambda: 1_719_000_000,
+            )
+            quote = quote_service.quote(
+                {
+                    "productId": "test-gift-card-link",
+                    "packageId": "1",
+                    "country": "US",
+                }
+            )
+            approval = Mock()
+            runner = WalletBitrefillPurchaseRunner(
+                store=store,
+                approval_client=approval,
+                user_funding_runner=Mock(
+                    side_effect=RuntimeError("WALLET-FUNDING-SECRET-MARKER")
+                ),
+                fulfillment_runner=Mock(),
+                now_provider=lambda: 1_719_000_001,
+            )
+            expected_hash = runner.payment_hash_for_quote(quote, recipient={})
+            approval.return_value = {
+                "approved": True,
+                "approvedHash": expected_hash,
+            }
+
+            with self.assertRaises(ValueError) as captured:
+                runner.buy(
+                    {"quoteId": "quote_1", "telegramUserId": "1045618308"}
+                )
+
+            wallet_checkout = store.get_quote("quote_1")["metadata"][
+                "walletCheckout"
+            ]
+            self.assertEqual(
+                wallet_checkout["fundingError"],
+                "Managed-wallet funding request failed",
+            )
+            self.assertNotIn(
+                "WALLET-FUNDING-SECRET-MARKER",
+                str(captured.exception),
+            )
+            self.assertNotIn(
+                "WALLET-FUNDING-SECRET-MARKER",
+                sqlite_text(path),
+            )
+
+    def test_wallet_fulfillment_failure_is_redacted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.sqlite3"
+            store = test_store(path)
+            quote_service = BitrefillQuoteService(
+                bitrefill_client=TestBitrefillClient(),
+                store=store,
+                singit_usd_price_provider=lambda: "0.01",
+                quote_id_provider=lambda: "quote_1",
+                now_provider=lambda: 1_719_000_000,
+            )
+            quote = quote_service.quote(
+                {
+                    "productId": "test-gift-card-link",
+                    "packageId": "1",
+                    "country": "US",
+                }
+            )
+            approval = Mock()
+            runner = WalletBitrefillPurchaseRunner(
+                store=store,
+                approval_client=approval,
+                fulfillment_runner=Mock(
+                    side_effect=RuntimeError(
+                        "WALLET-FULFILLMENT-SECRET-MARKER"
+                    )
+                ),
+                now_provider=lambda: 1_719_000_001,
+                fulfillment_token_provider=lambda: "fulfill_secret_1",
+            )
+            expected_hash = runner.payment_hash_for_quote(quote, recipient={})
+            approval.return_value = {
+                "approved": True,
+                "approvedHash": expected_hash,
+            }
+
+            with self.assertRaises(ValueError) as captured:
+                runner.buy({"quoteId": "quote_1"})
+
+            wallet_checkout = store.get_quote("quote_1")["metadata"][
+                "walletCheckout"
+            ]
+            self.assertEqual(
+                wallet_checkout["fulfillmentError"],
+                "Bitrefill fulfillment request failed",
+            )
+            self.assertNotIn(
+                "WALLET-FULFILLMENT-SECRET-MARKER",
+                str(captured.exception),
+            )
+            self.assertNotIn(
+                "WALLET-FULFILLMENT-SECRET-MARKER",
+                sqlite_text(path),
+            )
 
     def test_fulfillment_runner_buys_once_and_rejects_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1319,9 +1506,10 @@ class BitrefillRunnerTests(unittest.TestCase):
             bitrefill.buy_product.assert_called_once()
             self.assertEqual(store.get_quote("quote_1")["metadata"]["bankrSwap"]["txId"], "0xSWAP")
 
-    def test_fulfillment_does_not_buy_bitrefill_when_swap_fails(self):
+    def test_treasury_funding_failure_is_redacted(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store = test_store(Path(tmp) / "orders.sqlite3")
+            path = Path(tmp) / "orders.sqlite3"
+            store = test_store(path)
             store.save_quote(
                 {
                     "quoteId": "quote_1",
@@ -1344,20 +1532,26 @@ class BitrefillRunnerTests(unittest.TestCase):
                 {"fulfillmentTokenHash": hashlib.sha256(b"valid_token").hexdigest()},
             )
             bitrefill = Mock()
+            funding = Mock(side_effect=RuntimeError("TREASURY-SECRET-MARKER"))
             runner = BitrefillFulfillmentRunner(
                 store=store,
                 bitrefill_client=bitrefill,
-                funding_runner=FakeFundingRunner(fail=True),
+                funding_runner=funding,
                 now_provider=lambda: 1_719_000_001,
             )
 
-            with self.assertRaisesRegex(RuntimeError, "swap route failed"):
+            with self.assertRaises(ValueError) as captured:
                 runner.fulfill({"quoteId": "quote_1", "fulfillmentToken": "valid_token"})
 
             bitrefill.buy_product.assert_not_called()
             record = store.get_quote("quote_1")
             self.assertEqual(record["state"], "RECONCILIATION_REQUIRED")
-            self.assertEqual(record["metadata"]["fundingError"], "swap route failed")
+            self.assertEqual(
+                record["metadata"]["fundingError"],
+                "Bitrefill funding request failed",
+            )
+            self.assertNotIn("TREASURY-SECRET-MARKER", str(captured.exception))
+            self.assertNotIn("TREASURY-SECRET-MARKER", sqlite_text(path))
 
     def test_settlement_preparation_returns_real_rate_pricing_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1445,24 +1639,31 @@ class BitrefillRunnerTests(unittest.TestCase):
                 {
                     "recipient": {"email": "buyer@example.com"},
                     "bitrefill": {
+                        "invoiceId": "invoice_1",
                         "orderId": "order_1",
                         "status": "delivered",
-                        "redemption": {
-                            "type": "bitrefill",
-                            "label": "Bitrefill redemption",
-                            "value": {"code": "SECRET-CODE"},
-                        },
                     },
                 },
             )
-
-            from sign402_gateway.bitrefill_runner import lookup_bitrefill_order
+            provider = RefreshBitrefillClient(
+                {
+                    "invoiceId": "invoice_1",
+                    "orderId": "order_1",
+                    "status": "delivered",
+                    "redemption": {
+                        "type": "bitrefill",
+                        "label": "Bitrefill redemption",
+                        "value": {"code": "SECRET-CODE"},
+                    },
+                }
+            )
 
             result = lookup_bitrefill_order(
                 store,
                 "quote_1",
                 include_redemption=True,
                 recipient={"email": "buyer@example.com"},
+                bitrefill_client=provider,
             )
 
             self.assertEqual(result["redemption"]["value"]["code"], "SECRET-CODE")
@@ -1490,18 +1691,20 @@ class BitrefillRunnerTests(unittest.TestCase):
                 {
                     "fulfillmentTokenHash": hashlib.sha256(b"reveal_tok").hexdigest(),
                     "bitrefill": {
+                        "invoiceId": "invoice_1",
                         "orderId": "order_1",
                         "status": "delivered",
-                        "redemption": {
-                            "type": "bitrefill",
-                            "label": "Bitrefill redemption",
-                            "value": {"code": "SECRET-CODE"},
-                        },
                     },
                 },
             )
-
-            from sign402_gateway.bitrefill_runner import lookup_bitrefill_order
+            provider = RefreshBitrefillClient(
+                {
+                    "invoiceId": "invoice_1",
+                    "orderId": "order_1",
+                    "status": "delivered",
+                    "redemption": {"value": {"code": "SECRET-CODE"}},
+                }
+            )
 
             with self.assertRaises(ValueError):
                 lookup_bitrefill_order(store, "quote_1", include_redemption=True)
@@ -1512,6 +1715,7 @@ class BitrefillRunnerTests(unittest.TestCase):
                     "quote_1",
                     include_redemption=True,
                     fulfillment_token="wrong_tok",
+                    bitrefill_client=provider,
                 )
 
             result = lookup_bitrefill_order(
@@ -1519,6 +1723,7 @@ class BitrefillRunnerTests(unittest.TestCase):
                 "quote_1",
                 include_redemption=True,
                 fulfillment_token="reveal_tok",
+                bitrefill_client=provider,
             )
             self.assertEqual(result["redemption"]["value"]["code"], "SECRET-CODE")
 
@@ -1581,14 +1786,20 @@ class BitrefillRunnerTests(unittest.TestCase):
                 {
                     "recipient": {"email": "buyer@example.com"},
                     "bitrefill": {
+                        "invoiceId": "invoice_1",
                         "orderId": "order_1",
                         "status": "delivered",
-                        "redemption": {"value": {"code": "SECRET-CODE"}},
                     },
                 },
             )
-
-            from sign402_gateway.bitrefill_runner import lookup_bitrefill_order
+            provider = RefreshBitrefillClient(
+                {
+                    "invoiceId": "invoice_1",
+                    "orderId": "order_1",
+                    "status": "delivered",
+                    "redemption": {"value": {"code": "SECRET-CODE"}},
+                }
+            )
 
             with self.assertRaisesRegex(ValueError, "recipient does not match"):
                 lookup_bitrefill_order(
@@ -1596,11 +1807,275 @@ class BitrefillRunnerTests(unittest.TestCase):
                     "quote_1",
                     include_redemption=True,
                     recipient={"email": "attacker@example.com"},
+                    bitrefill_client=provider,
                 )
+            self.assertEqual(provider.refresh_calls, 0)
 
-    def test_fulfillment_records_provider_failure(self):
+    def test_status_lookup_never_refreshes_provider(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = test_store(Path(tmp) / "orders.sqlite3")
+            store.save_quote(
+                {"quoteId": "q1", "productId": "p1", "expiresAtEpoch": 999}
+            )
+            store.advance_state(
+                "q1",
+                "BITREFILL_PURCHASED",
+                {
+                    "bitrefill": {
+                        "invoiceId": "invoice_1",
+                        "orderId": "order_1",
+                        "status": "created",
+                    }
+                },
+            )
+            provider = RefreshBitrefillClient({})
+
+            result = lookup_bitrefill_order(
+                store,
+                "q1",
+                include_redemption=False,
+                bitrefill_client=provider,
+            )
+
+            self.assertEqual(result["state"], "BITREFILL_PURCHASED")
+            self.assertEqual(provider.refresh_calls, 0)
+
+    def test_wrong_recipient_is_rejected_before_refresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = test_store(Path(tmp) / "orders.sqlite3")
+            store.save_quote(
+                {"quoteId": "q1", "productId": "p1", "expiresAtEpoch": 999}
+            )
+            store.advance_state(
+                "q1",
+                "BITREFILL_PURCHASED",
+                {
+                    "recipient": {"email": "buyer@example.com"},
+                    "bitrefill": {
+                        "invoiceId": "invoice_1",
+                        "status": "created",
+                    },
+                },
+            )
+            provider = RefreshBitrefillClient({})
+
+            with self.assertRaisesRegex(ValueError, "recipient does not match order"):
+                lookup_bitrefill_order(
+                    store,
+                    "q1",
+                    include_redemption=True,
+                    recipient={"email": "attacker@example.com"},
+                    bitrefill_client=provider,
+                )
+            self.assertEqual(provider.refresh_calls, 0)
+
+    def test_wrong_token_is_rejected_before_refresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = test_store(Path(tmp) / "orders.sqlite3")
+            store.save_quote(
+                {"quoteId": "q1", "productId": "p1", "expiresAtEpoch": 999}
+            )
+            store.advance_state(
+                "q1",
+                "BITREFILL_PURCHASED",
+                {
+                    "fulfillmentTokenHash": hashlib.sha256(b"right").hexdigest(),
+                    "bitrefill": {
+                        "invoiceId": "invoice_1",
+                        "status": "created",
+                    },
+                },
+            )
+            provider = RefreshBitrefillClient({})
+
+            with self.assertRaisesRegex(ValueError, "valid fulfillmentToken"):
+                lookup_bitrefill_order(
+                    store,
+                    "q1",
+                    include_redemption=True,
+                    fulfillment_token="wrong",
+                    bitrefill_client=provider,
+                )
+            self.assertEqual(provider.refresh_calls, 0)
+
+    def test_authorized_refresh_returns_redemption_but_sqlite_stays_clean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.sqlite3"
+            store = test_store(path)
+            store.save_quote(
+                {
+                    "quoteId": "q1",
+                    "productId": "p1",
+                    "productName": "Product",
+                    "packageValue": "25",
+                    "expiresAtEpoch": 999,
+                }
+            )
+            store.advance_state(
+                "q1",
+                "BITREFILL_PURCHASED",
+                {
+                    "fulfillmentTokenHash": hashlib.sha256(
+                        b"reveal-token"
+                    ).hexdigest(),
+                    "bitrefill": {
+                        "invoiceId": "invoice_1",
+                        "orderId": "order_1",
+                        "status": "created",
+                    },
+                },
+            )
+            provider = RefreshBitrefillClient(
+                {
+                    "invoiceId": "invoice_1",
+                    "orderId": "order_1",
+                    "status": "delivered",
+                    "redemption": {"value": {"code": "READY-123"}},
+                }
+            )
+
+            result = lookup_bitrefill_order(
+                store,
+                "q1",
+                include_redemption=True,
+                fulfillment_token="reveal-token",
+                bitrefill_client=provider,
+            )
+
+            self.assertEqual(result["redemption"]["value"]["code"], "READY-123")
+            self.assertNotIn("READY-123", sqlite_text(path))
+
+    def test_authorized_refresh_runs_for_delivered_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = test_store(Path(tmp) / "orders.sqlite3")
+            store.save_quote(
+                {"quoteId": "q1", "productId": "p1", "expiresAtEpoch": 999}
+            )
+            store.advance_state(
+                "q1",
+                "DELIVERED",
+                {
+                    "fulfillmentTokenHash": hashlib.sha256(b"right").hexdigest(),
+                    "bitrefill": {
+                        "invoiceId": "invoice_1",
+                        "orderId": "order_1",
+                        "status": "delivered",
+                    },
+                },
+            )
+            provider = RefreshBitrefillClient(
+                {
+                    "invoiceId": "invoice_1",
+                    "orderId": "order_1",
+                    "status": "delivered",
+                    "redemption": {"value": {"code": "READY-123"}},
+                }
+            )
+
+            lookup_bitrefill_order(
+                store,
+                "q1",
+                include_redemption=True,
+                fulfillment_token="right",
+                bitrefill_client=provider,
+            )
+            self.assertEqual(provider.refresh_calls, 1)
+
+    def test_refresh_without_redemption_does_not_claim_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = test_store(Path(tmp) / "orders.sqlite3")
+            store.save_quote(
+                {"quoteId": "q1", "productId": "p1", "expiresAtEpoch": 999}
+            )
+            store.advance_state(
+                "q1",
+                "BITREFILL_PURCHASED",
+                {
+                    "fulfillmentTokenHash": hashlib.sha256(b"right").hexdigest(),
+                    "bitrefill": {
+                        "invoiceId": "invoice_1",
+                        "orderId": "order_1",
+                        "status": "created",
+                    },
+                },
+            )
+            provider = RefreshBitrefillClient(
+                {
+                    "invoiceId": "invoice_1",
+                    "orderId": "order_1",
+                    "status": "delivered",
+                    "redemption": {"value": ""},
+                }
+            )
+
+            result = lookup_bitrefill_order(
+                store,
+                "q1",
+                include_redemption=True,
+                fulfillment_token="right",
+                bitrefill_client=provider,
+            )
+            self.assertEqual(result["state"], "BITREFILL_PURCHASED")
+            self.assertNotEqual(result["status"], "delivered")
+            self.assertFalse(result["redemptionAvailable"])
+            self.assertEqual(store.get_quote("q1")["state"], "BITREFILL_PURCHASED")
+
+    def test_refresh_failure_returns_redacted_retryable_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.sqlite3"
+            store = test_store(path)
+            store.save_quote(
+                {"quoteId": "q1", "productId": "p1", "expiresAtEpoch": 999}
+            )
+            store.advance_state(
+                "q1",
+                "BITREFILL_PURCHASED",
+                {
+                    "fulfillmentTokenHash": hashlib.sha256(b"right").hexdigest(),
+                    "bitrefill": {
+                        "invoiceId": "invoice_1",
+                        "status": "created",
+                    },
+                },
+            )
+            provider = RefreshBitrefillClient(
+                error=RuntimeError("PROVIDER-SECRET")
+            )
+
+            result = lookup_bitrefill_order(
+                store,
+                "q1",
+                include_redemption=True,
+                fulfillment_token="right",
+                bitrefill_client=provider,
+            )
+            self.assertTrue(result["redemptionUnavailable"])
+            self.assertNotIn("PROVIDER-SECRET", json.dumps(result))
+            self.assertNotIn("PROVIDER-SECRET", sqlite_text(path))
+
+    def test_test_client_regenerates_redemption_from_sanitized_snapshot(self):
+        result = TestBitrefillClient().refresh_purchase(
+            {
+                "provider": "bitrefill-test",
+                "invoiceId": "test_invoice_deadbeef",
+                "orderId": "test_bitrefill_deadbeef",
+                "status": "delivered",
+            },
+            {
+                "quoteId": "q1",
+                "productId": "test-gift-card-code",
+                "packageId": "1",
+            },
+        )
+        self.assertEqual(
+            result["redemption"]["value"],
+            "TEST-REDEMPTION-NO-VALUE",
+        )
+
+    def test_provider_purchase_failure_is_redacted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.sqlite3"
+            store = test_store(path)
             quote_service = BitrefillQuoteService(
                 bitrefill_client=TestBitrefillClient(),
                 store=store,
@@ -1618,7 +2093,9 @@ class BitrefillRunnerTests(unittest.TestCase):
                 },
             )
             bitrefill = Mock()
-            bitrefill.buy_product.side_effect = RuntimeError("provider unavailable")
+            bitrefill.buy_product.side_effect = RuntimeError(
+                "PROVIDER-PURCHASE-SECRET-MARKER"
+            )
 
             from sign402_gateway.bitrefill_runner import BitrefillFulfillmentRunner
 
@@ -1628,12 +2105,23 @@ class BitrefillRunnerTests(unittest.TestCase):
                 now_provider=lambda: 1_719_000_001,
             )
 
-            with self.assertRaisesRegex(RuntimeError, "provider unavailable"):
+            with self.assertRaises(ValueError) as captured:
                 runner.fulfill({"quoteId": "quote_1", "fulfillmentToken": "valid_token"})
 
             record = store.get_quote("quote_1")
             self.assertEqual(record["state"], "FULFILLMENT_FAILED")
-            self.assertEqual(record["metadata"]["fulfillmentError"], "provider unavailable")
+            self.assertEqual(
+                record["metadata"]["fulfillmentError"],
+                "Bitrefill provider request failed",
+            )
+            self.assertNotIn(
+                "PROVIDER-PURCHASE-SECRET-MARKER",
+                str(captured.exception),
+            )
+            self.assertNotIn(
+                "PROVIDER-PURCHASE-SECRET-MARKER",
+                sqlite_text(path),
+            )
 
 
 if __name__ == "__main__":

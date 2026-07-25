@@ -33,6 +33,173 @@ def raw_metadata(path: Path, quote_id: str) -> dict:
 
 
 class CommerceStoreTests(unittest.TestCase):
+    def test_provider_and_checkpoint_snapshots_are_strict_allowlists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.sqlite3"
+            store = BitrefillCommerceStore(path, cipher=test_cipher())
+            store.save_quote(
+                {
+                    "quoteId": "q1",
+                    "productId": "trusted-product",
+                    "packageId": "trusted-package",
+                    "packageValue": "25",
+                    "expiresAtEpoch": 999,
+                }
+            )
+            forbidden = {
+                "redemption": {"value": {"code": "MARKER-REDEMPTION"}},
+                "code": "MARKER-CODE",
+                "pin": "MARKER-PIN",
+                "activationUrl": "MARKER-ACTIVATION",
+                "esim": {"activation": {"code": "MARKER-ESIM"}},
+                "paymentLink": "MARKER-PAYMENT-LINK",
+                "apiKey": "MARKER-API-KEY",
+                "stdout": "MARKER-STDOUT",
+                "stderr": "MARKER-STDERR",
+                "command": "MARKER-COMMAND",
+            }
+            store.advance_state(
+                "q1",
+                "BITREFILL_PURCHASED",
+                {
+                    "bitrefill": {
+                        "provider": "bitrefill-mcp",
+                        "invoiceId": "invoice-1",
+                        "orderId": "order-1",
+                        "status": "DELIVERED",
+                        "paymentMethod": "usdc_base",
+                        "createdAt": "100",
+                        "updatedAt": "101",
+                        "expiresAt": "102",
+                        "productId": "untrusted-product",
+                        "packageId": "untrusted-package",
+                        "packageValue": "999",
+                        "treasuryPayment": {
+                            "transactionHash": "0xTX",
+                            "chain": "base",
+                            "currency": "USDC",
+                            "amount": "25",
+                            "amountAtomic": "25000000",
+                            "credentials": "MARKER-TREASURY-CREDENTIAL",
+                        },
+                        **forbidden,
+                    },
+                    "bitrefillCheckpoint": {
+                        "invoiceId": "invoice-1",
+                        "status": "PROCESSING",
+                        "orderIds": ["order-1", "order-2"],
+                        "paymentInfo": {
+                            "amount": "25",
+                            "asset": "USDC",
+                            "network": "base",
+                            "address": "MARKER-PAYMENT-ADDRESS",
+                        },
+                        "treasuryPayment": {
+                            "hash": "0xTX",
+                            "network": "base",
+                            "token": "USDC",
+                            "amount": "25",
+                            "amountAtomic": "25000000",
+                        },
+                        **forbidden,
+                    },
+                },
+            )
+
+            metadata = raw_metadata(path, "q1")
+            encoded = json.dumps(metadata, sort_keys=True)
+            for key in (
+                "redemption",
+                "code",
+                "pin",
+                "activationUrl",
+                "esim",
+                "paymentLink",
+                "apiKey",
+                "stdout",
+                "stderr",
+                "command",
+                "address",
+                "credentials",
+            ):
+                self.assertNotIn(f'"{key}"', encoded)
+            for marker in (
+                "MARKER-REDEMPTION",
+                "MARKER-CODE",
+                "MARKER-PIN",
+                "MARKER-ACTIVATION",
+                "MARKER-ESIM",
+                "MARKER-PAYMENT-LINK",
+                "MARKER-API-KEY",
+                "MARKER-STDOUT",
+                "MARKER-STDERR",
+                "MARKER-COMMAND",
+                "MARKER-PAYMENT-ADDRESS",
+                "MARKER-TREASURY-CREDENTIAL",
+            ):
+                self.assertNotIn(marker, encoded)
+                for sidecar in path.parent.glob(f"{path.name}*"):
+                    self.assertNotIn(
+                        marker,
+                        sidecar.read_bytes().decode("utf-8", errors="ignore"),
+                    )
+            provider = metadata["bitrefill"]
+            self.assertEqual(provider["invoiceId"], "invoice-1")
+            self.assertEqual(provider["orderId"], "order-1")
+            self.assertEqual(provider["status"], "delivered")
+            self.assertEqual(provider["productId"], "trusted-product")
+            self.assertEqual(provider["packageId"], "trusted-package")
+            self.assertEqual(provider["packageValue"], "25")
+            self.assertEqual(
+                provider["treasuryPayment"],
+                {
+                    "txId": "0xTX",
+                    "network": "base",
+                    "asset": "USDC",
+                    "amount": "25",
+                    "amountAtomic": "25000000",
+                },
+            )
+            checkpoint = metadata["bitrefillCheckpoint"]
+            self.assertEqual(checkpoint["orderIds"], ["order-1", "order-2"])
+            self.assertEqual(
+                checkpoint["paymentInfo"],
+                {"amount": "25", "asset": "USDC", "network": "base"},
+            )
+
+    def test_allowlisted_scalar_field_rejects_nested_secret_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.sqlite3"
+            store = BitrefillCommerceStore(path, cipher=test_cipher())
+            store.save_quote(
+                {
+                    "quoteId": "q1",
+                    "productId": "trusted-product",
+                    "packageId": "trusted-package",
+                    "packageValue": "25",
+                    "expiresAtEpoch": 999,
+                }
+            )
+            before = raw_metadata(path, "q1")
+            cases = (
+                (
+                    {"bitrefill": {"status": {"secret": "NESTED-MARKER"}}},
+                    "bitrefill.status must be a scalar value",
+                ),
+                (
+                    {"bitrefill": "NESTED-MARKER"},
+                    "bitrefill must be an object",
+                ),
+                (
+                    {"bitrefillCheckpoint": "NESTED-MARKER"},
+                    "bitrefillCheckpoint must be an object",
+                ),
+            )
+            for update, error in cases:
+                with self.subTest(update=update):
+                    with self.assertRaisesRegex(ValueError, error):
+                        store.checkpoint("q1", update)
+                    self.assertEqual(raw_metadata(path, "q1"), before)
     def test_initialization_closes_database_connection(self):
         connection = MagicMock()
         with tempfile.TemporaryDirectory() as tmp:
