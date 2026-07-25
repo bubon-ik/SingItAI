@@ -1229,6 +1229,19 @@ class ImessageApprovalService:
         expected_approval_id = str(approval_id).strip() if approval_id is not None else ""
         if approval_channel == "whatsapp" and not expected_approval_id:
             return _no_pending()
+        # Without an approval id an iMessage "YES" can only mean "the oldest
+        # pending approval". That is normally the one the user saw, since a
+        # second approval cannot be created while one is pending — but if the
+        # first expired and a new one was raised in the meantime, a late reply
+        # would land on the newer commitment. Operators whose sidecar echoes
+        # the id (from /agent/imessage/pending) can close that by setting
+        # SIGN402_REQUIRE_IMESSAGE_APPROVAL_ID.
+        if (
+            approval_channel == "imessage"
+            and not expected_approval_id
+            and _require_imessage_approval_id()
+        ):
+            return _no_pending()
         normalized_decision = str(decision or "").strip().upper()
         if normalized_decision not in {"YES", "NO"}:
             return {"ok": False, "imessageText": "Reply YES or NO."}
@@ -1706,6 +1719,13 @@ def _looks_like_pairing_code(value: str) -> bool:
 
 def _canonical_json(value: dict[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _require_imessage_approval_id() -> bool:
+    """Whether an iMessage decision must name the approval it answers."""
+    return str(
+        os.environ.get("SIGN402_REQUIRE_IMESSAGE_APPROVAL_ID", "")
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _sanitize_context_line(value: Any) -> str:

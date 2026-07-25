@@ -19,7 +19,7 @@ from sign402_gateway.secure_state import (
 )
 
 
-def test_cipher():
+def make_cipher():
     return SensitiveStateCipher(Fernet.generate_key().decode("ascii"))
 
 
@@ -45,7 +45,7 @@ class CommerceStoreTests(unittest.TestCase):
     def test_provider_and_checkpoint_snapshots_are_strict_allowlists(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "orders.sqlite3"
-            store = BitrefillCommerceStore(path, cipher=test_cipher())
+            store = BitrefillCommerceStore(path, cipher=make_cipher())
             store.save_quote(
                 {
                     "quoteId": "q1",
@@ -204,7 +204,7 @@ class CommerceStoreTests(unittest.TestCase):
     def test_bankr_snapshot_keeps_only_bounded_reconciliation_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "orders.sqlite3"
-            store = BitrefillCommerceStore(path, cipher=test_cipher())
+            store = BitrefillCommerceStore(path, cipher=make_cipher())
             store.save_quote(
                 {
                     "quoteId": "q1",
@@ -321,7 +321,7 @@ class CommerceStoreTests(unittest.TestCase):
                     mutation=mutation_name,
                 ), tempfile.TemporaryDirectory() as tmp:
                     path = Path(tmp) / "orders.sqlite3"
-                    store = BitrefillCommerceStore(path, cipher=test_cipher())
+                    store = BitrefillCommerceStore(path, cipher=make_cipher())
                     store.save_quote(
                         {
                             "quoteId": "q1",
@@ -353,7 +353,7 @@ class CommerceStoreTests(unittest.TestCase):
     def test_allowlisted_scalar_field_rejects_nested_secret_without_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "orders.sqlite3"
-            store = BitrefillCommerceStore(path, cipher=test_cipher())
+            store = BitrefillCommerceStore(path, cipher=make_cipher())
             store.save_quote(
                 {
                     "quoteId": "q1",
@@ -389,7 +389,7 @@ class CommerceStoreTests(unittest.TestCase):
     ):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "orders.sqlite3"
-            store = BitrefillCommerceStore(path, cipher=test_cipher())
+            store = BitrefillCommerceStore(path, cipher=make_cipher())
             store.save_quote(
                 {
                     "quoteId": "q1",
@@ -440,7 +440,7 @@ class CommerceStoreTests(unittest.TestCase):
     def test_new_recipient_is_encrypted_in_raw_sqlite(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "private" / "orders.sqlite3"
-            store = BitrefillCommerceStore(path, cipher=test_cipher())
+            store = BitrefillCommerceStore(path, cipher=make_cipher())
             store.save_quote(
                 {
                     "quoteId": "q1",
@@ -497,7 +497,7 @@ class CommerceStoreTests(unittest.TestCase):
     def test_legacy_recipient_reads_but_row_update_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "orders.sqlite3"
-            store = BitrefillCommerceStore(path, cipher=test_cipher())
+            store = BitrefillCommerceStore(path, cipher=make_cipher())
             store.save_quote(
                 {"quoteId": "q1", "productId": "p1", "expiresAtEpoch": 999}
             )
@@ -520,7 +520,7 @@ class CommerceStoreTests(unittest.TestCase):
     def test_malformed_encrypted_recipient_never_falls_back_to_legacy(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "orders.sqlite3"
-            store = BitrefillCommerceStore(path, cipher=test_cipher())
+            store = BitrefillCommerceStore(path, cipher=make_cipher())
             store.save_quote(
                 {"quoteId": "q1", "productId": "p1", "expiresAtEpoch": 999}
             )
@@ -545,7 +545,7 @@ class CommerceStoreTests(unittest.TestCase):
     def test_null_encrypted_recipient_never_falls_back_to_legacy(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "orders.sqlite3"
-            store = BitrefillCommerceStore(path, cipher=test_cipher())
+            store = BitrefillCommerceStore(path, cipher=make_cipher())
             store.save_quote(
                 {"quoteId": "q1", "productId": "p1", "expiresAtEpoch": 999}
             )
@@ -572,7 +572,7 @@ class CommerceStoreTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / "private" / "orders.sqlite3"
-                BitrefillCommerceStore(path, cipher=test_cipher())
+                BitrefillCommerceStore(path, cipher=make_cipher())
                 self.assertEqual(
                     stat.S_IMODE(path.parent.stat().st_mode),
                     0o700,
@@ -588,11 +588,11 @@ class CommerceStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             parent = Path(tmp) / "private"
             path = parent / "orders.sqlite3"
-            BitrefillCommerceStore(path, cipher=test_cipher())
+            BitrefillCommerceStore(path, cipher=make_cipher())
             os.chmod(parent, 0o755)
             os.chmod(path, 0o644)
 
-            BitrefillCommerceStore(path, cipher=test_cipher())
+            BitrefillCommerceStore(path, cipher=make_cipher())
 
             self.assertEqual(
                 stat.S_IMODE(parent.stat().st_mode),
@@ -612,14 +612,14 @@ class CommerceStoreTests(unittest.TestCase):
             path.symlink_to(outside)
 
             with self.assertRaises(SensitiveStateError):
-                BitrefillCommerceStore(path, cipher=test_cipher())
+                BitrefillCommerceStore(path, cipher=make_cipher())
 
             self.assertFalse(outside.exists())
 
     def test_try_mark_fulfilling_refuses_legacy_recipient_without_writing(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "orders.sqlite3"
-            store = BitrefillCommerceStore(path, cipher=test_cipher())
+            store = BitrefillCommerceStore(path, cipher=make_cipher())
             store.save_quote(
                 {"quoteId": "q1", "productId": "p1", "expiresAtEpoch": 999}
             )

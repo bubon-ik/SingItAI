@@ -41,10 +41,12 @@ async function main() {
 
   if (command === "buy-user") {
     const url = requiredOption(options, "url");
+    // Required, not optional: these are the approved terms, and a purchase
+    // without them would be unbounded.
     const caps = {
-      maxAtomic: options["max-atomic"] || "",
-      expectedReceiver: options["expected-receiver"] || "",
-      expectedAsset: options["expected-asset"] || "",
+      maxAtomic: requiredOption(options, "max-atomic"),
+      expectedReceiver: requiredOption(options, "expected-receiver"),
+      expectedAsset: requiredOption(options, "expected-asset"),
     };
     const result = await buyPaidResourceWithPrivateKey(url, caps);
     writeJson(result);
@@ -128,10 +130,11 @@ async function buyPaidResource(url) {
 async function buyPaidResourceWithPrivateKey(url, caps = {}) {
   const privateKey = requiredEnv("SIGN402_EVM_PRIVATE_KEY");
   const account = privateKeyToAccount(privateKey);
-  return buyPaidResourceWithSigner(url, account, caps);
+  // Spending a user's wallet always runs through the approval guard.
+  return buyPaidResourceWithSigner(url, account, caps, { enforceCaps: true });
 }
 
-async function buyPaidResourceWithSigner(url, signer, caps = {}) {
+async function buyPaidResourceWithSigner(url, signer, caps = {}, { enforceCaps = false } = {}) {
   const config = {
     schemes: [
       {
@@ -141,8 +144,10 @@ async function buyPaidResourceWithSigner(url, signer, caps = {}) {
     ],
   };
   // Enforce the exact terms the user approved before any payment is signed.
-  if (caps.maxAtomic || caps.expectedReceiver || caps.expectedAsset) {
-    config.paymentRequirementsSelector = makePaymentRequirementsSelector(caps);
+  if (enforceCaps || caps.maxAtomic || caps.expectedReceiver || caps.expectedAsset) {
+    config.paymentRequirementsSelector = makePaymentRequirementsSelector(caps, {
+      requireAll: enforceCaps,
+    });
   }
   const fetchWithPayment = wrapFetchWithPaymentFromConfig(fetch, config);
 

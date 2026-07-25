@@ -11,8 +11,17 @@
  * @param {{maxAtomic?: string|number|bigint, expectedReceiver?: string, expectedAsset?: string}} caps
  * @returns {(x402Version: number, paymentRequirements: object[]) => object}
  */
-export function makePaymentRequirementsSelector(caps = {}) {
+export function makePaymentRequirementsSelector(caps = {}, { requireAll = false } = {}) {
   const { maxAtomic, expectedReceiver, expectedAsset } = caps;
+  // A guard built from empty caps degrades into "accept the first requirement",
+  // which is exactly the behaviour this module exists to prevent. Callers that
+  // spend a user's wallet pass requireAll so a missing cap fails closed instead
+  // of silently disabling the check.
+  if (requireAll && (!maxAtomic || !expectedReceiver || !expectedAsset)) {
+    throw new Error(
+      "refusing to pay: approved max amount, receiver, and asset are all required",
+    );
+  }
   const maxCap =
     maxAtomic !== undefined && maxAtomic !== null && String(maxAtomic) !== ""
       ? BigInt(maxAtomic)

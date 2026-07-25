@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 
@@ -18,7 +19,7 @@ from sign402_gateway.imessage_approvals import (
 from sign402_gateway.user_wallets import ManagedBaseWalletService, UserWalletStore
 
 
-def test_master_key() -> str:
+def make_master_key() -> str:
     return Fernet.generate_key().decode("ascii")
 
 
@@ -81,7 +82,7 @@ class ImessageApprovalTests(unittest.TestCase):
     def make_service(self, *, notifier: RecordingNotifier | None = None):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        master_key = test_master_key()
+        master_key = make_master_key()
         wallet_store = UserWalletStore(Path(tmp.name) / "wallets.db")
         wallet_service = ManagedBaseWalletService(
             store=wallet_store,
@@ -466,6 +467,37 @@ class ImessageApprovalTests(unittest.TestCase):
         self.assertTrue(decided["ok"])
         self.assertEqual(decided["status"], "approved")
 
+    def test_imessage_decision_without_approval_id_is_accepted_by_default(self):
+        service, _wallet_service, _store, _notifier = self.make_linked_service()
+        service.create_test_approval("1045618308")
+
+        decided = service.record_decision("+15551234567", "YES")
+
+        self.assertTrue(decided["ok"])
+        self.assertEqual(decided["status"], "approved")
+
+    def test_imessage_decision_can_be_required_to_name_its_approval(self):
+        """Operators whose sidecar echoes the id can demand it.
+
+        Off by default: a sidecar that does not send one would otherwise stop
+        being able to approve anything at all.
+        """
+        service, _wallet_service, _store, _notifier = self.make_linked_service()
+        service.create_test_approval("1045618308")
+
+        with patch.dict(
+            os.environ, {"SIGN402_REQUIRE_IMESSAGE_APPROVAL_ID": "true"}
+        ):
+            unbound = service.record_decision("+15551234567", "YES")
+            pending = service.pending_for_photon_sender("+15551234567")
+            bound = service.record_decision(
+                "+15551234567", "YES", approval_id=pending["approvalId"]
+            )
+
+        self.assertFalse(unbound["ok"])
+        self.assertTrue(bound["ok"])
+        self.assertEqual(bound["status"], "approved")
+
     def test_decision_with_mismatched_approval_id_is_rejected(self):
         service, _wallet_service, _store, _notifier = self.make_linked_service()
         service.create_test_approval("1045618308")
@@ -763,7 +795,7 @@ class ImessageApprovalTests(unittest.TestCase):
                 store=ImessageApprovalStore(Path(tmp.name) / "approvals.db"),
                 wallet_service=ManagedBaseWalletService(
                     store=UserWalletStore(Path(tmp.name) / "wallets.db"),
-                    master_key=test_master_key(),
+                    master_key=make_master_key(),
                 ),
                 master_key=bad_key,
                 notifier=RecordingNotifier(),

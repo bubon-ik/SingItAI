@@ -5,6 +5,7 @@ import stat
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import ExitStack
 from decimal import Decimal
@@ -43,6 +44,7 @@ from sign402_gateway.server import (
     DEFAULT_SINGIT_RISK_CHECK_URL,
     DEFAULT_SINGIT_TOKEN_ADDRESS,
     ExternalX402Buyer,
+    SPEND_RECORD_RETENTION_DAYS,
     SPEND_RESERVATION_TTL_SECONDS,
     Sign402GatewayHandler,
     SingitSettlementVerifier,
@@ -1725,6 +1727,59 @@ class GatewayServerTests(unittest.TestCase):
         self.assertIn("leave at least", body["detail"])
         server.imessage_approval_service.request_hash_approval.assert_not_called()
         server.user_token_transfer_client.transfer_native.assert_not_called()
+        # Nothing was signed, so the reassurance is accurate here.
+        self.assertEqual(body["fundsMoved"], "no")
+        self.assertIn("No funds moved", body["telegramText"])
+
+    def test_withdraw_failure_after_broadcast_does_not_claim_funds_are_safe(self):
+        """A transfer that fails mid-flight may still have landed on-chain.
+
+        Telling the user "No funds moved" there invites them to withdraw a
+        second time and pay twice.
+        """
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "123"
+        server.user_wallet_service.withdrawable_tokens.return_value = {
+            "ok": True,
+            "wallet": {"address": "0xAc4aCb03cAdaFE1d68262cf94cD5E8B56d9bf45C"},
+            "tokens": [
+                {
+                    "symbol": "SINGIT",
+                    "contractAddress": DEFAULT_SINGIT_TOKEN_ADDRESS,
+                    "balance": "1000",
+                    "decimals": 18,
+                    "verified": True,
+                }
+            ],
+        }
+        server.user_wallet_service.decrypt_private_key_for_future_signing.return_value = "0xSECRET"
+        server.imessage_approval_service.request_hash_approval.return_value = {
+            "ok": True,
+            "status": "approved",
+            "approved": True,
+        }
+        server.user_token_transfer_client.transfer_token.side_effect = TimeoutError(
+            "node transfer timed out"
+        )
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/withdraw",
+                {
+                    "telegramUserId": "123",
+                    "tokenAddress": DEFAULT_SINGIT_TOKEN_ADDRESS,
+                    "amount": "100",
+                    "toAddress": "0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+                },
+                server=server,
+                headers=self.llm_auth_headers(),
+            )
+
+        body = self.response_json(handler)
+        self.assertIn("HTTP/1.0 400 Bad Request", self.response_text(handler))
+        self.assertEqual(body["fundsMoved"], "unknown")
+        self.assertNotIn("No funds moved", body["telegramText"])
+        self.assertIn("check your wallet balance", body["telegramText"].lower())
 
     def test_llm_key_start_requires_per_user_token(self):
         server = DummyServer()
@@ -4143,14 +4198,52 @@ class GatewayServerTests(unittest.TestCase):
             script.write_text("// test", encoding="utf-8")
             client = UserWalletBaseX402PaymentClient(service_dir, runner=runner)
 
-            result = client("https://x402.example/paid", private_key="0xSECRET")
+            result = client(
+                "https://x402.example/paid",
+                private_key="0xSECRET",
+                max_atomic="1000",
+                expected_receiver="0x0E84dDEdAaE6A779c462C22a59F301EC31B6b808",
+                expected_asset="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            )
 
         self.assertTrue(result["ok"])
         args = runner.call_args.args[0]
         kwargs = runner.call_args.kwargs
-        self.assertEqual(args[-3:], ["buy-user", "--url", "https://x402.example/paid"])
+        self.assertEqual(args[2:5], ["buy-user", "--url", "https://x402.example/paid"])
         self.assertNotIn("0xSECRET", args)
         self.assertEqual(kwargs["env"]["SIGN402_EVM_PRIVATE_KEY"], "0xSECRET")
+
+    def test_user_wallet_base_x402_payment_client_refuses_without_approved_terms(self):
+        """An unbounded purchase must not reach the signer at all.
+
+        Omitting a cap used to just drop the flag, and the node guard then
+        accepted whatever the resource server demanded.
+        """
+        runner = Mock()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service_dir = Path(tmpdir)
+            script = service_dir / "src" / "index.mjs"
+            script.parent.mkdir(parents=True)
+            script.write_text("// test", encoding="utf-8")
+            client = UserWalletBaseX402PaymentClient(service_dir, runner=runner)
+
+            for omitted in ("max_atomic", "expected_receiver", "expected_asset"):
+                terms = {
+                    "max_atomic": "1000",
+                    "expected_receiver": "0x0E84dDEdAaE6A779c462C22a59F301EC31B6b808",
+                    "expected_asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                }
+                terms[omitted] = ""
+                with self.subTest(omitted=omitted):
+                    with self.assertRaises(ValueError) as caught:
+                        client(
+                            "https://x402.example/paid",
+                            private_key="0xSECRET",
+                            **terms,
+                        )
+                    self.assertIn("approved terms", str(caught.exception))
+
+        runner.assert_not_called()
 
     def test_user_wallet_base_x402_payment_client_forwards_approved_caps(self):
         completed = subprocess.CompletedProcess(
@@ -6661,6 +6754,52 @@ class SpendReservationTests(unittest.TestCase):
             thread.join()
 
         self.assertEqual(len([value for value in results if value is not None]), 1)
+
+    def test_old_records_are_pruned_but_todays_cap_is_untouched(self):
+        """The file is rewritten on every spend, so history cannot grow forever.
+
+        Only today's records bind the daily cap, so anything past the audit
+        window is dropped — but nothing that still counts may be lost.
+        """
+        store = self.make_store()
+        stale_day = time.strftime(
+            "%Y-%m-%d", time.gmtime(time.time() - (SPEND_RECORD_RETENTION_DAYS + 5) * 86400)
+        )
+        recent_day = time.strftime(
+            "%Y-%m-%d", time.gmtime(time.time() - 2 * 86400)
+        )
+        asset = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        with store.lock:
+            data = store._read_all_unlocked()
+            data["records"] = [
+                {
+                    "telegramUserId": "1045618308",
+                    "day": day,
+                    "amountAtomic": 10,
+                    "asset": asset,
+                    "network": "base-mainnet",
+                }
+                for day in (stale_day, recent_day)
+            ]
+            store._write_all_unlocked(data)
+
+        handle = self.reserve(store, 100_000)
+        store.settle_reservation(handle, tx_id="0xabc")
+
+        with store.lock:
+            days = [
+                str(entry.get("day"))
+                for entry in store._read_all_unlocked()["records"]
+            ]
+
+        self.assertNotIn(stale_day, days)
+        self.assertIn(recent_day, days)
+        self.assertEqual(
+            store.spent_today_atomic(
+                "1045618308", asset=asset, network="base-mainnet"
+            ),
+            100_000,
+        )
 
     def test_reservations_are_scoped_per_user(self):
         store = self.make_store()

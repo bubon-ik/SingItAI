@@ -68,6 +68,8 @@ MAX_REQUEST_BODY_BYTES = 1024 * 1024
 # Must outlast the approval prompt (10 min) plus payment execution, so a hold
 # never lapses while the purchase it guards is still in flight.
 SPEND_RESERVATION_TTL_SECONDS = 15 * 60
+# Only today's records bind the daily cap; the rest is a short audit tail.
+SPEND_RECORD_RETENTION_DAYS = 30
 MAX_BASE_RPC_RESPONSE_BYTES = 1024 * 1024
 COINBASE_NATIVE_TOKEN_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 
@@ -906,6 +908,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=400)
 
     def _handle_agent_withdraw(self) -> None:
+        transfer_attempted = False
         try:
             payload = self._read_json()
             user_id = _require_authenticated_user(self, payload)
@@ -968,6 +971,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             private_key = self.server.user_wallet_service.decrypt_private_key_for_future_signing(
                 user_id
             )
+            # Past this point a broadcast may already have happened, so a
+            # failure can no longer promise that funds stayed put.
+            transfer_attempted = True
             if is_native:
                 transfer = self.server.user_token_transfer_client.transfer_native(
                     private_key=private_key,
@@ -1018,12 +1024,23 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 status=503,
             )
         except Exception as exc:
+            # Only promise that nothing moved when the failure happened before
+            # the transfer could be broadcast. Afterwards the transaction may
+            # well be on-chain, and telling the user otherwise invites them to
+            # withdraw a second time.
             self._send_json(
                 {
                     "ok": False,
                     "error": "withdraw_request_failed",
                     "detail": _redact_error_detail(str(exc)),
-                    "telegramText": "Withdrawal failed. No funds moved.",
+                    "fundsMoved": "unknown" if transfer_attempted else "no",
+                    "telegramText": (
+                        "Withdrawal failed after the transfer was sent. It may still "
+                        "have gone through — check your wallet balance before trying "
+                        "again."
+                        if transfer_attempted
+                        else "Withdrawal failed. No funds moved."
+                    ),
                 },
                 status=400,
             )
@@ -3690,15 +3707,25 @@ class UserWalletBaseX402PaymentClient:
         if not str(private_key or "").strip():
             raise ValueError("user wallet private key is required")
 
-        command = ["node", str(script), "buy-user", "--url", resource_url]
         # Pass the exact terms the user approved so the node signer refuses to
         # pay a different amount/receiver/asset than was shown in the approval.
-        if str(max_atomic or "").strip():
-            command += ["--max-atomic", str(max_atomic).strip()]
-        if str(expected_receiver or "").strip():
-            command += ["--expected-receiver", str(expected_receiver).strip()]
-        if str(expected_asset or "").strip():
-            command += ["--expected-asset", str(expected_asset).strip()]
+        # All three are mandatory: omitting one would leave the signer free to
+        # accept whatever the resource server asks for.
+        approved_terms = {
+            "--max-atomic": str(max_atomic or "").strip(),
+            "--expected-receiver": str(expected_receiver or "").strip(),
+            "--expected-asset": str(expected_asset or "").strip(),
+        }
+        missing = sorted(flag for flag, value in approved_terms.items() if not value)
+        if missing:
+            raise ValueError(
+                "refusing to pay without approved terms: "
+                + ", ".join(flag.removeprefix("--") for flag in missing)
+            )
+
+        command = ["node", str(script), "buy-user", "--url", resource_url]
+        for flag, value in approved_terms.items():
+            command += [flag, value]
 
         env = dict(os.environ)
         env["SIGN402_EVM_PRIVATE_KEY"] = str(private_key).strip()
@@ -4410,6 +4437,24 @@ class UserSpendLimitStore:
         return value if isinstance(value, list) else []
 
     @staticmethod
+    def _prune_old_records(data: dict[str, Any], now: float) -> None:
+        """Drop settled records too old to affect any daily cap.
+
+        The whole file is rewritten on every spend, so an unbounded history
+        makes each purchase progressively slower. Only today's records matter
+        for the cap; the rest is kept for a short audit window and then cut.
+        """
+        cutoff_day = time.strftime(
+            "%Y-%m-%d",
+            time.gmtime(now - SPEND_RECORD_RETENTION_DAYS * 86400),
+        )
+        data["records"] = [
+            entry
+            for entry in UserSpendLimitStore._entries(data, "records")
+            if isinstance(entry, dict) and str(entry.get("day", "")) >= cutoff_day
+        ]
+
+    @staticmethod
     def _drop_expired_reservations(data: dict[str, Any], now: float) -> None:
         reservations = UserSpendLimitStore._entries(data, "reservations")
         data["reservations"] = [
@@ -4534,6 +4579,7 @@ class UserSpendLimitStore:
             records = self._entries(data, "records")
             records.append(record)
             data["records"] = records
+            self._prune_old_records(data, now)
             self._write_all_unlocked(data)
         return record
 
@@ -4570,6 +4616,7 @@ class UserSpendLimitStore:
                 records = []
             records.append(record)
             data["records"] = records
+            self._prune_old_records(data, time.time())
             self._write_all_unlocked(data)
         return record
 
@@ -6093,6 +6140,20 @@ def _validate_base_usdc_x402_requirement(requirement: Any) -> None:
     asset = str(requirement.get("asset") or "")
     if asset.lower() != BASE_USDC_MAINNET.lower():
         raise ValueError("Only Base USDC x402 endpoints are supported for raw URL purchases.")
+
+    # The signer binds the payment to these three values, so a blank one would
+    # leave the purchase unbounded. Reject it here, with a readable reason,
+    # rather than letting the node signer fail on a missing argument.
+    receiver = str(requirement.get("receiver") or requirement.get("payTo") or "")
+    if not re.fullmatch(r"0x[a-fA-F0-9]{40}", receiver):
+        raise ValueError("x402 paymentRequirements.payTo must be a Base EVM address")
+
+    try:
+        amount_atomic = int(str(requirement.get("amountAtomic") or requirement.get("amount") or ""))
+    except ValueError as exc:
+        raise ValueError("x402 paymentRequirements amount must be a positive integer") from exc
+    if amount_atomic <= 0:
+        raise ValueError("x402 paymentRequirements amount must be a positive integer")
 
 
 def _is_singit_x402_requirement(requirement: dict[str, Any]) -> bool:

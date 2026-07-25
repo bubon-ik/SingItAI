@@ -79,3 +79,34 @@ test("without caps returns the first requirement (non-user funded path)", () => 
   const select = makePaymentRequirementsSelector({});
   assert.equal(select(2, [req({ maxAmountRequired: "5" }), req()]).maxAmountRequired, "5");
 });
+
+test("requireAll refuses to build a guard that would accept anything", () => {
+  // buy-user passes requireAll, so a caller that drops a cap fails closed
+  // instead of quietly spending the user's wallet without a bound.
+  assert.throws(() => makePaymentRequirementsSelector({}, { requireAll: true }), /required/);
+  assert.throws(
+    () =>
+      makePaymentRequirementsSelector(
+        { maxAtomic: "10000", expectedReceiver: RECEIVER },
+        { requireAll: true },
+      ),
+    /required/,
+  );
+  assert.throws(
+    () =>
+      makePaymentRequirementsSelector(
+        { maxAtomic: "", expectedReceiver: RECEIVER, expectedAsset: ASSET },
+        { requireAll: true },
+      ),
+    /required/,
+  );
+});
+
+test("requireAll still builds a working guard when every cap is present", () => {
+  const select = makePaymentRequirementsSelector(
+    { maxAtomic: "10000", expectedReceiver: RECEIVER, expectedAsset: ASSET },
+    { requireAll: true },
+  );
+  assert.doesNotThrow(() => select(2, [req()]));
+  assert.throws(() => select(2, [req({ maxAmountRequired: "10001" })]), /approved terms/);
+});

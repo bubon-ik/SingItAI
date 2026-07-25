@@ -53,6 +53,16 @@ with shared bearer tokens:
 - **Decisions are bound to a commitment.** `record_decision` accepts the
   `approval_id` the sidecar showed the user (from `/agent/imessage/pending`), so
   a stale "YES" cannot approve a different, newer commitment.
+  WhatsApp always requires it (the id rides in the button payload). For
+  iMessage it is optional by default, because a sidecar that does not send one
+  would otherwise be unable to approve anything. Without it a "YES" resolves to
+  the oldest pending approval — normally the very one the user saw, since a
+  second approval cannot be created while one is pending, but a reply arriving
+  after the first expired could land on a newer commitment.
+  **To close that:** confirm the sidecar echoes `approvalId`, then set
+  `SIGN402_REQUIRE_IMESSAGE_APPROVAL_ID=true`. Verify by approving one purchase
+  with the flag on in a staging run: if the sidecar omits the id, the decision
+  is refused with "No pending approval." and nothing is spent.
 - **Approval text cannot be forged by provider data.** Approval bodies are
   newline-joined, and some lines carry third-party content (a Bitrefill product
   name). `_sanitize_context_lines` collapses whitespace and strips control

@@ -18,7 +18,7 @@ from sign402_gateway.user_wallets import (
 )
 
 
-def test_master_key() -> str:
+def make_master_key() -> str:
     return Fernet.generate_key().decode("ascii")
 
 
@@ -33,7 +33,7 @@ class UserWalletTests(unittest.TestCase):
         store = UserWalletStore(Path(tmp.name) / "wallets.db")
         service = ManagedBaseWalletService(
             store=store,
-            master_key=master_key or test_master_key(),
+            master_key=master_key or make_master_key(),
             balance_provider=balance_provider,
         )
         return service, store
@@ -167,7 +167,7 @@ class UserWalletTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         service = build_wallet_service_from_env(
-            env={"SIGN402_WALLET_MASTER_KEY": test_master_key()},
+            env={"SIGN402_WALLET_MASTER_KEY": make_master_key()},
             store_path=Path(tmp.name) / "wallets.db",
         )
 
@@ -184,7 +184,7 @@ class UserWalletTests(unittest.TestCase):
 
         service = build_wallet_service_from_env(
             env={
-                "SIGN402_WALLET_MASTER_KEY": test_master_key(),
+                "SIGN402_WALLET_MASTER_KEY": make_master_key(),
                 "SIGN402_BASE_RPC_URL": (
                     "https://base-mainnet.g.alchemy.com/v2/private-key"
                 ),
