@@ -651,7 +651,7 @@ def _imessage_phone_prompt(*, channel: str = "imessage") -> str:
     )
     return (
         f"Send your {channel_label} phone number in international format.\n"
-        "Example: +420773173967"
+        "Example: +12025550123"
         f"{extra}"
         f"{assignment_note}"
         f"{target}"

@@ -414,7 +414,7 @@ class FakePhotonResponse:
     def read(self, size=-1):
         return (
             b'{"succeed":true,"data":{"id":"user-1","type":"shared",'
-            b'"phoneNumber":"+420773173967","assignedPhoneNumber":"+16282647754"}}'
+            b'"phoneNumber":"+12025550123","assignedPhoneNumber":"+16282647754"}}'
         )
 
     def close(self):
@@ -1053,7 +1053,8 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertEqual(client.imessage_calls, [])
         text = gateway.adapters["telegram"].sent[-1][1]
         self.assertIn("phone number", text.lower())
-        self.assertIn("+420", text)
+        self.assertIn("Example: +12025550123", text)
+        self.assertNotIn("Example: +420", text)
         self.assertIn("iMessage", text)
         self.assertIn("private pairing line", text)
         self.assertNotIn("+420111222333", text)
@@ -1225,7 +1226,7 @@ class PluginRegistrationTests(unittest.TestCase):
             )
             result = context.hooks["pre_gateway_dispatch"](
                 event=FakeEvent(
-                    "+420773173967",
+                    "+12025550123",
                     "1045618308",
                     username="AlpskyKnedlik",
                     platform="telegram",
@@ -1250,7 +1251,7 @@ class PluginRegistrationTests(unittest.TestCase):
             json.loads(request.data.decode("utf-8")),
             {
                 "type": "shared",
-                "phoneNumber": "+420773173967",
+                "phoneNumber": "+12025550123",
             },
         )
         self.assertEqual(
@@ -3354,7 +3355,7 @@ class PluginRegistrationTests(unittest.TestCase):
             [
                 (
                     "link",
-                    {"code": "ABCDEFGH", "photonUserId": "+420773173967"},
+                    {"code": "ABCDEFGH", "photonUserId": "+12025550123"},
                 )
             ],
         )
@@ -3626,10 +3627,10 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertEqual(
             client.imessage_calls,
             [
-                ("pending", {"photonUserId": "+420773173967"}),
+                ("pending", {"photonUserId": "+12025550123"}),
                 (
                     "decision",
-                    {"photonUserId": "+420773173967", "decision": "YES"},
+                    {"photonUserId": "+12025550123", "decision": "YES"},
                 ),
             ],
         )

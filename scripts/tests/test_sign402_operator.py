@@ -74,6 +74,12 @@ class Sign402OperatorTests(unittest.TestCase):
             photon_api_token="photon-token",
         )
 
+    def test_normalize_e164_uses_fictional_us_example(self):
+        operator = load_operator()
+
+        with self.assertRaisesRegex(ValueError, r"\+12025550123"):
+            operator.normalize_e164("not-a-phone")
+
     def seed_user_wallet(self):
         db = sqlite3.connect(self.root / "user-wallets.db")
         with db:

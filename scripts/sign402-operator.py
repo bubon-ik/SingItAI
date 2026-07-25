@@ -326,7 +326,7 @@ def normalize_e164(value: str) -> str:
     if not compact.startswith("+"):
         compact = "+" + compact
     if not E164_RE.fullmatch(compact):
-        raise ValueError("phone must be E.164, for example +420773173967")
+        raise ValueError("phone must be E.164, for example +12025550123")
     return compact
 
 
