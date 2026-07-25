@@ -55,7 +55,9 @@ be enforced.
 - Settlement or on-chain reconciliation of an ambiguous signing attempt.
 - Bulk migration of existing plaintext state.
 - Stale iMessage decisions, Firefly bridge authentication, paid resource replay,
-  risk-check validation, private-key CLI arguments, and response-size caps.
+  risk-check validation, private-key CLI arguments, and general response-size
+  hardening outside the payment challenge/resource/subprocess boundaries
+  covered here.
 - Redesign of Bitrefill quotes, managed-wallet funding, Bankr swaps, or Bankr
   LLM-credit purchases that do not use the autonomous Bankr x402 client.
 - Re-enabling any legacy route by default.
@@ -152,7 +154,10 @@ Canonicalization rules are part of the security contract:
   between the two after approval.
 - For `x402`, `x402Version` must be the integer `2`, `scheme` must be `exact`,
   and `network` is the canonical CAIP-2 network from `x402Network`. The
-  gateway's internal aliases such as `base-mainnet` are not signed.
+  gateway's internal aliases such as `base-mainnet` are not signed. P1a uses a
+  closed map for the covered payment backends: Base Mainnet `eip155:8453` and
+  the existing Algorand TestNet identifier. Other EVM chains and Algorand
+  MainNet are rejected; the covered local AVM signer is TestNet-only.
 - For the preserved direct Algorand debug executor, `paymentKind` is `direct`,
   `x402Version` is `null`, and `scheme` is `direct`.
   `algorand-testnet` maps only to the repository's existing Algorand TestNet
@@ -172,6 +177,9 @@ Canonicalization rules are part of the security contract:
   lowercase scheme and IDNA ASCII host, no credentials or fragment, no dot
   segments, no default port, an explicit `/` for an empty path, uppercase
   percent escapes, and otherwise preserves its ASCII path and query bytes.
+  The original URL is checked for non-space printable ASCII before invoking a
+  URL parser so tabs, newlines, and leading controls cannot be silently
+  stripped or normalized.
   HTTPS is required except for explicitly supported loopback test URLs.
   A candidate-declared `resource`, when present, must canonicalize to this same
   URL. It is never replaced by the approved URL before comparison.
@@ -208,18 +216,25 @@ separators, lowercase JSON literals, and UTF-8 encoding.
 
 Python and Node use fixtures containing the same canonical JSON and expected
 hash, including adversarial unsafe integers, floats, Unicode, URL encodings,
-duplicate keys, and nested `extra` values. Cross-language fixture equality is
-required before the CDP guard can be considered safe.
+duplicate keys, numeric-looking object keys, `__proto__`, and nested `extra`
+values. Node uses an explicit lexicographic emitter and null-prototype parser
+objects rather than relying on JavaScript property-enumeration order.
+Cross-language fixture equality is required before the CDP guard can be
+considered safe.
 
 ### Durable approval store
 
 Add `sign402_gateway.payment_approvals.PaymentApprovalStore`, backed by a
 dedicated SQLite file. The runtime default is
-`demo-dashboard/payment-approvals.sqlite3`, configurable through the existing
-gateway construction pattern for tests and deployment.
+`demo-dashboard/private/payment-approvals.sqlite3`, configurable through the
+existing gateway construction pattern for tests and deployment. The dedicated
+`private` directory is created as mode `0700`; the store never chmods the
+existing shared `demo-dashboard` directory or another pre-existing
+non-private configured parent.
 
-The implementation adds this exact runtime path to `.gitignore` before any
-runtime can create it. Tests verify that the default file is ignored.
+The implementation adds this database plus its standard `-journal`, `-wal`,
+and `-shm` sidecar paths to `.gitignore` before any runtime can create them.
+Tests verify all four default paths are ignored.
 
 The parent directory is private, the database is mode `0600`, and SQLite
 sidecar files are created only inside the same private directory. Store
@@ -245,6 +260,10 @@ Each row contains:
 The store never persists private keys, mnemonics, fulfillment tokens,
 redemption data, request authorization headers, arbitrary provider response
 bodies, or raw subprocess output.
+
+Decoded rows are recursively immutable trusted records. Signer adapters and
+HTTP response DTOs receive explicit fresh plain copies; callback mutation
+cannot change receipt validation or durable replay state.
 
 The approval lifetime is 120 seconds. Expired approvals cannot be revived.
 Creating a new approval for identical terms creates a new `approvalId`; a hash
@@ -299,6 +318,10 @@ x402 buyers call this service instead of coordinating the store directly.
 The service has no wallet key and does not sign. The payment executor receives
 only normalized requirements read back from the claimed approval row.
 
+Paid resource content is a separately bounded transient result: it is returned
+only for the first in-process completion and is never part of the durable
+receipt, event, log, or completed replay.
+
 Before contacting Firefly, the service formats exactly three mandatory
 hardware-context lines within the existing 31-character limit:
 
@@ -340,7 +363,8 @@ Processing order:
 6. persist `approved` only when Firefly returns `approved: true` and an
    `approvedHash` exactly equal to the server-generated commitment hash;
    denial, missing hash, stale hash, or provider error is persisted as
-   non-executable `denied`;
+   non-executable `denied`, or as `expired` when the row's 120-second lifetime
+   elapsed during the provider call;
 7. return `approvalId`, `paymentApprovalHash`, canonical commitment,
    `expiresAt`, and the allowlisted Firefly result.
 
@@ -366,14 +390,24 @@ Processing order:
 1. authenticate the legacy operator and apply the transaction-pause guard;
 2. read the approval and reject unknown, denied, or expired IDs;
 3. validate any compatibility assertions;
-4. re-resolve and compare the current signer backend and payer, then revalidate
-   that the stored policy still permits the stored requirements;
-5. atomically claim `approved -> executing`;
-6. perform the final transaction-pause check and, if paused, persist
+4. if the row is already `completed`, validate its stored allowlisted receipt
+   and return it as a replay without resolving a signer or rerunning the spend
+   validator; a used-intent validator may reject a new payment but must not
+   suppress a historical successful receipt;
+5. for every non-completed row, re-resolve and compare the current signer
+   backend and payer, then revalidate that the stored policy still permits the
+   stored requirements;
+6. atomically claim `approved -> executing`;
+7. perform the final transaction-pause check and, if paused, persist
    `cancelled_before_sign` without invoking the executor;
-7. invoke the executor with only the stored requirements and policy hash;
-8. allowlist the receipt and persist `completed`, or persist
-   `outcome_unknown` on any exception once step 7 has been invoked.
+8. invoke the executor with only the stored requirements and policy hash;
+9. allowlist the receipt and persist `completed`, or persist
+   `outcome_unknown` on any exception once step 8 has been invoked.
+
+If a non-completed preclaim validation loses a race to a successful completion,
+the service rereads once and may return only that now-completed, valid stored
+receipt. It does not rerun the executor or erase the original validation error
+for any other state.
 
 The response preserves `policyHash`, `paymentApprovalHash`, and `payment` and
 adds `approvalId`, `status`, and `replayed`.
@@ -406,6 +440,12 @@ official `PaymentRequired` envelope only from that stored selection, and
 receives the claimed normalized requirements rather than a mutable caller
 object.
 
+Both the initial Python challenge fetch and the paid AVM fetch use a
+no-redirect opener. An initial redirect fails before approval. A redirect
+returned after the AVM signer handoff is not followed, never receives a
+forwarded payment header, and leaves the claimed attempt
+`outcome_unknown`.
+
 The CDP branch passes the complete approved terms and hash to the Node process.
 The Python buyer accepts success only when the Node result reports the same
 selected commitment hash.
@@ -419,23 +459,31 @@ The CDP subprocess receives approved terms over stdin, not as wallet secrets or
 large JSON command-line arguments. The Node process:
 
 1. validates the stdin envelope and recomputes the approved hash;
-2. verifies that the resolved signer backend and payer equal the approved
+2. wraps the raw live 402 fetch so duplicate keys, lexical floats/exponents,
+   and other restricted-domain violations are rejected before the x402
+   library's ordinary JSON parser can normalize them;
+3. verifies that the resolved signer backend and payer equal the approved
    identity;
-3. configures fetch to reject redirects during the payment attempt;
-4. defines the effective resource as the actual non-redirected request URL,
+4. configures fetch to reject redirects during the payment attempt;
+5. defines the effective resource as the actual non-redirected request URL,
    then separately requires any candidate-declared resource to canonicalize to
    that URL before building the candidate terms;
-5. converts every candidate in the live second challenge to version 2 terms;
-6. selects only a candidate whose canonical JSON and hash exactly equal the
+6. converts every candidate in the live second challenge to version 2 terms;
+7. selects only a candidate whose canonical JSON and hash exactly equal the
    approved values;
-7. wraps the signer with an attempt counter and throws before a second signing
+8. wraps the signer with an attempt counter and throws before a second signing
    invocation inside the same paid fetch, including after an HTTP failure;
-8. throws before payload creation/signing when no exact candidate exists;
-9. returns the selected hash, signer invocation count, and allowlisted payment
-   receipt.
+9. throws before payload creation/signing when no exact candidate exists;
+10. returns the selected hash, signer invocation count, and allowlisted payment
+    receipt.
 
 Post-payment hash comparison in Python is defense in depth. It does not replace
 the selector check before signing.
+
+Network challenge/body reads, paid resource reads, Node stdout, and stderr are
+stream-capped before buffering. JSON parsers enforce depth and node-count
+limits; Python kills and reaps a child that exceeds its output or time budget
+without logging captured bytes.
 
 The current user-wallet CDP call also moves to the same exact guard and durable
 execution state. `PaymentApprovalService` creates a pending payment row before
@@ -445,6 +493,17 @@ and continues to bind its wallet address, nonce, and expiry. It returns both
 the iMessage approval ID and embedded payment-terms hash. The payment service
 marks its row approved only when that terms hash matches, then atomically
 claims it before `UserWalletX402Buyer` calls Node.
+
+For this path, the server-owned `policyHash` is SHA-256 over a canonical
+snapshot of the authenticated user ID and the effective per-transaction,
+daily, and operator-ceiling settings enforced by `UserSpendLimitStore`.
+Execution rereads and rehashes those settings before claim. The changing
+daily-spend counter is not included; atomic reservation of that counter remains
+the explicit P1b budget-concurrency work.
+
+The iMessage envelope uses the durable payment row's exact expiry, which is no
+later than 120 seconds after creation, so channel approval cannot outlive the
+payment authorization.
 
 The user event records the channel approval ID and the separate payment
 authorization ID. Completed, concurrent, stale, and unknown user-wallet
