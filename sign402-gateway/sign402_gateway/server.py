@@ -65,6 +65,9 @@ BANKR_LLM_CREDITS_RESOURCE = "bankr://llm-credits/top-up"
 BANKR_LLM_CREDITS_RECEIVER = "bankr.llm"
 DEFAULT_NATIVE_ETH_WITHDRAW_GAS_RESERVE = Decimal("0.000001")
 MAX_REQUEST_BODY_BYTES = 1024 * 1024
+# Must outlast the approval prompt (10 min) plus payment execution, so a hold
+# never lapses while the purchase it guards is still in flight.
+SPEND_RESERVATION_TTL_SECONDS = 15 * 60
 MAX_BASE_RPC_RESPONSE_BYTES = 1024 * 1024
 COINBASE_NATIVE_TOKEN_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 
@@ -740,6 +743,11 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             _require_wallet_api_token(self)
             payload = self._read_json()
             telegram_user_id = _read_telegram_user_id(payload)
+            # This is the one endpoint that runs on the shared token alone: it
+            # mints a per-user token for whatever id it is handed. Rate-limit it
+            # so a leaked shared token cannot enumerate users or mint tokens in
+            # bulk unnoticed.
+            _enforce_wallet_creation_rate(telegram_user_id)
             result = self.server.user_wallet_service.create_wallet(
                 telegram_user_id=telegram_user_id,
                 telegram_username=str(payload.get("telegramUsername", "") or ""),
@@ -1389,6 +1397,10 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         resource_url: str,
         telegram_user_id: str,
     ) -> None:
+        # Any exit that does not settle must give the held budget back, so a
+        # failed purchase never eats into the user's daily cap.
+        reservation_id: str | None = None
+        settled = False
         try:
             user_id = _require_authenticated_user(
                 self, {"telegramUserId": telegram_user_id}
@@ -1406,7 +1418,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 resource_url=resource_url,
             )
             _validate_base_usdc_x402_requirement(payment_requirements)
-            _enforce_user_wallet_spend_limits(self.server, user_id, payment_requirements)
+            reservation_id = _reserve_user_wallet_spend(
+                self.server, user_id, payment_requirements
+            )
             approval = self.server.imessage_approval_service.request_purchase_approval(
                 telegram_user_id=user_id,
                 tool_name=str(tool.get("name") or "x402 resource"),
@@ -1447,14 +1461,15 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             enriched["ok"] = bool(result.get("ok", False))
             enriched["telegramUserId"] = user_id
             if enriched.get("ok"):
-                _record_user_wallet_spend(
+                _settle_user_wallet_spend(
                     self.server,
-                    user_id,
+                    reservation_id,
                     tool,
                     resource_url,
                     payment_requirements,
                     enriched,
                 )
+                settled = True
                 self.server.user_event_store.write(user_id, enriched)
             self._send_json(enriched, status=200 if enriched.get("ok") else 400)
         except WalletApiAuthError as exc:
@@ -1465,6 +1480,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=503)
         except Exception as exc:
             self._send_json({"decision": "rejected", "ok": False, "error": str(exc)}, status=400)
+        finally:
+            if not settled:
+                _release_user_wallet_spend(self.server, reservation_id)
 
     def _handle_agent_inspect_x402(self) -> None:
         if not self._legacy_operator_request_allowed():
@@ -1648,9 +1666,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                     # feed; only the token-gated /agent/last-purchase reads it.
                     self.server.user_event_store.write(user_id, result)
                     if result.get("priceUsd"):
-                        _record_user_wallet_spend(
+                        _settle_user_wallet_spend(
                             self.server,
-                            user_id,
+                            result.get("spendReservationId"),
                             {"id": "bitrefill"},
                             "bitrefill",
                             _bitrefill_spend_requirement(
@@ -2314,10 +2332,14 @@ def build_server(
         # `server` is bound later in this scope; the closure resolves it at
         # call time, so spend limits are re-checked at buy time (not only at
         # quote time, which a direct /agent/buy-wallet-bitrefill call skips).
-        enforce_spend=lambda user_id, quote: _enforce_user_wallet_spend_limits(
+        enforce_spend=lambda user_id, quote: _reserve_user_wallet_spend(
             server,
             user_id,
             _bitrefill_spend_requirement(quote.get("totalUsd") or quote["priceUsd"]),
+        ),
+        release_spend=lambda reservation_id: _release_user_wallet_spend(
+            server,
+            reservation_id,
         ),
     )
     x402_inspector = ExternalX402Inspector()
@@ -4314,31 +4336,206 @@ class UserSpendLimitStore:
         )
 
     def spent_today_atomic(self, telegram_user_id: str, *, asset: str, network: str) -> int:
-        user_id = str(telegram_user_id)
+        with self.lock:
+            data = self._read_all_unlocked()
+            return self._spent_today_unlocked(
+                data,
+                str(telegram_user_id),
+                asset=asset,
+                network=network,
+            )
+
+    def _matches_scope(
+        self,
+        entry: Any,
+        user_id: str,
+        *,
+        asset_key: str,
+        network_key: str,
+        today: str,
+    ) -> bool:
+        return (
+            isinstance(entry, dict)
+            and str(entry.get("telegramUserId")) == user_id
+            and str(entry.get("day")) == today
+            and str(entry.get("asset", "")).lower() == asset_key
+            and str(entry.get("network")) == network_key
+        )
+
+    def _spent_today_unlocked(
+        self,
+        data: dict[str, Any],
+        user_id: str,
+        *,
+        asset: str,
+        network: str,
+        now: float | None = None,
+    ) -> int:
+        """Settled spend plus every hold that has not expired yet.
+
+        A reservation counts against the cap exactly like a settled record, so
+        a purchase waiting on human approval cannot be measured against a total
+        that ignores it.
+        """
         asset_key = str(asset).lower()
         network_key = str(network)
         today = self._today_key()
+        current_time = time.time() if now is None else now
         total = 0
-        with self.lock:
-            records = self._read_all_unlocked().get("records", [])
-            if not isinstance(records, list):
-                return 0
-            for record in records:
-                if not isinstance(record, dict):
+        for entry in self._entries(data, "records"):
+            if not self._matches_scope(
+                entry, user_id, asset_key=asset_key, network_key=network_key, today=today
+            ):
+                continue
+            try:
+                total += int(str(entry.get("amountAtomic", "0")))
+            except ValueError:
+                continue
+        for entry in self._entries(data, "reservations"):
+            if not self._matches_scope(
+                entry, user_id, asset_key=asset_key, network_key=network_key, today=today
+            ):
+                continue
+            try:
+                if float(entry.get("expiresAt", 0)) <= current_time:
                     continue
-                if str(record.get("telegramUserId")) != user_id:
-                    continue
-                if str(record.get("day")) != today:
-                    continue
-                if str(record.get("asset", "")).lower() != asset_key:
-                    continue
-                if str(record.get("network")) != network_key:
-                    continue
-                try:
-                    total += int(str(record.get("amountAtomic", "0")))
-                except ValueError:
-                    continue
+                total += int(str(entry.get("amountAtomic", "0")))
+            except (TypeError, ValueError):
+                continue
         return total
+
+    @staticmethod
+    def _entries(data: dict[str, Any], key: str) -> list[Any]:
+        value = data.get(key)
+        return value if isinstance(value, list) else []
+
+    @staticmethod
+    def _drop_expired_reservations(data: dict[str, Any], now: float) -> None:
+        reservations = UserSpendLimitStore._entries(data, "reservations")
+        data["reservations"] = [
+            entry
+            for entry in reservations
+            if isinstance(entry, dict) and _safe_float(entry.get("expiresAt")) > now
+        ]
+
+    def reserve_within_limits(
+        self,
+        telegram_user_id: str,
+        *,
+        amount_atomic: int,
+        asset: str,
+        network: str,
+        max_per_tx_atomic: int | None,
+        daily_cap_atomic: int | None,
+        ttl_seconds: float = SPEND_RESERVATION_TTL_SECONDS,
+    ) -> str | None:
+        """Check the caps and hold the amount in one atomic step.
+
+        Returns a reservation id, or None when the amount does not fit. The
+        caller must settle the reservation once the payment succeeds, or
+        release it on rejection, timeout, or error.
+        """
+        amount = int(amount_atomic)
+        if max_per_tx_atomic is not None and amount > int(max_per_tx_atomic):
+            return None
+
+        user_id = str(telegram_user_id)
+        now = time.time()
+        reservation_id = f"hold_{secrets.token_urlsafe(12)}"
+        with self.lock:
+            data = self._read_all_unlocked()
+            self._drop_expired_reservations(data, now)
+            if daily_cap_atomic is not None:
+                spent = self._spent_today_unlocked(
+                    data, user_id, asset=asset, network=network, now=now
+                )
+                if spent + amount > int(daily_cap_atomic):
+                    self._write_all_unlocked(data)
+                    return None
+            reservations = self._entries(data, "reservations")
+            reservations.append(
+                {
+                    "reservationId": reservation_id,
+                    "telegramUserId": user_id,
+                    "day": self._today_key(),
+                    "amountAtomic": amount,
+                    "asset": str(asset),
+                    "network": str(network),
+                    "createdAt": now,
+                    "expiresAt": now + float(ttl_seconds),
+                }
+            )
+            data["reservations"] = reservations
+            self._write_all_unlocked(data)
+        return reservation_id
+
+    def release_reservation(self, reservation_id: str | None) -> None:
+        if not reservation_id:
+            return
+        with self.lock:
+            data = self._read_all_unlocked()
+            self._drop_expired_reservations(data, time.time())
+            data["reservations"] = [
+                entry
+                for entry in self._entries(data, "reservations")
+                if str(entry.get("reservationId")) != str(reservation_id)
+            ]
+            self._write_all_unlocked(data)
+
+    def settle_reservation(
+        self,
+        reservation_id: str | None,
+        *,
+        tx_id: str = "",
+        payment_intent: str | None = None,
+        approval_id: str | None = None,
+        tool_id: str | None = None,
+        resource_url: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Turn a hold into a settled record without double-counting it."""
+        if not reservation_id:
+            return None
+        with self.lock:
+            data = self._read_all_unlocked()
+            now = time.time()
+            self._drop_expired_reservations(data, now)
+            reservations = self._entries(data, "reservations")
+            held = next(
+                (
+                    entry
+                    for entry in reservations
+                    if str(entry.get("reservationId")) == str(reservation_id)
+                ),
+                None,
+            )
+            if held is None:
+                # The hold expired mid-flight. Still record the spend, so a slow
+                # payment cannot settle without counting against the cap.
+                self._write_all_unlocked(data)
+                return None
+            data["reservations"] = [
+                entry
+                for entry in reservations
+                if str(entry.get("reservationId")) != str(reservation_id)
+            ]
+            record = {
+                "telegramUserId": str(held.get("telegramUserId")),
+                "day": str(held.get("day")),
+                "amountAtomic": int(str(held.get("amountAtomic", "0"))),
+                "asset": str(held.get("asset", "")),
+                "network": str(held.get("network", "")),
+                "txId": str(tx_id or ""),
+                "paymentIntent": str(payment_intent or ""),
+                "approvalId": str(approval_id or ""),
+                "toolId": str(tool_id or ""),
+                "resourceUrl": str(resource_url or ""),
+                "recordedAt": now,
+            }
+            records = self._entries(data, "records")
+            records.append(record)
+            data["records"] = records
+            self._write_all_unlocked(data)
+        return record
 
     def record_successful_spend(
         self,
@@ -4605,6 +4802,7 @@ _USER_RATE_LIMITER = SlidingWindowRateLimiter()
 
 DEFAULT_USER_REQUESTS_PER_MINUTE = "60"
 DEFAULT_USER_PURCHASES_PER_HOUR = "20"
+DEFAULT_WALLET_CREATIONS_PER_MINUTE = "30"
 
 
 def _rate_limit_setting(env_name: str, default_value: str) -> int | None:
@@ -4625,6 +4823,28 @@ def _enforce_user_request_rate(user_id: str) -> None:
     if not _USER_RATE_LIMITER.allow("requests", user_id, limit=limit, window_seconds=60.0):
         raise RateLimitExceededError(
             "Too many wallet requests. Please wait a minute and try again."
+        )
+
+
+def _enforce_wallet_creation_rate(telegram_user_id: str) -> None:
+    """Bound wallet creation per user and across all users.
+
+    The per-user bucket alone would not help: the caller chooses the id, so it
+    could walk a fresh id every request. The global bucket is what actually
+    caps a leaked shared token.
+    """
+    _enforce_user_request_rate(telegram_user_id)
+    limit = _rate_limit_setting(
+        "SIGN402_WALLET_CREATIONS_PER_MINUTE",
+        DEFAULT_WALLET_CREATIONS_PER_MINUTE,
+    )
+    if limit is None:
+        return
+    if not _USER_RATE_LIMITER.allow(
+        "wallet_creations", "global", limit=limit, window_seconds=60.0
+    ):
+        raise RateLimitExceededError(
+            "Too many wallet creations right now. Please try again shortly."
         )
 
 
@@ -4832,10 +5052,15 @@ def _withdraw_approval_context_lines(
     from_address: str,
     to_address: str,
 ) -> list[str]:
+    # The destination is shown in full, never abbreviated. A withdrawal's only
+    # safeguard is this approval, and it is worth nothing if the approver cannot
+    # tell the real address from a look-alike: an abbreviation to first-6 and
+    # last-4 hex leaves ~40 bits to collide, which a vanity generator does in
+    # minutes. The amount and destination are what the human actually verifies.
     return [
         f"Action: WITHDRAW {symbol}",
         f"Amount: {amount} {symbol}",
-        f"To: {_short_address(to_address)}",
+        f"To: {to_address}",
         f"From: {_short_address(from_address)}",
         "Network: Base",
     ]
@@ -5576,6 +5801,13 @@ def _optional_int(value: Any) -> int | None:
     return int(str(value))
 
 
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _operator_user_wallet_limits() -> dict[str, int | None]:
     return {
         "maxPerTxAtomic": _user_wallet_atomic_limit(
@@ -5657,11 +5889,11 @@ def _spending_limits_telegram_text(limits: dict[str, Any], *, updated: bool) -> 
     )
 
 
-def _enforce_user_wallet_spend_limits(
+def _user_wallet_spend_scope(
     server: Sign402GatewayServer,
     telegram_user_id: str,
     payment_requirements: dict[str, Any],
-) -> None:
+) -> dict[str, Any]:
     operator_limits = _operator_user_wallet_limits()
     operator_ceilings = _operator_user_wallet_ceilings()
     limits = server.user_spend_limit_store.limit_settings(
@@ -5671,30 +5903,107 @@ def _enforce_user_wallet_spend_limits(
         operator_ceiling_per_tx_atomic=operator_ceilings["ceilingPerTxAtomic"],
         operator_ceiling_daily_atomic=operator_ceilings["ceilingDailyAtomic"],
     )
-    max_per_tx = limits.get("maxPerTxAtomic")
-    daily_cap = limits.get("dailyCapAtomic")
-    amount = _payment_amount_atomic(payment_requirements)
-    if max_per_tx is not None and amount > int(max_per_tx):
-        raise ValueError(
-            f"x402 amount {amount} exceeds the per-transaction cap {int(max_per_tx)}"
-        )
-    if daily_cap is None:
-        return
+    return {
+        "maxPerTx": limits.get("maxPerTxAtomic"),
+        "dailyCap": limits.get("dailyCapAtomic"),
+        "amount": _payment_amount_atomic(payment_requirements),
+        "asset": str(payment_requirements.get("asset", "")),
+        "network": str(
+            payment_requirements.get("network")
+            or payment_requirements.get("x402Network")
+            or ""
+        ),
+    }
 
-    asset = str(payment_requirements.get("asset", ""))
-    network = str(payment_requirements.get("network") or payment_requirements.get("x402Network") or "")
+
+def _enforce_user_wallet_spend_limits(
+    server: Sign402GatewayServer,
+    telegram_user_id: str,
+    payment_requirements: dict[str, Any],
+) -> None:
+    """Check the caps without holding budget.
+
+    Used where nothing is about to be spent yet (a quote). Purchases must use
+    `_reserve_user_wallet_spend` instead, so the amount is held for the whole
+    approve-then-pay window.
+    """
+    scope = _user_wallet_spend_scope(server, telegram_user_id, payment_requirements)
+    amount = scope["amount"]
+    if scope["maxPerTx"] is not None and amount > int(scope["maxPerTx"]):
+        raise ValueError(
+            f"x402 amount {amount} exceeds the per-transaction cap {int(scope['maxPerTx'])}"
+        )
+    if scope["dailyCap"] is None:
+        return
     spent_today = int(
         server.user_spend_limit_store.spent_today_atomic(
             telegram_user_id,
-            asset=asset,
-            network=network,
+            asset=scope["asset"],
+            network=scope["network"],
         )
     )
-    if spent_today + amount > int(daily_cap):
+    if spent_today + amount > int(scope["dailyCap"]):
         raise ValueError(
-            f"x402 amount {amount} exceeds the daily spending cap {int(daily_cap)}; "
+            f"x402 amount {amount} exceeds the daily spending cap {int(scope['dailyCap'])}; "
             f"spent today {spent_today} (SIGN402_USER_WALLET_DAILY_ATOMIC_CAP)"
         )
+
+
+def _reserve_user_wallet_spend(
+    server: Sign402GatewayServer,
+    telegram_user_id: str,
+    payment_requirements: dict[str, Any],
+) -> str:
+    """Check the caps and hold the amount for this purchase.
+
+    The hold is what closes the window between the cap check and the recorded
+    spend: approval can take minutes, and a second purchase started in that
+    window would otherwise measure itself against a total that ignores the
+    first. Callers must settle the returned id on success and release it on
+    rejection, timeout, or error.
+    """
+    scope = _user_wallet_spend_scope(server, telegram_user_id, payment_requirements)
+    amount = scope["amount"]
+    reservation_id = server.user_spend_limit_store.reserve_within_limits(
+        telegram_user_id,
+        amount_atomic=amount,
+        asset=scope["asset"],
+        network=scope["network"],
+        max_per_tx_atomic=scope["maxPerTx"],
+        daily_cap_atomic=scope["dailyCap"],
+    )
+    if reservation_id is not None:
+        return reservation_id
+
+    if scope["maxPerTx"] is not None and amount > int(scope["maxPerTx"]):
+        raise ValueError(
+            f"x402 amount {amount} exceeds the per-transaction cap {int(scope['maxPerTx'])}"
+        )
+    spent_today = int(
+        server.user_spend_limit_store.spent_today_atomic(
+            telegram_user_id,
+            asset=scope["asset"],
+            network=scope["network"],
+        )
+    )
+    raise ValueError(
+        f"x402 amount {amount} exceeds the daily spending cap {int(scope['dailyCap'])}; "
+        f"spent today {spent_today} (SIGN402_USER_WALLET_DAILY_ATOMIC_CAP)"
+    )
+
+
+def _release_user_wallet_spend(
+    server: Sign402GatewayServer,
+    reservation_id: str | None,
+) -> None:
+    if not reservation_id:
+        return
+    try:
+        server.user_spend_limit_store.release_reservation(reservation_id)
+    except Exception:
+        # A stuck hold expires on its own; never let cleanup mask the real
+        # outcome of the purchase.
+        pass
 
 
 def _record_user_wallet_spend(
@@ -5713,6 +6022,27 @@ def _record_user_wallet_spend(
         network=str(payment_requirements.get("network") or payment_requirements.get("x402Network") or ""),
         tx_id=str(event.get("txId") or ""),
         payment_intent=str(payment_requirements.get("paymentIntent") or event.get("paymentIntent") or ""),
+        approval_id=str(event.get("approvalId") or ""),
+        tool_id=str(tool.get("id") or event.get("toolId") or ""),
+        resource_url=resource_url,
+    )
+
+
+def _settle_user_wallet_spend(
+    server: Sign402GatewayServer,
+    reservation_id: str | None,
+    tool: dict[str, Any],
+    resource_url: str,
+    payment_requirements: dict[str, Any],
+    event: dict[str, Any],
+) -> None:
+    """Convert this purchase's hold into a settled spend record."""
+    server.user_spend_limit_store.settle_reservation(
+        reservation_id,
+        tx_id=str(event.get("txId") or ""),
+        payment_intent=str(
+            payment_requirements.get("paymentIntent") or event.get("paymentIntent") or ""
+        ),
         approval_id=str(event.get("approvalId") or ""),
         tool_id=str(tool.get("id") or event.get("toolId") or ""),
         resource_url=resource_url,

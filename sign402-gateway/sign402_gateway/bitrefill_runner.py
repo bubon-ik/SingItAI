@@ -572,7 +572,8 @@ class WalletBitrefillPurchaseRunner:
         source_wallet_provider: Callable[[str], str] | None = None,
         now_provider: Callable[[], int] = now_epoch,
         fulfillment_token_provider: Callable[[], str] = lambda: secrets.token_urlsafe(32),
-        enforce_spend: Callable[[str, dict[str, Any]], None] | None = None,
+        enforce_spend: Callable[[str, dict[str, Any]], str | None] | None = None,
+        release_spend: Callable[[str], None] | None = None,
     ):
         self.store = store
         self.approval_client = approval_client
@@ -582,6 +583,7 @@ class WalletBitrefillPurchaseRunner:
         self.now_provider = now_provider
         self.fulfillment_token_provider = fulfillment_token_provider
         self.enforce_spend = enforce_spend
+        self.release_spend = release_spend
 
     def __call__(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.buy(payload)
@@ -590,6 +592,34 @@ class WalletBitrefillPurchaseRunner:
         return hash_purchase_commitment(build_purchase_commitment(quote, recipient=recipient))
 
     def buy(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Hold the user's budget across the whole approve-then-fulfil window.
+
+        `enforce_spend` reserves the amount, which is only safe if every exit
+        path gives it back. The caller settles the returned reservation id once
+        the purchase has been recorded.
+        """
+        holder: dict[str, Any] = {"reservationId": None}
+        try:
+            result = self._buy(payload, holder)
+        except BaseException:
+            self._release_spend(holder["reservationId"])
+            raise
+        if not isinstance(result, dict) or not result.get("ok"):
+            self._release_spend(holder["reservationId"])
+            return result
+        result["spendReservationId"] = holder["reservationId"]
+        return result
+
+    def _release_spend(self, reservation_id: Any) -> None:
+        if not reservation_id or self.release_spend is None:
+            return
+        try:
+            self.release_spend(reservation_id)
+        except Exception:
+            # A stranded hold expires on its own; never mask the real failure.
+            pass
+
+    def _buy(self, payload: dict[str, Any], holder: dict[str, Any]) -> dict[str, Any]:
         quote_id = str(payload.get("quoteId", "")).strip()
         if not quote_id:
             raise ValueError("quoteId is required")
@@ -607,7 +637,7 @@ class WalletBitrefillPurchaseRunner:
         payment_hash = hash_purchase_commitment(commitment)
         telegram_user_id = str(payload.get("telegramUserId", "") or "").strip()
         if telegram_user_id and self.enforce_spend is not None:
-            self.enforce_spend(telegram_user_id, quote)
+            holder["reservationId"] = self.enforce_spend(telegram_user_id, quote)
         source_wallet = ""
         if telegram_user_id and self.source_wallet_provider is not None:
             source_wallet = str(self.source_wallet_provider(telegram_user_id) or "").strip()

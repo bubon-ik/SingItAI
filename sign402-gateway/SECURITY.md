@@ -13,6 +13,14 @@ with shared bearer tokens:
 - **WhatsApp Cloud / Hermes adapter** — verifies Meta webhook signatures with
   `WHATSAPP_CLOUD_APP_SECRET`, then forwards the trusted `wa_id` through the
   same independent approval bearer-token boundary.
+  **This check lives in Hermes, not in this repository.** Only the outbound
+  template client (`whatsapp_cloud.py`) is here; inbound decisions reach the
+  gateway through `/agent/imessage/decision` with `channel=whatsapp`, carrying
+  the Photon bearer token. So the gateway cannot itself tell a signed Meta
+  webhook from a forged one — that guarantee is entirely Hermes's, and it must
+  be re-verified whenever the adapter is redeployed. Last confirmed by external
+  probe on 2026-07-14 (unsigned POST → `401`, bad verify token → `403`); see
+  `docs/security-audit/2026-07-14-risk-register.md`.
 
 ### What hardens this beyond the shared tokens
 
@@ -45,10 +53,31 @@ with shared bearer tokens:
 - **Decisions are bound to a commitment.** `record_decision` accepts the
   `approval_id` the sidecar showed the user (from `/agent/imessage/pending`), so
   a stale "YES" cannot approve a different, newer commitment.
+- **Approval text cannot be forged by provider data.** Approval bodies are
+  newline-joined, and some lines carry third-party content (a Bitrefill product
+  name). `_sanitize_context_lines` collapses whitespace and strips control
+  characters — including U+2028/U+2029 and NEL — before any line is hashed,
+  stored, displayed, or sent, so smuggled text cannot present itself as an extra
+  `Total:` line above the real one. The Firefly path was already safe:
+  `format_payment_context_command` drops everything outside printable ASCII and
+  the `|` field separator.
 - **Payments are bound to approved terms.** The x402 signer refuses to pay an
   amount/receiver/asset other than what was approved (`payment-guard`), and
   per-user spend limits cap per-transaction and daily USD value (including
   Bitrefill).
+- **Spend limits hold budget across the approval wait.** The daily cap is
+  checked before the approval prompt but the spend is only recorded after the
+  payment settles. `UserSpendLimitStore.reserve_within_limits` closes that
+  window: the check and the hold happen under one lock, and an unexpired hold
+  counts against the cap exactly like a settled record, so a second purchase
+  started while the first awaits approval cannot measure itself against a stale
+  total. Holds are released on rejection, timeout, or error, and expire on their
+  own after `SPEND_RESERVATION_TTL_SECONDS`. The Bankr LLM path is instead
+  bounded by a partial unique index allowing one active purchase per user.
+- **Wallet creation is rate limited.** `/agent/create-wallet` runs on the shared
+  token alone and mints a per-user token for whatever id it is given, so it is
+  capped both per user and globally
+  (`SIGN402_WALLET_CREATIONS_PER_MINUTE`, default 30/min).
 
 ### Residual assumption (#9): the sidecar is trusted
 

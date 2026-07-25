@@ -4,6 +4,7 @@ import os
 import stat
 import subprocess
 import tempfile
+import threading
 import unittest
 from contextlib import ExitStack
 from decimal import Decimal
@@ -42,6 +43,7 @@ from sign402_gateway.server import (
     DEFAULT_SINGIT_RISK_CHECK_URL,
     DEFAULT_SINGIT_TOKEN_ADDRESS,
     ExternalX402Buyer,
+    SPEND_RESERVATION_TTL_SECONDS,
     Sign402GatewayHandler,
     SingitSettlementVerifier,
     UserPurchaseStore,
@@ -136,6 +138,37 @@ class DummyServer:
             "userConfigured": False,
         }
         self.user_spend_limit_store.spent_today_atomic.return_value = 0
+        # Mirror the real store's contract: a reservation is refused (None)
+        # exactly when the amount does not fit the caps. Without this the Mock
+        # would hand back a truthy handle and every cap test would pass
+        # vacuously.
+        self.user_spend_limit_store.reserve_within_limits.side_effect = (
+            self._reserve_within_limits
+        )
+
+    def _reserve_within_limits(
+        self,
+        telegram_user_id,
+        *,
+        amount_atomic,
+        asset,
+        network,
+        max_per_tx_atomic,
+        daily_cap_atomic,
+        **_kwargs,
+    ):
+        amount = int(amount_atomic)
+        if max_per_tx_atomic is not None and amount > int(max_per_tx_atomic):
+            return None
+        if daily_cap_atomic is not None:
+            spent = int(
+                self.user_spend_limit_store.spent_today_atomic(
+                    telegram_user_id, asset=asset, network=network
+                )
+            )
+            if spent + amount > int(daily_cap_atomic):
+                return None
+        return "hold_test"
 
 
 class FakeSocket:
@@ -1576,6 +1609,21 @@ class GatewayServerTests(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertEqual(body["txId"], "0x" + "b" * 64)
         server.imessage_approval_service.request_hash_approval.assert_called_once()
+        # The approval is the only safeguard on a withdrawal, so the approver
+        # must see the destination in full. An abbreviated address cannot be
+        # distinguished from a cheaply generated look-alike.
+        approval_kwargs = (
+            server.imessage_approval_service.request_hash_approval.call_args.kwargs
+        )
+        self.assertIn(
+            "To: 0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+            approval_kwargs["context_lines"],
+        )
+        destination_lines = [
+            line for line in approval_kwargs["context_lines"] if line.startswith("To:")
+        ]
+        self.assertEqual(len(destination_lines), 1)
+        self.assertNotIn("...", destination_lines[0])
         server.user_token_transfer_client.transfer_token.assert_called_once_with(
             private_key="0xSECRET",
             to_address="0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
@@ -2036,6 +2084,32 @@ class GatewayServerTests(unittest.TestCase):
             telegram_user_id="1045618308",
             telegram_username="AlpskyKnedlik",
         )
+
+    def test_agent_create_wallet_is_rate_limited_across_all_users(self):
+        """A leaked shared token must not be able to mint tokens in bulk.
+
+        Limiting per telegramUserId alone would not bite, because the caller
+        picks the id and can walk a fresh one on every request.
+        """
+        server = DummyServer()
+        server.user_wallet_service.create_wallet.return_value = {"ok": True}
+        statuses = []
+
+        with patch("sys.stderr", io.StringIO()):
+            with patch.dict(
+                os.environ, {"SIGN402_WALLET_CREATIONS_PER_MINUTE": "3"}
+            ):
+                for index in range(5):
+                    handler = self.make_handler(
+                        "/agent/create-wallet",
+                        {"telegramUserId": f"10456183{index:02d}"},
+                        server=server,
+                        headers=self.wallet_auth_headers(),
+                    )
+                    statuses.append("HTTP/1.0 200 OK" in self.response_text(handler))
+
+        self.assertEqual(statuses, [True, True, True, False, False])
+        self.assertEqual(server.user_wallet_service.create_wallet.call_count, 3)
 
     def test_agent_create_wallet_requires_wallet_api_token(self):
         server = DummyServer()
@@ -3133,16 +3207,16 @@ class GatewayServerTests(unittest.TestCase):
         saved = server.user_event_store.write.call_args
         self.assertEqual(saved.args[0], "1045618308")
         self.assertEqual(saved.args[1]["telegramUserId"], "1045618308")
-        server.user_spend_limit_store.spent_today_atomic.assert_called_once_with(
-            "1045618308",
-            asset="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-            network="base-mainnet",
-        )
-        server.user_spend_limit_store.record_successful_spend.assert_called_once()
-        spend_args = server.user_spend_limit_store.record_successful_spend.call_args
-        self.assertEqual(spend_args.args[0], "1045618308")
-        self.assertEqual(spend_args.kwargs["amount_atomic"], 1000)
-        self.assertEqual(spend_args.kwargs["tx_id"], "0xTX")
+        reserve_args = server.user_spend_limit_store.reserve_within_limits.call_args
+        self.assertEqual(reserve_args.args[0], "1045618308")
+        self.assertEqual(reserve_args.kwargs["amount_atomic"], 1000)
+        self.assertEqual(reserve_args.kwargs["network"], "base-mainnet")
+        # The hold is settled, never released, once the payment succeeds.
+        server.user_spend_limit_store.settle_reservation.assert_called_once()
+        settle_args = server.user_spend_limit_store.settle_reservation.call_args
+        self.assertEqual(settle_args.args[0], "hold_test")
+        self.assertEqual(settle_args.kwargs["tx_id"], "0xTX")
+        server.user_spend_limit_store.release_reservation.assert_not_called()
 
     def test_agent_buy_tool_preflights_shared_user_state_before_external_side_effects(
         self,
@@ -3905,11 +3979,12 @@ class GatewayServerTests(unittest.TestCase):
 
         self.assertIn("HTTP/1.0 400", response)
         self.assertIn("daily spending cap", body["error"])
-        server.user_spend_limit_store.spent_today_atomic.assert_called_once_with(
+        server.user_spend_limit_store.spent_today_atomic.assert_any_call(
             "1045618308",
             asset="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
             network="base-mainnet",
         )
+        server.user_spend_limit_store.settle_reservation.assert_not_called()
         server.imessage_approval_service.request_purchase_approval.assert_not_called()
         server.user_wallet_service.decrypt_private_key_for_future_signing.assert_not_called()
         server.user_x402_buyer.assert_not_called()
@@ -3960,6 +4035,58 @@ class GatewayServerTests(unittest.TestCase):
         self.assertIn("iMessage is not linked", body["telegramText"])
         server.user_wallet_service.decrypt_private_key_for_future_signing.assert_not_called()
         server.user_x402_buyer.assert_not_called()
+        # The budget was held before the prompt; a refused prompt must give it
+        # back, or one declined purchase would burn the user's daily cap.
+        server.user_spend_limit_store.release_reservation.assert_called_once_with(
+            "hold_test"
+        )
+        server.user_spend_limit_store.settle_reservation.assert_not_called()
+
+    def test_agent_buy_tool_for_user_releases_the_hold_when_payment_fails(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
+        server.imessage_approval_service.request_purchase_approval.return_value = {
+            "ok": True,
+            "status": "approved",
+        }
+        server.user_x402_buyer.side_effect = ValueError("x402 resource denied payment")
+        payment_requirements = {
+            "scheme": "exact",
+            "network": "base-mainnet",
+            "x402Network": "eip155:8453",
+            "amountAtomic": "1000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "receiver": "0x0E84dDEdAaE6A779c462C22a59F301EC31B6b808",
+            "paymentIntent": "crypto-news-1",
+            "purpose": "x402_api_access",
+            "extra": {"name": "USD Coin", "version": "2"},
+        }
+
+        with patch("sys.stderr", io.StringIO()):
+            with (
+                patch(
+                    "sign402_gateway.server.fetch_x402_payment_required",
+                    return_value={"x402Version": 2, "accepts": [{}]},
+                ),
+                patch(
+                    "sign402_gateway.server.normalize_x402_payment_required",
+                    return_value=payment_requirements,
+                ),
+            ):
+                handler = self.make_handler(
+                    "/agent/buy-tool",
+                    {"tool": "news", "telegramUserId": "1045618308"},
+                    server=server,
+                    headers=self.llm_auth_headers(),
+                )
+
+        response = self.response_text(handler)
+
+        self.assertIn("HTTP/1.0 400", response)
+        server.user_spend_limit_store.release_reservation.assert_called_once_with(
+            "hold_test"
+        )
+        server.user_spend_limit_store.settle_reservation.assert_not_called()
         server.user_spend_limit_store.record_successful_spend.assert_not_called()
 
     def test_agent_buy_tool_rejects_per_user_token_acting_as_another_user(self):
@@ -5624,6 +5751,7 @@ class GatewayServerTests(unittest.TestCase):
                 "priceUsd": "0.005",
                 "totalUsd": "0.0051",
                 "txId": "0xTX",
+                "spendReservationId": "hold_bitrefill",
             }
         )
 
@@ -5639,9 +5767,13 @@ class GatewayServerTests(unittest.TestCase):
             )
 
         self.assertIn("HTTP/1.0 200 OK", self.response_text(handler))
-        server.user_spend_limit_store.record_successful_spend.assert_called_once()
-        kwargs = server.user_spend_limit_store.record_successful_spend.call_args.kwargs
-        self.assertEqual(kwargs["amount_atomic"], 5100)  # 0.0051 USDC
+        # The runner already holds the budget; the handler settles that hold
+        # rather than recording a second, unreserved spend.
+        server.user_spend_limit_store.settle_reservation.assert_called_once()
+        settle_args = server.user_spend_limit_store.settle_reservation.call_args
+        self.assertEqual(settle_args.args[0], "hold_bitrefill")
+        self.assertEqual(settle_args.kwargs["tx_id"], "0xTX")
+        server.user_spend_limit_store.record_successful_spend.assert_not_called()
 
     def test_internal_fulfill_bitrefill_requires_service_secret(self):
         server = DummyServer()
@@ -6411,6 +6543,139 @@ class GatewayServerTests(unittest.TestCase):
             requirement,
         )
         agent_state_store.record_payment.assert_called_once_with(algo_hash, "intent-001", 10000)
+
+
+class SpendReservationTests(unittest.TestCase):
+    """A purchase must hold its budget while it waits for human approval.
+
+    The cap is checked before the approval prompt and only recorded after the
+    payment settles, so without a hold a second purchase started inside that
+    window measures itself against a stale total and the daily cap is exceeded.
+    """
+
+    def make_store(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        return UserSpendLimitStore(Path(temp_dir.name) / "limits.json")
+
+    def reserve(self, store, amount_atomic, *, daily_cap_atomic=1_000_000):
+        return store.reserve_within_limits(
+            "1045618308",
+            amount_atomic=amount_atomic,
+            asset="0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            network="base-mainnet",
+            max_per_tx_atomic=None,
+            daily_cap_atomic=daily_cap_atomic,
+        )
+
+    def test_unsettled_reservation_still_consumes_the_daily_cap(self):
+        store = self.make_store()
+
+        first = self.reserve(store, 600_000)
+        second = self.reserve(store, 600_000)
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+
+    def test_released_reservation_frees_the_daily_cap_again(self):
+        store = self.make_store()
+
+        first = self.reserve(store, 600_000)
+        store.release_reservation(first)
+        second = self.reserve(store, 600_000)
+
+        self.assertIsNotNone(second)
+
+    def test_settled_reservation_keeps_consuming_the_daily_cap(self):
+        store = self.make_store()
+
+        first = self.reserve(store, 600_000)
+        store.settle_reservation(first, tx_id="0xabc")
+        second = self.reserve(store, 600_000)
+
+        self.assertIsNone(second)
+        self.assertEqual(
+            store.spent_today_atomic(
+                "1045618308",
+                asset="0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                network="base-mainnet",
+            ),
+            600_000,
+        )
+
+    def test_settling_a_reservation_does_not_double_count_it(self):
+        store = self.make_store()
+
+        handle = self.reserve(store, 400_000)
+        store.settle_reservation(handle, tx_id="0xabc")
+
+        self.assertEqual(
+            store.spent_today_atomic(
+                "1045618308",
+                asset="0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                network="base-mainnet",
+            ),
+            400_000,
+        )
+
+    def test_expired_reservation_stops_blocking_new_purchases(self):
+        store = self.make_store()
+
+        with patch("time.time", return_value=1_000.0):
+            first = self.reserve(store, 600_000)
+            self.assertIsNotNone(first)
+
+        later = 1_000.0 + SPEND_RESERVATION_TTL_SECONDS + 1
+        with patch("time.time", return_value=later):
+            second = self.reserve(store, 600_000)
+
+        self.assertIsNotNone(second)
+
+    def test_per_transaction_cap_is_enforced_by_the_reservation(self):
+        store = self.make_store()
+
+        handle = store.reserve_within_limits(
+            "1045618308",
+            amount_atomic=200_000,
+            asset="0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            network="base-mainnet",
+            max_per_tx_atomic=100_000,
+            daily_cap_atomic=1_000_000,
+        )
+
+        self.assertIsNone(handle)
+
+    def test_concurrent_reservations_cannot_both_win_the_last_slot(self):
+        store = self.make_store()
+        results = []
+        barrier = threading.Barrier(8)
+
+        def attempt():
+            barrier.wait()
+            results.append(self.reserve(store, 600_000))
+
+        threads = [threading.Thread(target=attempt) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(len([value for value in results if value is not None]), 1)
+
+    def test_reservations_are_scoped_per_user(self):
+        store = self.make_store()
+
+        self.reserve(store, 600_000)
+        other = store.reserve_within_limits(
+            "2045618308",
+            amount_atomic=600_000,
+            asset="0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            network="base-mainnet",
+            max_per_tx_atomic=None,
+            daily_cap_atomic=1_000_000,
+        )
+
+        self.assertIsNotNone(other)
 
 
 class AgentStateStoreTests(unittest.TestCase):
