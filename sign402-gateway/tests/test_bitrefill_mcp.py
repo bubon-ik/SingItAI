@@ -1015,6 +1015,51 @@ class BitrefillMcpCatalogTests(unittest.TestCase):
                 recipient={"phone": "+12025550123"},
             )
 
+    def test_quote_accepts_price_equal_to_live_cap_and_rejects_price_above_it(self):
+        product = {
+            "product_id": "large-gift-card-us",
+            "name": "Large Gift Card",
+            "country": "US",
+            "currency": "USD",
+            "recipient_type": "none",
+            "packages": [
+                {
+                    "package_id": "large-gift-card-us<&>1000",
+                    "package_value": "1000",
+                    "price": "1000.00",
+                },
+                {
+                    "package_id": "large-gift-card-us<&>1000.01",
+                    "package_value": "1000.01",
+                    "price": "1000.01",
+                },
+            ],
+        }
+        client = McpBitrefillClient(
+            api_key="key_123",
+            max_purchase_usd="1000.00",
+            call_tool=FakeMcpCaller([product, product]),
+        )
+
+        quote = client.quote_product(
+            product_id="large-gift-card-us",
+            package_id="large-gift-card-us<&>1000",
+            country="US",
+            recipient={},
+        )
+        self.assertEqual(quote["priceUsd"], "1000.00")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"exceeds live Bitrefill max \$1000\.00",
+        ):
+            client.quote_product(
+                product_id="large-gift-card-us",
+                package_id="large-gift-card-us<&>1000.01",
+                country="US",
+                recipient={},
+            )
+
 
 APPROVED_QUOTE = {
     "quoteId": "quote_live_1",

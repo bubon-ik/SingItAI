@@ -541,8 +541,9 @@ class GatewayClient:
         )
         if live_max_match:
             return (
-                "This Bitrefill amount is above the current live purchase limit "
-                f"({live_max_match.group(1)}). Choose a smaller amount or another product."
+                "This product exceeds the Bitrefill product maximum "
+                f"({live_max_match.group(1)}), which is separate from your wallet limits. "
+                "Choose a smaller product or ask the operator to raise the Bitrefill limit."
             )
         if (
             "\n" in error

@@ -472,7 +472,9 @@ class GatewayClientTests(unittest.TestCase):
 
         self.assertEqual(
             raised.exception.user_message,
-            "This Bitrefill amount is above the current live purchase limit ($5.00). Choose a smaller amount or another product.",
+            "This product exceeds the Bitrefill product maximum ($5.00), "
+            "which is separate from your wallet limits. Choose a smaller "
+            "product or ask the operator to raise the Bitrefill limit.",
         )
 
     def test_execute_bitrefill_purchase_hides_upstream_stack_traces(self):
@@ -608,8 +610,21 @@ class GatewayClientTests(unittest.TestCase):
         )
 
     def test_execute_spending_limits_shows_current_limits(self):
+        message = (
+            "Current spending limits.\n\n"
+            "Your spending limits:\n"
+            "- Max per transaction: 50 USDC\n"
+            "- Daily cap: 1000 USDC\n\n"
+            "Platform maximums:\n"
+            "- Max per transaction: 1020 USDC\n"
+            "- Daily cap: 5000 USDC\n\n"
+            "Bitrefill product maximum: 1000 USD before the 2% service fee.\n"
+            "Service fees count toward your spending limits.\n"
+            "The lowest applicable limit wins.\n\n"
+            "To change: /limits <per-transaction> <daily>"
+        )
         opener = RecordingOpener(
-            response=FakeResponse(b'{"telegramText":"Current spending limits."}')
+            response=FakeResponse(json.dumps({"telegramText": message}).encode("utf-8"))
         )
 
         result = self.make_client(opener).execute_spending_limits(
@@ -618,7 +633,7 @@ class GatewayClientTests(unittest.TestCase):
         )
 
         request, timeout = opener.requests[0]
-        self.assertEqual(result, "Current spending limits.")
+        self.assertEqual(result, message)
         self.assertEqual(request.full_url, "http://127.0.0.1:8099/agent/spending-limits")
         self.assertEqual(timeout, 5.0)
         self.assertEqual(json.loads(request.data), {"telegramUserId": "1045618308"})
@@ -631,8 +646,8 @@ class GatewayClientTests(unittest.TestCase):
 
         result = self.make_client(opener).execute_spending_limits(
             TelegramIdentity(user_id="1045618308", username="AlpskyKnedlik"),
-            max_per_tx_usdc="0.005",
-            daily_cap_usdc="0.05",
+            max_per_tx_usdc="200",
+            daily_cap_usdc="1000",
             user_access_token="user-token-1",
         )
 
@@ -643,8 +658,8 @@ class GatewayClientTests(unittest.TestCase):
             {
                 "telegramUserId": "1045618308",
                 "telegramUsername": "AlpskyKnedlik",
-                "maxPerTxUsdc": "0.005",
-                "dailyCapUsdc": "0.05",
+                "maxPerTxUsdc": "200",
+                "dailyCapUsdc": "1000",
             },
         )
         self.assertEqual(request.get_header("X-sign402-user-token"), "user-token-1")

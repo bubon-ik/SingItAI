@@ -2892,7 +2892,7 @@ class PluginRegistrationTests(unittest.TestCase):
 
         result = context.hooks["pre_gateway_dispatch"](
             event=FakeEvent(
-                "/limits 0.004 0.04",
+                "/limits 200 1000",
                 "1045618308",
                 platform="telegram",
                 chat_id="telegram-chat",
@@ -2906,7 +2906,7 @@ class PluginRegistrationTests(unittest.TestCase):
         )
         self.assertEqual(
             client.limits_calls,
-            [("1045618308", None, "0.004", "0.04", "user-access-token")],
+            [("1045618308", None, "200", "1000", "user-access-token")],
         )
 
     def test_set_limits_requires_two_numbers(self):

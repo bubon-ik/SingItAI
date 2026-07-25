@@ -3714,8 +3714,8 @@ class GatewayServerTests(unittest.TestCase):
                     "/agent/spending-limits",
                     {
                         "telegramUserId": "1045618308",
-                        "maxPerTxUsdc": "100",
-                        "dailyCapUsdc": "500",
+                        "maxPerTxUsdc": "200",
+                        "dailyCapUsdc": "1000",
                     },
                     server=server,
                     headers=self.llm_auth_headers(),
@@ -3726,9 +3726,41 @@ class GatewayServerTests(unittest.TestCase):
 
         self.assertIn("HTTP/1.0 200 OK", response)
         self.assertTrue(body["ok"])
-        self.assertEqual(body["limits"]["maxPerTxAtomic"], 100000000)
-        self.assertEqual(body["limits"]["dailyCapAtomic"], 500000000)
+        self.assertEqual(body["limits"]["maxPerTxAtomic"], 200_000_000)
+        self.assertEqual(body["limits"]["dailyCapAtomic"], 1_000_000_000)
         self.assertTrue(body["limits"]["userConfigured"])
+
+    def test_agent_spending_limits_accepts_values_equal_to_production_ceilings(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server.user_spend_limit_store = UserSpendLimitStore(Path(tmpdir) / "limits.json")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SIGN402_USER_WALLET_CEILING_ATOMIC_PER_TX": "1020000000",
+                    "SIGN402_USER_WALLET_CEILING_DAILY_ATOMIC": "5000000000",
+                },
+            ):
+                with patch("sys.stderr", io.StringIO()):
+                    handler = self.make_handler(
+                        "/agent/spending-limits",
+                        {
+                            "telegramUserId": "1045618308",
+                            "maxPerTxUsdc": "1020",
+                            "dailyCapUsdc": "5000",
+                        },
+                        server=server,
+                        headers=self.llm_auth_headers(),
+                    )
+
+        response = self.response_text(handler)
+        body = json.loads(response.split("\r\n\r\n", 1)[1])
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertEqual(body["limits"]["maxPerTxAtomic"], 1_020_000_000)
+        self.assertEqual(body["limits"]["dailyCapAtomic"], 5_000_000_000)
 
     def test_authenticated_requests_are_rate_limited_per_user(self):
         server = DummyServer()
@@ -3795,8 +3827,8 @@ class GatewayServerTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "SIGN402_USER_WALLET_CEILING_ATOMIC_PER_TX": "50000000",
-                    "SIGN402_USER_WALLET_CEILING_DAILY_ATOMIC": "100000000",
+                    "SIGN402_USER_WALLET_CEILING_ATOMIC_PER_TX": "1020000000",
+                    "SIGN402_USER_WALLET_CEILING_DAILY_ATOMIC": "5000000000",
                 },
             ):
                 with patch("sys.stderr", io.StringIO()):
@@ -3804,8 +3836,8 @@ class GatewayServerTests(unittest.TestCase):
                         "/agent/spending-limits",
                         {
                             "telegramUserId": "1045618308",
-                            "maxPerTxUsdc": "100",
-                            "dailyCapUsdc": "500",
+                            "maxPerTxUsdc": "1020.000001",
+                            "dailyCapUsdc": "5000",
                         },
                         server=server,
                         headers=self.llm_auth_headers(),
@@ -3816,7 +3848,39 @@ class GatewayServerTests(unittest.TestCase):
 
         self.assertIn("HTTP/1.0 400", response)
         self.assertFalse(body["ok"])
-        self.assertIn("operator ceiling", body["error"])
+        self.assertIn("1020 USDC", body["error"])
+
+    def test_agent_spending_limits_rejects_daily_cap_above_operator_ceiling(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server.user_spend_limit_store = UserSpendLimitStore(Path(tmpdir) / "limits.json")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SIGN402_USER_WALLET_CEILING_ATOMIC_PER_TX": "1020000000",
+                    "SIGN402_USER_WALLET_CEILING_DAILY_ATOMIC": "5000000000",
+                },
+            ):
+                with patch("sys.stderr", io.StringIO()):
+                    handler = self.make_handler(
+                        "/agent/spending-limits",
+                        {
+                            "telegramUserId": "1045618308",
+                            "maxPerTxUsdc": "1020",
+                            "dailyCapUsdc": "5000.000001",
+                        },
+                        server=server,
+                        headers=self.llm_auth_headers(),
+                    )
+
+        response = self.response_text(handler)
+        body = json.loads(response.split("\r\n\r\n", 1)[1])
+
+        self.assertIn("HTTP/1.0 400", response)
+        self.assertFalse(body["ok"])
+        self.assertIn("5000 USDC", body["error"])
 
     def test_agent_spending_limits_clamps_stored_limits_to_lowered_ceiling(self):
         server = DummyServer()
@@ -5913,6 +5977,59 @@ class GatewayServerTests(unittest.TestCase):
         response = self.response_text(handler)
         self.assertIn("HTTP/1.0 400", response)
         self.assertIn("cap", response.lower())
+
+    def test_quote_bitrefill_accepts_1020_total_at_personal_limit(self):
+        server = DummyServer()
+        server.user_wallet_api_token = "wallet-token-secret-value"
+        server.user_wallet_service.resolve_telegram_user_id = Mock(
+            return_value="1045618308"
+        )
+        server.bitrefill_quote_service = Mock(
+            return_value={
+                "ok": True,
+                "priceUsd": "1000.00",
+                "serviceFeeUsd": "20.00",
+                "totalUsd": "1020.00",
+                "quoteId": "q-large",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = UserSpendLimitStore(Path(tmpdir) / "limits.json")
+            server.user_spend_limit_store = store
+            store.set_limit_settings(
+                "1045618308",
+                max_per_tx_atomic=1_020_000_000,
+                daily_cap_atomic=5_000_000_000,
+                operator_max_per_tx_atomic=10_000,
+                operator_daily_cap_atomic=100_000,
+                operator_ceiling_per_tx_atomic=1_020_000_000,
+                operator_ceiling_daily_atomic=5_000_000_000,
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "SIGN402_USER_WALLET_CEILING_ATOMIC_PER_TX": "1020000000",
+                    "SIGN402_USER_WALLET_CEILING_DAILY_ATOMIC": "5000000000",
+                },
+            ):
+                with patch("sys.stderr", io.StringIO()):
+                    handler = self.make_handler(
+                        "/agent/quote-bitrefill",
+                        {
+                            "productId": "large-gift-card-us",
+                            "packageId": "1000",
+                            "telegramUserId": "1045618308",
+                        },
+                        headers={
+                            "Authorization": "Bearer wallet-token-secret-value",
+                            "X-Sign402-User-Token": "user-token-1",
+                        },
+                        server=server,
+                    )
+
+        response = self.response_text(handler)
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertIn('"totalUsd": "1020.00"', response)
 
     def test_buy_wallet_bitrefill_records_user_spend(self):
         server = DummyServer()
