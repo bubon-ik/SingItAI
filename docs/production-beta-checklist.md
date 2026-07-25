@@ -146,14 +146,19 @@ per UTC day. Wallet limits include the 2% fee, so a $1,000 product needs a
 1,020 USDC personal transaction limit. The Bitrefill cap is checked before the
 fee, and the lowest applicable limit wins.
 
-For production validation, keep `SIGN402_PURCHASES_PAUSED=1`; never call a buy
-or fulfillment endpoint. To roll back, restore the pre-change environment
-backup and restart the service.
+For production configuration verification only, keep
+`SIGN402_PURCHASES_PAUSED=1`; never call a buy or fulfillment endpoint. Do not
+proceed to the separate manual live-purchase smoke flow while purchases are
+paused. To roll back, restore the pre-change environment backup and restart the
+service.
 
-## Fresh User Flow
+## Authorized Manual Live-Purchase Smoke Flow (Pre-rollout Only)
 
-Run this with a Telegram account that was never allowlisted and never used the
-bot before:
+This flow is not part of paused production configuration verification. Run it
+only as a separately authorized pre-rollout manual live-purchase smoke test,
+after configuration verification is complete and purchases have been explicitly
+authorized. Run this with a Telegram account that was never allowlisted and
+never used the bot before:
 
 1. Send `/start`.
 2. Confirm wallet is created and Base address is shown.
