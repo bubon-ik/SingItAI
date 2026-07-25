@@ -113,6 +113,34 @@ from .imessage_approvals import (
 
 HEX_32_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 BUY_TOOL_DUPLICATE_SUPPRESSION_SECONDS = 120
+FUND_MOVING_POST_PATHS = frozenset(
+    {
+        "/approve-payment",
+        "/execute-payment",
+        "/agent/buy-probe",
+        "/agent/buy-tool",
+        "/agent/buy-x402",
+        "/agent/top-up-llm-credits",
+        "/agent/buy-bitrefill",
+        "/agent/buy-wallet-bitrefill",
+        "/agent/withdraw",
+        "/agent/llm-key/start",
+        "/agent/llm-key/verify",
+        "/agent/llm-key/reconcile",
+        "/internal/fulfill-bitrefill",
+    }
+)
+_PURCHASES_PAUSED_MESSAGE = (
+    "⏸️ Purchases are temporarily paused for maintenance. "
+    "Please try again later."
+)
+
+
+def _purchases_paused() -> bool:
+    return os.getenv(
+        "SIGN402_PURCHASES_PAUSED",
+        "",
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
 
 PAID_TOOLS: dict[str, dict[str, Any]] = {
@@ -469,6 +497,10 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "not_found"}, status=404)
 
     def do_POST(self) -> None:
+        path = self.path.split("?", 1)[0]
+        if path in FUND_MOVING_POST_PATHS and self._reject_if_purchases_paused():
+            return
+
         try:
             declared_length = int(self.headers.get("Content-Length", "0"))
         except (TypeError, ValueError):
@@ -481,7 +513,6 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "request_body_too_large"}, status=413)
             return
 
-        path = self.path.split("?", 1)[0]
         if path == "/approve-policy":
             self._handle_approve_policy()
             return
@@ -1708,6 +1739,19 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         if not HEX_32_RE.fullmatch(policy_hash):
             raise ValueError("stored policyHash must be 64 hex characters")
         return policy_hash
+
+    def _reject_if_purchases_paused(self) -> bool:
+        if not _purchases_paused():
+            return False
+        self._send_json(
+            {
+                "ok": False,
+                "paused": True,
+                "telegramText": _PURCHASES_PAUSED_MESSAGE,
+            },
+            status=503,
+        )
+        return True
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))

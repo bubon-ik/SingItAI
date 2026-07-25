@@ -22,7 +22,9 @@ from sign402_gateway.secure_state import (
 )
 from sign402_gateway.user_wallets import BASE_NATIVE_ETH_ASSET_ID
 from sign402_gateway.server import (
+    FUND_MOVING_POST_PATHS,
     _USER_RATE_LIMITER,
+    _purchases_paused,
     AgentStateStore,
     BankrCliX402PaymentClient,
     BankrLlmCreditsTopUpClient,
@@ -1090,6 +1092,201 @@ class GatewayServerTests(unittest.TestCase):
             **self.wallet_auth_headers(),
             "X-Sign402-User-Token": user_token,
         }
+
+    def test_kill_switch_blocks_every_transaction_route_before_dispatch(self):
+        routes = {
+            "/approve-payment": "_handle_approve_payment",
+            "/execute-payment": "_handle_execute_payment",
+            "/agent/buy-probe": "_handle_agent_buy_probe",
+            "/agent/buy-tool": "_handle_agent_buy_tool",
+            "/agent/buy-x402": "_handle_agent_buy_x402",
+            "/agent/top-up-llm-credits": "_handle_agent_top_up_llm_credits",
+            "/agent/buy-bitrefill": "_handle_agent_buy_bitrefill",
+            "/agent/buy-wallet-bitrefill": "_handle_agent_buy_wallet_bitrefill",
+            "/agent/withdraw": "_handle_agent_withdraw",
+            "/agent/llm-key/start": "_handle_agent_llm_key_start",
+            "/agent/llm-key/verify": "_handle_agent_llm_key_verify",
+            "/agent/llm-key/reconcile": "_handle_agent_llm_key_reconcile",
+            "/internal/fulfill-bitrefill": (
+                "_handle_internal_fulfill_bitrefill"
+            ),
+        }
+        self.assertEqual(FUND_MOVING_POST_PATHS, frozenset(routes))
+
+        for enabled in ("1", "true", "yes", "on"):
+            with patch.dict(
+                os.environ,
+                {"SIGN402_PURCHASES_PAUSED": enabled},
+            ):
+                for path, handler_name in routes.items():
+                    with self.subTest(enabled=enabled, path=path):
+                        server = DummyServer()
+                        server.firefly = Mock()
+                        server.payment_executor = Mock()
+                        server.agent_buy_probe = Mock()
+                        server.x402_buyer = Mock()
+                        server.user_x402_buyer = Mock()
+                        server.bankr_llm_topup = Mock()
+                        server.bitrefill_purchase_runner = Mock()
+                        server.bitrefill_wallet_purchase_runner = Mock()
+                        server.bitrefill_fulfillment_runner = Mock()
+                        tripwires = (
+                            server.firefly.approve_payment_hash,
+                            server.payment_executor,
+                            server.agent_buy_probe,
+                            server.x402_buyer,
+                            server.user_x402_buyer,
+                            server.bankr_llm_topup,
+                            server.bitrefill_purchase_runner,
+                            server.bitrefill_wallet_purchase_runner,
+                            server.bitrefill_fulfillment_runner,
+                            server.user_wallet_service.decrypt_private_key_for_future_signing,
+                            server.user_token_transfer_client.transfer_token,
+                            server.user_token_transfer_client.transfer_native,
+                            server.imessage_approval_service.request_purchase_approval,
+                            server.bankr_llm_purchase_service.start,
+                            server.bankr_llm_purchase_service.verify_otp,
+                            server.bankr_llm_purchase_service.resume,
+                            server.bankr_llm_purchase_service.reconcile,
+                        )
+                        with patch.object(
+                            Sign402GatewayHandler,
+                            "_read_json",
+                            side_effect=AssertionError("body was read"),
+                        ) as read_json:
+                            with patch.object(
+                                Sign402GatewayHandler,
+                                handler_name,
+                                side_effect=AssertionError(
+                                    "handler was dispatched"
+                                ),
+                            ):
+                                with patch("sys.stderr", io.StringIO()):
+                                    handler = self.make_handler(
+                                        path,
+                                        {},
+                                        server=server,
+                                        headers=self.llm_auth_headers(),
+                                    )
+                        response = self.response_text(handler)
+                        body = json.loads(
+                            response.split("\r\n\r\n", 1)[1]
+                        )
+                        self.assertIn("HTTP/1.0 503", response)
+                        self.assertEqual(
+                            body,
+                            {
+                                "ok": False,
+                                "paused": True,
+                                "telegramText": (
+                                    "⏸️ Purchases are temporarily paused for "
+                                    "maintenance. Please try again later."
+                                ),
+                            },
+                        )
+                        read_json.assert_not_called()
+                        for tripwire in tripwires:
+                            tripwire.assert_not_called()
+
+    def test_kill_switch_allows_representative_non_transaction_routes(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "u"
+        server.user_event_store = Mock()
+        server.user_event_store.read.return_value = {
+            "ok": True,
+            "telegramText": "Last purchase",
+        }
+        server.bitrefill_search_service = Mock(
+            return_value={"ok": True, "products": []}
+        )
+        server.bitrefill_quote_service = Mock(
+            return_value={"ok": True, "quoteId": "q1"}
+        )
+        server.bitrefill_settlement_preparation_runner = Mock(
+            return_value={
+                "ok": True,
+                "quoteId": "q1",
+                "status": "ready",
+            }
+        )
+        server.user_spend_limit_store.limit_settings.return_value = {
+            "maxPerTxAtomic": 10000,
+            "dailyCapAtomic": 100000,
+            "maxPerTxUsdc": "0.01",
+            "dailyCapUsdc": "0.1",
+            "operatorMaxPerTxAtomic": 10000,
+            "operatorDailyCapAtomic": 100000,
+            "userConfigured": False,
+        }
+        server.user_spend_limit_store.set_limit_settings.return_value = dict(
+            server.user_spend_limit_store.limit_settings.return_value
+        )
+        cases = (
+            (
+                "/agent/spending-limits",
+                {"telegramUserId": "u"},
+                self.llm_auth_headers(),
+            ),
+            (
+                "/agent/spending-limits",
+                {
+                    "telegramUserId": "u",
+                    "maxPerTxAtomic": 10000,
+                    "dailyCapAtomic": 100000,
+                },
+                self.llm_auth_headers(),
+            ),
+            (
+                "/agent/last-purchase",
+                {"telegramUserId": "u"},
+                self.llm_auth_headers(),
+            ),
+            (
+                "/agent/search-bitrefill",
+                {"query": "gift"},
+                None,
+            ),
+            (
+                "/agent/quote-bitrefill",
+                {"productId": "p1", "packageId": "pkg1"},
+                None,
+            ),
+            (
+                "/internal/prepare-bitrefill-settlement",
+                {"quoteId": "q1", "fulfillmentToken": "test"},
+                {"Authorization": "Bearer internal-test-secret"},
+            ),
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "SIGN402_PURCHASES_PAUSED": "1",
+                "SIGN402_BANKR_FULFILLMENT_SECRET": (
+                    "internal-test-secret"
+                ),
+            },
+        ):
+            for path, payload, headers in cases:
+                with self.subTest(path=path):
+                    with patch("sys.stderr", io.StringIO()):
+                        handler = self.make_handler(
+                            path,
+                            payload,
+                            server=server,
+                            headers=headers,
+                        )
+                    response = self.response_text(handler)
+                    self.assertIn("HTTP/1.0 200 OK", response)
+                    self.assertNotIn("HTTP/1.0 503", response)
+
+    def test_purchase_pause_parser_rejects_all_other_values(self):
+        for value in ("", "0", "false", "no", "off", "enabled"):
+            with self.subTest(value=value):
+                with patch.dict(
+                    os.environ,
+                    {"SIGN402_PURCHASES_PAUSED": value},
+                ):
+                    self.assertFalse(_purchases_paused())
 
     def test_withdraw_tokens_requires_per_user_token(self):
         server = DummyServer()
