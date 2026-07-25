@@ -200,6 +200,49 @@ class CommerceStoreTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, error):
                         store.checkpoint("q1", update)
                     self.assertEqual(raw_metadata(path, "q1"), before)
+
+    def test_checkpoint_rejects_non_scalar_order_id_after_sixteenth_without_mutation(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.sqlite3"
+            store = BitrefillCommerceStore(path, cipher=test_cipher())
+            store.save_quote(
+                {
+                    "quoteId": "q1",
+                    "productId": "trusted-product",
+                    "packageId": "trusted-package",
+                    "packageValue": "25",
+                    "expiresAtEpoch": 999,
+                }
+            )
+            before = raw_metadata(path, "q1")
+            nested_marker = "ORDER-ID-NESTED-SECRET"
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"bitrefillCheckpoint\.orderIds\[16\] must be a scalar value",
+            ):
+                store.checkpoint(
+                    "q1",
+                    {
+                        "bitrefillCheckpoint": {
+                            "invoiceId": "invoice-1",
+                            "orderIds": [
+                                *(f"order-{index}" for index in range(16)),
+                                {"secret": nested_marker},
+                            ],
+                        }
+                    },
+                )
+
+            self.assertEqual(raw_metadata(path, "q1"), before)
+            for sidecar in path.parent.glob(f"{path.name}*"):
+                self.assertNotIn(
+                    nested_marker,
+                    sidecar.read_bytes().decode("utf-8", errors="ignore"),
+                )
+
     def test_initialization_closes_database_connection(self):
         connection = MagicMock()
         with tempfile.TemporaryDirectory() as tmp:

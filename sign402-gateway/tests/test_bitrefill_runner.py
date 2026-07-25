@@ -2020,6 +2020,64 @@ class BitrefillRunnerTests(unittest.TestCase):
             self.assertFalse(result["redemptionAvailable"])
             self.assertEqual(store.get_quote("q1")["state"], "BITREFILL_PURCHASED")
 
+    def test_initial_provider_delivery_with_empty_redemption_does_not_claim_delivery(
+        self,
+    ):
+        for empty_value in ("", {}, []):
+            with self.subTest(empty_value=empty_value), tempfile.TemporaryDirectory() as tmp:
+                store = test_store(Path(tmp) / "orders.sqlite3")
+                store.save_quote(
+                    {
+                        "quoteId": "q1",
+                        "productId": "test-gift-card-code",
+                        "productName": "Test Gift Card Code",
+                        "productType": "gift_card",
+                        "packageId": "1",
+                        "packageValue": "1",
+                        "maxSingitAtomic": "100",
+                        "expiresAtEpoch": 1_719_000_120,
+                    }
+                )
+                store.advance_state(
+                    "q1",
+                    "FIREFLY_APPROVED",
+                    {
+                        "fulfillmentTokenHash": hashlib.sha256(
+                            b"valid_token"
+                        ).hexdigest()
+                    },
+                )
+                provider = Mock()
+                provider.buy_product.return_value = {
+                    "ok": True,
+                    "provider": "bitrefill-live",
+                    "invoiceId": "invoice-1",
+                    "orderId": "order-1",
+                    "status": "delivered",
+                    "redemption": {
+                        "type": "bitrefill",
+                        "label": "Bitrefill redemption",
+                        "value": empty_value,
+                    },
+                }
+                runner = BitrefillFulfillmentRunner(
+                    store=store,
+                    bitrefill_client=provider,
+                    now_provider=lambda: 1_719_000_001,
+                )
+
+                runner.fulfill(
+                    {
+                        "quoteId": "q1",
+                        "fulfillmentToken": "valid_token",
+                    }
+                )
+
+                self.assertEqual(
+                    store.get_quote("q1")["state"],
+                    "BITREFILL_PURCHASED",
+                )
+
     def test_refresh_failure_returns_redacted_retryable_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "orders.sqlite3"

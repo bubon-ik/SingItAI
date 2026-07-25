@@ -161,14 +161,15 @@ def sanitize_bitrefill_checkpoint(
         order_ids = checkpoint["orderIds"]
         if not isinstance(order_ids, list):
             raise ValueError("bitrefillCheckpoint.orderIds must be a list")
-        snapshot["orderIds"] = [
+        validated_order_ids = [
             _bounded_scalar(
                 value,
                 field=f"bitrefillCheckpoint.orderIds[{index}]",
                 limit=512,
             )
-            for index, value in enumerate(order_ids[:16])
+            for index, value in enumerate(order_ids)
         ]
+        snapshot["orderIds"] = validated_order_ids[:16]
     for key in ("productId", "packageId", "packageValue"):
         if key in quote:
             snapshot[key] = _bounded_scalar(

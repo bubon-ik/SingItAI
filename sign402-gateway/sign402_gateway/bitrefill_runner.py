@@ -879,9 +879,22 @@ def _provider_is_delivered(result: dict[str, Any], quote: dict[str, Any]) -> boo
     if str(result.get("status", "")).strip().lower() != "delivered":
         return False
     if quote.get("productType") in {"gift_card", "esim"}:
-        redemption = result.get("redemption")
-        return isinstance(redemption, dict) and redemption.get("value") is not None
+        return _redemption_has_nonempty_value(result.get("redemption"))
     return True
+
+
+def _redemption_has_nonempty_value(redemption: Any) -> bool:
+    if not isinstance(redemption, dict) or "value" not in redemption:
+        return False
+
+    def has_value(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(has_value(item) for item in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(has_value(item) for item in value)
+        return bool(str(value or "").strip())
+
+    return has_value(redemption["value"])
 
 
 def _bitrefill_purchase_telegram_text(
