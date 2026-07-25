@@ -17,7 +17,10 @@ from .bitrefill_quote import (
     new_quote_id,
     now_epoch,
 )
-from .commerce_store import BitrefillCommerceStore
+from .commerce_store import (
+    BitrefillCommerceStore,
+    sanitize_bankr_reconciliation_snapshot,
+)
 from .numeric import format_decimal
 
 
@@ -486,6 +489,7 @@ class BitrefillPurchaseRunner:
                 {"bankrError": "Bankr payment request failed"},
             )
             raise ValueError("Bankr payment request failed") from None
+        bankr_snapshot = sanitize_bankr_reconciliation_snapshot(bankr_result)
         if self.settlement_verifier is not None or self.fulfillment_runner is not None:
             if self.settlement_verifier is None or self.fulfillment_runner is None:
                 raise ValueError("settlement_verifier and fulfillment_runner must be configured together")
@@ -497,7 +501,10 @@ class BitrefillPurchaseRunner:
                 self.store.advance_state(
                     quote_id,
                     "SINGIT_SETTLED",
-                    {"bankr": bankr_result, "singitSettlement": settlement_proof},
+                    {
+                        "bankr": bankr_snapshot,
+                        "singitSettlement": settlement_proof,
+                    },
                 )
                 bitrefill_result = self.fulfillment_runner(
                     {"quoteId": quote_id, "fulfillmentToken": fulfillment_token}
@@ -507,7 +514,7 @@ class BitrefillPurchaseRunner:
                     quote_id,
                     "RECONCILIATION_REQUIRED",
                     {
-                        "bankr": bankr_result,
+                        "bankr": bankr_snapshot,
                         "singitSettlementError": (
                             "Bitrefill settlement or fulfillment failed"
                         ),
@@ -517,30 +524,39 @@ class BitrefillPurchaseRunner:
                     "Bitrefill settlement or fulfillment failed"
                 ) from None
             return {
-                "ok": bool(bankr_result.get("ok", False)) and bool(bitrefill_result.get("ok", False)),
+                "ok": bool(bankr_snapshot.get("ok", False))
+                and bool(bitrefill_result.get("ok", False)),
                 "decision": "approved_and_executed",
                 "quoteId": quote_id,
                 "paymentApprovalHash": payment_hash,
                 "paymentCommitment": commitment,
                 "fulfillmentToken": fulfillment_token,
-                "bankr": bankr_result,
+                "bankr": bankr_snapshot,
                 "singitSettlement": settlement_proof,
                 "bitrefill": bitrefill_result,
                 "telegramText": _bitrefill_purchase_telegram_text(quote),
             }
         refreshed = self.store.get_quote(quote_id)
         if refreshed["state"] == "DELIVERED":
-            self.store.advance_state(quote_id, "DELIVERED", {"bankr": bankr_result})
+            self.store.advance_state(
+                quote_id,
+                "DELIVERED",
+                {"bankr": bankr_snapshot},
+            )
         else:
-            self.store.advance_state(quote_id, "SINGIT_SETTLED", {"bankr": bankr_result})
+            self.store.advance_state(
+                quote_id,
+                "SINGIT_SETTLED",
+                {"bankr": bankr_snapshot},
+            )
         return {
-            "ok": bool(bankr_result.get("ok", False)),
+            "ok": bool(bankr_snapshot.get("ok", False)),
             "decision": "approved_and_executed",
             "quoteId": quote_id,
             "paymentApprovalHash": payment_hash,
             "paymentCommitment": commitment,
             "fulfillmentToken": fulfillment_token,
-            "bankr": bankr_result,
+            "bankr": bankr_snapshot,
             "telegramText": _bitrefill_purchase_telegram_text(quote),
         }
 

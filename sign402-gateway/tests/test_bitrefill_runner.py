@@ -851,6 +851,99 @@ class BitrefillRunnerTests(unittest.TestCase):
             self.assertEqual(store.get_quote("quote_1")["state"], "DELIVERED")
             settlement_verifier.assert_called_once_with(bankr_result=bankr_result, quote=quote)
 
+    def test_runner_keeps_raw_bankr_result_only_for_settlement_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.sqlite3"
+            store = test_store(path)
+            quote_service = BitrefillQuoteService(
+                bitrefill_client=TestBitrefillClient(),
+                store=store,
+                singit_usd_price_provider=lambda: "0.01",
+                quote_id_provider=lambda: "quote_1",
+                now_provider=lambda: 1_719_000_000,
+            )
+            quote = quote_service.quote(
+                {
+                    "productId": "test-gift-card-link",
+                    "packageId": "1",
+                    "country": "US",
+                }
+            )
+            raw_bankr_result = {
+                "ok": True,
+                "status": 200,
+                "transactionHash": "0xSINGITTX",
+                "startBlock": 47_751_000,
+                "paymentMade": {
+                    "network": "eip155:8453",
+                    "payTo": "0x1111111111111111111111111111111111111111",
+                    "amountUsd": "0.0057",
+                },
+                "command": ["bankr", "RUNNER-BANKR-COMMAND-MARKER"],
+                "stdout": "RUNNER-BANKR-STDOUT-TOKEN-MARKER",
+                "stderr": "RUNNER-BANKR-STDERR-CREDENTIAL-MARKER",
+                "body": {
+                    "redemption": "RUNNER-BANKR-REDEMPTION-MARKER",
+                    "paymentLink": "RUNNER-BANKR-PAYMENT-LINK-MARKER",
+                },
+            }
+            firefly = Mock()
+            settlement_verifier = Mock(
+                return_value={
+                    "transactionHash": "0xSINGITTX",
+                    "amountAtomic": quote["maxSingitAtomic"],
+                }
+            )
+            runner = BitrefillPurchaseRunner(
+                store=store,
+                firefly=firefly,
+                bankr_payment_client=Mock(return_value=raw_bankr_result),
+                bankr_resource_url=(
+                    "https://x402.bankr.bot/wallet/buy-bitrefill"
+                ),
+                now_provider=lambda: 1_719_000_001,
+                fulfillment_token_provider=lambda: "fulfill_secret_1",
+                settlement_verifier=settlement_verifier,
+                fulfillment_runner=Mock(return_value={"ok": True}),
+            )
+            expected_hash = runner.payment_hash_for_quote(quote, recipient={})
+            firefly.approve_payment_hash.return_value = {
+                "approved": True,
+                "approvedHash": expected_hash,
+            }
+
+            result = runner.buy({"quoteId": "quote_1"})
+
+            settlement_verifier.assert_called_once_with(
+                bankr_result=raw_bankr_result,
+                quote=quote,
+            )
+            expected_snapshot = {
+                "ok": True,
+                "status": "200",
+                "transactionHash": "0xSINGITTX",
+                "startBlock": "47751000",
+                "paymentMade": {
+                    "network": "eip155:8453",
+                    "payTo": "0x1111111111111111111111111111111111111111",
+                    "amountUsd": "0.0057",
+                },
+            }
+            self.assertEqual(result["bankr"], expected_snapshot)
+            self.assertEqual(
+                store.get_quote("quote_1")["metadata"]["bankr"],
+                expected_snapshot,
+            )
+            for marker in (
+                "RUNNER-BANKR-COMMAND-MARKER",
+                "RUNNER-BANKR-STDOUT-TOKEN-MARKER",
+                "RUNNER-BANKR-STDERR-CREDENTIAL-MARKER",
+                "RUNNER-BANKR-REDEMPTION-MARKER",
+                "RUNNER-BANKR-PAYMENT-LINK-MARKER",
+            ):
+                self.assertNotIn(marker, str(result))
+                self.assertNotIn(marker, sqlite_text(path))
+
     def test_runner_rejects_expired_quote_before_firefly_or_bankr(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = test_store(Path(tmp) / "orders.sqlite3")

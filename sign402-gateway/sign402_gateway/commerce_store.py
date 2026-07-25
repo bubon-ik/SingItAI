@@ -66,6 +66,21 @@ def _copy_scalar(
     target[key] = _bounded_scalar(source[source_key], field=field, limit=limit)
 
 
+def _copy_bool(
+    target: dict[str, Any],
+    source: Mapping[str, Any],
+    key: str,
+    *,
+    field: str,
+) -> None:
+    if key not in source:
+        return
+    value = source[key]
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a boolean")
+    target[key] = value
+
+
 def _treasury_snapshot(
     value: Any,
     *,
@@ -209,6 +224,93 @@ def sanitize_bitrefill_checkpoint(
     return snapshot
 
 
+def sanitize_bankr_reconciliation_snapshot(
+    bankr_result: Mapping[str, Any],
+    quote: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    del quote
+    snapshot: dict[str, Any] = {}
+    _copy_bool(snapshot, bankr_result, "ok", field="bankr.ok")
+    _copy_scalar(
+        snapshot,
+        bankr_result,
+        "status",
+        field="bankr.status",
+    )
+    _copy_scalar(
+        snapshot,
+        bankr_result,
+        "transactionHash",
+        field="bankr.transactionHash",
+        aliases=("txHash", "transaction", "txId"),
+    )
+    _copy_scalar(
+        snapshot,
+        bankr_result,
+        "startBlock",
+        field="bankr.startBlock",
+    )
+    if "paymentMade" in bankr_result:
+        payment = bankr_result["paymentMade"]
+        if not isinstance(payment, Mapping):
+            raise ValueError("bankr.paymentMade must be an object")
+        safe_payment: dict[str, Any] = {}
+        _copy_scalar(
+            safe_payment,
+            payment,
+            "network",
+            field="bankr.paymentMade.network",
+        )
+        _copy_scalar(
+            safe_payment,
+            payment,
+            "transactionHash",
+            field="bankr.paymentMade.transactionHash",
+            aliases=("txHash", "transaction", "txId"),
+        )
+        for key in (
+            "payTo",
+            "amountUsd",
+            "amount",
+            "amountAtomic",
+            "asset",
+        ):
+            _copy_scalar(
+                safe_payment,
+                payment,
+                key,
+                field=f"bankr.paymentMade.{key}",
+            )
+        snapshot["paymentMade"] = safe_payment
+    return snapshot
+
+
+def _assert_reserved_snapshots_are_canonical(
+    metadata: dict[str, Any],
+    quote: dict[str, Any],
+) -> None:
+    for key, sanitizer in (
+        ("bitrefill", sanitize_bitrefill_provider_snapshot),
+        ("bitrefillCheckpoint", sanitize_bitrefill_checkpoint),
+        ("bankr", sanitize_bankr_reconciliation_snapshot),
+    ):
+        if key not in metadata:
+            continue
+        value = metadata[key]
+        error = (
+            f"unsafe legacy {key} snapshot must be migrated "
+            "before updating Bitrefill order state"
+        )
+        if not isinstance(value, Mapping):
+            raise SensitiveStateError(error)
+        try:
+            canonical = sanitizer(value, quote)
+        except (TypeError, ValueError):
+            raise SensitiveStateError(error) from None
+        if dict(value) != canonical:
+            raise SensitiveStateError(error)
+
+
 class BitrefillCommerceStore:
     def __init__(
         self,
@@ -284,6 +386,8 @@ class BitrefillCommerceStore:
             if STATE_ORDER[new_state] < STATE_ORDER[old_state]:
                 raise ValueError("cannot move order state backward")
             existing = json.loads(row["metadata_json"] or "{}")
+            quote = json.loads(row["quote_json"])
+            _assert_reserved_snapshots_are_canonical(existing, quote)
             if "recipient" in existing:
                 raise SensitiveStateError(
                     "legacy plaintext recipient must be migrated "
@@ -291,7 +395,7 @@ class BitrefillCommerceStore:
                 )
             update = self._encoded_metadata_update(
                 metadata or {},
-                json.loads(row["quote_json"]),
+                quote,
             )
             if "encryptedRecipient" in update:
                 existing.pop("recipient", None)
@@ -315,6 +419,8 @@ class BitrefillCommerceStore:
             if row is None:
                 raise ValueError("quote not found")
             existing = json.loads(row["metadata_json"] or "{}")
+            quote = json.loads(row["quote_json"])
+            _assert_reserved_snapshots_are_canonical(existing, quote)
             if "recipient" in existing:
                 raise SensitiveStateError(
                     "legacy plaintext recipient must be migrated "
@@ -322,7 +428,7 @@ class BitrefillCommerceStore:
                 )
             update = self._encoded_metadata_update(
                 metadata or {},
-                json.loads(row["quote_json"]),
+                quote,
             )
             if "encryptedRecipient" in update:
                 existing.pop("recipient", None)
@@ -348,6 +454,23 @@ class BitrefillCommerceStore:
         ]
         placeholders = ",".join("?" for _ in claimable_states)
         with self.lock, self._database() as db:
+            row = db.execute(
+                "SELECT state, quote_json, metadata_json "
+                "FROM bitrefill_orders WHERE quote_id = ?",
+                (quote_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("quote not found")
+            metadata = json.loads(row["metadata_json"] or "{}")
+            _assert_reserved_snapshots_are_canonical(
+                metadata,
+                json.loads(row["quote_json"]),
+            )
+            if "recipient" in metadata:
+                raise SensitiveStateError(
+                    "legacy plaintext recipient must be migrated "
+                    "before updating Bitrefill order state"
+                )
             cursor = db.execute(
                 f"""
                 UPDATE bitrefill_orders
@@ -359,18 +482,6 @@ class BitrefillCommerceStore:
             )
             if cursor.rowcount == 1:
                 return True
-            row = db.execute(
-                "SELECT state, metadata_json FROM bitrefill_orders WHERE quote_id = ?",
-                (quote_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError("quote not found")
-            metadata = json.loads(row["metadata_json"] or "{}")
-            if "recipient" in metadata:
-                raise SensitiveStateError(
-                    "legacy plaintext recipient must be migrated "
-                    "before updating Bitrefill order state"
-                )
             return False
 
     def _prepare_private_database_file(self) -> None:
@@ -412,6 +523,7 @@ class BitrefillCommerceStore:
         for key, sanitizer in (
             ("bitrefill", sanitize_bitrefill_provider_snapshot),
             ("bitrefillCheckpoint", sanitize_bitrefill_checkpoint),
+            ("bankr", sanitize_bankr_reconciliation_snapshot),
         ):
             if key not in update:
                 continue

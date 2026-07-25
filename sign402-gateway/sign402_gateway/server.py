@@ -91,6 +91,7 @@ from .bankr_llm_purchase import (
     BankrLlmError,
     build_bankr_llm_purchase_service_from_env,
 )
+from .commerce_store import sanitize_bankr_reconciliation_snapshot
 from .numeric import format_decimal
 from .goplausible import fetch_x402_paid_resource, fetch_x402_payment_required, normalize_x402_payment_required
 from .real_rate_pricing import RealRateSingitPricer
@@ -498,9 +499,6 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
-        if path in FUND_MOVING_POST_PATHS and self._reject_if_purchases_paused():
-            return
-
         try:
             declared_length = int(self.headers.get("Content-Length", "0"))
         except (TypeError, ValueError):
@@ -511,6 +509,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if declared_length > MAX_REQUEST_BODY_BYTES:
             self._send_json({"error": "request_body_too_large"}, status=413)
+            return
+        if path in FUND_MOVING_POST_PATHS and self._reject_if_purchases_paused():
             return
 
         if path == "/approve-policy":
@@ -792,6 +792,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             telegram_user_id = _require_authenticated_user(self, payload)
+            self.server.user_event_store.preflight_write()
             event = self.server.user_event_store.read(telegram_user_id)
             if not isinstance(event, dict) or not event.get("ok"):
                 self._send_json(
@@ -1393,6 +1394,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 self, {"telegramUserId": telegram_user_id}
             )
             _enforce_user_purchase_rate(user_id)
+            self.server.user_event_store.preflight_write()
             payment_context = _tool_payment_context(tool, payload)
             request_body = tool.get("requestBody") if isinstance(tool.get("requestBody"), dict) else None
             raw_payment_required = fetch_x402_payment_required(
@@ -1602,7 +1604,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
 
         try:
             payload = self._read_json()
-            result = self.server.bitrefill_purchase_runner(payload)
+            result = _sanitize_bitrefill_purchase_result(
+                self.server.bitrefill_purchase_runner(payload)
+            )
             if result.get("ok"):
                 self.server.event_store.write(_without_fulfillment_token(result))
             self._send_json(result)
@@ -1618,6 +1622,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             if str(payload.get("telegramUserId", "") or "").strip():
                 user_id = _require_authenticated_user(self, payload)
                 _enforce_user_purchase_rate(user_id)
+                self.server.user_event_store.preflight_write()
                 payload = {**payload, "telegramUserId": user_id}
             elif not self._legacy_operator_request_allowed():
                 return
@@ -1633,7 +1638,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            result = self.server.bitrefill_wallet_purchase_runner(payload)
+            result = _sanitize_bitrefill_purchase_result(
+                self.server.bitrefill_wallet_purchase_runner(payload)
+            )
             if result.get("ok"):
                 redacted = _without_fulfillment_token(result)
                 if user_id:
@@ -4126,6 +4133,15 @@ class UserPurchaseStore:
             persisted["encryptedFulfillmentToken"] = self.cipher.encrypt_text(token)
         return persisted
 
+    def preflight_write(self) -> None:
+        with self.lock:
+            if self.cipher is None:
+                raise SensitiveStateConfigurationError(
+                    "SIGN402_WALLET_MASTER_KEY is required "
+                    "to persist user purchase state"
+                )
+            self._assert_no_legacy_tokens(self._read_all_unlocked())
+
     def write(
         self,
         telegram_user_id: str,
@@ -4145,8 +4161,8 @@ class UserPurchaseStore:
             if not isinstance(value, dict):
                 return None
             event = dict(value)
-            encrypted = event.pop("encryptedFulfillmentToken", None)
-            if encrypted is not None:
+            if "encryptedFulfillmentToken" in event:
+                encrypted = event.pop("encryptedFulfillmentToken")
                 if self.cipher is None:
                     raise SensitiveStateConfigurationError(
                         "SIGN402_WALLET_MASTER_KEY is required "
@@ -6009,6 +6025,19 @@ def _busy_payload() -> dict[str, Any]:
     }
 
 
+def _sanitize_bitrefill_purchase_result(
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    sanitized = dict(result)
+    if "bankr" not in sanitized:
+        return sanitized
+    bankr = sanitized["bankr"]
+    if not isinstance(bankr, dict):
+        raise ValueError("bankr reconciliation result must be an object")
+    sanitized["bankr"] = sanitize_bankr_reconciliation_snapshot(bankr)
+    return sanitized
+
+
 def _without_fulfillment_token(result: dict[str, Any]) -> dict[str, Any]:
     """Drop the plaintext fulfillment token before persisting/broadcasting.
 
@@ -6016,7 +6045,12 @@ def _without_fulfillment_token(result: dict[str, Any]) -> dict[str, Any]:
     redemption code, but it must never reach the dashboard event store, which
     is served back over an open-CORS GET endpoint.
     """
-    return {key: value for key, value in result.items() if key != "fulfillmentToken"}
+    sanitized = _sanitize_bitrefill_purchase_result(result)
+    return {
+        key: value
+        for key, value in sanitized.items()
+        if key != "fulfillmentToken"
+    }
 
 
 def _last_bitrefill_purchase_response(

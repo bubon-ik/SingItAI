@@ -5,6 +5,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from contextlib import ExitStack
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import ANY, Mock, patch
@@ -23,6 +24,7 @@ from sign402_gateway.secure_state import (
 from sign402_gateway.user_wallets import BASE_NATIVE_ETH_ASSET_ID
 from sign402_gateway.server import (
     FUND_MOVING_POST_PATHS,
+    MAX_REQUEST_BODY_BYTES,
     _USER_RATE_LIMITER,
     _purchases_paused,
     AgentStateStore,
@@ -52,6 +54,7 @@ from sign402_gateway.server import (
     build_bitrefill_user_funding_runner_from_env,
     build_bitrefill_client_from_env,
     build_approval_client_from_env,
+    build_server,
     build_payment_executor,
     build_x402_payment_signature_builder,
     build_real_rate_pricer_from_env,
@@ -234,6 +237,18 @@ class GatewayServerTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), before)
             self.assertEqual(list(path.parent.glob("*.tmp")), [])
 
+    def test_user_purchase_store_write_preflight_requires_cipher_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-purchases.json"
+            store = UserPurchaseStore(path)
+            preflight = getattr(store, "preflight_write", None)
+
+            self.assertIsNotNone(preflight)
+            with self.assertRaises(SensitiveStateConfigurationError):
+                preflight()
+
+            self.assertFalse(path.exists())
+
     def test_user_purchase_store_invalid_envelope_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "user-purchases.json"
@@ -245,6 +260,30 @@ class GatewayServerTests(unittest.TestCase):
 
             with self.assertRaises(SensitiveStateDecryptionError):
                 store.read("u")
+
+    def test_user_purchase_store_null_envelope_never_falls_back_to_legacy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-purchases.json"
+            legacy_marker = "LEGACY-FULFILLMENT-TOKEN-MARKER"
+            path.write_text(
+                json.dumps(
+                    {
+                        "u": {
+                            "encryptedFulfillmentToken": None,
+                            "fulfillmentToken": legacy_marker,
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            store = UserPurchaseStore(path, cipher=self.state_cipher())
+
+            with self.assertRaises(SensitiveStateDecryptionError) as captured:
+                store.read("u")
+
+            self.assertNotIn(legacy_marker, str(captured.exception))
+            self.assertIsNone(captured.exception.__cause__)
 
     def test_user_purchase_store_token_write_without_cipher_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -436,6 +475,112 @@ class GatewayServerTests(unittest.TestCase):
             executor({}, "a" * 64)
         with self.assertRaisesRegex(RuntimeError, "disabled"):
             signature_builder({})
+
+    def test_build_server_allows_missing_master_key_but_rejects_invalid_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_server = Mock()
+            fake_wallet_service = Mock()
+            with ExitStack() as stack:
+                stack.enter_context(patch.dict(os.environ, {}, clear=True))
+                for target in (
+                    "sign402_gateway.server.build_approval_client_from_env",
+                    "sign402_gateway.server.build_payment_executor",
+                    (
+                        "sign402_gateway.server."
+                        "build_x402_payment_signature_builder"
+                    ),
+                    "sign402_gateway.server.CdpBaseX402PaymentClient",
+                    "sign402_gateway.server.BankrCliX402PaymentClient",
+                    (
+                        "sign402_gateway.commerce_store."
+                        "BitrefillCommerceStore"
+                    ),
+                    (
+                        "sign402_gateway.server."
+                        "build_imessage_approval_service_from_env"
+                    ),
+                    "sign402_gateway.server.build_bitrefill_client_from_env",
+                    "sign402_gateway.server.build_real_rate_pricer_from_env",
+                    (
+                        "sign402_gateway.server."
+                        "build_bitrefill_funding_runner_from_env"
+                    ),
+                    "sign402_gateway.server.build_usdc_reserve_guard_from_env",
+                    (
+                        "sign402_gateway.server."
+                        "build_singit_settlement_verifier_from_env"
+                    ),
+                    (
+                        "sign402_gateway.server."
+                        "build_bitrefill_user_funding_runner_from_env"
+                    ),
+                    "sign402_gateway.server.UserWalletBaseX402PaymentClient",
+                    "sign402_gateway.server.UserWalletTokenTransferClient",
+                    "sign402_gateway.server.BankrLlmCreditsTopUpClient",
+                    (
+                        "sign402_gateway.server."
+                        "build_bankr_llm_purchase_service_from_env"
+                    ),
+                ):
+                    stack.enter_context(patch(target, return_value=Mock()))
+                stack.enter_context(
+                    patch(
+                        "sign402_gateway.server.build_wallet_service_from_env",
+                        return_value=fake_wallet_service,
+                    )
+                )
+                server_constructor = stack.enter_context(
+                    patch(
+                        "sign402_gateway.server.Sign402GatewayServer",
+                        return_value=fake_server,
+                    )
+                )
+                missing_key_server = build_server(
+                    "127.0.0.1",
+                    0,
+                    firefly_port=None,
+                    approval_provider="disabled",
+                    payment_executor_dir=root / "payment-executor",
+                    event_store_path=root / "latest-run.json",
+                    agent_state_path=root / "agent-state.json",
+                    cdp_x402_service_dir=root / "cdp-x402-service",
+                    bitrefill_commerce_store_path=root / "orders.sqlite3",
+                    user_wallet_store_path=root / "user-wallets.json",
+                    user_spend_limit_store_path=root / "spend-limits.json",
+                    imessage_approval_store_path=root / "approvals.json",
+                )
+
+                self.assertIs(missing_key_server, fake_server)
+                self.assertEqual(server_constructor.call_count, 1)
+
+                os.environ["SIGN402_WALLET_MASTER_KEY"] = (
+                    "nonempty-invalid-master-key-marker"
+                )
+                with self.assertRaises(
+                    SensitiveStateConfigurationError
+                ) as captured:
+                    build_server(
+                        "127.0.0.1",
+                        0,
+                        firefly_port=None,
+                        approval_provider="disabled",
+                        payment_executor_dir=root / "payment-executor",
+                        event_store_path=root / "latest-run.json",
+                        agent_state_path=root / "agent-state.json",
+                        cdp_x402_service_dir=root / "cdp-x402-service",
+                        bitrefill_commerce_store_path=root / "orders.sqlite3",
+                        user_wallet_store_path=root / "user-wallets.json",
+                        user_spend_limit_store_path=root / "spend-limits.json",
+                        imessage_approval_store_path=root / "approvals.json",
+                    )
+
+                self.assertNotIn(
+                    "nonempty-invalid-master-key-marker",
+                    str(captured.exception),
+                )
+                self.assertEqual(server_constructor.call_count, 1)
+                self.assertEqual(list(root.iterdir()), [])
 
     def test_bitrefill_client_factory_defaults_to_safe_test_mode(self):
         client = build_bitrefill_client_from_env({})
@@ -1080,6 +1225,56 @@ class GatewayServerTests(unittest.TestCase):
         self.assertIn("HTTP/1.0 400 ", self.response_text(handler))
         self.assertEqual(self.response_json(handler)["error"], "invalid_content_length")
         server.user_wallet_service.wallet_status.assert_not_called()
+
+    def test_paused_transaction_still_validates_content_length_before_pause(self):
+        cases = (
+            ("nope", "HTTP/1.0 400 Bad Request", "invalid_content_length"),
+            ("-1", "HTTP/1.0 400 Bad Request", "invalid_content_length"),
+            (
+                str(MAX_REQUEST_BODY_BYTES + 1),
+                "HTTP/1.0 413 ",
+                "request_body_too_large",
+            ),
+        )
+        with patch.dict(
+            os.environ,
+            {"SIGN402_PURCHASES_PAUSED": "1"},
+        ):
+            for declared_length, status, error in cases:
+                with self.subTest(declared_length=declared_length):
+                    request = (
+                        b"POST /agent/buy-tool HTTP/1.1\r\n"
+                        + f"Content-Length: {declared_length}\r\n".encode("ascii")
+                        + b"Content-Type: application/json\r\n"
+                        + b"\r\n"
+                        + b"{}"
+                    )
+                    socket = FakeSocket(request)
+                    server = DummyServer()
+                    with (
+                        patch.object(
+                            Sign402GatewayHandler,
+                            "_read_json",
+                            side_effect=AssertionError("body was read"),
+                        ) as read_json,
+                        patch.object(
+                            Sign402GatewayHandler,
+                            "_handle_agent_buy_tool",
+                            side_effect=AssertionError("handler was dispatched"),
+                        ) as dispatched,
+                        patch("sys.stderr", io.StringIO()),
+                    ):
+                        handler = Sign402GatewayHandler(
+                            socket,
+                            ("127.0.0.1", 12345),
+                            server,
+                        )
+                    handler.response = socket.wfile
+
+                    self.assertIn(status, self.response_text(handler))
+                    self.assertEqual(self.response_json(handler)["error"], error)
+                    read_json.assert_not_called()
+                    dispatched.assert_not_called()
 
     def wallet_auth_headers(self) -> dict[str, str]:
         return {"Authorization": "Bearer test-wallet-token"}
@@ -2949,6 +3144,72 @@ class GatewayServerTests(unittest.TestCase):
         self.assertEqual(spend_args.kwargs["amount_atomic"], 1000)
         self.assertEqual(spend_args.kwargs["tx_id"], "0xTX")
 
+    def test_agent_buy_tool_preflights_shared_user_state_before_external_side_effects(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-purchases.json"
+            legacy_marker = "OTHER-USER-LEGACY-TOKEN"
+            path.write_text(
+                json.dumps(
+                    {
+                        "other-user": {
+                            "ok": True,
+                            "fulfillmentToken": legacy_marker,
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = path.read_bytes()
+            server = DummyServer()
+            server.user_event_store = UserPurchaseStore(
+                path,
+                cipher=self.state_cipher(),
+            )
+            server.user_wallet_service = Mock()
+            server.user_wallet_service.resolve_telegram_user_id.return_value = (
+                "1045618308"
+            )
+            server.imessage_approval_service = Mock()
+            server.user_x402_buyer = Mock()
+            server.event_store = Mock()
+
+            with (
+                patch(
+                    "sign402_gateway.server.fetch_x402_payment_required",
+                    side_effect=AssertionError("requirement fetch was called"),
+                ) as requirement_fetch,
+                patch(
+                    "sign402_gateway.server.normalize_x402_payment_required",
+                    side_effect=AssertionError("requirement normalization was called"),
+                ) as normalize_requirement,
+                patch("sys.stderr", io.StringIO()),
+            ):
+                handler = self.make_handler(
+                    "/agent/buy-tool",
+                    {"tool": "news", "telegramUserId": "1045618308"},
+                    server=server,
+                    headers=self.llm_auth_headers(),
+                )
+
+            response = self.response_text(handler)
+            self.assertIn("HTTP/1.0 400 Bad Request", response)
+            self.assertIn(
+                "legacy plaintext fulfillment tokens must be migrated",
+                response,
+            )
+            self.assertNotIn(legacy_marker, response)
+            self.assertEqual(path.read_bytes(), before)
+            requirement_fetch.assert_not_called()
+            normalize_requirement.assert_not_called()
+            server.imessage_approval_service.request_purchase_approval.assert_not_called()
+            server.user_wallet_service.decrypt_private_key_for_future_signing.assert_not_called()
+            server.user_x402_buyer.assert_not_called()
+            server.user_spend_limit_store.record_successful_spend.assert_not_called()
+            server.event_store.write.assert_not_called()
+
     def test_agent_last_purchase_returns_users_own_event(self):
         server = DummyServer()
         server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
@@ -2980,6 +3241,60 @@ class GatewayServerTests(unittest.TestCase):
         self.assertEqual(body["txId"], "0xTX")
         # Ownership is enforced by the per-user key, not a payer heuristic.
         server.user_event_store.read.assert_called_once_with("1045618308")
+
+    def test_agent_last_purchase_preflights_shared_state_before_bitrefill_refresh(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-purchases.json"
+            store = UserPurchaseStore(path, cipher=self.state_cipher())
+            store.write(
+                "1045618308",
+                {
+                    "ok": True,
+                    "quoteId": "quote_wallet_1",
+                    "fulfillmentToken": "reveal_secret_1",
+                    "bitrefill": {"orderId": "order_1"},
+                },
+            )
+            legacy_marker = "OTHER-USER-LAST-PURCHASE-LEGACY-TOKEN"
+            seeded = json.loads(path.read_text(encoding="utf-8"))
+            seeded["other-user"] = {
+                "ok": True,
+                "fulfillmentToken": legacy_marker,
+            }
+            path.write_text(json.dumps(seeded) + "\n", encoding="utf-8")
+            before = path.read_bytes()
+            server = DummyServer()
+            server.user_event_store = store
+            server.user_wallet_service.resolve_telegram_user_id.return_value = (
+                "1045618308"
+            )
+            server.bitrefill_order_lookup = Mock(
+                side_effect=AssertionError("Bitrefill refresh was called")
+            )
+
+            with (
+                patch.object(store, "read", wraps=store.read) as read,
+                patch("sys.stderr", io.StringIO()),
+            ):
+                handler = self.make_handler(
+                    "/agent/last-purchase",
+                    {"telegramUserId": "1045618308"},
+                    server=server,
+                    headers=self.llm_auth_headers(),
+                )
+
+            response = self.response_text(handler)
+            self.assertIn("HTTP/1.0 400 Bad Request", response)
+            self.assertIn(
+                "legacy plaintext fulfillment tokens must be migrated",
+                response,
+            )
+            self.assertNotIn(legacy_marker, response)
+            self.assertEqual(path.read_bytes(), before)
+            read.assert_not_called()
+            server.bitrefill_order_lookup.assert_not_called()
 
     def test_agent_last_purchase_reveals_users_bitrefill_code(self):
         server = DummyServer()
@@ -5054,6 +5369,71 @@ class GatewayServerTests(unittest.TestCase):
         self.assertNotIn("fulfillmentToken", saved_event)
         self.assertNotIn("reveal_secret_1", json.dumps(saved_event))
 
+    def test_agent_buy_bitrefill_never_returns_or_persists_raw_bankr_diagnostics(
+        self,
+    ):
+        server = DummyServer()
+        server.firefly_busy = False
+        server.event_store = Mock()
+        server.bitrefill_purchase_runner = Mock(
+            return_value={
+                "ok": True,
+                "quoteId": "quote_1",
+                "fulfillmentToken": "reveal_secret_1",
+                "bankr": {
+                    "ok": True,
+                    "status": 200,
+                    "transactionHash": "0xSINGITTX",
+                    "startBlock": 47_751_000,
+                    "paymentMade": {
+                        "network": "eip155:8453",
+                        "payTo": "0x1111111111111111111111111111111111111111",
+                        "amountUsd": "0.0057",
+                        "credential": "GATEWAY-BANKR-CREDENTIAL-MARKER",
+                    },
+                    "command": ["bankr", "GATEWAY-BANKR-COMMAND-MARKER"],
+                    "stdout": "GATEWAY-BANKR-STDOUT-TOKEN-MARKER",
+                    "stderr": "GATEWAY-BANKR-STDERR-PAYMENT-LINK-MARKER",
+                    "body": {
+                        "redemption": "GATEWAY-BANKR-REDEMPTION-MARKER",
+                    },
+                },
+            }
+        )
+
+        with patch("sys.stderr", io.StringIO()):
+            handler = self.make_handler(
+                "/agent/buy-bitrefill",
+                {"quoteId": "quote_1"},
+                server=server,
+            )
+
+        expected_bankr = {
+            "ok": True,
+            "status": "200",
+            "transactionHash": "0xSINGITTX",
+            "startBlock": "47751000",
+            "paymentMade": {
+                "network": "eip155:8453",
+                "payTo": "0x1111111111111111111111111111111111111111",
+                "amountUsd": "0.0057",
+            },
+        }
+        response_body = self.response_json(handler)
+        saved_event = server.event_store.write.call_args.args[0]
+        self.assertEqual(response_body["bankr"], expected_bankr)
+        self.assertEqual(saved_event["bankr"], expected_bankr)
+        self.assertNotIn("fulfillmentToken", saved_event)
+        for marker in (
+            "GATEWAY-BANKR-CREDENTIAL-MARKER",
+            "GATEWAY-BANKR-COMMAND-MARKER",
+            "GATEWAY-BANKR-STDOUT-TOKEN-MARKER",
+            "GATEWAY-BANKR-STDERR-PAYMENT-LINK-MARKER",
+            "GATEWAY-BANKR-REDEMPTION-MARKER",
+        ):
+            self.assertNotIn(marker, self.response_text(handler))
+            self.assertNotIn(marker, json.dumps(saved_event))
+
     def test_agent_buy_wallet_bitrefill_uses_wallet_runner(self):
         server = DummyServer()
         server.firefly_busy = False
@@ -5125,6 +5505,82 @@ class GatewayServerTests(unittest.TestCase):
         self.assertEqual(saved_user_event.get("fulfillmentToken"), "reveal_secret_1")
         # A per-user purchase must not leak into the public /events/latest store.
         server.event_store.write.assert_not_called()
+
+    def test_agent_buy_wallet_bitrefill_preflights_shared_user_state_before_purchase(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-purchases.json"
+            legacy_marker = "OTHER-USER-BITREFILL-LEGACY-TOKEN"
+            path.write_text(
+                json.dumps(
+                    {
+                        "other-user": {
+                            "ok": True,
+                            "fulfillmentToken": legacy_marker,
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            before = path.read_bytes()
+            server = DummyServer()
+            server.firefly_busy = False
+            server.user_event_store = UserPurchaseStore(
+                path,
+                cipher=self.state_cipher(),
+            )
+            server.user_wallet_service = Mock()
+            server.user_wallet_service.resolve_telegram_user_id.return_value = (
+                "1045618308"
+            )
+            server.imessage_approval_service = Mock()
+            server.user_token_transfer_client = Mock()
+            server.bitrefill_wallet_purchase_runner = Mock(
+                return_value={
+                    "ok": True,
+                    "quoteId": "quote-wallet-1",
+                    "fulfillmentToken": "new-token",
+                }
+            )
+            server.bitrefill_fulfillment_runner = Mock()
+            server.event_store = Mock()
+
+            with (
+                patch.object(
+                    Sign402GatewayHandler,
+                    "_acquire_firefly",
+                    return_value=True,
+                ) as acquire_firefly,
+                patch("sys.stderr", io.StringIO()),
+            ):
+                handler = self.make_handler(
+                    "/agent/buy-wallet-bitrefill",
+                    {
+                        "quoteId": "quote-wallet-1",
+                        "telegramUserId": "1045618308",
+                    },
+                    server=server,
+                    headers=self.llm_auth_headers(),
+                )
+
+            response = self.response_text(handler)
+            self.assertIn("HTTP/1.0 400 Bad Request", response)
+            self.assertIn(
+                "legacy plaintext fulfillment tokens must be migrated",
+                response,
+            )
+            self.assertNotIn(legacy_marker, response)
+            self.assertEqual(path.read_bytes(), before)
+            acquire_firefly.assert_not_called()
+            server.bitrefill_wallet_purchase_runner.assert_not_called()
+            server.bitrefill_fulfillment_runner.assert_not_called()
+            server.imessage_approval_service.request_hash_approval.assert_not_called()
+            server.user_wallet_service.decrypt_private_key_for_future_signing.assert_not_called()
+            server.user_token_transfer_client.transfer_token.assert_not_called()
+            server.user_token_transfer_client.transfer_native.assert_not_called()
+            server.event_store.write.assert_not_called()
 
     def test_quote_bitrefill_rejects_amount_over_spend_cap(self):
         server = DummyServer()

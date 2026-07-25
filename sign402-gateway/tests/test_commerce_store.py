@@ -32,6 +32,15 @@ def raw_metadata(path: Path, quote_id: str) -> dict:
     return json.loads(value)
 
 
+def raw_order_row(path: Path, quote_id: str) -> tuple[str, str, int]:
+    with closing(sqlite3.connect(path)) as db:
+        return db.execute(
+            "SELECT state, metadata_json, updated_at "
+            "FROM bitrefill_orders WHERE quote_id = ?",
+            (quote_id,),
+        ).fetchone()
+
+
 class CommerceStoreTests(unittest.TestCase):
     def test_provider_and_checkpoint_snapshots_are_strict_allowlists(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -144,28 +153,202 @@ class CommerceStoreTests(unittest.TestCase):
                         sidecar.read_bytes().decode("utf-8", errors="ignore"),
                     )
             provider = metadata["bitrefill"]
-            self.assertEqual(provider["invoiceId"], "invoice-1")
-            self.assertEqual(provider["orderId"], "order-1")
-            self.assertEqual(provider["status"], "delivered")
-            self.assertEqual(provider["productId"], "trusted-product")
-            self.assertEqual(provider["packageId"], "trusted-package")
-            self.assertEqual(provider["packageValue"], "25")
             self.assertEqual(
-                provider["treasuryPayment"],
+                provider,
                 {
-                    "txId": "0xTX",
-                    "network": "base",
-                    "asset": "USDC",
-                    "amount": "25",
-                    "amountAtomic": "25000000",
+                    "provider": "bitrefill-mcp",
+                    "invoiceId": "invoice-1",
+                    "orderId": "order-1",
+                    "status": "delivered",
+                    "paymentMethod": "usdc_base",
+                    "createdAt": "100",
+                    "updatedAt": "101",
+                    "expiresAt": "102",
+                    "productId": "trusted-product",
+                    "packageId": "trusted-package",
+                    "packageValue": "25",
+                    "treasuryPayment": {
+                        "txId": "0xTX",
+                        "network": "base",
+                        "asset": "USDC",
+                        "amount": "25",
+                        "amountAtomic": "25000000",
+                    },
                 },
             )
             checkpoint = metadata["bitrefillCheckpoint"]
-            self.assertEqual(checkpoint["orderIds"], ["order-1", "order-2"])
             self.assertEqual(
-                checkpoint["paymentInfo"],
-                {"amount": "25", "asset": "USDC", "network": "base"},
+                checkpoint,
+                {
+                    "invoiceId": "invoice-1",
+                    "status": "processing",
+                    "orderIds": ["order-1", "order-2"],
+                    "productId": "trusted-product",
+                    "packageId": "trusted-package",
+                    "packageValue": "25",
+                    "paymentInfo": {
+                        "amount": "25",
+                        "asset": "USDC",
+                        "network": "base",
+                    },
+                    "treasuryPayment": {
+                        "txId": "0xTX",
+                        "network": "base",
+                        "asset": "USDC",
+                        "amount": "25",
+                        "amountAtomic": "25000000",
+                    },
+                },
             )
+
+    def test_bankr_snapshot_keeps_only_bounded_reconciliation_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.sqlite3"
+            store = BitrefillCommerceStore(path, cipher=test_cipher())
+            store.save_quote(
+                {
+                    "quoteId": "q1",
+                    "productId": "trusted-product",
+                    "packageId": "trusted-package",
+                    "packageValue": "25",
+                    "expiresAtEpoch": 999,
+                }
+            )
+            raw_bankr = {
+                "ok": True,
+                "status": 200,
+                "txHash": "0xTOP",
+                "startBlock": 47_751_000,
+                "paymentMade": {
+                    "network": "eip155:8453",
+                    "txId": "0xPAYMENT",
+                    "payTo": "0x1111111111111111111111111111111111111111",
+                    "amountUsd": "0.0057",
+                    "amountAtomic": "5700000000000000",
+                    "asset": "SINGIT",
+                    "credential": "BANKR-PAYMENT-CREDENTIAL-MARKER",
+                },
+                "command": ["bankr", "BANKR-COMMAND-MARKER"],
+                "stdout": "BANKR-STDOUT-REDEMPTION-MARKER",
+                "stderr": "BANKR-STDERR-PAYMENT-LINK-MARKER",
+                "body": {
+                    "fulfillmentToken": "BANKR-TOKEN-MARKER",
+                    "redemption": "BANKR-REDEMPTION-MARKER",
+                    "paymentLink": "BANKR-LINK-MARKER",
+                },
+            }
+
+            store.advance_state(
+                "q1",
+                "SINGIT_SETTLED",
+                {"bankr": raw_bankr},
+            )
+
+            persisted = raw_metadata(path, "q1")["bankr"]
+            self.assertEqual(
+                persisted,
+                {
+                    "ok": True,
+                    "status": "200",
+                    "transactionHash": "0xTOP",
+                    "startBlock": "47751000",
+                    "paymentMade": {
+                        "network": "eip155:8453",
+                        "transactionHash": "0xPAYMENT",
+                        "payTo": "0x1111111111111111111111111111111111111111",
+                        "amountUsd": "0.0057",
+                        "amountAtomic": "5700000000000000",
+                        "asset": "SINGIT",
+                    },
+                },
+            )
+            for marker in (
+                "BANKR-PAYMENT-CREDENTIAL-MARKER",
+                "BANKR-COMMAND-MARKER",
+                "BANKR-STDOUT-REDEMPTION-MARKER",
+                "BANKR-STDERR-PAYMENT-LINK-MARKER",
+                "BANKR-TOKEN-MARKER",
+                "BANKR-REDEMPTION-MARKER",
+                "BANKR-LINK-MARKER",
+            ):
+                for sidecar in path.parent.glob(f"{path.name}*"):
+                    self.assertNotIn(
+                        marker,
+                        sidecar.read_bytes().decode("utf-8", errors="ignore"),
+                    )
+
+    def test_every_row_mutation_rejects_noncanonical_reserved_snapshots(self):
+        unsafe_snapshots = {
+            "bitrefill": {
+                "bitrefill": {
+                    "invoiceId": "invoice-1",
+                    "unsafe": {"secret": "UNSAFE-BITREFILL-MARKER"},
+                }
+            },
+            "bitrefillCheckpoint": {
+                "bitrefillCheckpoint": {
+                    "invoiceId": "invoice-1",
+                    "unsafe": {"secret": "UNSAFE-CHECKPOINT-MARKER"},
+                }
+            },
+            "bankr": {
+                "bankr": {
+                    "status": "200",
+                    "stdout": "UNSAFE-BANKR-MARKER",
+                }
+            },
+            "nonmapping-bankr": {
+                "bankr": "UNSAFE-NONMAPPING-BANKR-MARKER",
+            },
+        }
+        mutations = {
+            "advance_state": lambda store: store.advance_state(
+                "q1",
+                "USER_APPROVED",
+                {"paymentHash": "a" * 64},
+            ),
+            "checkpoint": lambda store: store.checkpoint(
+                "q1",
+                {"paymentHash": "a" * 64},
+            ),
+            "try_mark_fulfilling": lambda store: store.try_mark_fulfilling("q1"),
+        }
+
+        for snapshot_name, snapshot in unsafe_snapshots.items():
+            for mutation_name, mutate in mutations.items():
+                with self.subTest(
+                    snapshot=snapshot_name,
+                    mutation=mutation_name,
+                ), tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "orders.sqlite3"
+                    store = BitrefillCommerceStore(path, cipher=test_cipher())
+                    store.save_quote(
+                        {
+                            "quoteId": "q1",
+                            "productId": "p1",
+                            "packageId": "pkg1",
+                            "packageValue": "25",
+                            "expiresAtEpoch": 999,
+                        }
+                    )
+                    with closing(sqlite3.connect(path)) as db, db:
+                        db.execute(
+                            "UPDATE bitrefill_orders "
+                            "SET metadata_json = ?, updated_at = 123 "
+                            "WHERE quote_id = ?",
+                            (json.dumps(snapshot), "q1"),
+                        )
+                    before = raw_order_row(path, "q1")
+
+                    with self.assertRaises(SensitiveStateError) as captured:
+                        mutate(store)
+
+                    self.assertIn(
+                        "unsafe legacy",
+                        str(captured.exception),
+                    )
+                    self.assertNotIn("MARKER", str(captured.exception))
+                    self.assertEqual(raw_order_row(path, "q1"), before)
 
     def test_allowlisted_scalar_field_rejects_nested_secret_without_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
