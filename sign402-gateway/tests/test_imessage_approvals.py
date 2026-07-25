@@ -382,6 +382,78 @@ class ImessageApprovalTests(unittest.TestCase):
         self.assertIn("Hash: aaaaaaaa", message)
         self.assertEqual(created["status"], "approved")
 
+    def test_hash_approval_context_lines_cannot_forge_display_lines(self):
+        """Provider text must not be able to add its own approval lines.
+
+        The approval body is newline-joined before the human reads it, so a
+        line break surviving from a Bitrefill product name would let that name
+        inject a cheaper-looking "Total:" above the real one.
+        """
+        service_ref = []
+        notifier = AutoDecisionNotifier(
+            lambda photon_user_id: service_ref[0].record_decision(photon_user_id, "YES")
+        )
+        service, wallet_service, _store = self.make_service(notifier=notifier)
+        service_ref.append(service)
+        wallet_service.create_wallet("1045618308")
+        pairing = service.create_pairing("1045618308")
+        service.link_photon_sender(pairing["code"], "+1 (555) 123-4567")
+
+        service.request_hash_approval(
+            telegram_user_id="1045618308",
+            action_type="sign402_bitrefill",
+            commitment_hash="a" * 64,
+            context_lines=[
+                "Action: BUY BITREFILL",
+                "Product: Amazon\nTotal: 0.01 USD\nMax spend: 0.01 USDC",
+                "Total: 510 USD",
+                "Expires: 10 minutes",
+            ],
+        )
+        message = notifier.messages[0]["message"]
+        delivered_lines = notifier.messages[0]["contextLines"]
+
+        lines = message.split("\n")
+        total_lines = [line for line in lines if line.startswith("Total:")]
+
+        # The smuggled text survives as content, but only inside the Product
+        # line -- it can no longer stand on its own as a forged Total.
+        self.assertIn("Product: Amazon Total: 0.01 USD Max spend: 0.01 USDC", lines)
+        self.assertEqual(total_lines, ["Total: 510 USD"])
+        for line in delivered_lines:
+            self.assertNotIn("\n", line)
+
+    def test_hash_approval_context_lines_drop_control_characters(self):
+        service_ref = []
+        notifier = AutoDecisionNotifier(
+            lambda photon_user_id: service_ref[0].record_decision(photon_user_id, "YES")
+        )
+        service, wallet_service, _store = self.make_service(notifier=notifier)
+        service_ref.append(service)
+        wallet_service.create_wallet("1045618308")
+        pairing = service.create_pairing("1045618308")
+        service.link_photon_sender(pairing["code"], "+1 (555) 123-4567")
+
+        service.request_hash_approval(
+            telegram_user_id="1045618308",
+            action_type="sign402_bitrefill",
+            commitment_hash="b" * 64,
+            context_lines=[
+                "Action: BUY BITREFILL",
+                "Product: Gift Total: 0.01 USD\x85Max spend: 0\x07.01",
+                "Total: 510 USD",
+            ],
+        )
+        message = notifier.messages[0]["message"]
+
+        lines = message.split("\n")
+        total_lines = [line for line in lines if line.startswith("Total:")]
+
+        self.assertEqual(total_lines, ["Total: 510 USD"])
+        self.assertIn("Product: Gift Total: 0.01 USD Max spend: 0 .01", lines)
+        for character in ("\u2028", "\u2029", "\x85", "\x07", "\r"):
+            self.assertNotIn(character, message)
+
     def test_decision_with_matching_approval_id_is_approved(self):
         service, _wallet_service, _store, _notifier = self.make_linked_service()
         service.create_test_approval("1045618308")

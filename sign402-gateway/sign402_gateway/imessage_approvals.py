@@ -29,6 +29,8 @@ LINK_ATTEMPT_LIMIT = 10
 LINK_ATTEMPT_WINDOW_SECONDS = 10 * 60
 TEST_APPROVAL_TTL_SECONDS = 2 * 60
 PURCHASE_APPROVAL_TTL_SECONDS = 10 * 60
+APPROVAL_LINE_MAX_CHARS = 80
+_CONTROL_CHARACTERS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 SUPPORTED_APPROVAL_CHANNELS = frozenset({"imessage", "whatsapp"})
 
 
@@ -834,6 +836,9 @@ class ImessageApprovalService:
         normalized_hash = str(commitment_hash or "").strip().lower()
         if not re.fullmatch(r"[a-f0-9]{64}", normalized_hash):
             raise ValueError("commitment_hash must be a 64-character hex string")
+        # Flatten before anything stores, hashes, or displays these lines, so
+        # the recorded approval matches exactly what the approver was shown.
+        safe_context_lines = _sanitize_context_lines(context_lines)
         wallet_status = self.wallet_service.wallet_status(user_id)
         if not wallet_status.get("ok"):
             return {
@@ -882,14 +887,14 @@ class ImessageApprovalService:
                 "schemaVersion": 1,
                 "actionType": str(action_type or "sign402_external"),
                 "commitmentHash": normalized_hash,
-                "contextLines": [str(line) for line in context_lines],
+                "contextLines": list(safe_context_lines),
                 "createdAt": now,
                 "expiresAt": expires_at,
             }
             canonical_json = _canonical_json(canonical)
             approval_id = secrets.token_urlsafe(18)
             message = _purchase_approval_message(
-                context_lines=[str(line) for line in context_lines],
+                context_lines=safe_context_lines,
                 commitment_hash=normalized_hash,
             )
             db.execute(
@@ -905,7 +910,7 @@ class ImessageApprovalService:
                     user_id,
                     str(action_type or "sign402_external"),
                     normalized_hash,
-                    json.dumps(context_lines, separators=(",", ":")),
+                    json.dumps(safe_context_lines, separators=(",", ":")),
                     canonical_json,
                     now,
                     expires_at,
@@ -925,7 +930,7 @@ class ImessageApprovalService:
             links=links,
             message=message,
             approval_id=approval_id,
-            context_lines=[str(line) for line in context_lines],
+            context_lines=safe_context_lines,
             expires_at=expires_at,
         )
         delivered_channels = self._delivery_channels(deliveries)
@@ -1054,11 +1059,13 @@ class ImessageApprovalService:
                 canonical_json.encode("utf-8")
             ).hexdigest()
             approval_id = secrets.token_urlsafe(18)
-            context_lines = _purchase_context_lines(
-                tool_name=str(tool_name or "x402 resource"),
-                wallet_address=wallet_address,
-                resource_url=str(resource_url or ""),
-                payment_requirements=payment_requirements,
+            context_lines = _sanitize_context_lines(
+                _purchase_context_lines(
+                    tool_name=str(tool_name or "x402 resource"),
+                    wallet_address=wallet_address,
+                    resource_url=str(resource_url or ""),
+                    payment_requirements=payment_requirements,
+                )
             )
             message = _purchase_approval_message(
                 context_lines=context_lines,
@@ -1701,6 +1708,27 @@ def _canonical_json(value: dict[str, Any]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def _sanitize_context_line(value: Any) -> str:
+    """Flatten one approval line so its content cannot forge extra lines.
+
+    Approval text is newline-joined before it reaches the approver, and some
+    lines carry provider-controlled data (a Bitrefill product name). A line
+    break surviving from there would let that data inject its own "Total:"
+    above the real one, so the human's YES would be bound to terms they never
+    saw. Whitespace is collapsed and control characters are dropped; Python's
+    ``str.split`` already treats U+2028/U+2029/NEL as whitespace.
+    """
+    text = _CONTROL_CHARACTERS_RE.sub(" ", str(value if value is not None else ""))
+    return " ".join(text.split())[:APPROVAL_LINE_MAX_CHARS]
+
+
+def _sanitize_context_lines(lines: Any) -> list[str]:
+    if not isinstance(lines, (list, tuple)):
+        return []
+    sanitized = (_sanitize_context_line(line) for line in lines)
+    return [line for line in sanitized if line]
+
+
 def _short_address(address: str) -> str:
     if len(address) >= 12:
         return f"{address[:6]}...{address[-4:]}"
@@ -1755,11 +1783,14 @@ def _purchase_approval_message(
     context_lines: list[str],
     commitment_hash: str,
 ) -> str:
+    # Sanitize here too: this is the last step before the approver reads the
+    # text, so a caller that forgets to flatten still cannot forge a line.
+    safe_lines = _sanitize_context_lines(context_lines)
     expires_lines = [
-        line for line in context_lines if str(line).strip().lower().startswith("expires:")
+        line for line in safe_lines if line.strip().lower().startswith("expires:")
     ]
     body_lines = [
-        line for line in context_lines if not str(line).strip().lower().startswith("expires:")
+        line for line in safe_lines if not line.strip().lower().startswith("expires:")
     ]
     expires_line = expires_lines[0] if expires_lines else "Expires: 2 minutes"
     return "\n".join(
