@@ -3592,6 +3592,89 @@ class GatewayServerTests(unittest.TestCase):
         self.assertIn("0.01 USDC", body["telegramText"])
         self.assertIn("0.1 USDC", body["telegramText"])
 
+    def test_agent_spending_limits_distinguishes_personal_platform_and_bitrefill_limits(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = UserSpendLimitStore(Path(tmpdir) / "limits.json")
+            server.user_spend_limit_store = store
+            store.set_limit_settings(
+                "1045618308",
+                max_per_tx_atomic=50_000_000,
+                daily_cap_atomic=1_000_000_000,
+                operator_max_per_tx_atomic=50_000_000,
+                operator_daily_cap_atomic=500_000_000,
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SIGN402_BITREFILL_MODE": "live",
+                    "SIGN402_BITREFILL_LIVE_MAX_USD": "1000.00",
+                    "SIGN402_USER_WALLET_MAX_ATOMIC_PER_TX": "50000000",
+                    "SIGN402_USER_WALLET_DAILY_ATOMIC_CAP": "500000000",
+                    "SIGN402_USER_WALLET_CEILING_ATOMIC_PER_TX": "1020000000",
+                    "SIGN402_USER_WALLET_CEILING_DAILY_ATOMIC": "5000000000",
+                },
+            ):
+                with patch("sys.stderr", io.StringIO()):
+                    handler = self.make_handler(
+                        "/agent/spending-limits",
+                        {"telegramUserId": "1045618308"},
+                        server=server,
+                        headers=self.llm_auth_headers(),
+                    )
+
+        body = self.response_json(handler)
+        self.assertEqual(body["limits"]["bitrefillMode"], "live")
+        self.assertEqual(body["limits"]["bitrefillLiveMaxUsd"], "1000")
+        self.assertEqual(
+            body["telegramText"],
+            "Current spending limits.\n\n"
+            "Your spending limits:\n"
+            "- Max per transaction: 50 USDC\n"
+            "- Daily cap: 1000 USDC\n\n"
+            "Platform maximums:\n"
+            "- Max per transaction: 1020 USDC\n"
+            "- Daily cap: 5000 USDC\n\n"
+            "Bitrefill product maximum: 1000 USD before the 2% service fee.\n"
+            "Service fees count toward your spending limits.\n"
+            "The lowest applicable limit wins.\n\n"
+            "To change: /limits <per-transaction> <daily>",
+        )
+
+    def test_agent_spending_limits_marks_bitrefill_cap_inactive_outside_live_mode(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server.user_spend_limit_store = UserSpendLimitStore(
+                Path(tmpdir) / "limits.json"
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "SIGN402_BITREFILL_MODE": "test",
+                    "SIGN402_USER_WALLET_CEILING_ATOMIC_PER_TX": "",
+                    "SIGN402_USER_WALLET_CEILING_DAILY_ATOMIC": "",
+                },
+            ):
+                with patch("sys.stderr", io.StringIO()):
+                    handler = self.make_handler(
+                        "/agent/spending-limits",
+                        {"telegramUserId": "1045618308"},
+                        server=server,
+                        headers=self.llm_auth_headers(),
+                    )
+
+        body = self.response_json(handler)
+        self.assertEqual(body["limits"]["bitrefillMode"], "test")
+        self.assertIsNone(body["limits"]["bitrefillLiveMaxUsd"])
+        self.assertIn("Platform maximums:", body["telegramText"])
+        self.assertIn("- Max per transaction: unlimited", body["telegramText"])
+        self.assertIn("- Daily cap: unlimited", body["telegramText"])
+        self.assertIn("Bitrefill product maximum: inactive", body["telegramText"])
+        self.assertNotIn("Default safety limits:", body["telegramText"])
+
     def test_agent_spending_limits_updates_user_limits_below_operator_caps(self):
         server = DummyServer()
         server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"

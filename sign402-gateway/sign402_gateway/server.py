@@ -14,7 +14,7 @@ import time
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from urllib.parse import quote
 import urllib.request
 
@@ -27,6 +27,7 @@ DEMO_RESOURCE_SERVER_DIR = ROOT_DIR / "demo-resource-server"
 DEFAULT_EVENT_STORE_PATH = ROOT_DIR / "demo-dashboard" / "latest-run.json"
 DEFAULT_AGENT_STATE_PATH = ROOT_DIR / "demo-dashboard" / "agent-state.json"
 DEFAULT_BITREFILL_COMMERCE_STORE_PATH = ROOT_DIR / "demo-dashboard" / "bitrefill-orders.sqlite3"
+DEFAULT_BITREFILL_LIVE_MAX_USD = "5.00"
 DEFAULT_CDP_X402_SERVICE_DIR = ROOT_DIR / "cdp-x402-service"
 DEFAULT_USER_SPEND_LIMIT_STORE_PATH = Path.home() / ".sign402" / "user-spend-limits.json"
 DEFAULT_BASE_REPORT_URL = "http://127.0.0.1:4021/paid/sign402-report"
@@ -878,6 +879,10 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                     operator_ceiling_daily_atomic=operator_ceilings["ceilingDailyAtomic"],
                 )
                 updated = False
+            limits = {
+                **limits,
+                **_bitrefill_live_limit_settings(),
+            }
             self._send_json(
                 {
                     "ok": True,
@@ -2014,6 +2019,32 @@ def build_approval_client_from_env(
     raise ValueError(f"unsupported SIGN402_APPROVAL_PROVIDER: {provider}")
 
 
+def _bitrefill_live_limit_settings(
+    env: Mapping[str, str] | None = None,
+) -> dict[str, str | None]:
+    values = os.environ if env is None else env
+    mode = str(values.get("SIGN402_BITREFILL_MODE", "test")).strip().lower()
+    if mode != "live":
+        return {
+            "bitrefillMode": mode,
+            "bitrefillLiveMaxUsd": None,
+        }
+    value = Decimal(
+        str(
+            values.get(
+                "SIGN402_BITREFILL_LIVE_MAX_USD",
+                DEFAULT_BITREFILL_LIVE_MAX_USD,
+            )
+        )
+    )
+    if not value.is_finite() or value <= 0:
+        raise ValueError("SIGN402_BITREFILL_LIVE_MAX_USD must be positive")
+    return {
+        "bitrefillMode": mode,
+        "bitrefillLiveMaxUsd": format_decimal(value),
+    }
+
+
 def build_bitrefill_client_from_env(env: dict[str, str] | None = None):
     from .bitrefill import TestBitrefillClient
     from .bitrefill_mcp import McpBitrefillClient
@@ -2045,7 +2076,10 @@ def build_bitrefill_client_from_env(env: dict[str, str] | None = None):
                 "SIGN402_BITREFILL_MCP_URL",
                 "https://api.bitrefill.com/mcp",
             ),
-            max_purchase_usd=values.get("SIGN402_BITREFILL_LIVE_MAX_USD", "5.00"),
+            max_purchase_usd=values.get(
+                "SIGN402_BITREFILL_LIVE_MAX_USD",
+                DEFAULT_BITREFILL_LIVE_MAX_USD,
+            ),
             max_invoice_overage_bps=int(
                 values.get("SIGN402_BITREFILL_LIVE_MAX_INVOICE_OVERAGE_BPS", "500")
             ),
@@ -5923,16 +5957,26 @@ def _spending_limits_telegram_text(limits: dict[str, Any], *, updated: bool) -> 
     heading = "Spending limits updated." if updated else "Current spending limits."
     max_per_tx = str(limits.get("maxPerTxUsdc") or "unlimited")
     daily_cap = str(limits.get("dailyCapUsdc") or "unlimited")
-    operator_max = _format_usdc_atomic(limits.get("operatorMaxPerTxAtomic"))
-    operator_daily = _format_usdc_atomic(limits.get("operatorDailyCapAtomic"))
+    platform_max = _format_usdc_atomic(limits.get("operatorCeilingPerTxAtomic"))
+    platform_daily = _format_usdc_atomic(limits.get("operatorCeilingDailyAtomic"))
+    bitrefill_max = limits.get("bitrefillLiveMaxUsd")
+    bitrefill_line = (
+        f"Bitrefill product maximum: {bitrefill_max} USD before the 2% service fee."
+        if bitrefill_max is not None
+        else "Bitrefill product maximum: inactive."
+    )
     return (
         f"{heading}\n\n"
-        f"Max per transaction: {max_per_tx} USDC\n"
-        f"Daily cap: {daily_cap} USDC\n\n"
-        "Default safety limits:\n"
-        f"- Max per transaction: {operator_max} USDC\n"
-        f"- Daily cap: {operator_daily} USDC\n\n"
-        "To change: /limits 0.005 0.05"
+        "Your spending limits:\n"
+        f"- Max per transaction: {max_per_tx} USDC\n"
+        f"- Daily cap: {daily_cap} USDC\n\n"
+        "Platform maximums:\n"
+        f"- Max per transaction: {platform_max} USDC\n"
+        f"- Daily cap: {platform_daily} USDC\n\n"
+        f"{bitrefill_line}\n"
+        "Service fees count toward your spending limits.\n"
+        "The lowest applicable limit wins.\n\n"
+        "To change: /limits <per-transaction> <daily>"
     )
 
 
@@ -6325,6 +6369,8 @@ def _erc20_log_amount_atomic(log: dict[str, Any]) -> str | None:
 
 
 def _format_usdc_atomic(value: Any) -> str:
+    if value is None:
+        return "unlimited"
     return format_decimal(Decimal(str(value)) / Decimal(1_000_000))
 
 
