@@ -131,6 +131,25 @@ Expected:
 - `sign402-gateway` is `active`.
 - `hermes-gateway` is `active`.
 
+## Configurable Spending Limits
+
+Set the approved production ceilings in `/etc/sign402-gateway.env`:
+
+```env
+SIGN402_BITREFILL_LIVE_MAX_USD=1000.00
+SIGN402_USER_WALLET_CEILING_ATOMIC_PER_TX=1020000000
+SIGN402_USER_WALLET_CEILING_DAILY_ATOMIC=5000000000
+```
+
+`/limits 50 1000` means 50 USDC total per transaction and 1,000 USDC total
+per UTC day. Wallet limits include the 2% fee, so a $1,000 product needs a
+1,020 USDC personal transaction limit. The Bitrefill cap is checked before the
+fee, and the lowest applicable limit wins.
+
+For production validation, keep `SIGN402_PURCHASES_PAUSED=1`; never call a buy
+or fulfillment endpoint. To roll back, restore the pre-change environment
+backup and restart the service.
+
 ## Fresh User Flow
 
 Run this with a Telegram account that was never allowlisted and never used the
