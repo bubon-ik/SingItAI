@@ -1362,6 +1362,15 @@ class ImessageApprovalService:
             if now >= expires_at:
                 break
             time.sleep(self.purchase_approval_poll_interval)
+        # Nobody is waiting for this answer any more, and the caller has been
+        # told no funds moved. Leaving the row pending would block every new
+        # purchase by this user until the row's own TTL ran out — several
+        # minutes longer than the request that created it.
+        self._release_pending_approval(
+            approval_id=approval_id,
+            telegram_user_id=telegram_user_id,
+            commitment_hash=commitment_hash,
+        )
         return {
             "ok": False,
             "status": "timeout",
@@ -1369,6 +1378,36 @@ class ImessageApprovalService:
             "commitmentHash": commitment_hash,
             "telegramText": "Approval timed out. No funds were moved.",
         }
+
+    def _release_pending_approval(
+        self,
+        *,
+        approval_id: str,
+        telegram_user_id: str,
+        commitment_hash: str,
+    ) -> None:
+        now = self._now()
+        with self.store.lock, self.store._database() as db:
+            released = db.execute(
+                """
+                UPDATE imessage_approvals
+                SET status = 'expired', decision_at = ?
+                WHERE approval_id = ? AND status = 'pending'
+                """,
+                (now, approval_id),
+            ).rowcount
+            # A decision that landed in the same moment keeps its own status:
+            # the guard above only touches a row that is still pending.
+            if released:
+                self._record_audit(
+                    db,
+                    telegram_user_id=str(telegram_user_id),
+                    event_type="approval_timeout",
+                    approval_id=approval_id,
+                    action_type="",
+                    commitment_hash=commitment_hash,
+                    status="expired",
+                )
 
     def _linked_approval_channels(
         self,

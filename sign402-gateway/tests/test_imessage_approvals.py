@@ -498,6 +498,45 @@ class ImessageApprovalTests(unittest.TestCase):
         self.assertTrue(bound["ok"])
         self.assertEqual(bound["status"], "approved")
 
+    def test_timed_out_purchase_does_not_block_the_next_one(self):
+        """A request that gives up must not hold the user's approval slot.
+
+        Only one approval may be pending per user, and the row outlives the
+        request that created it, so a timed-out purchase used to lock the user
+        out of buying anything for the rest of the row's TTL.
+        """
+        service, wallet_service, _store = self.make_service()
+        service.purchase_approval_timeout = 1.0
+        service.purchase_approval_poll_interval = 0.01
+        wallet_service.create_wallet("1045618308")
+        pairing = service.create_pairing("1045618308")
+        service.link_photon_sender(pairing["code"], "+1 (555) 123-4567")
+        requirements = {
+            "scheme": "exact",
+            "network": "base-mainnet",
+            "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "amountAtomic": "1000",
+            "receiver": "0x0E84dDEdAaE6A779c462C22a59F301EC31B6b808",
+        }
+
+        timed_out = service.request_purchase_approval(
+            telegram_user_id="1045618308",
+            tool_name="Crypto News",
+            resource_url="https://x402.example/news",
+            payment_requirements=requirements,
+        )
+        # Nobody answered, so the slot must be free for a fresh attempt.
+        retried = service.request_purchase_approval(
+            telegram_user_id="1045618308",
+            tool_name="Crypto News",
+            resource_url="https://x402.example/news",
+            payment_requirements=requirements,
+        )
+
+        self.assertEqual(timed_out["status"], "timeout")
+        self.assertNotEqual(retried.get("status"), "approval_pending")
+        self.assertNotEqual(retried["approvalId"], timed_out["approvalId"])
+
     def test_decision_with_mismatched_approval_id_is_rejected(self):
         service, _wallet_service, _store, _notifier = self.make_linked_service()
         service.create_test_approval("1045618308")
