@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, TypedDict, cast
+
+
+class LegacyFulfillmentTokenCleanupError(RuntimeError):
+    pass
+
+
+class CleanupReport(TypedDict):
+    mode: str
+    records: int
+    plaintext_token_records: int
+    encrypted_token_records: int
+    token_fields_removed: int
+    changed: bool
+
+
+def _load_purchase_store(path: Path) -> dict[str, dict[str, Any]]:
+    if path.is_symlink():
+        raise LegacyFulfillmentTokenCleanupError(
+            "purchase store must not be a symlink"
+        )
+    if not path.exists():
+        raise LegacyFulfillmentTokenCleanupError(
+            "purchase store does not exist"
+        )
+    if not path.is_file():
+        raise LegacyFulfillmentTokenCleanupError(
+            "purchase store must be a regular file"
+        )
+    try:
+        serialized = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        raise LegacyFulfillmentTokenCleanupError(
+            "purchase store must be UTF-8 JSON"
+        ) from None
+    except OSError:
+        raise LegacyFulfillmentTokenCleanupError(
+            "purchase store could not be read"
+        ) from None
+    try:
+        payload = json.loads(serialized)
+    except json.JSONDecodeError:
+        raise LegacyFulfillmentTokenCleanupError(
+            "purchase store must contain valid JSON"
+        ) from None
+    if not isinstance(payload, dict):
+        raise LegacyFulfillmentTokenCleanupError(
+            "purchase store root must be an object"
+        )
+    if any(not isinstance(record, dict) for record in payload.values()):
+        raise LegacyFulfillmentTokenCleanupError(
+            "every purchase store record must be an object"
+        )
+    return cast(dict[str, dict[str, Any]], payload)
+
+
+def cleanup_legacy_fulfillment_tokens(
+    path: Path,
+    *,
+    apply: bool = False,
+) -> CleanupReport:
+    data = _load_purchase_store(Path(path))
+    plaintext_records = sum(
+        "fulfillmentToken" in record for record in data.values()
+    )
+    encrypted_records = sum(
+        "encryptedFulfillmentToken" in record for record in data.values()
+    )
+    token_fields = plaintext_records + encrypted_records
+    return {
+        "mode": "apply" if apply else "dry-run",
+        "records": len(data),
+        "plaintext_token_records": plaintext_records,
+        "encrypted_token_records": encrypted_records,
+        "token_fields_removed": token_fields,
+        "changed": False,
+    }
