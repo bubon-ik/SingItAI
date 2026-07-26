@@ -11,7 +11,10 @@ from unittest.mock import MagicMock, patch
 
 from cryptography.fernet import Fernet
 
-from sign402_gateway.commerce_store import BitrefillCommerceStore
+from sign402_gateway.commerce_store import (
+    STATE_ORDER,
+    BitrefillCommerceStore,
+)
 from sign402_gateway.secure_state import (
     SensitiveStateCipher,
     SensitiveStateDecryptionError,
@@ -42,6 +45,74 @@ def raw_order_row(path: Path, quote_id: str) -> tuple[str, str, int]:
 
 
 class CommerceStoreTests(unittest.TestCase):
+    def test_invoice_created_is_between_approval_and_funding(self):
+        self.assertGreater(
+            STATE_ORDER["INVOICE_CREATED"],
+            STATE_ORDER["USER_APPROVED"],
+        )
+        self.assertLess(
+            STATE_ORDER["INVOICE_CREATED"],
+            STATE_ORDER["FULFILLING"],
+        )
+
+    def test_invoice_created_persists_only_safe_prepared_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.sqlite3"
+            store = BitrefillCommerceStore(path, cipher=make_cipher())
+            store.save_quote(
+                {
+                    "quoteId": "q1",
+                    "productId": "steam-usa",
+                    "packageId": "steam-usa<&>50",
+                    "packageValue": "50",
+                    "expiresAtEpoch": 999,
+                }
+            )
+
+            store.advance_state(
+                "q1",
+                "INVOICE_CREATED",
+                {
+                    "bitrefillCheckpoint": {
+                        "invoiceId": "inv_1",
+                        "status": "UNPAID",
+                        "productId": "hostile-product",
+                        "packageValue": "999",
+                        "paymentMethod": "usdc_base",
+                        "paymentAmount": "50.50",
+                        "paymentAsset": "USDC",
+                        "paymentNetwork": "base",
+                        "paymentAddress": (
+                            "0x1111111111111111111111111111111111111111"
+                        ),
+                        "paymentLink": "https://pay.example/secret",
+                    }
+                },
+            )
+
+            record = store.get_quote("q1")
+            self.assertEqual(record["state"], "INVOICE_CREATED")
+            self.assertEqual(
+                record["metadata"]["bitrefillCheckpoint"],
+                {
+                    "invoiceId": "inv_1",
+                    "status": "unpaid",
+                    "productId": "steam-usa",
+                    "packageId": "steam-usa<&>50",
+                    "packageValue": "50",
+                    "paymentMethod": "usdc_base",
+                    "paymentAmount": "50.50",
+                    "paymentAsset": "USDC",
+                    "paymentNetwork": "base",
+                },
+            )
+            raw = "\n".join(
+                sidecar.read_bytes().decode("utf-8", errors="ignore")
+                for sidecar in path.parent.glob(f"{path.name}*")
+            )
+            self.assertNotIn("0x1111111111111111111111111111111111111111", raw)
+            self.assertNotIn("https://pay.example/secret", raw)
+
     def test_refunded_is_terminal_and_token_return_is_sanitized(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "orders.sqlite3"

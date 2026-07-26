@@ -23,6 +23,7 @@ STATE_ORDER = {
     "QUOTED": 10,
     "FIREFLY_APPROVED": 20,
     "USER_APPROVED": 20,
+    "INVOICE_CREATED": 25,
     "SINGIT_AUTHORIZED": 30,
     "SINGIT_SETTLED": 35,
     "FULFILLING": 40,
@@ -173,6 +174,24 @@ def sanitize_bitrefill_checkpoint(
         )
     if "status" in snapshot:
         snapshot["status"] = snapshot["status"].lower()
+    for key in (
+        "paymentMethod",
+        "paymentAmount",
+        "paymentAsset",
+        "paymentNetwork",
+    ):
+        _copy_scalar(
+            snapshot,
+            checkpoint,
+            key,
+            field=f"bitrefillCheckpoint.{key}",
+        )
+    if "paymentMethod" in snapshot:
+        snapshot["paymentMethod"] = snapshot["paymentMethod"].lower()
+    if "paymentAsset" in snapshot:
+        snapshot["paymentAsset"] = snapshot["paymentAsset"].upper()
+    if "paymentNetwork" in snapshot:
+        snapshot["paymentNetwork"] = snapshot["paymentNetwork"].lower()
     if "orderIds" in checkpoint:
         order_ids = checkpoint["orderIds"]
         if not isinstance(order_ids, list):
