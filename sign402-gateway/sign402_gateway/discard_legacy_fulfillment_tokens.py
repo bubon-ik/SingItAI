@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from collections.abc import Sequence
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, TypedDict, cast
+from typing import Any, NoReturn, TypedDict, cast
 
 from .secure_state import SensitiveStateError, atomic_write_private_json
 
@@ -21,6 +23,53 @@ class CleanupReport(TypedDict):
     encrypted_token_records: int
     token_fields_removed: int
     changed: bool
+
+
+class _DuplicateObjectMember(ValueError):
+    pass
+
+
+class _NonstandardJsonNumber(ValueError):
+    pass
+
+
+def _object_without_duplicate_members(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateObjectMember
+        result[key] = value
+    return result
+
+
+def _reject_nonstandard_json_number(_: str) -> NoReturn:
+    raise _NonstandardJsonNumber
+
+
+def _normalize_lossless_json_numbers(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        converted = float(value)
+        if (
+            not math.isfinite(converted)
+            or Decimal(str(converted)) != value
+        ):
+            raise LegacyFulfillmentTokenCleanupError(
+                "purchase store numbers must be losslessly representable"
+            )
+        return converted
+    if isinstance(value, list):
+        return [
+            _normalize_lossless_json_numbers(item)
+            for item in value
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _normalize_lossless_json_numbers(item)
+            for key, item in value.items()
+        }
+    return value
 
 
 def _load_purchase_store(path: Path) -> dict[str, dict[str, Any]]:
@@ -47,11 +96,29 @@ def _load_purchase_store(path: Path) -> dict[str, dict[str, Any]]:
             "purchase store could not be read"
         ) from None
     try:
-        payload = json.loads(serialized)
+        payload = json.loads(
+            serialized,
+            object_pairs_hook=_object_without_duplicate_members,
+            parse_float=Decimal,
+            parse_constant=_reject_nonstandard_json_number,
+        )
+    except _DuplicateObjectMember:
+        raise LegacyFulfillmentTokenCleanupError(
+            "purchase store must not contain duplicate object members"
+        ) from None
+    except _NonstandardJsonNumber:
+        raise LegacyFulfillmentTokenCleanupError(
+            "purchase store must contain strict JSON numbers"
+        ) from None
+    except InvalidOperation:
+        raise LegacyFulfillmentTokenCleanupError(
+            "purchase store numbers must be losslessly representable"
+        ) from None
     except json.JSONDecodeError:
         raise LegacyFulfillmentTokenCleanupError(
             "purchase store must contain valid JSON"
         ) from None
+    payload = _normalize_lossless_json_numbers(payload)
     if not isinstance(payload, dict):
         raise LegacyFulfillmentTokenCleanupError(
             "purchase store root must be an object"

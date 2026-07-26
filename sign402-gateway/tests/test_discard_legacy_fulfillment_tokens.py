@@ -6,6 +6,7 @@ import stat
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from decimal import Decimal
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -30,6 +31,42 @@ class DiscardLegacyFulfillmentTokensTests(unittest.TestCase):
             json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+
+    def assert_cli_rejects_raw_apply_without_mutation(
+        self,
+        raw: bytes,
+        expected_error: str,
+        secret_marker: str,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-purchases.json"
+            path.write_bytes(raw)
+            before_bytes = path.read_bytes()
+            before_mtime_ns = path.stat().st_mtime_ns
+            module = cleanup_module()
+            stdout = StringIO()
+            stderr = StringIO()
+
+            try:
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    exit_code = module.main(
+                        ["--path", str(path), "--apply"]
+                    )
+            except Exception as exc:
+                self.fail(
+                    "CLI must return a cleanup error instead of raising "
+                    f"{type(exc).__name__}"
+                )
+
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertEqual(
+                stderr.getvalue(),
+                f"error: {expected_error}\n",
+            )
+            self.assertNotIn(secret_marker, stderr.getvalue())
+            self.assertEqual(path.read_bytes(), before_bytes)
+            self.assertEqual(path.stat().st_mtime_ns, before_mtime_ns)
 
     def test_dry_run_reports_counts_without_mutating_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -266,3 +303,115 @@ class DiscardLegacyFulfillmentTokensTests(unittest.TestCase):
             self.assertEqual(stdout.getvalue(), "")
             self.assertIn("valid JSON", stderr.getvalue())
             self.assertNotIn("CLI-SECRET-MARKER", stderr.getvalue())
+
+    def test_duplicate_top_level_user_id_is_rejected_without_mutation(self):
+        marker = "DUPLICATE-TOP-LEVEL-SECRET"
+        self.assert_cli_rejects_raw_apply_without_mutation(
+            (
+                b'{"duplicate-user":{"fulfillmentToken":"'
+                + marker.encode()
+                + b'"},"duplicate-user":{"ok":true}}\n'
+            ),
+            "purchase store must not contain duplicate object members",
+            marker,
+        )
+
+    def test_duplicate_nested_field_is_rejected_without_mutation(self):
+        marker = "DUPLICATE-NESTED-SECRET"
+        self.assert_cli_rejects_raw_apply_without_mutation(
+            (
+                b'{"u":{"fulfillmentToken":"'
+                + marker.encode()
+                + b'","details":{"status":"first","status":"second"}}}\n'
+            ),
+            "purchase store must not contain duplicate object members",
+            marker,
+        )
+
+    def test_nonstandard_and_lossy_numbers_are_rejected_without_mutation(self):
+        marker = "UNSAFE-NUMBER-SECRET"
+        cases = (
+            (
+                "nan",
+                b'NaN',
+                "purchase store must contain strict JSON numbers",
+            ),
+            (
+                "positive-infinity",
+                b'Infinity',
+                "purchase store must contain strict JSON numbers",
+            ),
+            (
+                "negative-infinity",
+                b'-Infinity',
+                "purchase store must contain strict JSON numbers",
+            ),
+            (
+                "overflowing-exponent",
+                b'1e400',
+                (
+                    "purchase store numbers must be "
+                    "losslessly representable"
+                ),
+            ),
+            (
+                "unsupported-decimal-exponent",
+                b'1e9999999999999999999',
+                (
+                    "purchase store numbers must be "
+                    "losslessly representable"
+                ),
+            ),
+            (
+                "high-precision-decimal",
+                b'0.12345678901234567890123456789',
+                (
+                    "purchase store numbers must be "
+                    "losslessly representable"
+                ),
+            ),
+        )
+        for name, number, expected_error in cases:
+            with self.subTest(name=name):
+                self.assert_cli_rejects_raw_apply_without_mutation(
+                    (
+                        b'{"u":{"fulfillmentToken":"'
+                        + marker.encode()
+                        + b'","amount":'
+                        + number
+                        + b"}}\n"
+                    ),
+                    expected_error,
+                    marker,
+                )
+
+    def test_lossless_json_numbers_remain_supported_during_apply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-purchases.json"
+            path.write_bytes(
+                b'{"u":{"fulfillmentToken":"REMOVE-ME",'
+                b'"integer":123456789012345678901234567890,'
+                b'"decimal":1.25,"exponent":1e3,"negativeZero":-0.0}}\n'
+            )
+            module = cleanup_module()
+
+            report = module.cleanup_legacy_fulfillment_tokens(
+                path,
+                apply=True,
+            )
+
+            persisted = json.loads(
+                path.read_text(encoding="utf-8"),
+                parse_float=Decimal,
+            )
+            self.assertTrue(report["changed"])
+            self.assertNotIn("fulfillmentToken", persisted["u"])
+            self.assertEqual(
+                persisted["u"],
+                {
+                    "integer": 123456789012345678901234567890,
+                    "decimal": Decimal("1.25"),
+                    "exponent": Decimal("1e3"),
+                    "negativeZero": Decimal("-0.0"),
+                },
+            )
