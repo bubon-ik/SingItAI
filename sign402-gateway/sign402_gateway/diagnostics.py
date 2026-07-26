@@ -139,6 +139,52 @@ def safe_provider_diagnostic(
     return {"type": "no_allowlisted_fields", **fingerprint}
 
 
+def describe_payload_shape(
+    value: Any,
+    *,
+    depth: int = 3,
+    max_keys: int = 40,
+) -> Any:
+    """Describe a decoded payload by key names and value types only.
+
+    A provider response that fails a structural check is unusable as evidence
+    unless its shape is visible, but its values can be payment addresses or
+    redemption codes. Field names and type names carry the diagnosis without
+    carrying any of that, so only those are returned.
+    """
+    if isinstance(value, Mapping):
+        if depth <= 0:
+            return f"object({len(value)} keys)"
+        shape: dict[str, Any] = {}
+        items = sorted(
+            ((str(key), item) for key, item in value.items()),
+            key=lambda pair: pair[0],
+        )
+        for index, (key, item) in enumerate(items):
+            if index >= int(max_keys):
+                shape["…"] = f"+{len(items) - int(max_keys)} more"
+                break
+            shape[key] = describe_payload_shape(
+                item,
+                depth=depth - 1,
+                max_keys=max_keys,
+            )
+        return shape
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return f"list[{len(value)}]"
+        if depth <= 0:
+            return f"list[{len(value)}]"
+        return {
+            f"list[{len(value)}]": describe_payload_shape(
+                value[0],
+                depth=depth - 1,
+                max_keys=max_keys,
+            )
+        }
+    return type(value).__name__
+
+
 def _context(
     fields: dict[str, Any],
     *,

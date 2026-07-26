@@ -5,6 +5,7 @@ import unittest
 
 from sign402_gateway.diagnostics import (
     bounded,
+    describe_payload_shape,
     log_swallowed_failure,
     redact_secrets,
     safe_provider_diagnostic,
@@ -198,6 +199,54 @@ class LogSwallowedFailureTests(unittest.TestCase):
         self.assertNotIn("https://", joined)
         self.assertNotIn(address, joined)
         self.assertNotIn("secret-provider-value", joined)
+
+
+class DescribePayloadShapeTests(unittest.TestCase):
+    def test_shape_reports_key_names_and_types_but_never_values(self):
+        shape = describe_payload_shape(
+            {
+                "result": {
+                    "invoice_id": "inv_secret_value",
+                    "payment_info": {"address": "0xSECRETADDRESS", "amount": 23.76},
+                    "paid": False,
+                }
+            }
+        )
+
+        self.assertEqual(
+            shape,
+            {
+                "result": {
+                    "invoice_id": "str",
+                    "paid": "bool",
+                    "payment_info": {"address": "str", "amount": "float"},
+                }
+            },
+        )
+        rendered = str(shape)
+        self.assertNotIn("inv_secret_value", rendered)
+        self.assertNotIn("0xSECRETADDRESS", rendered)
+
+    def test_lists_report_length_and_element_shape(self):
+        shape = describe_payload_shape({"orders": [{"order_id": "ord_1"}]})
+
+        self.assertEqual(shape, {"orders": {"list[1]": {"order_id": "str"}}})
+
+    def test_empty_list_is_reported_without_element_shape(self):
+        self.assertEqual(describe_payload_shape({"orders": []}), {"orders": "list[0]"})
+
+    def test_depth_is_bounded(self):
+        shape = describe_payload_shape({"a": {"b": {"c": {"d": "x"}}}}, depth=2)
+
+        self.assertEqual(shape, {"a": {"b": "object(1 keys)"}})
+
+    def test_key_count_is_bounded(self):
+        payload = {f"key_{index}": index for index in range(5)}
+
+        shape = describe_payload_shape(payload, max_keys=2)
+
+        self.assertEqual(len(shape), 3)
+        self.assertEqual(shape["…"], "+3 more")
 
 
 if __name__ == "__main__":

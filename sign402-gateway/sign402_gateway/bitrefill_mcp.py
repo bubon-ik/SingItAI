@@ -20,6 +20,7 @@ from mcp.client.streamable_http import streamable_http_client
 from .bankr_swap import BASE_USDC_MAINNET
 from .bitrefill import _infer_product_type, _money, _recipient_fields
 from .diagnostics import (
+    describe_payload_shape,
     log_hidden_detail,
     log_swallowed_failure,
     safe_provider_diagnostic,
@@ -942,6 +943,18 @@ class McpBitrefillClient:
     ) -> dict[str, Any]:
         invoice_id = self._invoice_id(invoice)
         if not invoice_id:
+            # Nothing else identifies where the provider put the id, and the
+            # values themselves must not reach the journal.
+            log_hidden_detail(
+                logger,
+                "Bitrefill invoice response carries no invoice id",
+                json.dumps(
+                    describe_payload_shape(invoice),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ),
+            )
             raise ValueError("Bitrefill MCP invoice id is missing")
         provider_method = str(
             invoice.get("payment_method")

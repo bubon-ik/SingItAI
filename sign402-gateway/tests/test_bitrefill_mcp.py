@@ -1243,6 +1243,35 @@ class BitrefillMcpPurchaseTests(unittest.TestCase):
             self.assertNotIn(marker, str(checkpoints))
             self.assertNotIn(marker, str(result))
 
+    def test_missing_invoice_id_logs_the_response_shape(self):
+        caller = FakeMcpCaller(
+            [
+                {
+                    "result": {
+                        "invoice_id": "inv_secret_value",
+                        "payment_info": {"address": "0xSECRETADDRESS"},
+                    }
+                }
+            ]
+        )
+        client = McpBitrefillClient(
+            api_key="key_123",
+            max_purchase_usd="50.00",
+            call_tool=caller,
+        )
+        logger = logging.getLogger("sign402_gateway.bitrefill_mcp")
+
+        with self.assertLogs(logger, level="ERROR") as captured:
+            with self.assertRaisesRegex(ValueError, "invoice id is missing"):
+                client.prepare_purchase(quote=APPROVED_QUOTE, recipient={})
+
+        joined = "\n".join(captured.output)
+        self.assertIn("result", joined)
+        self.assertIn("payment_info", joined)
+        self.assertIn("invoice_id", joined)
+        self.assertNotIn("inv_secret_value", joined)
+        self.assertNotIn("0xSECRETADDRESS", joined)
+
     def test_purchase_never_sends_the_deprecated_package_id_field(self):
         caller = FakeMcpCaller(
             [
