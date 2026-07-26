@@ -1161,7 +1161,7 @@ class BitrefillMcpPurchaseTests(unittest.TestCase):
             caller.calls[0][1],
             {
                 "cart_items": [
-                    {"product_id": "steam-usa", "package_id": "50"}
+                    {"product_id": "steam-usa", "package_value": "50"}
                 ],
                 "payment_method": "balance",
                 "return_payment_link": False,
@@ -1183,6 +1183,29 @@ class BitrefillMcpPurchaseTests(unittest.TestCase):
         ):
             self.assertNotIn(marker, str(checkpoints))
             self.assertNotIn(marker, str(result))
+
+    def test_purchase_never_sends_the_deprecated_package_id_field(self):
+        caller = FakeMcpCaller(
+            [
+                {"invoice_id": "inv_1", "status": "complete"},
+                {
+                    "invoice_id": "inv_1",
+                    "status": "complete",
+                    "orders": [{"order_id": "ord_1", "status": "delivered"}],
+                },
+            ]
+        )
+        client = McpBitrefillClient(
+            api_key="key_123",
+            max_purchase_usd="50.00",
+            call_tool=caller,
+        )
+
+        client.buy_product(quote=APPROVED_QUOTE, recipient={})
+
+        item = caller.calls[0][1]["cart_items"][0]
+        self.assertNotIn("package_id", item)
+        self.assertEqual(item["package_value"], "50")
 
     def test_purchase_maps_committed_recipient_to_refill_input(self):
         caller = FakeMcpCaller(

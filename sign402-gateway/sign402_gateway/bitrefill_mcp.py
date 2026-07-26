@@ -651,9 +651,12 @@ class McpBitrefillClient:
             raise ValueError(
                 f"Bitrefill quote exceeds live Bitrefill max ${self.max_purchase_usd}"
             )
+        # `package_id` is deprecated in the Bitrefill MCP schema; the cart is
+        # keyed by the denomination `get-product-details` reports as
+        # `package_value`, which is exactly what the quote carries.
         item: dict[str, Any] = {
             "product_id": str(quote["productId"]),
-            "package_id": str(quote["packageValue"]),
+            "package_value": str(quote["packageValue"]),
         }
         refill_input = self._recipient_value(
             recipient,
