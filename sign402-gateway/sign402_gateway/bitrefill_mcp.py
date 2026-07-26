@@ -1183,7 +1183,14 @@ class McpBitrefillClient:
         ).strip()
 
     def _invoice_status(self, invoice: dict[str, Any]) -> str:
-        return str(invoice.get("status") or "").strip().lower()
+        # The live server names this `invoice_status`; reading only `status`
+        # would poll a paid invoice to exhaustion and report it as failed.
+        return str(
+            invoice.get("status")
+            or invoice.get("invoice_status")
+            or invoice.get("invoiceStatus")
+            or ""
+        ).strip().lower()
 
     def _orders(self, invoice: dict[str, Any]) -> list[dict[str, Any]]:
         orders = invoice.get("orders")

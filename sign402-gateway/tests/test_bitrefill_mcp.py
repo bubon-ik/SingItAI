@@ -1623,6 +1623,68 @@ class BitrefillMcpUsdcPurchaseTests(unittest.TestCase):
         self.assertFalse(caller.calls[0][1]["return_payment_link"])
         self.assertEqual(result["treasuryPayment"]["txId"], "0xUSDC")
 
+    def test_polling_accepts_the_live_invoice_status_field(self):
+        # The live server reports `invoice_status`, not `status`; reading only
+        # `status` would abandon an invoice that has already been paid.
+        caller = FakeMcpCaller(
+            [
+                {
+                    "invoice_id": "inv_live",
+                    "invoice_status": "unpaid",
+                    "payment_info": self._payment_info(),
+                },
+                {
+                    "invoice_id": "inv_live",
+                    "invoice_status": "payment_confirmed",
+                    "payment_info": self._payment_info(),
+                },
+                {
+                    "invoice_id": "inv_live",
+                    "invoice_status": "complete",
+                    "orders_delivery_status": "all_delivered",
+                    "orders": [
+                        {
+                            "order_id": "ord_live",
+                            "status": "delivered",
+                            "redemption_info": {"pin": "SECRET-PIN"},
+                        }
+                    ],
+                },
+            ]
+        )
+        client = self._client(
+            caller,
+            FakeTreasuryClient(),
+            invoice_poll_attempts=3,
+        )
+
+        result = client.buy_product(quote=APPROVED_QUOTE, recipient={})
+
+        self.assertEqual(result["status"], "delivered")
+        self.assertEqual(result["orderId"], "ord_live")
+        self.assertEqual(result["redemption"]["value"]["pin"], "SECRET-PIN")
+
+    def test_terminal_error_in_the_live_invoice_status_field_stops_polling(self):
+        caller = FakeMcpCaller(
+            [
+                {
+                    "invoice_id": "inv_blocked",
+                    "invoice_status": "unpaid",
+                    "payment_info": self._payment_info(),
+                },
+                {
+                    "invoice_id": "inv_blocked",
+                    "invoice_status": "unpaid",
+                    "payment_info": self._payment_info(),
+                },
+                {"invoice_id": "inv_blocked", "invoice_status": "denied"},
+            ]
+        )
+        client = self._client(caller, FakeTreasuryClient())
+
+        with self.assertRaisesRegex(ValueError, "failed \\(denied\\)"):
+            client.buy_product(quote=APPROVED_QUOTE, recipient={})
+
     def test_documented_minimal_payment_info_is_accepted(self):
         caller = FakeMcpCaller(
             [
