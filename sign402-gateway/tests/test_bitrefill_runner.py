@@ -1812,6 +1812,196 @@ class BitrefillRunnerTests(unittest.TestCase):
 
             cdp_funding.assert_not_called()
 
+    def test_missing_user_transfer_hash_never_uses_existing_cdp_balance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = make_commerce_store(Path(tmp) / "orders.sqlite3")
+            quote_service = BitrefillQuoteService(
+                bitrefill_client=TestBitrefillClient(),
+                store=store,
+                singit_usd_price_provider=lambda: "0.01",
+                quote_id_provider=lambda: "quote_missing_transfer",
+                now_provider=lambda: 1_719_000_000,
+            )
+            quote = quote_service.quote(
+                {
+                    "productId": "test-gift-card-link",
+                    "packageId": "1",
+                    "country": "US",
+                }
+            )
+            cdp_funding = Mock()
+            fulfillment = BitrefillFulfillmentRunner(
+                store=store,
+                bitrefill_client=TestBitrefillClient(),
+                funding_runner=cdp_funding,
+                now_provider=lambda: 1_719_000_002,
+            )
+            approval = Mock()
+            runner = WalletBitrefillPurchaseRunner(
+                store=store,
+                approval_client=approval,
+                fulfillment_runner=fulfillment,
+                user_funding_runner=Mock(
+                    return_value={
+                        "ok": True,
+                        "fromWallet": "0xUser",
+                        "transfer": {"ok": True, "txId": None},
+                    }
+                ),
+                now_provider=lambda: 1_719_000_001,
+                fulfillment_token_provider=lambda: "invoice-first-secret",
+            )
+            approval.return_value = {
+                "approved": True,
+                "approvedHash": runner.payment_hash_for_quote(
+                    quote,
+                    recipient={},
+                ),
+            }
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Managed-wallet funding request failed",
+            ):
+                runner.buy(
+                    {
+                        "quoteId": quote["quoteId"],
+                        "telegramUserId": "u1",
+                    }
+                )
+
+            cdp_funding.assert_not_called()
+            self.assertEqual(
+                store.get_quote(quote["quoteId"])["state"],
+                "RECONCILIATION_REQUIRED",
+            )
+
+    def test_prepared_invoice_can_finish_after_quote_ttl_crosses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = make_commerce_store(Path(tmp) / "orders.sqlite3")
+            quote_service = BitrefillQuoteService(
+                bitrefill_client=TestBitrefillClient(),
+                store=store,
+                singit_usd_price_provider=lambda: "0.01",
+                quote_id_provider=lambda: "quote_ttl_crossed",
+                now_provider=lambda: 1_719_000_000,
+                ttl_seconds=120,
+            )
+            quote = quote_service.quote(
+                {
+                    "productId": "test-gift-card-link",
+                    "packageId": "1",
+                    "country": "US",
+                }
+            )
+            fulfillment_times = iter(
+                [1_719_000_119, 1_719_000_121]
+            )
+            cdp_funding = Mock(return_value={"ok": True, "txId": "0xSWAP"})
+            fulfillment = BitrefillFulfillmentRunner(
+                store=store,
+                bitrefill_client=TestBitrefillClient(),
+                funding_runner=cdp_funding,
+                now_provider=lambda: next(fulfillment_times),
+            )
+            approval = Mock()
+            runner = WalletBitrefillPurchaseRunner(
+                store=store,
+                approval_client=approval,
+                fulfillment_runner=fulfillment,
+                user_funding_runner=FakeUserFundingRunner(),
+                now_provider=lambda: 1_719_000_001,
+                fulfillment_token_provider=lambda: "invoice-first-secret",
+            )
+            approval.return_value = {
+                "approved": True,
+                "approvedHash": runner.payment_hash_for_quote(
+                    quote,
+                    recipient={},
+                ),
+            }
+
+            result = runner.buy(
+                {
+                    "quoteId": quote["quoteId"],
+                    "telegramUserId": "u1",
+                }
+            )
+
+            self.assertTrue(result["ok"])
+            cdp_funding.assert_called_once()
+            self.assertEqual(
+                store.get_quote(quote["quoteId"])["state"],
+                "DELIVERED",
+            )
+
+    def test_missing_swap_hash_never_completes_invoice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = make_commerce_store(Path(tmp) / "orders.sqlite3")
+            quote_service = BitrefillQuoteService(
+                bitrefill_client=TestBitrefillClient(),
+                store=store,
+                singit_usd_price_provider=lambda: "0.01",
+                quote_id_provider=lambda: "quote_missing_swap",
+                now_provider=lambda: 1_719_000_000,
+            )
+            quote = quote_service.quote(
+                {
+                    "productId": "test-gift-card-link",
+                    "packageId": "1",
+                    "country": "US",
+                }
+            )
+            test_client = TestBitrefillClient()
+            bitrefill = Mock()
+            bitrefill.prepare_purchase.side_effect = (
+                test_client.prepare_purchase
+            )
+            bitrefill.complete_purchase.side_effect = (
+                test_client.complete_purchase
+            )
+            fulfillment = BitrefillFulfillmentRunner(
+                store=store,
+                bitrefill_client=bitrefill,
+                funding_runner=Mock(
+                    return_value={"ok": True, "txId": None, "swap": {}}
+                ),
+                now_provider=lambda: 1_719_000_002,
+            )
+            approval = Mock()
+            runner = WalletBitrefillPurchaseRunner(
+                store=store,
+                approval_client=approval,
+                fulfillment_runner=fulfillment,
+                user_funding_runner=FakeUserFundingRunner(),
+                now_provider=lambda: 1_719_000_001,
+                fulfillment_token_provider=lambda: "invoice-first-secret",
+            )
+            approval.return_value = {
+                "approved": True,
+                "approvedHash": runner.payment_hash_for_quote(
+                    quote,
+                    recipient={},
+                ),
+            }
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Bitrefill fulfillment request failed",
+            ):
+                runner.buy(
+                    {
+                        "quoteId": quote["quoteId"],
+                        "telegramUserId": "u1",
+                    }
+                )
+
+            bitrefill.complete_purchase.assert_not_called()
+            self.assertEqual(
+                store.get_quote(quote["quoteId"])["state"],
+                "RECONCILIATION_REQUIRED",
+            )
+
     def test_wallet_runner_enforces_spend_limits_before_approval_and_payment(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = make_commerce_store(Path(tmp) / "orders.sqlite3")

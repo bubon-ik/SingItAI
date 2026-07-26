@@ -988,11 +988,30 @@ class WalletBitrefillPurchaseRunner:
             if telegram_user_id:
                 if self.user_funding_runner is None:
                     raise ValueError("user wallet funding runner is required")
-                wallet_checkout["userFunding"] = self.user_funding_runner(
+                user_funding = self.user_funding_runner(
                     telegram_user_id=telegram_user_id,
                     quote=execution_quote,
                     recipient=recipient,
                 )
+                if not isinstance(user_funding, dict):
+                    raise ValueError(
+                        "user wallet funding result is invalid"
+                    )
+                transfer = user_funding.get("transfer")
+                transfer_tx_id = (
+                    str(
+                        transfer.get("txId")
+                        or transfer.get("transactionHash")
+                        or ""
+                    ).strip()
+                    if isinstance(transfer, dict)
+                    else ""
+                )
+                if not transfer_tx_id:
+                    raise ValueError(
+                        "user wallet funding transaction is unconfirmed"
+                    )
+                wallet_checkout["userFunding"] = user_funding
         except Exception as exc:
             log_swallowed_failure(
                 logger,
@@ -1253,13 +1272,22 @@ class BitrefillFulfillmentRunner:
     def _authorized_context(
         self,
         payload: dict[str, Any],
+        *,
+        allow_prepared_after_expiry: bool = False,
     ) -> tuple[str, dict[str, Any], dict[str, Any]]:
         quote_id = str(payload.get("quoteId", "")).strip()
         if not quote_id:
             raise ValueError("quoteId is required")
 
         record = self.store.get_quote(quote_id)
-        if self.now_provider() >= int(record["quote"]["expiresAtEpoch"]):
+        prepared_can_finish = (
+            allow_prepared_after_expiry
+            and record["state"] == "INVOICE_CREATED"
+        )
+        if (
+            self.now_provider() >= int(record["quote"]["expiresAtEpoch"])
+            and not prepared_can_finish
+        ):
             self.store.advance_state(quote_id, "QUOTE_EXPIRED")
             raise ValueError("quote expired")
         metadata = record["metadata"]
@@ -1325,7 +1353,10 @@ class BitrefillFulfillmentRunner:
         return stored
 
     def fulfill(self, payload: dict[str, Any]) -> dict[str, Any]:
-        quote_id, record, effective_quote = self._authorized_context(payload)
+        quote_id, record, effective_quote = self._authorized_context(
+            payload,
+            allow_prepared_after_expiry=True,
+        )
         metadata = record["metadata"]
         prepared = metadata.get("bitrefillCheckpoint")
         prepared_flow = record["state"] == "INVOICE_CREATED"
@@ -1339,6 +1370,36 @@ class BitrefillFulfillmentRunner:
         if self.funding_runner is not None:
             try:
                 funding_result = self.funding_runner(effective_quote)
+                if not isinstance(funding_result, dict) or funding_result.get(
+                    "ok"
+                ) is False:
+                    raise CdpWalletServiceError(
+                        "CDP wallet service failed"
+                    )
+                payment_token_address = str(
+                    effective_quote.get("paymentTokenAddress") or ""
+                ).strip()
+                direct_usdc = (
+                    bool(payment_token_address)
+                    and payment_token_address.casefold()
+                    == BASE_USDC_MAINNET.casefold()
+                )
+                swap = funding_result.get("swap")
+                funding_tx_id = str(
+                    funding_result.get("txId")
+                    or funding_result.get("transactionHash")
+                    or (
+                        swap.get("txId")
+                        or swap.get("transactionHash")
+                        if isinstance(swap, dict)
+                        else ""
+                    )
+                    or ""
+                ).strip()
+                if prepared_flow and not direct_usdc and not funding_tx_id:
+                    raise CdpWalletServiceError(
+                        "CDP wallet service failed"
+                    )
                 self.store.advance_state(
                     quote_id,
                     "FULFILLING",
