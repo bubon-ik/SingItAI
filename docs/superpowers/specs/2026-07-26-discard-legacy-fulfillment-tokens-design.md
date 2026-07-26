@@ -1,7 +1,7 @@
 # Discard Legacy Fulfillment Tokens Design
 
 **Date:** 2026-07-26  
-**Status:** Approved in conversation; awaiting review of this written specification
+**Status:** Approved in conversation and reviewed by the user
 
 ## Goal
 
@@ -86,7 +86,9 @@ The operator command fails without modifying the file when:
 - the document is not valid JSON;
 - the top-level value is not an object;
 - any purchase-record value is not an object;
-- the atomic replacement cannot complete.
+- the atomic replacement cannot complete. In that case the original JSON
+  bytes remain unchanged; the existing private-state helper may still tighten
+  filesystem permissions before the failed replacement.
 
 An empty store and a valid store with no token fields are safe no-ops, including
 in apply mode; their bytes and timestamps remain unchanged. The command reports
