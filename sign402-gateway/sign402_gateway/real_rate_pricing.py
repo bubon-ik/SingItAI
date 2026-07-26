@@ -26,6 +26,13 @@ def _finite_decimal(value: Any, *, field: str) -> Decimal:
     return parsed
 
 
+def _guaranteed_to_amount(quote: dict[str, Any]) -> Decimal:
+    value = quote.get("minToAmount")
+    if value is None or str(value).strip() == "":
+        value = quote["toAmount"]
+    return _finite_decimal(value, field="guaranteed swap output")
+
+
 class RealRateSingitPricer:
     def __init__(
         self,
@@ -84,7 +91,7 @@ class RealRateSingitPricer:
         low = Decimal("0")
         high = min(Decimal("1"), amount_cap)
         high_quote = self._quote_or_none(high, token, token_decimals)
-        while high_quote is None or Decimal(high_quote["toAmount"]) < buffered_target:
+        while high_quote is None or _guaranteed_to_amount(high_quote) < buffered_target:
             if high >= amount_cap:
                 if balance_cap and high_quote is None:
                     raise ValueError(
@@ -109,7 +116,7 @@ class RealRateSingitPricer:
             if quote is None:
                 low = mid
                 continue
-            if Decimal(quote["toAmount"]) >= buffered_target:
+            if _guaranteed_to_amount(quote) >= buffered_target:
                 best_amount = mid
                 high = mid
             else:
@@ -126,7 +133,7 @@ class RealRateSingitPricer:
             quantum=amount_quantum,
         )
         final_quote = self._quote(rounded_singit, token, token_decimals)
-        if Decimal(final_quote["toAmount"]) < buffered_target:
+        if _guaranteed_to_amount(final_quote) < buffered_target:
             raise ValueError("Bankr quote did not meet target USDC after rounding")
 
         amount_text = format_decimal(rounded_singit)
@@ -142,7 +149,7 @@ class RealRateSingitPricer:
             "requiredSingit": amount_text,
             "requiredSingitAtomic": amount_atomic,
             "expectedUsdc": final_quote["toAmount"],
-            "minUsdc": final_quote.get("minToAmount", final_quote["toAmount"]),
+            "minUsdc": format(_guaranteed_to_amount(final_quote), "f"),
             "fromToken": token,
             "toToken": self.to_token,
             "chain": self.chain,
@@ -189,7 +196,7 @@ class RealRateSingitPricer:
         doubled = current * 2
         if quote is None:
             return doubled
-        received = Decimal(str(quote.get("toAmount", "0")))
+        received = _guaranteed_to_amount(quote)
         if received <= 0:
             return doubled
         estimated = (
@@ -209,7 +216,7 @@ class RealRateSingitPricer:
         quantum: Decimal,
     ) -> Decimal:
         quote = self._quote(amount, token, token_decimals)
-        received = Decimal(str(quote.get("toAmount", "0")))
+        received = _guaranteed_to_amount(quote)
         if received > 0:
             proportional = (amount * buffered_target / received).quantize(
                 quantum,
@@ -223,14 +230,14 @@ class RealRateSingitPricer:
                 )
                 if (
                     proportional_quote is not None
-                    and Decimal(proportional_quote["toAmount"]) >= buffered_target
+                    and _guaranteed_to_amount(proportional_quote) >= buffered_target
                 ):
                     amount = proportional
         if amount <= quantum:
             return amount
         previous = amount - quantum
         quote = self._quote_or_none(previous, token, token_decimals)
-        if quote is not None and Decimal(quote["toAmount"]) >= buffered_target:
+        if quote is not None and _guaranteed_to_amount(quote) >= buffered_target:
             return previous
         return amount
 

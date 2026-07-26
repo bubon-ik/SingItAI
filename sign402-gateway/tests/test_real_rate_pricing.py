@@ -32,6 +32,19 @@ class LinearQuoteClient:
         }
 
 
+class QuoteClientWithoutMinimum(LinearQuoteClient):
+    def quote(self, *, from_token, to_token, amount, chain, decimals=18):
+        quote = super().quote(
+            from_token=from_token,
+            to_token=to_token,
+            amount=amount,
+            chain=chain,
+            decimals=decimals,
+        )
+        quote.pop("minToAmount")
+        return quote
+
+
 class MinAmountQuoteClient(LinearQuoteClient):
     def __init__(self, rate: Decimal, minimum: Decimal):
         super().__init__(rate)
@@ -140,6 +153,34 @@ class WalletApiAuthErrorQuoteClient(LinearQuoteClient):
 
 
 class RealRatePricingTests(unittest.TestCase):
+    def test_zero_buffer_sizes_against_guaranteed_minimum(self):
+        client = LinearQuoteClient(Decimal("0.000001"))
+        pricer = RealRateSingitPricer(
+            quote_client=client,
+            from_token="0xSINGIT",
+            buffer_bps=0,
+            max_singit="2000000",
+        )
+
+        result = pricer.price_for_usdc("1")
+
+        self.assertGreaterEqual(Decimal(result["minUsdc"]), Decimal("1"))
+        self.assertGreater(Decimal(result["requiredSingit"]), Decimal("1000000"))
+
+    def test_missing_minimum_falls_back_to_expected_output(self):
+        client = QuoteClientWithoutMinimum(Decimal("0.000001"))
+        pricer = RealRateSingitPricer(
+            quote_client=client,
+            from_token="0xSINGIT",
+            buffer_bps=0,
+            max_singit="1000000",
+        )
+
+        result = pricer.price_for_usdc("1")
+
+        self.assertEqual(result["expectedUsdc"], "1.000000")
+        self.assertEqual(result["minUsdc"], result["expectedUsdc"])
+
     def test_rounds_selected_token_to_its_decimal_precision(self):
         client = LinearQuoteClient(Decimal("1"))
         pricer = RealRateSingitPricer(
@@ -158,8 +199,9 @@ class RealRatePricingTests(unittest.TestCase):
             max_amount="5",
         )
 
-        self.assertEqual(result["requiredAmount"], "1.1")
-        self.assertEqual(result["requiredAmountAtomic"], "1100000")
+        self.assertEqual(result["requiredAmount"], "1.111112")
+        self.assertEqual(result["requiredAmountAtomic"], "1111112")
+        self.assertGreaterEqual(Decimal(result["minUsdc"]), Decimal("1.1"))
 
     def test_tolerates_wallet_api_5xx_for_small_amounts(self):
         client = WalletApiMinAmountQuoteClient(Decimal("0.01"), minimum=Decimal("5"))
@@ -225,7 +267,11 @@ class RealRatePricingTests(unittest.TestCase):
         self.assertEqual(result["targetUsdc"], "0.102")
         self.assertEqual(result["bufferedTargetUsdc"], "0.102000")
         self.assertGreaterEqual(Decimal(result["expectedUsdc"]), Decimal("0.102"))
-        self.assertEqual(result["requiredSingitAtomic"], "10200000000000000000")
+        self.assertGreaterEqual(Decimal(result["minUsdc"]), Decimal("0.102"))
+        self.assertEqual(
+            result["requiredSingitAtomic"],
+            "10303030303030303031",
+        )
 
     def test_price_for_usdc_accepts_per_call_token_and_decimals(self):
         client = LinearQuoteClient(Decimal("0.01"))
@@ -507,7 +553,8 @@ class RealRatePricingTests(unittest.TestCase):
 
         result = pricer.price_for_usdc("0.25", max_amount=format(balance, "f"))
 
-        self.assertEqual(result["requiredAmount"], "0.25")
+        self.assertEqual(result["requiredAmount"], "0.252525252525252526")
+        self.assertGreaterEqual(Decimal(result["minUsdc"]), Decimal("0.25"))
         self.assertEqual(client.amounts.count(balance), 1)
         self.assertTrue(all(amount <= balance for amount in client.amounts))
 
