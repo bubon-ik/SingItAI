@@ -29,6 +29,8 @@ from .diagnostics import (
 
 logger = logging.getLogger(__name__)
 
+INVOICE_ENVELOPE_KEYS = ("response", "invoice", "data", "result")
+
 MAX_MCP_RESPONSE_BYTES = 1024 * 1024
 MAX_CATALOG_CACHE_BYTES = 5 * 1024 * 1024
 MAX_CATALOG_CACHE_ENTRIES = 256
@@ -882,9 +884,9 @@ class McpBitrefillClient:
         currency = str(
             payment.get("currency") or payment.get("asset") or ""
         ).strip().upper()
-        if currency != "USDC":
+        if currency and currency != "USDC":
             raise ValueError(
-                f"Bitrefill MCP expected USDC, got {currency or 'unknown'}"
+                f"Bitrefill MCP expected USDC, got {currency}"
             )
         network = str(
             payment.get("network")
@@ -900,11 +902,16 @@ class McpBitrefillClient:
             or payment.get("contractAddress")
             or ""
         ).strip()
-        if (
-            contract_address
-            and contract_address.casefold() != BASE_USDC_MAINNET.casefold()
-        ):
+        contract_is_usdc = bool(contract_address) and (
+            contract_address.casefold() == BASE_USDC_MAINNET.casefold()
+        )
+        if contract_address and not contract_is_usdc:
             raise ValueError("Bitrefill MCP payment token is not Base USDC")
+        # The live invoice names the token only by contract address, older
+        # shapes only by currency. Pay only when at least one of them says USDC,
+        # so an invoice that identifies no token at all is never funded.
+        if not currency and not contract_is_usdc:
+            raise ValueError("Bitrefill MCP payment token is unidentified")
         raw_amount = (
             payment.get("amount")
             if payment.get("amount") is not None
@@ -1154,7 +1161,14 @@ class McpBitrefillClient:
         )
 
     def _normalize_invoice(self, payload: dict[str, Any]) -> dict[str, Any]:
-        for key in ("invoice", "data"):
+        # The live server wraps the invoice in `response` and adds sibling
+        # fields such as `agent_instructions`; older shapes used `invoice` or
+        # `data`. Prefer whichever level actually carries an invoice id so a
+        # new envelope cannot silently hide it again.
+        for candidate in (payload, *(payload.get(key) for key in INVOICE_ENVELOPE_KEYS)):
+            if isinstance(candidate, dict) and self._invoice_id(candidate):
+                return deepcopy(candidate)
+        for key in INVOICE_ENVELOPE_KEYS:
             nested = payload.get(key)
             if isinstance(nested, dict):
                 return deepcopy(nested)

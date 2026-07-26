@@ -1247,8 +1247,8 @@ class BitrefillMcpPurchaseTests(unittest.TestCase):
         caller = FakeMcpCaller(
             [
                 {
-                    "result": {
-                        "invoice_id": "inv_secret_value",
+                    "unexpected_envelope": {
+                        "identifier": "inv_secret_value",
                         "payment_info": {"address": "0xSECRETADDRESS"},
                     }
                 }
@@ -1266,9 +1266,9 @@ class BitrefillMcpPurchaseTests(unittest.TestCase):
                 client.prepare_purchase(quote=APPROVED_QUOTE, recipient={})
 
         joined = "\n".join(captured.output)
-        self.assertIn("result", joined)
+        self.assertIn("unexpected_envelope", joined)
         self.assertIn("payment_info", joined)
-        self.assertIn("invoice_id", joined)
+        self.assertIn("identifier", joined)
         self.assertNotIn("inv_secret_value", joined)
         self.assertNotIn("0xSECRETADDRESS", joined)
 
@@ -1399,6 +1399,80 @@ class BitrefillMcpUsdcPurchaseTests(unittest.TestCase):
         }
         invoice.update(overrides)
         return invoice
+
+    def test_prepare_unwraps_the_live_response_envelope(self):
+        # The live MCP server returns the invoice under `response`, alongside
+        # `agent_instructions`, instead of at the top level.
+        caller = FakeMcpCaller(
+            [
+                {
+                    "agent_instructions": "pay the invoice",
+                    "response": self._invoice(),
+                }
+            ]
+        )
+        client = self._client(caller, FakeTreasuryClient())
+
+        prepared = client.prepare_purchase(quote=APPROVED_QUOTE, recipient={})
+
+        self.assertEqual(prepared["invoiceId"], "inv_prepare")
+
+    def test_prepare_accepts_payment_info_identified_only_by_contract(self):
+        # The live invoice carries `contractAddress` and `altcoinPrice` but no
+        # `currency` field.
+        caller = FakeMcpCaller(
+            [
+                self._invoice(
+                    payment_info={
+                        "address": "0xBitrefill",
+                        "altcoinPrice": "50.50",
+                        "contractAddress": BASE_USDC_MAINNET,
+                        "paymentUri": "ethereum:0xBitrefill@8453",
+                    }
+                )
+            ]
+        )
+        client = self._client(caller, FakeTreasuryClient())
+
+        prepared = client.prepare_purchase(quote=APPROVED_QUOTE, recipient={})
+
+        self.assertEqual(prepared["paymentAmount"], "50.50")
+        self.assertEqual(prepared["paymentAsset"], "USDC")
+
+    def test_prepare_rejects_payment_info_that_identifies_no_token(self):
+        caller = FakeMcpCaller(
+            [
+                self._invoice(
+                    payment_info={
+                        "address": "0xBitrefill",
+                        "altcoinPrice": "50.50",
+                    }
+                )
+            ]
+        )
+        client = self._client(caller, FakeTreasuryClient())
+
+        with self.assertRaisesRegex(ValueError, "payment token"):
+            client.prepare_purchase(quote=APPROVED_QUOTE, recipient={})
+
+    def test_prepare_rejects_payment_info_for_another_token(self):
+        caller = FakeMcpCaller(
+            [
+                self._invoice(
+                    payment_info={
+                        "address": "0xBitrefill",
+                        "altcoinPrice": "50.50",
+                        "contractAddress": (
+                            "0x4200000000000000000000000000000000000006"
+                        ),
+                    }
+                )
+            ]
+        )
+        client = self._client(caller, FakeTreasuryClient())
+
+        with self.assertRaisesRegex(ValueError, "not Base USDC"):
+            client.prepare_purchase(quote=APPROVED_QUOTE, recipient={})
 
     def test_prepare_creates_and_validates_invoice_before_treasury_transfer(self):
         caller = FakeMcpCaller([self._invoice()])
