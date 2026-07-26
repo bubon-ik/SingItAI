@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -18,6 +19,8 @@ from typing import Any, Callable, Mapping
 from urllib.parse import quote
 import urllib.request
 
+
+logger = logging.getLogger(__name__)
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SIGN402_BRIDGE_DIR = ROOT_DIR / "sign402-bridge"
@@ -100,6 +103,7 @@ from .bankr_llm_purchase import (
 from .bitrefill_quote import SERVICE_FEE_BPS
 from .bitrefill_runner import CdpWalletServiceError
 from .commerce_store import sanitize_bankr_reconciliation_snapshot
+from .diagnostics import log_hidden_detail, log_swallowed_failure
 from .numeric import format_decimal
 from .goplausible import fetch_x402_paid_resource, fetch_x402_payment_required, normalize_x402_payment_required
 from .real_rate_pricing import RealRateSingitPricer
@@ -2587,6 +2591,11 @@ def build_x402_payment_signature_builder(payment_executor_dir: Path):
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=os.getenv("SIGN402_LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
     parser = argparse.ArgumentParser(description="Unified local gateway for Hermes Sign402.")
     parser.add_argument("--host", default=os.getenv("SIGN402_GATEWAY_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.getenv("SIGN402_GATEWAY_PORT", "8099")))
@@ -3424,6 +3433,7 @@ class CdpWalletClient:
     def _run(self, args: list[str]) -> dict[str, Any]:
         script = self.service_dir / "src" / "index.mjs"
         command = ["node", str(script), *args]
+        subcommand = args[0] if args else ""
         try:
             result = subprocess.run(
                 command,
@@ -3433,9 +3443,23 @@ class CdpWalletClient:
                 text=True,
                 timeout=240,
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
+            log_swallowed_failure(
+                logger,
+                "CDP wallet service timed out",
+                exc,
+                command=subcommand,
+            )
             raise CdpWalletServiceError("CDP wallet service failed") from None
         if result.returncode != 0:
+            # The service's own output never reaches responses or stored state;
+            # without this line a CDP failure leaves no trace anywhere.
+            log_hidden_detail(
+                logger,
+                "CDP wallet service exited non-zero",
+                f"exit={result.returncode} stderr={result.stderr} stdout={result.stdout}",
+                command=subcommand,
+            )
             stage = ""
             try:
                 error_payload = json.loads(result.stderr.strip())

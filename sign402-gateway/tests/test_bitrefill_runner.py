@@ -1,3 +1,4 @@
+import logging
 import tempfile
 import unittest
 import hashlib
@@ -2814,8 +2815,16 @@ class BitrefillRunnerTests(unittest.TestCase):
                 now_provider=lambda: 1_719_000_001,
             )
 
-            with self.assertRaises(ValueError) as captured:
-                runner.fulfill({"quoteId": "quote_1", "fulfillmentToken": "valid_token"})
+            logger = logging.getLogger("sign402_gateway.bitrefill_runner")
+            with self.assertLogs(logger, level="ERROR") as logged:
+                with self.assertRaises(ValueError) as captured:
+                    runner.fulfill(
+                        {"quoteId": "quote_1", "fulfillmentToken": "valid_token"}
+                    )
+
+            joined = "\n".join(logged.output)
+            self.assertIn("PROVIDER-PURCHASE-SECRET-MARKER", joined)
+            self.assertIn("quote_1", joined)
 
             record = store.get_quote("quote_1")
             self.assertEqual(record["state"], "FULFILLMENT_FAILED")

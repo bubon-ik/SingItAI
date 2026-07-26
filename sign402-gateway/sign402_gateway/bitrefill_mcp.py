@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import math
 import os
 import tempfile
@@ -18,7 +19,10 @@ from mcp.client.streamable_http import streamable_http_client
 
 from .bankr_swap import BASE_USDC_MAINNET
 from .bitrefill import _infer_product_type, _money, _recipient_fields
+from .diagnostics import log_hidden_detail, log_swallowed_failure
 
+
+logger = logging.getLogger(__name__)
 
 MAX_MCP_RESPONSE_BYTES = 1024 * 1024
 MAX_CATALOG_CACHE_BYTES = 5 * 1024 * 1024
@@ -38,6 +42,17 @@ def decode_mcp_tool_result(
     max_bytes: int = MAX_MCP_RESPONSE_BYTES,
 ) -> dict[str, Any]:
     if bool(getattr(result, "isError", False)):
+        # The provider's own words stay out of the exception (they can echo the
+        # API key back), but an operator needs them to act on the failure.
+        log_hidden_detail(
+            logger,
+            "Bitrefill MCP tool returned an error",
+            "\n".join(
+                str(block.text)
+                for block in getattr(result, "content", [])
+                if hasattr(block, "text")
+            ).strip(),
+        )
         raise ValueError("Bitrefill MCP tool failed")
 
     structured = getattr(result, "structuredContent", None)
@@ -97,6 +112,12 @@ class McpToolCaller:
         try:
             return asyncio.run(self._call(tool_name, arguments))
         except Exception as exc:
+            log_swallowed_failure(
+                logger,
+                "Bitrefill MCP request failed",
+                exc,
+                tool=tool_name,
+            )
             raise ValueError("Bitrefill MCP request failed") from exc
 
     async def _call(

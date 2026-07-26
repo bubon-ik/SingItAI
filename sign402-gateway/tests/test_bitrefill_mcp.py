@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -52,10 +53,33 @@ class BitrefillMcpDecodeTests(unittest.TestCase):
         self.assertEqual(result["products"][0]["name"], "Steam")
 
     def test_decoder_hides_tool_error_text(self):
-        with self.assertRaisesRegex(ValueError, "Bitrefill MCP tool failed") as raised:
-            decode_mcp_tool_result(FakeToolResult(text="key_123", is_error=True))
+        logger = logging.getLogger("sign402_gateway.bitrefill_mcp")
+        with self.assertLogs(logger, level="ERROR"):
+            with self.assertRaisesRegex(
+                ValueError,
+                "Bitrefill MCP tool failed",
+            ) as raised:
+                decode_mcp_tool_result(FakeToolResult(text="key_123", is_error=True))
 
         self.assertNotIn("key_123", str(raised.exception))
+
+    def test_decoder_logs_the_tool_error_text_without_the_api_key(self):
+        logger = logging.getLogger("sign402_gateway.bitrefill_mcp")
+        api_key = "key_1234567890abcdef"
+        with patch.dict(os.environ, {"BITREFILL_API_KEY": api_key}, clear=False):
+            with self.assertLogs(logger, level="ERROR") as captured:
+                with self.assertRaises(ValueError):
+                    decode_mcp_tool_result(
+                        FakeToolResult(
+                            text=f"package not purchasable {api_key}",
+                            is_error=True,
+                        )
+                    )
+
+        joined = "\n".join(captured.output)
+        self.assertIn("package not purchasable", joined)
+        self.assertNotIn(api_key, joined)
+        self.assertIn("<redacted:BITREFILL_API_KEY>", joined)
 
     def test_decoder_rejects_oversized_response(self):
         with self.assertRaisesRegex(ValueError, "response is too large"):

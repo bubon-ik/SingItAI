@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import logging
 import re
 import secrets
 from copy import deepcopy
@@ -21,8 +22,11 @@ from .commerce_store import (
     BitrefillCommerceStore,
     sanitize_bankr_reconciliation_snapshot,
 )
+from .diagnostics import log_swallowed_failure
 from .numeric import format_decimal
 
+
+logger = logging.getLogger(__name__)
 
 BITREFILL_BROWSE_CATEGORIES = {
     "all": "",
@@ -967,7 +971,13 @@ class WalletBitrefillPurchaseRunner:
                     quote=execution_quote,
                     recipient=recipient,
                 )
-        except Exception:
+        except Exception as exc:
+            log_swallowed_failure(
+                logger,
+                "Managed-wallet funding request failed",
+                exc,
+                quoteId=quote_id,
+            )
             self.store.advance_state(
                 quote_id,
                 "RECONCILIATION_REQUIRED",
@@ -991,6 +1001,13 @@ class WalletBitrefillPurchaseRunner:
                 {"quoteId": quote_id, "fulfillmentToken": fulfillment_token}
             )
         except CdpWalletServiceError as exc:
+            log_swallowed_failure(
+                logger,
+                "Bitrefill fulfillment request failed",
+                exc,
+                quoteId=quote_id,
+                stage=exc.stage or "unknown",
+            )
             user_funding = wallet_checkout.get("userFunding")
             transfer = (
                 user_funding.get("transfer")
@@ -1042,7 +1059,13 @@ class WalletBitrefillPurchaseRunner:
                             execution_quote["actualPaymentTokenAtomic"]
                         ),
                     )
-                except Exception:
+                except Exception as return_exc:
+                    log_swallowed_failure(
+                        logger,
+                        "Token return confirmation failed",
+                        return_exc,
+                        quoteId=quote_id,
+                    )
                     self.store.advance_state(
                         quote_id,
                         "RECONCILIATION_REQUIRED",
@@ -1095,7 +1118,13 @@ class WalletBitrefillPurchaseRunner:
                 },
             )
             raise ValueError("Bitrefill fulfillment request failed") from None
-        except Exception:
+        except Exception as exc:
+            log_swallowed_failure(
+                logger,
+                "Bitrefill fulfillment request failed",
+                exc,
+                quoteId=quote_id,
+            )
             self.store.advance_state(
                 quote_id,
                 "RECONCILIATION_REQUIRED",
@@ -1234,14 +1263,27 @@ class BitrefillFulfillmentRunner:
                     "FULFILLING",
                     {"bankrSwap": funding_result},
                 )
-            except CdpWalletServiceError:
+            except CdpWalletServiceError as exc:
+                log_swallowed_failure(
+                    logger,
+                    "Bitrefill funding request failed",
+                    exc,
+                    quoteId=quote_id,
+                    stage=exc.stage or "unknown",
+                )
                 self.store.advance_state(
                     quote_id,
                     "RECONCILIATION_REQUIRED",
                     {"fundingError": "Bitrefill funding request failed"},
                 )
                 raise
-            except Exception:
+            except Exception as exc:
+                log_swallowed_failure(
+                    logger,
+                    "Bitrefill funding request failed",
+                    exc,
+                    quoteId=quote_id,
+                )
                 self.store.advance_state(
                     quote_id,
                     "RECONCILIATION_REQUIRED",
@@ -1262,7 +1304,15 @@ class BitrefillFulfillmentRunner:
                     {"bitrefillCheckpoint": checkpoint},
                 ),
             )
-        except Exception:
+        except Exception as exc:
+            log_swallowed_failure(
+                logger,
+                "Bitrefill provider request failed",
+                exc,
+                quoteId=quote_id,
+                productId=str(effective_quote.get("productId", "")),
+                packageValue=str(effective_quote.get("packageValue", "")),
+            )
             self.store.advance_state(
                 quote_id,
                 "FULFILLMENT_FAILED",

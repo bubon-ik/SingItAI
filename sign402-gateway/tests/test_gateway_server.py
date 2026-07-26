@@ -1,5 +1,6 @@
 import io
 import json
+import logging
 import os
 import stat
 import subprocess
@@ -1110,6 +1111,29 @@ class GatewayServerTests(unittest.TestCase):
                     min_usdc="1.00",
                 )
         self.assertEqual(captured.exception.stage, "")
+
+    def test_cdp_wallet_client_logs_failure_output_with_secrets_redacted(self):
+        completed = subprocess_completed(
+            returncode=1,
+            stderr="node crashed: CDP-STDERR-MARKER wallet=leaked-wallet-secret",
+        )
+        logger = logging.getLogger("sign402_gateway.server")
+        with patch.dict(
+            os.environ,
+            {"CDP_WALLET_SECRET": "leaked-wallet-secret"},
+            clear=False,
+        ):
+            with patch("subprocess.run", return_value=completed):
+                client = CdpWalletClient(service_dir=Path("/tmp/cdp"))
+                with self.assertLogs(logger, level="ERROR") as logged:
+                    with self.assertRaises(CdpWalletServiceError):
+                        client.swap_singit_to_usdc(amount="1.25", min_usdc="1.00")
+
+        joined = "\n".join(logged.output)
+        self.assertIn("CDP-STDERR-MARKER", joined)
+        self.assertIn("swap", joined)
+        self.assertNotIn("leaked-wallet-secret", joined)
+        self.assertIn("<redacted:CDP_WALLET_SECRET>", joined)
 
     def test_cdp_wallet_client_builds_exact_idempotent_token_return(self):
         completed = subprocess_completed(
