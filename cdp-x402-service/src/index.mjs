@@ -15,6 +15,8 @@ import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
 import { assertSwapMeetsMinUsdc } from "./swap-floor.mjs";
 import { makePaymentRequirementsSelector } from "./payment-guard.mjs";
+import { executeStagedSwap, StagedCdpError } from "./staged-swap.mjs";
+import { returnErc20 } from "./token-return.mjs";
 import { humanTokenAmountToAtomic } from "./user-token-transfer.mjs";
 
 dotenv.config();
@@ -67,6 +69,12 @@ async function main() {
 
   if (command === "transfer-usdc") {
     const result = await transferUsdc(options);
+    writeJson(result);
+    return;
+  }
+
+  if (command === "transfer-token") {
+    const result = await transferTokenFromCdpWallet(options);
     writeJson(result);
     return;
   }
@@ -206,27 +214,23 @@ async function swapTokens(options) {
   const slippageBps = Number(options["slippage-bps"] || "100");
   const minUsdc = options["min-usdc"] || "";
 
-  // Enforce the caller's absolute USDC floor before moving funds. account.swap
-  // only honors slippageBps relative to its own execution price, so without
-  // this check a swap that underfills versus the original quote would still
-  // settle and silently short the treasury.
-  if (minUsdc) {
-    const price = await cdp.evm.getSwapPrice({
+  const result = await executeStagedSwap({
+    minUsdc,
+    getPrice: () => cdp.evm.getSwapPrice({
       network,
       fromToken,
       toToken,
       fromAmount,
       taker: account.address,
-    });
-    assertSwapMeetsMinUsdc(price, minUsdc);
-  }
-
-  const result = await account.swap({
-    network,
-    fromToken,
-    toToken,
-    fromAmount,
-    slippageBps,
+    }),
+    assertFloor: assertSwapMeetsMinUsdc,
+    swap: () => account.swap({
+      network,
+      fromToken,
+      toToken,
+      fromAmount,
+      slippageBps,
+    }),
   });
   const transactionHash = result.transactionHash || result.hash;
   return {
@@ -238,6 +242,20 @@ async function swapTokens(options) {
     minUsdc,
     network,
   };
+}
+
+async function transferTokenFromCdpWallet(options) {
+  const account = await getCdpAccount();
+  const chain = options.chain || "base";
+  return returnErc20({
+    account,
+    publicClient: basePublicClient(chain),
+    token: requiredOption(options, "token"),
+    to: requiredOption(options, "to"),
+    amountAtomic: requiredOption(options, "amount-atomic"),
+    network: networkName(chain),
+    idempotencyKey: requiredOption(options, "idempotency-key"),
+  });
 }
 
 async function transferUsdc(options) {
@@ -518,6 +536,15 @@ function writeJson(payload) {
 }
 
 main().catch((error) => {
+  if (error instanceof StagedCdpError) {
+    process.stderr.write(`${JSON.stringify({
+      ok: false,
+      error: "CDP wallet service failed",
+      stage: error.stage === "pre_swap" ? "pre_swap" : "",
+    })}\n`);
+    process.exitCode = 1;
+    return;
+  }
   console.error(error?.stack || error?.message || String(error));
   process.exitCode = 1;
 });
