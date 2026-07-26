@@ -3637,7 +3637,7 @@ class GatewayServerTests(unittest.TestCase):
             "Platform maximums:\n"
             "- Max per transaction: 1020 USDC\n"
             "- Daily cap: 5000 USDC\n\n"
-            "Bitrefill product maximum: 1000 USD before the 2% service fee.\n"
+            "Bitrefill product maximum: 1000 USD before the 1% service fee.\n"
             "Service fees count toward your spending limits.\n"
             "The lowest applicable limit wins.\n\n"
             "To change: /limits <per-transaction> <daily>",

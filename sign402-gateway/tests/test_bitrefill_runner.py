@@ -209,11 +209,11 @@ class BitrefillRunnerTests(unittest.TestCase):
             {
                 "productName": "Bitrefill Gift Card",
                 "priceUsd": "1.00",
-                "serviceFeeBps": 200,
-                "serviceFeeUsd": "0.02",
-                "totalUsd": "1.02",
+                "serviceFeeBps": 100,
+                "serviceFeeUsd": "0.01",
+                "totalUsd": "1.01",
                 "paymentTokenSymbol": "USDC",
-                "paymentTokenAmount": "1.02",
+                "paymentTokenAmount": "1.01",
                 "expiresAtEpoch": 220,
             },
             source_wallet="0x1111111111111111111111111111111111111111",
@@ -221,11 +221,27 @@ class BitrefillRunnerTests(unittest.TestCase):
         )
 
         self.assertIn("Product price: 1 USD", lines)
-        self.assertIn("Service fee (2%): 0.02 USD", lines)
-        self.assertIn("Total: 1.02 USD", lines)
+        self.assertIn("Service fee (1%): 0.01 USD", lines)
+        self.assertIn("Total: 1.01 USD", lines)
         self.assertNotIn("Cost: 1 USD", lines)
         self.assertIn("Payment token: USDC", lines)
-        self.assertIn("Maximum spend: 1.02 USDC", lines)
+        self.assertIn("Maximum spend: 1.01 USDC", lines)
+
+    def test_bitrefill_approval_uses_committed_fee_rate_for_legacy_quote(self):
+        lines = _bitrefill_approval_context_lines(
+            {
+                "productName": "Legacy Bitrefill Gift Card",
+                "priceUsd": "1.00",
+                "serviceFeeBps": 200,
+                "serviceFeeUsd": "0.02",
+                "totalUsd": "1.02",
+                "expiresAtEpoch": 220,
+            },
+            now_epoch_value=100,
+        )
+
+        self.assertIn("Service fee (2%): 0.02 USD", lines)
+        self.assertIn("Total: 1.02 USD", lines)
 
     def test_wallet_payment_token_resolver_uses_server_inventory_metadata(self):
         resolver = WalletPaymentTokenResolver(
@@ -312,7 +328,7 @@ class BitrefillRunnerTests(unittest.TestCase):
                 pricer.calls,
                 [
                     (
-                        "1.02",
+                        "1.01",
                         {
                             "from_token": "0x1111111111111111111111111111111111111111",
                             "decimals": 18,
@@ -367,13 +383,13 @@ class BitrefillRunnerTests(unittest.TestCase):
 
             pricer.price_for_usdc.assert_not_called()
             self.assertEqual(quote["paymentTokenSymbol"], "USDC")
-            self.assertEqual(quote["serviceFeeBps"], 200)
-            self.assertEqual(quote["serviceFeeUsd"], "0.02")
-            self.assertEqual(quote["totalUsd"], "1.02")
-            self.assertEqual(quote["paymentTokenAmount"], "1.02")
-            self.assertEqual(quote["maxPaymentTokenAtomic"], "1020000")
-            self.assertEqual(quote["requiredUsdc"], "1.02")
-            self.assertEqual(quote["bufferedTargetUsdc"], "1.02")
+            self.assertEqual(quote["serviceFeeBps"], 100)
+            self.assertEqual(quote["serviceFeeUsd"], "0.01")
+            self.assertEqual(quote["totalUsd"], "1.01")
+            self.assertEqual(quote["paymentTokenAmount"], "1.01")
+            self.assertEqual(quote["maxPaymentTokenAtomic"], "1010000")
+            self.assertEqual(quote["requiredUsdc"], "1.01")
+            self.assertEqual(quote["bufferedTargetUsdc"], "1.01")
 
     def test_quote_service_rejects_direct_usdc_when_wallet_balance_is_too_low(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1040,12 +1056,12 @@ class BitrefillRunnerTests(unittest.TestCase):
             self.assertIn("Action: BUY BITREFILL", context_lines)
             self.assertIn("Product: Test Gift Card Link", context_lines)
             self.assertIn("Product price: 1 USD", context_lines)
-            self.assertIn("Service fee (2%): 0.02 USD", context_lines)
-            self.assertIn("Total: 1.02 USD", context_lines)
-            self.assertIn("Max spend: 102 SINGIT", context_lines)
+            self.assertIn("Service fee (1%): 0.01 USD", context_lines)
+            self.assertIn("Total: 1.01 USD", context_lines)
+            self.assertIn("Max spend: 101 SINGIT", context_lines)
             self.assertIn("Paid from: 0xAc4a...f45C", context_lines)
             self.assertIn("Expires: 2 minutes", context_lines)
-            self.assertIn("Spent: 102 SINGIT", result["telegramText"])
+            self.assertIn("Spent: 101 SINGIT", result["telegramText"])
             self.assertIn("Transfer tx: https://basescan.org/tx/0xUSERTRANSFER", result["telegramText"])
 
     def test_wallet_runner_enforces_spend_limits_before_approval_and_payment(self):

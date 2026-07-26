@@ -12,14 +12,13 @@ from sign402_gateway.bitrefill_quote import (
 
 
 class BitrefillQuoteTests(unittest.TestCase):
-    def test_service_fee_is_two_percent_without_a_minimum(self):
+    def test_service_fee_is_one_percent_without_a_minimum(self):
         fee, total = quote_module.calculate_service_fee("0.10")
 
-        self.assertEqual(quote_module.SERVICE_FEE_BPS, 200)
-        self.assertEqual(fee, Decimal("0.002"))
-        self.assertEqual(total, Decimal("0.102"))
+        self.assertEqual(fee, Decimal("0.001"))
+        self.assertEqual(total, Decimal("0.101"))
 
-    def test_build_quote_charges_two_percent_with_atomic_precision(self):
+    def test_build_quote_charges_one_percent_with_atomic_precision(self):
         quote = build_quote(
             request={
                 "productId": "bitrefill-giftcard-usd",
@@ -41,13 +40,13 @@ class BitrefillQuoteTests(unittest.TestCase):
             now_epoch=1_719_000_000,
         )
 
-        self.assertEqual(quote["serviceFeeBps"], 200)
-        self.assertEqual(quote["serviceFeeUsd"], "0.002")
-        self.assertEqual(quote["totalUsd"], "0.102")
-        self.assertEqual(quote["singitAmount"], "10.2")
+        self.assertEqual(quote["serviceFeeBps"], 100)
+        self.assertEqual(quote["serviceFeeUsd"], "0.001")
+        self.assertEqual(quote["totalUsd"], "0.101")
+        self.assertEqual(quote["singitAmount"], "10.1")
         self.assertEqual(
             quote["maxSingitAtomic"],
-            str(int(Decimal("10.2") * 10**SINGIT_DECIMALS)),
+            str(int(Decimal("10.1") * 10**SINGIT_DECIMALS)),
         )
         self.assertNotIn("marginBps", quote)
 
@@ -76,7 +75,7 @@ class BitrefillQuoteTests(unittest.TestCase):
         self.assertEqual(quote["productId"], "test-phone-refill")
         self.assertEqual(quote["productType"], "phone_refill")
         self.assertEqual(quote["packageId"], "1")
-        self.assertEqual(quote["singitAmount"], "102")
+        self.assertEqual(quote["singitAmount"], "101")
 
     def test_build_quote_converts_usd_price_to_singit_atomic_with_service_fee(self):
         quote = build_quote(
@@ -103,8 +102,8 @@ class BitrefillQuoteTests(unittest.TestCase):
 
         self.assertEqual(quote["quoteId"], "quote_fixed")
         self.assertEqual(quote["productId"], "test-gift-card-code")
-        self.assertEqual(quote["singitAmount"], "2550")
-        self.assertEqual(quote["maxSingitAtomic"], str(2550 * 10**SINGIT_DECIMALS))
+        self.assertEqual(quote["singitAmount"], "2525")
+        self.assertEqual(quote["maxSingitAtomic"], str(2525 * 10**SINGIT_DECIMALS))
         self.assertEqual(quote["expiresAtEpoch"], 1_719_000_120)
         self.assertIn("Test Gift Card Code", quote["quoteText"])
 
@@ -130,10 +129,10 @@ class BitrefillQuoteTests(unittest.TestCase):
             now_epoch=1_719_000_000,
         )
 
-        self.assertEqual(quote["singitAmount"], "10.2")
+        self.assertEqual(quote["singitAmount"], "10.1")
         self.assertEqual(
             quote["maxSingitAtomic"],
-            str(int(Decimal("10.2") * 10**SINGIT_DECIMALS)),
+            str(int(Decimal("10.1") * 10**SINGIT_DECIMALS)),
         )
 
     def test_build_real_rate_quote_uses_bankr_pricing_result(self):
@@ -155,12 +154,12 @@ class BitrefillQuoteTests(unittest.TestCase):
             },
             pricing={
                 "pricingMode": "bankr_real_rate",
-                "targetUsdc": "0.102",
-                "bufferedTargetUsdc": "0.102",
+                "targetUsdc": "0.101",
+                "bufferedTargetUsdc": "0.101",
                 "requiredSingit": "25000",
                 "requiredSingitAtomic": "25000000000000000000000",
-                "expectedUsdc": "0.102",
-                "minUsdc": "0.102",
+                "expectedUsdc": "0.101",
+                "minUsdc": "0.101",
             },
             quote_id="quote_real_1",
             now_epoch=1_719_000_000,
@@ -170,9 +169,9 @@ class BitrefillQuoteTests(unittest.TestCase):
         self.assertEqual(quote["pricingMode"], "bankr_real_rate")
         self.assertEqual(quote["singitAmount"], "25000")
         self.assertEqual(quote["maxSingitAtomic"], "25000000000000000000000")
-        self.assertEqual(quote["serviceFeeUsd"], "0.002")
-        self.assertEqual(quote["totalUsd"], "0.102")
-        self.assertEqual(quote["requiredUsdc"], "0.102")
+        self.assertEqual(quote["serviceFeeUsd"], "0.001")
+        self.assertEqual(quote["totalUsd"], "0.101")
+        self.assertEqual(quote["requiredUsdc"], "0.101")
         self.assertIn("real-rate", quote["quoteText"])
 
     def test_build_real_rate_quote_binds_selected_payment_token(self):
@@ -194,12 +193,12 @@ class BitrefillQuoteTests(unittest.TestCase):
             },
             pricing={
                 "pricingMode": "bankr_real_rate",
-                "targetUsdc": "0.102",
-                "bufferedTargetUsdc": "0.102",
+                "targetUsdc": "0.101",
+                "bufferedTargetUsdc": "0.101",
                 "requiredAmount": "0.11",
                 "requiredAmountAtomic": "110000",
-                "expectedUsdc": "0.102",
-                "minUsdc": "0.102",
+                "expectedUsdc": "0.101",
+                "minUsdc": "0.101",
             },
             payment_token={
                 "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",

@@ -980,13 +980,17 @@ def _bitrefill_approval_context_lines(
 ) -> list[str]:
     expires_in = max(0, int(quote.get("expiresAtEpoch", now_epoch_value)) - int(now_epoch_value))
     expires_minutes = max(1, (expires_in + 59) // 60)
+    fee_percent = format_decimal(
+        Decimal(str(quote.get("serviceFeeBps", 0))) / Decimal(100)
+    )
     payment_symbol = str(quote.get("paymentTokenSymbol") or "").strip()
     payment_amount = str(quote.get("paymentTokenAmount") or "").strip()
     lines = [
         "Action: BUY BITREFILL",
         f"Product: {str(quote.get('productName', quote.get('productId', '')))}",
         f"Product price: {_format_amount(str(quote.get('priceUsd', '')))} USD",
-        f"Service fee (2%): {_format_amount(str(quote.get('serviceFeeUsd', '')))} USD",
+        f"Service fee ({fee_percent}%): "
+        f"{_format_amount(str(quote.get('serviceFeeUsd', '')))} USD",
         f"Total: {_format_amount(str(quote.get('totalUsd', '')))} USD",
     ]
     if payment_symbol and payment_amount:

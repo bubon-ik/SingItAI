@@ -97,6 +97,7 @@ from .bankr_llm_purchase import (
     BankrLlmError,
     build_bankr_llm_purchase_service_from_env,
 )
+from .bitrefill_quote import SERVICE_FEE_BPS
 from .commerce_store import sanitize_bankr_reconciliation_snapshot
 from .numeric import format_decimal
 from .goplausible import fetch_x402_paid_resource, fetch_x402_payment_required, normalize_x402_payment_required
@@ -5960,8 +5961,12 @@ def _spending_limits_telegram_text(limits: dict[str, Any], *, updated: bool) -> 
     platform_max = _format_usdc_atomic(limits.get("operatorCeilingPerTxAtomic"))
     platform_daily = _format_usdc_atomic(limits.get("operatorCeilingDailyAtomic"))
     bitrefill_max = limits.get("bitrefillLiveMaxUsd")
+    service_fee_percent = format_decimal(
+        Decimal(SERVICE_FEE_BPS) / Decimal(100)
+    )
     bitrefill_line = (
-        f"Bitrefill product maximum: {bitrefill_max} USD before the 2% service fee."
+        f"Bitrefill product maximum: {bitrefill_max} USD before the "
+        f"{service_fee_percent}% service fee."
         if bitrefill_max is not None
         else "Bitrefill product maximum: inactive."
     )

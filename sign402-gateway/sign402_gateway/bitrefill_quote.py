@@ -11,7 +11,7 @@ from .numeric import format_decimal
 
 SINGIT_DECIMALS = 18
 DEFAULT_QUOTE_TTL_SECONDS = 120
-SERVICE_FEE_BPS = 200
+SERVICE_FEE_BPS = 100
 
 
 def calculate_service_fee(price_usd: Any) -> tuple[Decimal, Decimal]:
