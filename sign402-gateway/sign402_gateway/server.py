@@ -98,6 +98,7 @@ from .bankr_llm_purchase import (
     build_bankr_llm_purchase_service_from_env,
 )
 from .bitrefill_quote import SERVICE_FEE_BPS
+from .bitrefill_runner import CdpWalletServiceError
 from .commerce_store import sanitize_bankr_reconciliation_snapshot
 from .numeric import format_decimal
 from .goplausible import fetch_x402_paid_resource, fetch_x402_payment_required, normalize_x402_payment_required
@@ -2370,10 +2371,11 @@ def build_server(
         ttl_seconds=int(os.getenv("SIGN402_BITREFILL_QUOTE_TTL_SECONDS", "120")),
         max_reprice_bps=bitrefill_max_reprice_bps,
     )
+    bitrefill_funding_runner = build_bitrefill_funding_runner_from_env()
     bitrefill_fulfillment_runner = BitrefillFulfillmentRunner(
         store=bitrefill_commerce_store,
         bitrefill_client=bitrefill_client,
-        funding_runner=build_bitrefill_funding_runner_from_env(),
+        funding_runner=bitrefill_funding_runner,
     )
     bitrefill_settlement_preparation_runner = BitrefillSettlementPreparationRunner(
         store=bitrefill_commerce_store,
@@ -2415,6 +2417,14 @@ def build_server(
                 payment_token_resolver=bitrefill_payment_token_resolver,
             )
             if real_rate_pricer is not None
+            else None
+        ),
+        return_runner=(
+            bitrefill_funding_runner.cdp_client.return_token
+            if isinstance(
+                bitrefill_funding_runner,
+                CdpWalletSwapFundingRunner,
+            )
             else None
         ),
         source_wallet_provider=lambda user_id: _managed_wallet_address(
@@ -3385,26 +3395,73 @@ class CdpWalletClient:
         )
         return self._with_tx_id(payload)
 
+    def return_token(
+        self,
+        *,
+        quote_id: str,
+        token_address: str,
+        to_address: str,
+        amount_atomic: str,
+        chain: str = "base",
+    ) -> dict[str, Any]:
+        payload = self._run(
+            [
+                "transfer-token",
+                "--token",
+                str(token_address),
+                "--to",
+                str(to_address),
+                "--amount-atomic",
+                str(amount_atomic),
+                "--chain",
+                str(chain),
+                "--idempotency-key",
+                f"bitrefill-return:{quote_id}",
+            ]
+        )
+        return self._with_tx_id(payload)
+
     def _run(self, args: list[str]) -> dict[str, Any]:
         script = self.service_dir / "src" / "index.mjs"
         command = ["node", str(script), *args]
-        result = subprocess.run(
-            command,
-            cwd=str(self.service_dir),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=240,
-        )
+        try:
+            result = subprocess.run(
+                command,
+                cwd=str(self.service_dir),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=240,
+            )
+        except subprocess.TimeoutExpired:
+            raise CdpWalletServiceError("CDP wallet service failed") from None
         if result.returncode != 0:
-            message = result.stderr.strip() or result.stdout.strip() or "CDP wallet service failed"
-            raise ValueError(message)
+            stage = ""
+            try:
+                error_payload = json.loads(result.stderr.strip())
+            except (json.JSONDecodeError, TypeError):
+                error_payload = None
+            if (
+                isinstance(error_payload, dict)
+                and error_payload.get("ok") is False
+                and error_payload.get("error") == "CDP wallet service failed"
+                and error_payload.get("stage") == "pre_swap"
+            ):
+                stage = "pre_swap"
+            raise CdpWalletServiceError(
+                "CDP wallet service failed",
+                stage=stage,
+            )
         try:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
-            raise ValueError("CDP wallet service returned non-JSON output") from exc
+            raise CdpWalletServiceError(
+                "CDP wallet service returned non-JSON output"
+            ) from exc
         if not isinstance(payload, dict):
-            raise ValueError("CDP wallet service returned non-object JSON")
+            raise CdpWalletServiceError(
+                "CDP wallet service returned non-object JSON"
+            )
         return payload
 
     def _with_tx_id(self, payload: dict[str, Any]) -> dict[str, Any]:

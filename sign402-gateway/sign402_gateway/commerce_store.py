@@ -33,7 +33,8 @@ STATE_ORDER = {
     "USER_REJECTED": 901,
     "FULFILLMENT_FAILED": 902,
     "RECONCILIATION_REQUIRED": 903,
-    "REFUND_REQUIRED": 904,
+    "REFUNDED": 904,
+    "REFUND_REQUIRED": 905,
 }
 
 
@@ -285,6 +286,35 @@ def sanitize_bankr_reconciliation_snapshot(
     return snapshot
 
 
+def sanitize_token_return_snapshot(
+    token_return: Mapping[str, Any],
+    quote: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    del quote
+    snapshot: dict[str, Any] = {}
+    _copy_scalar(
+        snapshot,
+        token_return,
+        "transactionHash",
+        field="tokenReturn.transactionHash",
+        aliases=("txId", "hash"),
+    )
+    for key in (
+        "network",
+        "token",
+        "amountAtomic",
+        "from",
+        "to",
+    ):
+        _copy_scalar(
+            snapshot,
+            token_return,
+            key,
+            field=f"tokenReturn.{key}",
+        )
+    return snapshot
+
+
 def _assert_reserved_snapshots_are_canonical(
     metadata: dict[str, Any],
     quote: dict[str, Any],
@@ -293,6 +323,7 @@ def _assert_reserved_snapshots_are_canonical(
         ("bitrefill", sanitize_bitrefill_provider_snapshot),
         ("bitrefillCheckpoint", sanitize_bitrefill_checkpoint),
         ("bankr", sanitize_bankr_reconciliation_snapshot),
+        ("tokenReturn", sanitize_token_return_snapshot),
     ):
         if key not in metadata:
             continue
@@ -524,6 +555,7 @@ class BitrefillCommerceStore:
             ("bitrefill", sanitize_bitrefill_provider_snapshot),
             ("bitrefillCheckpoint", sanitize_bitrefill_checkpoint),
             ("bankr", sanitize_bankr_reconciliation_snapshot),
+            ("tokenReturn", sanitize_token_return_snapshot),
         ):
             if key not in update:
                 continue

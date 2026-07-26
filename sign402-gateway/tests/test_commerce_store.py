@@ -42,6 +42,52 @@ def raw_order_row(path: Path, quote_id: str) -> tuple[str, str, int]:
 
 
 class CommerceStoreTests(unittest.TestCase):
+    def test_refunded_is_terminal_and_token_return_is_sanitized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.sqlite3"
+            store = BitrefillCommerceStore(path, cipher=make_cipher())
+            store.save_quote(
+                {
+                    "quoteId": "q1",
+                    "productId": "trusted-product",
+                    "expiresAtEpoch": 999,
+                }
+            )
+            store.advance_state("q1", "RECONCILIATION_REQUIRED")
+            store.advance_state(
+                "q1",
+                "REFUNDED",
+                {
+                    "tokenReturn": {
+                        "transactionHash": "0xRETURN",
+                        "network": "base",
+                        "token": "0xTOKEN",
+                        "amountAtomic": "101000000",
+                        "from": "0xCDP",
+                        "to": "0xUSER",
+                        "privateKey": "SECRET-MARKER",
+                        "stdout": "UNSAFE-STDOUT",
+                    }
+                },
+            )
+
+            record = store.get_quote("q1")
+            self.assertEqual(record["state"], "REFUNDED")
+            self.assertEqual(
+                record["metadata"]["tokenReturn"],
+                {
+                    "transactionHash": "0xRETURN",
+                    "network": "base",
+                    "token": "0xTOKEN",
+                    "amountAtomic": "101000000",
+                    "from": "0xCDP",
+                    "to": "0xUSER",
+                },
+            )
+            self.assertFalse(store.try_mark_fulfilling("q1"))
+            with self.assertRaisesRegex(ValueError, "backward"):
+                store.advance_state("q1", "RECONCILIATION_REQUIRED")
+
     def test_provider_and_checkpoint_snapshots_are_strict_allowlists(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "orders.sqlite3"

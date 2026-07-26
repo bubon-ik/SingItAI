@@ -17,6 +17,7 @@ from cryptography.fernet import Fernet
 from sign402_gateway.bankr_llm_purchase import BankrLlmError
 from sign402_gateway.bitrefill import TestBitrefillClient
 from sign402_gateway.bitrefill_mcp import McpBitrefillClient
+from sign402_gateway.bitrefill_runner import CdpWalletServiceError
 from sign402_gateway.secure_state import (
     SensitiveStateCipher,
     SensitiveStateConfigurationError,
@@ -1053,6 +1054,106 @@ class GatewayServerTests(unittest.TestCase):
         command = run.call_args_list[0].args[0]
         self.assertIn("--decimals", command)
         self.assertEqual(command[command.index("--decimals") + 1], "6")
+
+    def test_cdp_wallet_client_preserves_pre_swap_stage(self):
+        completed = subprocess_completed(
+            returncode=1,
+            stderr=json.dumps(
+                {
+                    "ok": False,
+                    "error": "CDP wallet service failed",
+                    "stage": "pre_swap",
+                }
+            ),
+        )
+        with patch("subprocess.run", return_value=completed):
+            client = CdpWalletClient(service_dir=Path("/tmp/cdp"))
+
+            with self.assertRaises(CdpWalletServiceError) as captured:
+                client.swap_singit_to_usdc(
+                    amount="1.25",
+                    from_token=(
+                        "0x1111111111111111111111111111111111111111"
+                    ),
+                    min_usdc="1.00",
+                    decimals=6,
+                )
+
+        self.assertEqual(captured.exception.stage, "pre_swap")
+        self.assertEqual(str(captured.exception), "CDP wallet service failed")
+
+    def test_cdp_wallet_client_unknown_errors_have_no_safe_stage(self):
+        failures = [
+            subprocess_completed(returncode=1, stderr="plain provider failure"),
+            subprocess_completed(returncode=1, stderr="{malformed"),
+        ]
+        for completed in failures:
+            with self.subTest(stderr=completed.stderr):
+                with patch("subprocess.run", return_value=completed):
+                    client = CdpWalletClient(service_dir=Path("/tmp/cdp"))
+                    with self.assertRaises(CdpWalletServiceError) as captured:
+                        client.swap_singit_to_usdc(
+                            amount="1.25",
+                            min_usdc="1.00",
+                        )
+                self.assertEqual(captured.exception.stage, "")
+                self.assertNotIn(completed.stderr, str(captured.exception))
+
+        with patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired(["node"], 240),
+        ):
+            client = CdpWalletClient(service_dir=Path("/tmp/cdp"))
+            with self.assertRaises(CdpWalletServiceError) as captured:
+                client.swap_singit_to_usdc(
+                    amount="1.25",
+                    min_usdc="1.00",
+                )
+        self.assertEqual(captured.exception.stage, "")
+
+    def test_cdp_wallet_client_builds_exact_idempotent_token_return(self):
+        completed = subprocess_completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "transactionHash": "0x" + "b" * 64,
+                    "network": "base",
+                    "token": DEFAULT_SINGIT_TOKEN_ADDRESS,
+                    "amountAtomic": "101000000",
+                    "from": "0xCDP",
+                    "to": "0xUSER",
+                }
+            )
+        )
+        with patch("subprocess.run", return_value=completed) as run:
+            client = CdpWalletClient(service_dir=Path("/tmp/cdp"))
+            result = client.return_token(
+                quote_id="quote_1",
+                token_address=DEFAULT_SINGIT_TOKEN_ADDRESS,
+                to_address="0x2A52e5eA26013bdCDCfEf8b71d700A6cDc918423",
+                amount_atomic="101000000",
+                chain="base",
+            )
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[2], "transfer-token")
+        self.assertEqual(
+            command[command.index("--token") + 1],
+            DEFAULT_SINGIT_TOKEN_ADDRESS,
+        )
+        self.assertEqual(
+            command[command.index("--to") + 1],
+            "0x2A52e5eA26013bdCDCfEf8b71d700A6cDc918423",
+        )
+        self.assertEqual(
+            command[command.index("--amount-atomic") + 1],
+            "101000000",
+        )
+        self.assertEqual(
+            command[command.index("--idempotency-key") + 1],
+            "bitrefill-return:quote_1",
+        )
+        self.assertEqual(result["txId"], result["transactionHash"])
 
     def test_real_rate_pricer_env_builder_requires_max_singit(self):
         with self.assertRaisesRegex(ValueError, "SIGN402_MAX_SINGIT_PER_BITREFILL_ORDER"):

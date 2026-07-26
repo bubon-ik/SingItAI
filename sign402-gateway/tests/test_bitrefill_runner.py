@@ -18,6 +18,7 @@ from sign402_gateway.bitrefill_runner import (
     BitrefillQuoteService,
     BitrefillSearchService,
     BitrefillSettlementPreparationRunner,
+    CdpWalletServiceError,
     RepriceRequiredError,
     WalletBitrefillExecutionPricer,
     WalletPaymentTokenResolver,
@@ -203,6 +204,27 @@ def wallet_token_quote() -> dict:
     }
 
 
+def wallet_execution_quote(quote: dict) -> dict:
+    execution_quote = deepcopy(quote)
+    execution_quote.update(
+        {
+            "actualPaymentTokenAmount": "101",
+            "actualPaymentTokenAtomic": "101000000",
+            "executionPricing": {
+                "paymentTokenAddress": quote["paymentTokenAddress"],
+                "paymentTokenDecimals": 6,
+                "actualPaymentTokenAmount": "101",
+                "actualPaymentTokenAtomic": "101000000",
+                "expectedUsdc": "1.02",
+                "minUsdc": "1.01",
+                "approvedMaximumAtomic": "105000000",
+                "pricedAtEpoch": 101,
+            },
+        }
+    )
+    return execution_quote
+
+
 class BitrefillRunnerTests(unittest.TestCase):
     def test_wallet_reprice_above_approved_maximum_moves_no_funds(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -254,23 +276,7 @@ class BitrefillRunnerTests(unittest.TestCase):
             store = make_commerce_store(Path(tmp) / "orders.sqlite3")
             quote = wallet_token_quote()
             store.save_quote(quote)
-            execution_quote = deepcopy(quote)
-            execution_quote.update(
-                {
-                    "actualPaymentTokenAmount": "101",
-                    "actualPaymentTokenAtomic": "101000000",
-                    "executionPricing": {
-                        "paymentTokenAddress": quote["paymentTokenAddress"],
-                        "paymentTokenDecimals": 6,
-                        "actualPaymentTokenAmount": "101",
-                        "actualPaymentTokenAtomic": "101000000",
-                        "expectedUsdc": "1.02",
-                        "minUsdc": "1.01",
-                        "approvedMaximumAtomic": "105000000",
-                        "pricedAtEpoch": 101,
-                    },
-                }
-            )
+            execution_quote = wallet_execution_quote(quote)
             user_funding = Mock(
                 return_value={
                     "ok": True,
@@ -328,6 +334,220 @@ class BitrefillRunnerTests(unittest.TestCase):
                     "actualPaymentTokenAtomic"
                 ],
                 "101000000",
+            )
+
+    def test_proven_pre_swap_failure_returns_exact_transfer_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = make_commerce_store(Path(tmp) / "orders.sqlite3")
+            quote = wallet_token_quote()
+            store.save_quote(quote)
+            cdp_funding = Mock(
+                side_effect=CdpWalletServiceError(
+                    "CDP wallet service failed",
+                    stage="pre_swap",
+                )
+            )
+            fulfillment = BitrefillFulfillmentRunner(
+                store=store,
+                bitrefill_client=TestBitrefillClient(),
+                funding_runner=cdp_funding,
+                now_provider=lambda: 102,
+            )
+            approval = Mock()
+            return_runner = Mock(
+                return_value={
+                    "ok": True,
+                    "transactionHash": "0xRETURN",
+                    "network": "base",
+                    "token": quote["paymentTokenAddress"],
+                    "amountAtomic": "101000000",
+                    "from": "0xCDP",
+                    "to": "0xUser",
+                }
+            )
+            runner = WalletBitrefillPurchaseRunner(
+                store=store,
+                approval_client=approval,
+                fulfillment_runner=fulfillment,
+                user_funding_runner=Mock(
+                    return_value={
+                        "ok": True,
+                        "fromWallet": "0xUser",
+                        "transfer": {"txId": "0xTRANSFER"},
+                    }
+                ),
+                execution_pricer=Mock(
+                    return_value=wallet_execution_quote(quote)
+                ),
+                return_runner=return_runner,
+                now_provider=lambda: 101,
+                fulfillment_token_provider=lambda: "fulfillment-secret",
+            )
+            expected_hash = runner.payment_hash_for_quote(quote, recipient={})
+            approval.return_value = {
+                "approved": True,
+                "approvedHash": expected_hash,
+            }
+
+            result = runner.buy(
+                {
+                    "quoteId": quote["quoteId"],
+                    "telegramUserId": "u1",
+                }
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(
+                result["decision"],
+                "refunded_after_rate_change",
+            )
+            return_runner.assert_called_once_with(
+                quote_id=quote["quoteId"],
+                token_address=quote["paymentTokenAddress"],
+                to_address="0xUser",
+                amount_atomic="101000000",
+                chain="base",
+            )
+            record = store.get_quote(quote["quoteId"])
+            self.assertEqual(record["state"], "REFUNDED")
+            self.assertEqual(
+                record["metadata"]["tokenReturn"]["transactionHash"],
+                "0xRETURN",
+            )
+            with self.assertRaisesRegex(ValueError, "not purchasable"):
+                runner.buy(
+                    {
+                        "quoteId": quote["quoteId"],
+                        "telegramUserId": "u1",
+                    }
+                )
+            return_runner.assert_called_once()
+
+    def test_unknown_swap_stage_never_returns_user_transfer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = make_commerce_store(Path(tmp) / "orders.sqlite3")
+            quote = wallet_token_quote()
+            store.save_quote(quote)
+            fulfillment = BitrefillFulfillmentRunner(
+                store=store,
+                bitrefill_client=TestBitrefillClient(),
+                funding_runner=Mock(
+                    side_effect=CdpWalletServiceError(
+                        "CDP wallet service failed",
+                        stage="",
+                    )
+                ),
+                now_provider=lambda: 102,
+            )
+            approval = Mock()
+            return_runner = Mock()
+            runner = WalletBitrefillPurchaseRunner(
+                store=store,
+                approval_client=approval,
+                fulfillment_runner=fulfillment,
+                user_funding_runner=Mock(
+                    return_value={
+                        "ok": True,
+                        "fromWallet": "0xUser",
+                        "transfer": {"txId": "0xTRANSFER"},
+                    }
+                ),
+                execution_pricer=Mock(
+                    return_value=wallet_execution_quote(quote)
+                ),
+                return_runner=return_runner,
+                now_provider=lambda: 101,
+                fulfillment_token_provider=lambda: "fulfillment-secret",
+            )
+            expected_hash = runner.payment_hash_for_quote(quote, recipient={})
+            approval.return_value = {
+                "approved": True,
+                "approvedHash": expected_hash,
+            }
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Bitrefill fulfillment request failed",
+            ):
+                runner.buy(
+                    {
+                        "quoteId": quote["quoteId"],
+                        "telegramUserId": "u1",
+                    }
+                )
+
+            return_runner.assert_not_called()
+            self.assertEqual(
+                store.get_quote(quote["quoteId"])["state"],
+                "RECONCILIATION_REQUIRED",
+            )
+
+    def test_failed_token_return_stays_in_reconciliation_without_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = make_commerce_store(Path(tmp) / "orders.sqlite3")
+            quote = wallet_token_quote()
+            store.save_quote(quote)
+            fulfillment = BitrefillFulfillmentRunner(
+                store=store,
+                bitrefill_client=TestBitrefillClient(),
+                funding_runner=Mock(
+                    side_effect=CdpWalletServiceError(
+                        "CDP wallet service failed",
+                        stage="pre_swap",
+                    )
+                ),
+                now_provider=lambda: 102,
+            )
+            approval = Mock()
+            return_runner = Mock(
+                side_effect=RuntimeError("RETURN-SECRET-MARKER")
+            )
+            runner = WalletBitrefillPurchaseRunner(
+                store=store,
+                approval_client=approval,
+                fulfillment_runner=fulfillment,
+                user_funding_runner=Mock(
+                    return_value={
+                        "ok": True,
+                        "fromWallet": "0xUser",
+                        "transfer": {"txId": "0xTRANSFER"},
+                    }
+                ),
+                execution_pricer=Mock(
+                    return_value=wallet_execution_quote(quote)
+                ),
+                return_runner=return_runner,
+                now_provider=lambda: 101,
+                fulfillment_token_provider=lambda: "fulfillment-secret",
+            )
+            expected_hash = runner.payment_hash_for_quote(quote, recipient={})
+            approval.return_value = {
+                "approved": True,
+                "approvedHash": expected_hash,
+            }
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Bitrefill fulfillment request failed",
+            ) as captured:
+                runner.buy(
+                    {
+                        "quoteId": quote["quoteId"],
+                        "telegramUserId": "u1",
+                    }
+                )
+
+            return_runner.assert_called_once()
+            record = store.get_quote(quote["quoteId"])
+            self.assertEqual(record["state"], "RECONCILIATION_REQUIRED")
+            self.assertEqual(
+                record["metadata"]["returnError"],
+                "Token return confirmation failed",
+            )
+            self.assertNotIn("RETURN-SECRET-MARKER", str(captured.exception))
+            self.assertNotIn(
+                "RETURN-SECRET-MARKER",
+                sqlite_text(Path(tmp) / "orders.sqlite3"),
             )
 
     def test_fulfillment_rejects_malformed_execution_before_swap_claim(self):

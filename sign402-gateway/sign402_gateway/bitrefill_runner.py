@@ -75,6 +75,12 @@ class RepriceRequiredError(ValueError):
     pass
 
 
+class CdpWalletServiceError(ValueError):
+    def __init__(self, message: str, *, stage: str = ""):
+        super().__init__(message)
+        self.stage = stage if stage == "pre_swap" else ""
+
+
 def _amount_to_atomic(value: Any, *, decimals: int, field: str) -> int:
     amount = Decimal(str(value))
     if not amount.is_finite() or amount < 0:
@@ -239,6 +245,42 @@ class WalletBitrefillExecutionPricer:
             raise
         except Exception:
             raise RepriceRequiredError("fresh pricing is unavailable") from None
+
+
+def _validated_token_return(
+    result: Any,
+    *,
+    token_address: str,
+    to_address: str,
+    amount_atomic: str,
+) -> dict[str, Any]:
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise ValueError("token return was not confirmed")
+    transaction_hash = str(
+        result.get("transactionHash") or result.get("txId") or ""
+    ).strip()
+    network = str(result.get("network") or "").strip()
+    token = str(result.get("token") or "").strip()
+    destination = str(result.get("to") or "").strip()
+    returned_atomic = str(result.get("amountAtomic") or "").strip()
+    if not transaction_hash:
+        raise ValueError("token return transaction hash is missing")
+    if network != "base":
+        raise ValueError("token return network changed")
+    if token.casefold() != str(token_address).casefold():
+        raise ValueError("token return asset changed")
+    if destination.casefold() != str(to_address).casefold():
+        raise ValueError("token return destination changed")
+    if returned_atomic != str(amount_atomic):
+        raise ValueError("token return amount changed")
+    return {
+        "transactionHash": transaction_hash,
+        "network": network,
+        "token": token,
+        "amountAtomic": returned_atomic,
+        "from": str(result.get("from") or "").strip(),
+        "to": destination,
+    }
 
 
 def _fulfillment_token_matches(metadata: dict[str, Any], fulfillment_token: str | None) -> bool:
@@ -744,6 +786,7 @@ class WalletBitrefillPurchaseRunner:
         user_funding_runner: Callable[..., dict[str, Any]] | None = None,
         execution_pricer: Callable[[str, dict[str, Any]], dict[str, Any]]
         | None = None,
+        return_runner: Callable[..., dict[str, Any]] | None = None,
         source_wallet_provider: Callable[[str], str] | None = None,
         now_provider: Callable[[], int] = now_epoch,
         fulfillment_token_provider: Callable[[], str] = lambda: secrets.token_urlsafe(32),
@@ -755,6 +798,7 @@ class WalletBitrefillPurchaseRunner:
         self.fulfillment_runner = fulfillment_runner
         self.user_funding_runner = user_funding_runner
         self.execution_pricer = execution_pricer
+        self.return_runner = return_runner
         self.source_wallet_provider = source_wallet_provider
         self.now_provider = now_provider
         self.fulfillment_token_provider = fulfillment_token_provider
@@ -946,6 +990,111 @@ class WalletBitrefillPurchaseRunner:
             bitrefill_result = self.fulfillment_runner(
                 {"quoteId": quote_id, "fulfillmentToken": fulfillment_token}
             )
+        except CdpWalletServiceError as exc:
+            user_funding = wallet_checkout.get("userFunding")
+            transfer = (
+                user_funding.get("transfer")
+                if isinstance(user_funding, dict)
+                else None
+            )
+            transfer_tx_id = (
+                str(
+                    transfer.get("txId")
+                    or transfer.get("transactionHash")
+                    or ""
+                ).strip()
+                if isinstance(transfer, dict)
+                else ""
+            )
+            can_return = (
+                exc.stage == "pre_swap"
+                and self.return_runner is not None
+                and quote.get("paymentTokenAddress") is not None
+                and not bool(quote.get("paymentTokenNative", False))
+                and bool(transfer_tx_id)
+                and isinstance(user_funding, dict)
+                and bool(str(user_funding.get("fromWallet") or "").strip())
+                and bool(
+                    str(
+                        execution_quote.get(
+                            "actualPaymentTokenAtomic"
+                        )
+                        or ""
+                    ).strip()
+                )
+            )
+            if can_return:
+                try:
+                    token_return = self.return_runner(
+                        quote_id=quote_id,
+                        token_address=str(quote["paymentTokenAddress"]),
+                        to_address=str(user_funding["fromWallet"]),
+                        amount_atomic=str(
+                            execution_quote["actualPaymentTokenAtomic"]
+                        ),
+                        chain="base",
+                    )
+                    token_return = _validated_token_return(
+                        token_return,
+                        token_address=str(quote["paymentTokenAddress"]),
+                        to_address=str(user_funding["fromWallet"]),
+                        amount_atomic=str(
+                            execution_quote["actualPaymentTokenAtomic"]
+                        ),
+                    )
+                except Exception:
+                    self.store.advance_state(
+                        quote_id,
+                        "RECONCILIATION_REQUIRED",
+                        {
+                            "walletCheckout": {
+                                **wallet_checkout,
+                                "fulfillmentError": (
+                                    "Bitrefill fulfillment request failed"
+                                ),
+                            },
+                            "returnError": "Token return confirmation failed",
+                        },
+                    )
+                    raise ValueError(
+                        "Bitrefill fulfillment request failed"
+                    ) from None
+                self.store.advance_state(
+                    quote_id,
+                    "REFUNDED",
+                    {
+                        "walletCheckout": {
+                            **wallet_checkout,
+                            "fulfillmentError": (
+                                "Bitrefill funding changed before swap"
+                            ),
+                        },
+                        "tokenReturn": token_return,
+                    },
+                )
+                return {
+                    "ok": False,
+                    "decision": "refunded_after_rate_change",
+                    "quoteId": quote_id,
+                    "paymentApprovalHash": payment_hash,
+                    "telegramText": (
+                        "The exchange rate changed after the wallet transfer. "
+                        "The exact token amount was returned to your wallet."
+                    ),
+                }
+            self.store.advance_state(
+                quote_id,
+                "RECONCILIATION_REQUIRED",
+                {
+                    "walletCheckout": {
+                        **wallet_checkout,
+                        "fulfillmentError": (
+                            "Bitrefill fulfillment request failed"
+                        ),
+                    }
+                },
+            )
+            raise ValueError("Bitrefill fulfillment request failed") from None
         except Exception:
             self.store.advance_state(
                 quote_id,
@@ -1085,6 +1234,13 @@ class BitrefillFulfillmentRunner:
                     "FULFILLING",
                     {"bankrSwap": funding_result},
                 )
+            except CdpWalletServiceError:
+                self.store.advance_state(
+                    quote_id,
+                    "RECONCILIATION_REQUIRED",
+                    {"fundingError": "Bitrefill funding request failed"},
+                )
+                raise
             except Exception:
                 self.store.advance_state(
                     quote_id,
