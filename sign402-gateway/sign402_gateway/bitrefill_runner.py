@@ -962,6 +962,28 @@ class WalletBitrefillPurchaseRunner:
             "USER_APPROVED",
             approval_metadata,
         )
+        prepare_purchase = getattr(self.fulfillment_runner, "prepare", None)
+        if not callable(prepare_purchase):
+            raise ValueError(
+                "Bitrefill invoice preparation runner is required"
+            )
+        prepared = prepare_purchase(
+            {
+                "quoteId": quote_id,
+                "fulfillmentToken": fulfillment_token,
+            }
+        )
+        if not isinstance(prepared, dict) or not str(
+            prepared.get("invoiceId", "")
+        ).strip():
+            raise ValueError("Bitrefill prepared invoice is invalid")
+        wallet_checkout["bitrefillInvoiceId"] = str(
+            prepared["invoiceId"]
+        ).strip()
+        self.store.checkpoint(
+            quote_id,
+            {"walletCheckout": wallet_checkout},
+        )
         try:
             if telegram_user_id:
                 if self.user_funding_runner is None:
@@ -1228,7 +1250,10 @@ class BitrefillFulfillmentRunner:
     def __call__(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.fulfill(payload)
 
-    def fulfill(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _authorized_context(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[str, dict[str, Any], dict[str, Any]]:
         quote_id = str(payload.get("quoteId", "")).strip()
         if not quote_id:
             raise ValueError("quoteId is required")
@@ -1252,6 +1277,62 @@ class BitrefillFulfillmentRunner:
                 record["quote"],
                 metadata.get("executionPricing"),
             )
+        return quote_id, record, effective_quote
+
+    def prepare(self, payload: dict[str, Any]) -> dict[str, Any]:
+        quote_id, record, effective_quote = self._authorized_context(payload)
+        if record["state"] not in {"USER_APPROVED", "FIREFLY_APPROVED"}:
+            raise ValueError(
+                f"quote cannot create an invoice (state: {record['state']})"
+            )
+        metadata = record["metadata"]
+        try:
+            prepared = self.bitrefill_client.prepare_purchase(
+                quote=effective_quote,
+                recipient=(
+                    metadata.get("recipient")
+                    if isinstance(metadata.get("recipient"), dict)
+                    else {}
+                ),
+            )
+            if not isinstance(prepared, dict):
+                raise ValueError("Bitrefill prepared invoice is invalid")
+            self.store.advance_state(
+                quote_id,
+                "INVOICE_CREATED",
+                {"bitrefillCheckpoint": prepared},
+            )
+        except Exception as exc:
+            log_swallowed_failure(
+                logger,
+                "Bitrefill provider invoice preparation failed",
+                exc,
+                quoteId=quote_id,
+                productId=str(effective_quote.get("productId", "")),
+                packageValue=str(effective_quote.get("packageValue", "")),
+            )
+            self.store.advance_state(
+                quote_id,
+                "FULFILLMENT_FAILED",
+                {"fulfillmentError": "Bitrefill provider request failed"},
+            )
+            raise ValueError("Bitrefill provider request failed") from None
+        stored = self.store.get_quote(quote_id)["metadata"].get(
+            "bitrefillCheckpoint"
+        )
+        if not isinstance(stored, dict):
+            raise ValueError("Bitrefill prepared invoice was not persisted")
+        return stored
+
+    def fulfill(self, payload: dict[str, Any]) -> dict[str, Any]:
+        quote_id, record, effective_quote = self._authorized_context(payload)
+        metadata = record["metadata"]
+        prepared = metadata.get("bitrefillCheckpoint")
+        prepared_flow = record["state"] == "INVOICE_CREATED"
+        if record["state"] == "USER_APPROVED" or (
+            prepared_flow and not isinstance(prepared, dict)
+        ):
+            raise ValueError("prepared invoice is required before funding")
         if not self.store.try_mark_fulfilling(quote_id):
             raise ValueError("quote is already fulfilled or being fulfilled")
 
@@ -1292,18 +1373,28 @@ class BitrefillFulfillmentRunner:
                 raise ValueError("Bitrefill funding request failed") from None
 
         try:
-            result = self.bitrefill_client.buy_product(
-                quote=effective_quote,
-                recipient=(
-                    metadata.get("recipient")
-                    if isinstance(metadata.get("recipient"), dict)
-                    else {}
-                ),
-                checkpoint_callback=lambda checkpoint: self.store.checkpoint(
-                    quote_id,
-                    {"bitrefillCheckpoint": checkpoint},
-                ),
-            )
+            if prepared_flow:
+                result = self.bitrefill_client.complete_purchase(
+                    quote=effective_quote,
+                    prepared=prepared,
+                    checkpoint_callback=lambda checkpoint: self.store.checkpoint(
+                        quote_id,
+                        {"bitrefillCheckpoint": checkpoint},
+                    ),
+                )
+            else:
+                result = self.bitrefill_client.buy_product(
+                    quote=effective_quote,
+                    recipient=(
+                        metadata.get("recipient")
+                        if isinstance(metadata.get("recipient"), dict)
+                        else {}
+                    ),
+                    checkpoint_callback=lambda checkpoint: self.store.checkpoint(
+                        quote_id,
+                        {"bitrefillCheckpoint": checkpoint},
+                    ),
+                )
         except Exception as exc:
             log_swallowed_failure(
                 logger,
@@ -1313,9 +1404,14 @@ class BitrefillFulfillmentRunner:
                 productId=str(effective_quote.get("productId", "")),
                 packageValue=str(effective_quote.get("packageValue", "")),
             )
+            failure_state = (
+                "RECONCILIATION_REQUIRED"
+                if prepared_flow
+                else "FULFILLMENT_FAILED"
+            )
             self.store.advance_state(
                 quote_id,
-                "FULFILLMENT_FAILED",
+                failure_state,
                 {"fulfillmentError": "Bitrefill provider request failed"},
             )
             raise ValueError("Bitrefill provider request failed") from None
