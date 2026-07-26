@@ -72,7 +72,7 @@ def _normalize_lossless_json_numbers(value: Any) -> Any:
     return value
 
 
-def _load_purchase_store(path: Path) -> dict[str, dict[str, Any]]:
+def _read_purchase_store_text(path: Path) -> str:
     if path.is_symlink():
         raise LegacyFulfillmentTokenCleanupError(
             "purchase store must not be a symlink"
@@ -86,7 +86,7 @@ def _load_purchase_store(path: Path) -> dict[str, dict[str, Any]]:
             "purchase store must be a regular file"
         )
     try:
-        serialized = path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         raise LegacyFulfillmentTokenCleanupError(
             "purchase store must be UTF-8 JSON"
@@ -95,6 +95,9 @@ def _load_purchase_store(path: Path) -> dict[str, dict[str, Any]]:
         raise LegacyFulfillmentTokenCleanupError(
             "purchase store could not be read"
         ) from None
+
+
+def _parse_purchase_store(serialized: str) -> dict[str, dict[str, Any]]:
     try:
         payload = json.loads(
             serialized,
@@ -135,7 +138,9 @@ def cleanup_legacy_fulfillment_tokens(
     *,
     apply: bool = False,
 ) -> CleanupReport:
-    data = _load_purchase_store(Path(path))
+    store_path = Path(path)
+    serialized = _read_purchase_store_text(store_path)
+    data = _parse_purchase_store(serialized)
     plaintext_records = sum(
         "fulfillmentToken" in record for record in data.values()
     )
@@ -156,8 +161,18 @@ def cleanup_legacy_fulfillment_tokens(
             }
             for key, record in data.items()
         }
+        # The rewrite replaces the whole document, so anything the gateway
+        # persisted since the read above would be silently discarded -- and a
+        # lost encrypted fulfillment token means a paid-for order the user can
+        # no longer redeem. The runbook says to stop the gateway first; this
+        # check refuses to write when that was not actually done.
+        if _read_purchase_store_text(store_path) != serialized:
+            raise LegacyFulfillmentTokenCleanupError(
+                "purchase store changed during cleanup; "
+                "stop sign402-gateway and retry"
+            )
         try:
-            atomic_write_private_json(Path(path), cleaned)
+            atomic_write_private_json(store_path, cleaned)
         except (OSError, SensitiveStateError):
             raise LegacyFulfillmentTokenCleanupError(
                 "purchase store could not be atomically updated"

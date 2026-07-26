@@ -385,6 +385,46 @@ class DiscardLegacyFulfillmentTokensTests(unittest.TestCase):
                     marker,
                 )
 
+    def test_concurrent_gateway_write_is_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-purchases.json"
+            self.write_store(
+                path,
+                {"u1": {"ok": True, "fulfillmentToken": PLAINTEXT_MARKER}},
+            )
+            module = cleanup_module()
+            concurrent = {
+                "u1": {"ok": True, "fulfillmentToken": PLAINTEXT_MARKER},
+                "u2": {"ok": True, "encryptedFulfillmentToken": ENCRYPTED_MARKER},
+            }
+            real_read = module._read_purchase_store_text
+            reads = {"count": 0}
+
+            def racing_read(store_path):
+                reads["count"] += 1
+                text = real_read(store_path)
+                if reads["count"] == 1:
+                    # The live gateway records a new purchase right after the
+                    # cleanup snapshot, before the rewrite lands.
+                    self.write_store(store_path, concurrent)
+                return text
+
+            with patch.object(module, "_read_purchase_store_text", racing_read):
+                with self.assertRaises(
+                    module.LegacyFulfillmentTokenCleanupError
+                ) as caught:
+                    module.cleanup_legacy_fulfillment_tokens(path, apply=True)
+
+            self.assertEqual(
+                str(caught.exception),
+                "purchase store changed during cleanup; "
+                "stop sign402-gateway and retry",
+            )
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8")),
+                concurrent,
+            )
+
     def test_lossless_json_numbers_remain_supported_during_apply(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "user-purchases.json"
