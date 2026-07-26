@@ -1,4 +1,4 @@
-from decimal import Decimal, ROUND_CEILING, getcontext
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, getcontext
 from typing import Any
 
 from .numeric import format_decimal
@@ -6,6 +6,24 @@ from .numeric import format_decimal
 
 SINGIT_DECIMALS = 18
 getcontext().prec = 50
+
+
+def _finite_decimal(value: Any, *, field: str) -> Decimal:
+    """Parse a caller-supplied amount, rejecting NaN/Infinity and junk.
+
+    ``Decimal(str(...))`` happily accepts ``"NaN"`` and ``"Infinity"``. An
+    infinite spend cap silently disables the wallet-balance ceiling this pricer
+    exists to enforce, and both forms make later comparisons raise
+    ``InvalidOperation`` (an ArithmeticError) instead of the ``ValueError`` the
+    quote path reports to the user.
+    """
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        raise ValueError(f"{field} must be a decimal number") from None
+    if not parsed.is_finite():
+        raise ValueError(f"{field} must be a finite decimal number")
+    return parsed
 
 
 class RealRateSingitPricer:
@@ -42,9 +60,9 @@ class RealRateSingitPricer:
         amount_quantum = Decimal(1).scaleb(-token_decimals)
         balance_cap = max_amount is not None
         amount_cap = (
-            Decimal(str(max_amount))
+            _finite_decimal(max_amount, field="payment token balance")
             if balance_cap
-            else self.max_singit
+            else _finite_decimal(self.max_singit, field="configured maximum amount")
         )
         cap_exhausted_message = (
             "selected payment token balance is insufficient at the current swap rate"
@@ -54,7 +72,7 @@ class RealRateSingitPricer:
         if amount_cap <= 0:
             raise ValueError("payment token balance must be positive")
         self._quote_cache = {}
-        target = Decimal(str(target_usdc))
+        target = _finite_decimal(target_usdc, field="target USDC")
         if target <= 0:
             raise ValueError("target USDC must be positive")
         buffered_target = (

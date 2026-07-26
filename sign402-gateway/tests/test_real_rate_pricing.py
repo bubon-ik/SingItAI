@@ -366,6 +366,65 @@ class RealRatePricingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "target USDC must be positive"):
             pricer.price_for_usdc("0")
 
+    def test_rejects_non_finite_or_malformed_wallet_balance(self):
+        for balance in ("Infinity", "-Infinity", "NaN", "sNaN", "not-a-number", ""):
+            with self.subTest(balance=balance):
+                client = LinearQuoteClient(Decimal("0.01"))
+                pricer = RealRateSingitPricer(
+                    quote_client=client,
+                    from_token="0xTOKEN",
+                    to_token="USDC",
+                    chain="base",
+                    buffer_bps=0,
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "^payment token balance must be a (finite )?decimal number$",
+                ):
+                    pricer.price_for_usdc("0.10", max_amount=balance)
+
+                self.assertEqual(client.amounts, [])
+
+    def test_rejects_non_finite_or_malformed_target(self):
+        for target in ("Infinity", "NaN", "not-a-number", ""):
+            with self.subTest(target=target):
+                client = LinearQuoteClient(Decimal("0.01"))
+                pricer = RealRateSingitPricer(
+                    quote_client=client,
+                    from_token="0xTOKEN",
+                    to_token="USDC",
+                    chain="base",
+                    buffer_bps=0,
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "^target USDC must be a (finite )?decimal number$",
+                ):
+                    pricer.price_for_usdc(target, max_amount="100")
+
+                self.assertEqual(client.amounts, [])
+
+    def test_rejects_non_finite_configured_maximum(self):
+        client = LinearQuoteClient(Decimal("0.01"))
+        pricer = RealRateSingitPricer(
+            quote_client=client,
+            from_token="0xTOKEN",
+            to_token="USDC",
+            chain="base",
+            buffer_bps=0,
+            max_singit="Infinity",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "^configured maximum amount must be a finite decimal number$",
+        ):
+            pricer.price_for_usdc("0.10")
+
+        self.assertEqual(client.amounts, [])
+
     def test_quotes_exact_wallet_balance_before_rejecting(self):
         balance = Decimal("20750000.123456789")
         client = MinAmountQuoteClient(
