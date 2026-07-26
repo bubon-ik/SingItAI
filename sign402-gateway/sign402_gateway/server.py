@@ -2020,6 +2020,29 @@ def build_approval_client_from_env(
     raise ValueError(f"unsupported SIGN402_APPROVAL_PROVIDER: {provider}")
 
 
+def _bounded_int_env(
+    name: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+    env: Mapping[str, str] | None = None,
+) -> int:
+    values = os.environ if env is None else env
+    raw = str(values.get(name, default)).strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{name} must be an integer from {minimum} to {maximum}"
+        ) from None
+    if not minimum <= value <= maximum:
+        raise ValueError(
+            f"{name} must be an integer from {minimum} to {maximum}"
+        )
+    return value
+
+
 def _bitrefill_live_limit_settings(
     env: Mapping[str, str] | None = None,
 ) -> dict[str, str | None]:
@@ -2277,6 +2300,7 @@ def build_server(
         BitrefillQuoteService,
         BitrefillSearchService,
         BitrefillSettlementPreparationRunner,
+        WalletBitrefillExecutionPricer,
         WalletPaymentTokenResolver,
         WalletBitrefillPurchaseRunner,
         lookup_bitrefill_order,
@@ -2328,15 +2352,23 @@ def build_server(
     bitrefill_product_details_service = BitrefillProductDetailsService(
         bitrefill_client=bitrefill_client
     )
+    bitrefill_payment_token_resolver = WalletPaymentTokenResolver(
+        user_wallet_service.withdrawable_tokens
+    )
+    bitrefill_max_reprice_bps = _bounded_int_env(
+        "SIGN402_BITREFILL_MAX_REPRICE_BPS",
+        default=500,
+        minimum=0,
+        maximum=500,
+    )
     bitrefill_quote_service = BitrefillQuoteService(
         bitrefill_client=bitrefill_client,
         store=bitrefill_commerce_store,
         singit_usd_price_provider=lambda: os.getenv("SIGN402_SINGIT_USD_PRICE", "0.01"),
         real_rate_pricer=real_rate_pricer,
-        payment_token_resolver=WalletPaymentTokenResolver(
-            user_wallet_service.withdrawable_tokens
-        ),
+        payment_token_resolver=bitrefill_payment_token_resolver,
         ttl_seconds=int(os.getenv("SIGN402_BITREFILL_QUOTE_TTL_SECONDS", "120")),
+        max_reprice_bps=bitrefill_max_reprice_bps,
     )
     bitrefill_fulfillment_runner = BitrefillFulfillmentRunner(
         store=bitrefill_commerce_store,
@@ -2376,6 +2408,14 @@ def build_server(
         fulfillment_runner=bitrefill_fulfillment_runner,
         user_funding_runner=build_bitrefill_user_funding_runner_from_env(
             user_wallet_service=user_wallet_service,
+        ),
+        execution_pricer=(
+            WalletBitrefillExecutionPricer(
+                real_rate_pricer=real_rate_pricer,
+                payment_token_resolver=bitrefill_payment_token_resolver,
+            )
+            if real_rate_pricer is not None
+            else None
         ),
         source_wallet_provider=lambda user_id: _managed_wallet_address(
             user_wallet_service,
@@ -3440,10 +3480,14 @@ class CdpWalletSwapFundingRunner:
             raise ValueError("CDP wallet swap funding requires pricingMode=bankr_real_rate")
         token_quote = quote.get("paymentTokenAddress") is not None
         amount = str(
-            quote.get("paymentTokenAmount") if token_quote else quote.get("singitAmount", "")
+            quote.get("actualPaymentTokenAmount")
+            if token_quote
+            else quote.get("singitAmount", "")
         ).strip()
         if not amount:
-            raise ValueError("quote payment token amount is required for CDP wallet swap funding")
+            raise ValueError(
+                "fresh payment token amount is required for CDP wallet swap funding"
+            )
         from_token = str(
             quote.get("paymentTokenAddress") if token_quote else self.from_token
         ).strip()
@@ -3986,10 +4030,14 @@ class UserWalletTransferToCdpFundingRunner:
             raise ValueError("user wallet Bitrefill funding requires pricingMode=bankr_real_rate")
         token_quote = quote.get("paymentTokenAddress") is not None
         amount = str(
-            quote.get("paymentTokenAmount") if token_quote else quote.get("singitAmount", "")
+            quote.get("actualPaymentTokenAmount")
+            if token_quote
+            else quote.get("singitAmount", "")
         ).strip()
         if not amount:
-            raise ValueError("quote payment token amount is required for user wallet Bitrefill funding")
+            raise ValueError(
+                "fresh payment token amount is required for user wallet Bitrefill funding"
+            )
         user_id = str(telegram_user_id or "").strip()
         if not user_id:
             raise ValueError("telegramUserId is required for user wallet Bitrefill funding")
@@ -4025,9 +4073,25 @@ class UserWalletTransferToCdpFundingRunner:
             if transfer_amount > current_balance:
                 raise ValueError("selected payment token balance is insufficient")
             approved_atomic = str(quote.get("maxPaymentTokenAtomic", "")).strip()
+            actual_atomic = str(
+                quote.get("actualPaymentTokenAtomic", "")
+            ).strip()
             amount_atomic = transfer_amount * (Decimal(10) ** decimals)
-            if approved_atomic and amount_atomic != Decimal(approved_atomic):
-                raise ValueError("selected payment token amount does not match approval")
+            if (
+                not actual_atomic
+                or amount_atomic != Decimal(actual_atomic)
+                or amount_atomic != amount_atomic.to_integral_value()
+            ):
+                raise ValueError(
+                    "fresh payment token amount does not match execution pricing"
+                )
+            if (
+                not approved_atomic
+                or Decimal(actual_atomic) > Decimal(approved_atomic)
+            ):
+                raise ValueError(
+                    "fresh payment token amount exceeds approved maximum"
+                )
             if native and current_balance - transfer_amount < DEFAULT_NATIVE_ETH_WITHDRAW_GAS_RESERVE:
                 raise ValueError("ETH payment must leave enough balance for network gas")
 

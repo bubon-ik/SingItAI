@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import ANY, Mock
 
@@ -17,6 +18,8 @@ from sign402_gateway.bitrefill_runner import (
     BitrefillQuoteService,
     BitrefillSearchService,
     BitrefillSettlementPreparationRunner,
+    RepriceRequiredError,
+    WalletBitrefillExecutionPricer,
     WalletPaymentTokenResolver,
     WalletBitrefillPurchaseRunner,
     _bitrefill_approval_context_lines,
@@ -163,7 +166,308 @@ class FakeUserFundingRunner:
         }
 
 
+def wallet_token_quote() -> dict:
+    return {
+        "quoteId": "quote_wallet_reprice",
+        "productId": "test-gift-card-link",
+        "productName": "Test Gift Card Link",
+        "productType": "gift_card",
+        "packageId": "1",
+        "packageValue": "1",
+        "country": "US",
+        "currency": "USD",
+        "priceUsd": "1.00",
+        "serviceFeeBps": 100,
+        "serviceFeeUsd": "0.01",
+        "totalUsd": "1.01",
+        "pricingMode": "bankr_real_rate",
+        "requiredUsdc": "1.01",
+        "bufferedTargetUsdc": "1.01",
+        "expectedUsdc": "1.01",
+        "minUsdc": "1.01",
+        "paymentTokenAddress": (
+            "0xc2c1e0b7C401e6217193732272444D928646eba3"
+        ),
+        "paymentTokenSymbol": "SINGIT",
+        "paymentTokenDecimals": 6,
+        "paymentTokenNative": False,
+        "paymentTokenAmount": "100",
+        "estimatedPaymentTokenAmount": "100",
+        "estimatedPaymentTokenAtomic": "100000000",
+        "maxPaymentTokenAmount": "105",
+        "maxPaymentTokenAtomic": "105000000",
+        "maxRepriceBps": 500,
+        "createdAtEpoch": 100,
+        "expiresAtEpoch": 220,
+        "expiresAt": "1970-01-01T00:03:40Z",
+    }
+
+
 class BitrefillRunnerTests(unittest.TestCase):
+    def test_wallet_reprice_above_approved_maximum_moves_no_funds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = make_commerce_store(Path(tmp) / "orders.sqlite3")
+            quote = wallet_token_quote()
+            store.save_quote(quote)
+            execution_pricer = Mock(
+                side_effect=RepriceRequiredError(
+                    "fresh price exceeds approved maximum"
+                )
+            )
+            user_funding = Mock()
+            fulfillment = Mock()
+            approval = Mock()
+            runner = WalletBitrefillPurchaseRunner(
+                store=store,
+                approval_client=approval,
+                fulfillment_runner=fulfillment,
+                user_funding_runner=user_funding,
+                execution_pricer=execution_pricer,
+                now_provider=lambda: 101,
+            )
+            expected_hash = runner.payment_hash_for_quote(quote, recipient={})
+            approval.return_value = {
+                "approved": True,
+                "approvedHash": expected_hash,
+            }
+
+            result = runner.buy(
+                {
+                    "quoteId": quote["quoteId"],
+                    "telegramUserId": "u1",
+                }
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["decision"], "reprice_required")
+            self.assertIn("No funds were moved", result["telegramText"])
+            execution_pricer.assert_called_once()
+            user_funding.assert_not_called()
+            fulfillment.assert_not_called()
+            self.assertEqual(
+                store.get_quote(quote["quoteId"])["state"],
+                "QUOTE_EXPIRED",
+            )
+
+    def test_wallet_reprice_inside_maximum_debits_only_fresh_amount(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = make_commerce_store(Path(tmp) / "orders.sqlite3")
+            quote = wallet_token_quote()
+            store.save_quote(quote)
+            execution_quote = deepcopy(quote)
+            execution_quote.update(
+                {
+                    "actualPaymentTokenAmount": "101",
+                    "actualPaymentTokenAtomic": "101000000",
+                    "executionPricing": {
+                        "paymentTokenAddress": quote["paymentTokenAddress"],
+                        "paymentTokenDecimals": 6,
+                        "actualPaymentTokenAmount": "101",
+                        "actualPaymentTokenAtomic": "101000000",
+                        "expectedUsdc": "1.02",
+                        "minUsdc": "1.01",
+                        "approvedMaximumAtomic": "105000000",
+                        "pricedAtEpoch": 101,
+                    },
+                }
+            )
+            user_funding = Mock(
+                return_value={
+                    "ok": True,
+                    "fromWallet": "0xUser",
+                    "transfer": {"txId": "0xTRANSFER"},
+                }
+            )
+            cdp_funding = Mock(
+                return_value={"ok": True, "transactionHash": "0xSWAP"}
+            )
+            fulfillment = BitrefillFulfillmentRunner(
+                store=store,
+                bitrefill_client=TestBitrefillClient(),
+                funding_runner=cdp_funding,
+                now_provider=lambda: 102,
+            )
+            approval = Mock()
+            runner = WalletBitrefillPurchaseRunner(
+                store=store,
+                approval_client=approval,
+                fulfillment_runner=fulfillment,
+                user_funding_runner=user_funding,
+                execution_pricer=Mock(return_value=execution_quote),
+                now_provider=lambda: 101,
+                fulfillment_token_provider=lambda: "fulfillment-secret",
+            )
+            expected_hash = runner.payment_hash_for_quote(quote, recipient={})
+            approval.return_value = {
+                "approved": True,
+                "approvedHash": expected_hash,
+            }
+
+            result = runner.buy(
+                {
+                    "quoteId": quote["quoteId"],
+                    "telegramUserId": "u1",
+                }
+            )
+
+            self.assertTrue(result["ok"])
+            transferred_quote = user_funding.call_args.kwargs["quote"]
+            self.assertEqual(
+                transferred_quote["actualPaymentTokenAtomic"],
+                "101000000",
+            )
+            swap_quote = cdp_funding.call_args.args[0]
+            self.assertEqual(
+                swap_quote["actualPaymentTokenAtomic"],
+                "101000000",
+            )
+            self.assertEqual(swap_quote["maxPaymentTokenAtomic"], "105000000")
+            record = store.get_quote(quote["quoteId"])
+            self.assertEqual(
+                record["metadata"]["executionPricing"][
+                    "actualPaymentTokenAtomic"
+                ],
+                "101000000",
+            )
+
+    def test_fulfillment_rejects_malformed_execution_before_swap_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = make_commerce_store(Path(tmp) / "orders.sqlite3")
+            quote = wallet_token_quote()
+            store.save_quote(quote)
+            store.advance_state(
+                quote["quoteId"],
+                "USER_APPROVED",
+                {
+                    "fulfillmentTokenHash": hashlib.sha256(
+                        b"fulfillment-secret"
+                    ).hexdigest(),
+                    "executionPricing": {
+                        "paymentTokenAddress": quote["paymentTokenAddress"],
+                        "paymentTokenDecimals": 6,
+                    },
+                },
+            )
+            cdp_funding = Mock()
+            fulfillment = BitrefillFulfillmentRunner(
+                store=store,
+                bitrefill_client=TestBitrefillClient(),
+                funding_runner=cdp_funding,
+                now_provider=lambda: 102,
+            )
+
+            with self.assertRaises(ValueError):
+                fulfillment(
+                    {
+                        "quoteId": quote["quoteId"],
+                        "fulfillmentToken": "fulfillment-secret",
+                    }
+                )
+
+            cdp_funding.assert_not_called()
+            self.assertEqual(
+                store.get_quote(quote["quoteId"])["state"],
+                "USER_APPROVED",
+            )
+
+    def test_execution_pricer_requotes_selected_token_inside_approved_cap(self):
+        quote = wallet_token_quote()
+        real_rate_pricer = Mock(
+            **{
+                "price_for_usdc.return_value": {
+                    "pricingMode": "bankr_real_rate",
+                    "targetUsdc": "1.01",
+                    "bufferedTargetUsdc": "1.01",
+                    "requiredAmount": "101",
+                    "requiredAmountAtomic": "101000000",
+                    "expectedUsdc": "1.02",
+                    "minUsdc": "1.01",
+                }
+            }
+        )
+        resolver = Mock()
+        resolver.resolve.return_value = {
+            "address": quote["paymentTokenAddress"],
+            "symbol": "SINGIT",
+            "decimals": 6,
+            "balance": "200",
+            "native": False,
+        }
+        pricer = WalletBitrefillExecutionPricer(
+            real_rate_pricer=real_rate_pricer,
+            payment_token_resolver=resolver,
+            now_provider=lambda: 123,
+        )
+
+        result = pricer("u1", quote)
+
+        self.assertEqual(result["actualPaymentTokenAmount"], "101")
+        self.assertEqual(result["actualPaymentTokenAtomic"], "101000000")
+        self.assertEqual(result["executionPricing"]["pricedAtEpoch"], 123)
+        self.assertEqual(
+            real_rate_pricer.price_for_usdc.call_args.kwargs["max_amount"],
+            "105",
+        )
+
+    def test_execution_pricer_rejects_token_or_decimal_drift(self):
+        quote = wallet_token_quote()
+        for changed_token in (
+            {
+                "address": "0x1111111111111111111111111111111111111111",
+                "symbol": "SINGIT",
+                "decimals": 6,
+                "balance": "200",
+                "native": False,
+            },
+            {
+                "address": quote["paymentTokenAddress"],
+                "symbol": "SINGIT",
+                "decimals": 18,
+                "balance": "200",
+                "native": False,
+            },
+        ):
+            with self.subTest(changed_token=changed_token):
+                resolver = Mock()
+                resolver.resolve.return_value = changed_token
+                real_rate_pricer = Mock()
+                execution_pricer = WalletBitrefillExecutionPricer(
+                    real_rate_pricer=real_rate_pricer,
+                    payment_token_resolver=resolver,
+                )
+
+                with self.assertRaises(RepriceRequiredError):
+                    execution_pricer("u1", quote)
+
+                real_rate_pricer.price_for_usdc.assert_not_called()
+
+    def test_execution_pricer_uses_current_balance_as_stricter_cap(self):
+        quote = wallet_token_quote()
+        resolver = Mock()
+        resolver.resolve.return_value = {
+            "address": quote["paymentTokenAddress"],
+            "symbol": "SINGIT",
+            "decimals": 6,
+            "balance": "99",
+            "native": False,
+        }
+        real_rate_pricer = Mock()
+        real_rate_pricer.price_for_usdc.side_effect = ValueError(
+            "selected payment token balance is insufficient"
+        )
+        execution_pricer = WalletBitrefillExecutionPricer(
+            real_rate_pricer=real_rate_pricer,
+            payment_token_resolver=resolver,
+        )
+
+        with self.assertRaises(RepriceRequiredError):
+            execution_pricer("u1", quote)
+
+        self.assertEqual(
+            real_rate_pricer.price_for_usdc.call_args.kwargs["max_amount"],
+            "99",
+        )
+
     def test_wallet_purchase_without_cipher_fails_before_approval_or_funding(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = BitrefillCommerceStore(

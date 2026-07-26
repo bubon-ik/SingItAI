@@ -64,6 +64,7 @@ from sign402_gateway.server import (
     build_real_rate_pricer_from_env,
     build_singit_settlement_verifier_from_env,
     build_usdc_reserve_guard_from_env,
+    _bounded_int_env,
     _bankr_cli_transaction_hash,
     _base_rpc_call,
     _build_bankr_llm_topup_intent,
@@ -879,13 +880,14 @@ class GatewayServerTests(unittest.TestCase):
                 "paymentTokenDecimals": 6,
                 "paymentTokenNative": False,
                 "paymentTokenAmount": "2.5",
+                "actualPaymentTokenAmount": "2.6",
                 "requiredUsdc": "1.00",
             }
         )
 
         self.assertEqual(result["fromToken"], "0x1111111111111111111111111111111111111111")
         cdp_client.swap_singit_to_usdc.assert_called_once_with(
-            amount="2.5",
+            amount="2.6",
             from_token="0x1111111111111111111111111111111111111111",
             min_usdc="1.00",
             chain="base",
@@ -908,12 +910,13 @@ class GatewayServerTests(unittest.TestCase):
                 "paymentTokenDecimals": 6,
                 "paymentTokenNative": False,
                 "paymentTokenAmount": "1.10",
+                "actualPaymentTokenAmount": "1.01",
                 "requiredUsdc": "1.00",
             }
         )
 
         self.assertEqual(result["mode"], "cdp_wallet_usdc_ready")
-        self.assertEqual(result["amount"], "1.10")
+        self.assertEqual(result["amount"], "1.01")
         cdp_client.swap_singit_to_usdc.assert_not_called()
 
     def test_bankr_transfer_to_cdp_swap_runner_transfers_then_swaps(self):
@@ -1082,6 +1085,41 @@ class GatewayServerTests(unittest.TestCase):
         )
 
         self.assertEqual(pricer.buffer_bps, 0)
+
+    def test_bitrefill_max_reprice_env_is_bounded_to_five_percent(self):
+        self.assertEqual(
+            _bounded_int_env(
+                "SIGN402_BITREFILL_MAX_REPRICE_BPS",
+                env={},
+                default=500,
+                minimum=0,
+                maximum=500,
+            ),
+            500,
+        )
+        self.assertEqual(
+            _bounded_int_env(
+                "SIGN402_BITREFILL_MAX_REPRICE_BPS",
+                env={"SIGN402_BITREFILL_MAX_REPRICE_BPS": "250"},
+                default=500,
+                minimum=0,
+                maximum=500,
+            ),
+            250,
+        )
+        for value in ("-1", "501", "not-an-int"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "SIGN402_BITREFILL_MAX_REPRICE_BPS",
+                ):
+                    _bounded_int_env(
+                        "SIGN402_BITREFILL_MAX_REPRICE_BPS",
+                        env={"SIGN402_BITREFILL_MAX_REPRICE_BPS": value},
+                        default=500,
+                        minimum=0,
+                        maximum=500,
+                    )
 
     def test_bitrefill_funding_runner_env_builder_uses_bankr_wallet_api_swap(self):
         runner = build_bitrefill_funding_runner_from_env(
@@ -4646,7 +4684,13 @@ class GatewayServerTests(unittest.TestCase):
                 "paymentTokenDecimals": 6,
                 "paymentTokenNative": False,
                 "paymentTokenAmount": "1.10",
-                "maxPaymentTokenAtomic": "1100000",
+                "estimatedPaymentTokenAmount": "1.10",
+                "estimatedPaymentTokenAtomic": "1100000",
+                "maxPaymentTokenAmount": "1.155",
+                "maxPaymentTokenAtomic": "1155000",
+                "maxRepriceBps": 500,
+                "actualPaymentTokenAmount": "1.12",
+                "actualPaymentTokenAtomic": "1120000",
             },
             recipient={},
         )
@@ -4657,7 +4701,7 @@ class GatewayServerTests(unittest.TestCase):
             private_key="0xSECRET",
             to_address="0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
             token_address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-            amount="1.10",
+            amount="1.12",
             chain="base",
             decimals=6,
         )
@@ -4701,7 +4745,13 @@ class GatewayServerTests(unittest.TestCase):
                 "paymentTokenDecimals": 18,
                 "paymentTokenNative": True,
                 "paymentTokenAmount": "0.001",
-                "maxPaymentTokenAtomic": "1000000000000000",
+                "estimatedPaymentTokenAmount": "0.001",
+                "estimatedPaymentTokenAtomic": "1000000000000000",
+                "maxPaymentTokenAmount": "0.00105",
+                "maxPaymentTokenAtomic": "1050000000000000",
+                "maxRepriceBps": 500,
+                "actualPaymentTokenAmount": "0.00101",
+                "actualPaymentTokenAtomic": "1010000000000000",
             },
             recipient={},
         )
@@ -4709,10 +4759,62 @@ class GatewayServerTests(unittest.TestCase):
         transfer_client.transfer_native.assert_called_once_with(
             private_key="0xSECRET",
             to_address="0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
-            amount="0.001",
+            amount="0.00101",
             chain="base",
         )
         transfer_client.transfer_token.assert_not_called()
+
+    def test_user_wallet_transfer_rejects_execution_amount_above_approval(self):
+        wallet_service = Mock(
+            **{
+                "withdrawable_tokens.return_value": {
+                    "ok": True,
+                    "wallet": {"address": "0xUser"},
+                    "tokens": [
+                        {
+                            "symbol": "USDC",
+                            "contractAddress": (
+                                "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+                            ),
+                            "balance": "4.82",
+                            "decimals": 6,
+                            "verified": True,
+                            "native": False,
+                        }
+                    ],
+                }
+            }
+        )
+        transfer_client = Mock()
+        runner = UserWalletTransferToCdpFundingRunner(
+            wallet_service=wallet_service,
+            transfer_client=transfer_client,
+            cdp_wallet_address=(
+                "0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd"
+            ),
+            from_token=DEFAULT_SINGIT_TOKEN_ADDRESS,
+        )
+
+        with self.assertRaisesRegex(ValueError, "approved maximum"):
+            runner(
+                telegram_user_id="1045618308",
+                quote={
+                    "pricingMode": "bankr_real_rate",
+                    "paymentTokenAddress": (
+                        "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+                    ),
+                    "paymentTokenSymbol": "USDC",
+                    "paymentTokenDecimals": 6,
+                    "paymentTokenNative": False,
+                    "maxPaymentTokenAtomic": "1155000",
+                    "actualPaymentTokenAmount": "1.16",
+                    "actualPaymentTokenAtomic": "1160000",
+                },
+                recipient={},
+            )
+
+        transfer_client.transfer_token.assert_not_called()
+        transfer_client.transfer_native.assert_not_called()
 
     def test_user_wallet_transfer_to_cdp_rechecks_selected_token_balance(self):
         wallet_service = Mock(
@@ -4751,7 +4853,13 @@ class GatewayServerTests(unittest.TestCase):
                     "paymentTokenDecimals": 6,
                     "paymentTokenNative": False,
                     "paymentTokenAmount": "1.10",
-                    "maxPaymentTokenAtomic": "1100000",
+                    "estimatedPaymentTokenAmount": "1.10",
+                    "estimatedPaymentTokenAtomic": "1100000",
+                    "maxPaymentTokenAmount": "1.155",
+                    "maxPaymentTokenAtomic": "1155000",
+                    "maxRepriceBps": 500,
+                    "actualPaymentTokenAmount": "1.12",
+                    "actualPaymentTokenAtomic": "1120000",
                 },
                 recipient={},
             )

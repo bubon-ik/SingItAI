@@ -71,6 +71,176 @@ class WalletPaymentTokenResolver:
         raise ValueError("selected payment token is not available in this wallet")
 
 
+class RepriceRequiredError(ValueError):
+    pass
+
+
+def _amount_to_atomic(value: Any, *, decimals: int, field: str) -> int:
+    amount = Decimal(str(value))
+    if not amount.is_finite() or amount < 0:
+        raise ValueError(f"{field} must be a non-negative finite amount")
+    scaled = amount * (Decimal(10) ** int(decimals))
+    if scaled != scaled.to_integral_value():
+        raise ValueError(f"{field} exceeds token decimal precision")
+    return int(scaled)
+
+
+def _quote_with_execution_pricing(
+    quote: dict[str, Any],
+    execution_pricing: Any,
+) -> dict[str, Any]:
+    if not isinstance(execution_pricing, dict):
+        raise ValueError("execution pricing is missing")
+    token_address = str(execution_pricing.get("paymentTokenAddress") or "").strip()
+    if token_address.casefold() != str(
+        quote.get("paymentTokenAddress") or ""
+    ).strip().casefold():
+        raise ValueError("execution payment token changed")
+    decimals = int(quote["paymentTokenDecimals"])
+    if int(execution_pricing.get("paymentTokenDecimals", -1)) != decimals:
+        raise ValueError("execution payment token decimals changed")
+    maximum_atomic = int(quote["maxPaymentTokenAtomic"])
+    approved_maximum = int(
+        execution_pricing.get("approvedMaximumAtomic", -1)
+    )
+    if approved_maximum != maximum_atomic:
+        raise ValueError("execution maximum does not match approval")
+    actual_amount = str(
+        execution_pricing.get("actualPaymentTokenAmount") or ""
+    ).strip()
+    actual_atomic = int(
+        str(execution_pricing.get("actualPaymentTokenAtomic") or "0")
+    )
+    if actual_atomic <= 0 or actual_atomic > maximum_atomic:
+        raise ValueError("execution amount exceeds approved maximum")
+    if _amount_to_atomic(
+        actual_amount,
+        decimals=decimals,
+        field="execution payment-token amount",
+    ) != actual_atomic:
+        raise ValueError("execution payment-token amount is inconsistent")
+    expected_usdc = Decimal(str(execution_pricing.get("expectedUsdc") or "0"))
+    minimum_usdc = Decimal(str(execution_pricing.get("minUsdc") or "0"))
+    required_usdc = Decimal(str(quote["totalUsd"]))
+    if (
+        not expected_usdc.is_finite()
+        or not minimum_usdc.is_finite()
+        or minimum_usdc < required_usdc
+    ):
+        raise ValueError("execution pricing does not cover the purchase total")
+    safe_pricing = {
+        "paymentTokenAddress": token_address,
+        "paymentTokenDecimals": decimals,
+        "actualPaymentTokenAmount": actual_amount,
+        "actualPaymentTokenAtomic": str(actual_atomic),
+        "expectedUsdc": format_decimal(expected_usdc),
+        "minUsdc": format_decimal(minimum_usdc),
+        "approvedMaximumAtomic": str(maximum_atomic),
+        "pricedAtEpoch": int(execution_pricing["pricedAtEpoch"]),
+    }
+    effective_quote = deepcopy(quote)
+    effective_quote.update(
+        {
+            "actualPaymentTokenAmount": actual_amount,
+            "actualPaymentTokenAtomic": str(actual_atomic),
+            "expectedUsdc": safe_pricing["expectedUsdc"],
+            "minUsdc": safe_pricing["minUsdc"],
+            "executionPricing": safe_pricing,
+        }
+    )
+    return effective_quote
+
+
+class WalletBitrefillExecutionPricer:
+    def __init__(
+        self,
+        *,
+        real_rate_pricer: Any,
+        payment_token_resolver: WalletPaymentTokenResolver,
+        now_provider: Callable[[], int] = now_epoch,
+    ):
+        self.real_rate_pricer = real_rate_pricer
+        self.payment_token_resolver = payment_token_resolver
+        self.now_provider = now_provider
+
+    def __call__(
+        self,
+        telegram_user_id: str,
+        quote: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            token = self.payment_token_resolver.resolve(
+                str(telegram_user_id),
+                {"address": quote["paymentTokenAddress"]},
+            )
+            committed_address = str(quote["paymentTokenAddress"])
+            if str(token["address"]).casefold() != committed_address.casefold():
+                raise ValueError("payment token changed")
+            decimals = int(quote["paymentTokenDecimals"])
+            if int(token["decimals"]) != decimals:
+                raise ValueError("payment token decimals changed")
+            maximum_atomic = int(quote["maxPaymentTokenAtomic"])
+            if maximum_atomic <= 0:
+                raise ValueError("approved maximum is invalid")
+            balance_atomic = _amount_to_atomic(
+                token["balance"],
+                decimals=decimals,
+                field="payment-token balance",
+            )
+            allowed_atomic = min(maximum_atomic, balance_atomic)
+            if allowed_atomic <= 0:
+                raise ValueError("payment-token balance is insufficient")
+            pricing_address = (
+                COINBASE_NATIVE_TOKEN_ADDRESS
+                if token["native"]
+                else token["address"]
+            )
+            if committed_address.casefold() == BASE_USDC_MAINNET.casefold():
+                pricing = _price_direct_usdc(
+                    quote["totalUsd"],
+                    decimals=decimals,
+                    balance=token["balance"],
+                )
+            else:
+                pricing = self.real_rate_pricer.price_for_usdc(
+                    quote["totalUsd"],
+                    from_token=pricing_address,
+                    decimals=decimals,
+                    max_amount=format_decimal(
+                        Decimal(allowed_atomic)
+                        / (Decimal(10) ** decimals)
+                    ),
+                )
+            actual_atomic = int(pricing["requiredAmountAtomic"])
+            actual_amount = str(pricing["requiredAmount"])
+            if (
+                actual_atomic > maximum_atomic
+                or actual_atomic > balance_atomic
+                or _amount_to_atomic(
+                    actual_amount,
+                    decimals=decimals,
+                    field="fresh payment-token amount",
+                )
+                != actual_atomic
+            ):
+                raise ValueError("fresh price exceeds approved maximum")
+            execution_pricing = {
+                "paymentTokenAddress": committed_address,
+                "paymentTokenDecimals": decimals,
+                "actualPaymentTokenAmount": actual_amount,
+                "actualPaymentTokenAtomic": str(actual_atomic),
+                "expectedUsdc": str(pricing["expectedUsdc"]),
+                "minUsdc": str(pricing["minUsdc"]),
+                "approvedMaximumAtomic": str(maximum_atomic),
+                "pricedAtEpoch": int(self.now_provider()),
+            }
+            return _quote_with_execution_pricing(quote, execution_pricing)
+        except RepriceRequiredError:
+            raise
+        except Exception:
+            raise RepriceRequiredError("fresh pricing is unavailable") from None
+
+
 def _fulfillment_token_matches(metadata: dict[str, Any], fulfillment_token: str | None) -> bool:
     expected_hash = str(metadata.get("fulfillmentTokenHash", "")) if isinstance(metadata, dict) else ""
     token = str(fulfillment_token or "")
@@ -572,6 +742,8 @@ class WalletBitrefillPurchaseRunner:
         approval_client: Callable[..., dict[str, Any]],
         fulfillment_runner: Callable[[dict[str, Any]], dict[str, Any]],
         user_funding_runner: Callable[..., dict[str, Any]] | None = None,
+        execution_pricer: Callable[[str, dict[str, Any]], dict[str, Any]]
+        | None = None,
         source_wallet_provider: Callable[[str], str] | None = None,
         now_provider: Callable[[], int] = now_epoch,
         fulfillment_token_provider: Callable[[], str] = lambda: secrets.token_urlsafe(32),
@@ -582,6 +754,7 @@ class WalletBitrefillPurchaseRunner:
         self.approval_client = approval_client
         self.fulfillment_runner = fulfillment_runner
         self.user_funding_runner = user_funding_runner
+        self.execution_pricer = execution_pricer
         self.source_wallet_provider = source_wallet_provider
         self.now_provider = now_provider
         self.fulfillment_token_provider = fulfillment_token_provider
@@ -688,13 +861,66 @@ class WalletBitrefillPurchaseRunner:
             "approval": approval,
             "mode": "wallet_native",
         }
+        execution_quote = quote
+        if telegram_user_id and quote.get("paymentTokenAddress") is not None:
+            try:
+                if self.execution_pricer is None:
+                    raise RepriceRequiredError(
+                        "execution repricing is not configured"
+                    )
+                repriced = self.execution_pricer(telegram_user_id, quote)
+                execution_quote = _quote_with_execution_pricing(
+                    quote,
+                    repriced.get("executionPricing")
+                    if isinstance(repriced, dict)
+                    else None,
+                )
+            except Exception:
+                self.store.advance_state(
+                    quote_id,
+                    "QUOTE_EXPIRED",
+                    {
+                        "paymentHash": payment_hash,
+                        "walletCheckout": wallet_checkout,
+                        "repriceError": "Fresh pricing requires a new approval",
+                    },
+                )
+                return {
+                    "ok": False,
+                    "decision": "reprice_required",
+                    "quoteId": quote_id,
+                    "paymentApprovalHash": payment_hash,
+                    "telegramText": (
+                        "The exchange rate changed. No funds were moved. "
+                        "Request a new quote and confirm it again."
+                    ),
+                }
+
+        fulfillment_token = self.fulfillment_token_provider()
+        token_hash = hashlib.sha256(fulfillment_token.encode("utf-8")).hexdigest()
+        approval_metadata = {
+            "paymentHash": payment_hash,
+            "paymentCommitment": commitment,
+            "walletCheckout": wallet_checkout,
+            "fulfillmentTokenHash": token_hash,
+            "recipient": recipient,
+        }
+        if execution_quote.get("executionPricing") is not None:
+            approval_metadata["executionPricing"] = execution_quote[
+                "executionPricing"
+            ]
+        self.store.advance_state(
+            quote_id,
+            "USER_APPROVED",
+            approval_metadata,
+        )
         try:
             if telegram_user_id:
                 if self.user_funding_runner is None:
                     raise ValueError("user wallet funding runner is required")
                 wallet_checkout["userFunding"] = self.user_funding_runner(
                     telegram_user_id=telegram_user_id,
-                    quote=quote,
+                    quote=execution_quote,
                     recipient=recipient,
                 )
         except Exception:
@@ -710,17 +936,10 @@ class WalletBitrefillPurchaseRunner:
             )
             raise ValueError("Managed-wallet funding request failed") from None
 
-        fulfillment_token = self.fulfillment_token_provider()
-        token_hash = hashlib.sha256(fulfillment_token.encode("utf-8")).hexdigest()
-        self.store.advance_state(
+        self.store.checkpoint(
             quote_id,
-            "USER_APPROVED",
             {
-                "paymentHash": payment_hash,
-                "paymentCommitment": commitment,
                 "walletCheckout": wallet_checkout,
-                "fulfillmentTokenHash": token_hash,
-                "recipient": recipient,
             },
         )
         try:
@@ -751,7 +970,7 @@ class WalletBitrefillPurchaseRunner:
             "walletCheckout": wallet_checkout,
             "bitrefill": bitrefill_result,
             "telegramText": _bitrefill_purchase_telegram_text(
-                quote,
+                execution_quote,
                 source_wallet=str(
                     wallet_checkout.get("userFunding", {}).get("fromWallet", "")
                     if isinstance(wallet_checkout.get("userFunding"), dict)
@@ -849,12 +1068,18 @@ class BitrefillFulfillmentRunner:
             expected_token_hash,
         ):
             raise ValueError("invalid fulfillment token")
+        effective_quote = record["quote"]
+        if record["quote"].get("paymentTokenAddress") is not None:
+            effective_quote = _quote_with_execution_pricing(
+                record["quote"],
+                metadata.get("executionPricing"),
+            )
         if not self.store.try_mark_fulfilling(quote_id):
             raise ValueError("quote is already fulfilled or being fulfilled")
 
         if self.funding_runner is not None:
             try:
-                funding_result = self.funding_runner(record["quote"])
+                funding_result = self.funding_runner(effective_quote)
                 self.store.advance_state(
                     quote_id,
                     "FULFILLING",
@@ -870,7 +1095,7 @@ class BitrefillFulfillmentRunner:
 
         try:
             result = self.bitrefill_client.buy_product(
-                quote=record["quote"],
+                quote=effective_quote,
                 recipient=(
                     metadata.get("recipient")
                     if isinstance(metadata.get("recipient"), dict)
@@ -891,7 +1116,7 @@ class BitrefillFulfillmentRunner:
         self.store.advance_state(quote_id, "BITREFILL_PURCHASED", {"bitrefill": result})
         if _provider_is_delivered(result, record["quote"]):
             self.store.advance_state(quote_id, "DELIVERED", {})
-        return self._redacted_result(record["quote"], result)
+        return self._redacted_result(effective_quote, result)
 
     def _redacted_result(self, quote: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
         redacted = {
@@ -902,9 +1127,12 @@ class BitrefillFulfillmentRunner:
         }
         if quote.get("maxPaymentTokenAtomic") is not None:
             maximum = str(quote["maxPaymentTokenAtomic"])
+            actual = str(
+                quote.get("actualPaymentTokenAtomic") or maximum
+            )
             redacted.update(
                 {
-                    "settleAmountAtomic": maximum,
+                    "settleAmountAtomic": actual,
                     "maxPaymentTokenAtomic": maximum,
                 }
             )
@@ -958,7 +1186,12 @@ def _bitrefill_purchase_telegram_text(
     value_text = f" ${package_value}" if package_value else ""
     source_text = f" Paid from {_short_address(source_wallet)}." if source_wallet else ""
     payment_symbol = str(quote.get("paymentTokenSymbol") or "SINGIT")
-    payment_amount = str(quote.get("paymentTokenAmount") or singit_spent or "").strip()
+    payment_amount = str(
+        quote.get("actualPaymentTokenAmount")
+        or quote.get("paymentTokenAmount")
+        or singit_spent
+        or ""
+    ).strip()
     spent_text = (
         f"\nSpent: {_format_amount(payment_amount)} {payment_symbol}"
         if payment_amount
