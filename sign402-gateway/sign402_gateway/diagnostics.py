@@ -74,6 +74,8 @@ def _safe_provider_text(
     *,
     env: Mapping[str, str] | None,
 ) -> str:
+    if isinstance(value, (Mapping, list, tuple, set)):
+        return "<redacted:non-scalar>"
     text = redact_secrets(str(value), env=env)
     text = _URL.sub("<redacted:url>", text)
     text = _EVM_VALUE.sub("<redacted:evm-value>", text)
@@ -137,8 +139,16 @@ def safe_provider_diagnostic(
     return {"type": "no_allowlisted_fields", **fingerprint}
 
 
-def _context(fields: dict[str, Any]) -> str:
-    return " ".join(f"{key}={value}" for key, value in fields.items() if value != "")
+def _context(
+    fields: dict[str, Any],
+    *,
+    env: Mapping[str, str] | None,
+) -> str:
+    return " ".join(
+        f"{key}={_safe_provider_text(value, env=env)}"
+        for key, value in fields.items()
+        if value != ""
+    )
 
 
 def _safe(
@@ -170,7 +180,7 @@ def log_swallowed_failure(
     logger.error(
         "%s [%s]: %s: %s\n%s",
         event,
-        _context(fields),
+        _context(fields, env=env),
         type(exc).__name__,
         _safe(str(exc), env=env, limit=limit),
         _safe(chain, env=env, limit=limit),
@@ -190,6 +200,6 @@ def log_hidden_detail(
     logger.error(
         "%s [%s]: %s",
         event,
-        _context(fields),
+        _context(fields, env=env),
         _safe(detail, env=env, limit=limit),
     )

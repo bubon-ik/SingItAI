@@ -124,6 +124,26 @@ class SafeProviderDiagnosticTests(unittest.TestCase):
         )
         self.assertNotIn(detail, str(diagnostic))
 
+    def test_non_scalar_allowlisted_message_never_logs_nested_bearer_data(self):
+        diagnostic = safe_provider_diagnostic(
+            json.dumps(
+                {
+                    "code": "REJECTED",
+                    "message": {
+                        "redemption": {"code": "GIFT-SECRET"},
+                        "payment_address": (
+                            "0x1111111111111111111111111111111111111111"
+                        ),
+                    },
+                }
+            ),
+            env={},
+        )
+
+        self.assertEqual(diagnostic["code"], "REJECTED")
+        self.assertNotIn("GIFT-SECRET", str(diagnostic))
+        self.assertNotIn("0x111111", str(diagnostic))
+
 
 class LogSwallowedFailureTests(unittest.TestCase):
     def test_cause_is_logged_with_context(self):
@@ -159,6 +179,25 @@ class LogSwallowedFailureTests(unittest.TestCase):
         joined = "\n".join(captured.output)
         self.assertNotIn("leaked-secret-value", joined)
         self.assertIn("<redacted:CDP_API_KEY_SECRET>", joined)
+
+    def test_context_fields_use_the_same_bearer_filter(self):
+        logger = logging.getLogger("sign402_gateway.test_target")
+        address = "0x1111111111111111111111111111111111111111"
+
+        with self.assertLogs(logger, level="ERROR") as captured:
+            log_swallowed_failure(
+                logger,
+                "provider failed",
+                RuntimeError("safe cause"),
+                env={"API_KEY": "secret-provider-value"},
+                request=f"https://pay.example/secret {address}",
+                trace="secret-provider-value",
+            )
+
+        joined = "\n".join(captured.output)
+        self.assertNotIn("https://", joined)
+        self.assertNotIn(address, joined)
+        self.assertNotIn("secret-provider-value", joined)
 
 
 if __name__ == "__main__":
