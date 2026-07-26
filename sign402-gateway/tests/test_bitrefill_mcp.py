@@ -1474,6 +1474,59 @@ class BitrefillMcpUsdcPurchaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not Base USDC"):
             client.prepare_purchase(quote=APPROVED_QUOTE, recipient={})
 
+    def test_prepare_records_the_invoice_deadline(self):
+        caller = FakeMcpCaller([self._invoice(expiration_minutes=30)])
+        client = self._client(
+            caller,
+            FakeTreasuryClient(),
+            now_provider=lambda: 1_000_000,
+        )
+
+        prepared = client.prepare_purchase(quote=APPROVED_QUOTE, recipient={})
+
+        self.assertEqual(prepared["expiresAtEpoch"], 1_000_000 + 30 * 60)
+
+    def test_prepare_refuses_an_invoice_that_expires_before_funding_can_finish(self):
+        # Funding runs between preparation and payment: transfer, swap, then
+        # the treasury transfer. An invoice that cannot survive that window
+        # must be refused while nothing has moved yet.
+        caller = FakeMcpCaller([self._invoice(expiration_minutes=1)])
+        treasury = FakeTreasuryClient()
+        client = self._client(
+            caller,
+            treasury,
+            now_provider=lambda: 1_000_000,
+            invoice_min_seconds_left=180,
+        )
+
+        with self.assertRaisesRegex(ValueError, "expires too soon"):
+            client.prepare_purchase(quote=APPROVED_QUOTE, recipient={})
+
+        self.assertEqual(treasury.token_transfers, [])
+
+    def test_completion_refuses_to_pay_an_invoice_past_its_deadline(self):
+        clock = {"now": 1_000_000}
+        caller = FakeMcpCaller(
+            [
+                self._invoice(expiration_minutes=30),
+                self._invoice(expiration_minutes=30),
+            ]
+        )
+        treasury = FakeTreasuryClient()
+        client = self._client(
+            caller,
+            treasury,
+            now_provider=lambda: clock["now"],
+        )
+        prepared = client.prepare_purchase(quote=APPROVED_QUOTE, recipient={})
+
+        clock["now"] = prepared["expiresAtEpoch"] + 1
+
+        with self.assertRaisesRegex(ValueError, "expired before payment"):
+            client.complete_purchase(quote=APPROVED_QUOTE, prepared=prepared)
+
+        self.assertEqual(treasury.token_transfers, [])
+
     def test_prepare_creates_and_validates_invoice_before_treasury_transfer(self):
         caller = FakeMcpCaller([self._invoice()])
         treasury = FakeTreasuryClient()

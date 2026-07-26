@@ -82,6 +82,7 @@ class CommerceStoreTests(unittest.TestCase):
                         "paymentAmount": "50.50",
                         "paymentAsset": "USDC",
                         "paymentNetwork": "base",
+                        "expiresAtEpoch": 1_719_000_600,
                         "paymentAddress": (
                             "0x1111111111111111111111111111111111111111"
                         ),
@@ -104,6 +105,7 @@ class CommerceStoreTests(unittest.TestCase):
                     "paymentAmount": "50.50",
                     "paymentAsset": "USDC",
                     "paymentNetwork": "base",
+                    "expiresAtEpoch": "1719000600",
                 },
             )
             raw = "\n".join(
@@ -787,6 +789,31 @@ class CommerceStoreTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "cannot move order state backward"):
                 store.advance_state("quote_1", "QUOTED", {})
+
+    def test_a_failed_order_can_still_be_recovered_as_delivered(self):
+        # Polling can run out after the invoice was paid; when the provider
+        # later confirms delivery the order must be able to reach DELIVERED.
+        for failed_state in ("FULFILLMENT_FAILED", "RECONCILIATION_REQUIRED"):
+            with self.subTest(state=failed_state):
+                with tempfile.TemporaryDirectory() as tmp:
+                    store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+                    store.save_quote(
+                        {"quoteId": "quote_1", "productId": "p", "expiresAtEpoch": 1}
+                    )
+                    store.advance_state("quote_1", failed_state, {})
+
+                    store.advance_state("quote_1", "DELIVERED", {})
+
+                    self.assertEqual(store.get_quote("quote_1")["state"], "DELIVERED")
+
+    def test_a_refunded_order_can_never_become_delivered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            store.save_quote({"quoteId": "quote_1", "productId": "p", "expiresAtEpoch": 1})
+            store.advance_state("quote_1", "REFUNDED", {})
+
+            with self.assertRaisesRegex(ValueError, "cannot move order state backward"):
+                store.advance_state("quote_1", "DELIVERED", {})
 
     def test_checkpoint_metadata_does_not_change_state(self):
         with tempfile.TemporaryDirectory() as tmp:

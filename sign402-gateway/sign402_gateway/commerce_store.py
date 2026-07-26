@@ -39,6 +39,15 @@ STATE_ORDER = {
 }
 
 
+# An order can be paid and still fail — polling runs out, the provider is slow.
+# Only the provider can settle that, so delivery it confirms afterwards is the
+# one transition allowed to move against the ordering. A refunded or rejected
+# order stays terminal.
+RECOVERABLE_TO_DELIVERED = frozenset(
+    {"FULFILLMENT_FAILED", "RECONCILIATION_REQUIRED"}
+)
+
+
 def _bounded_scalar(value: Any, *, field: str, limit: int) -> str:
     if value is None:
         return ""
@@ -179,6 +188,7 @@ def sanitize_bitrefill_checkpoint(
         "paymentAmount",
         "paymentAsset",
         "paymentNetwork",
+        "expiresAtEpoch",
     ):
         _copy_scalar(
             snapshot,
@@ -433,7 +443,9 @@ class BitrefillCommerceStore:
             if row is None:
                 raise ValueError("quote not found")
             old_state = str(row["state"])
-            if STATE_ORDER[new_state] < STATE_ORDER[old_state]:
+            if STATE_ORDER[new_state] < STATE_ORDER[old_state] and not (
+                new_state == "DELIVERED" and old_state in RECOVERABLE_TO_DELIVERED
+            ):
                 raise ValueError("cannot move order state backward")
             existing = json.loads(row["metadata_json"] or "{}")
             quote = json.loads(row["quote_json"])

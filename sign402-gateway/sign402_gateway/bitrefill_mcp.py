@@ -8,7 +8,7 @@ import threading
 import time
 import urllib.parse
 from copy import deepcopy
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -174,6 +174,8 @@ class McpBitrefillClient:
         treasury_client: Any | None = None,
         invoice_poll_attempts: int = 12,
         invoice_poll_interval_seconds: float = 5.0,
+        invoice_min_seconds_left: float = 180.0,
+        invoice_payment_margin_seconds: float = 30.0,
         sleeper: Any | None = None,
         call_tool: Any | None = None,
         catalog_call_tool: Any | None = None,
@@ -205,6 +207,14 @@ class McpBitrefillClient:
         self.invoice_poll_interval_seconds = float(invoice_poll_interval_seconds)
         if self.invoice_poll_interval_seconds < 0:
             raise ValueError("invoice_poll_interval_seconds must be non-negative")
+        self.invoice_min_seconds_left = float(invoice_min_seconds_left)
+        if self.invoice_min_seconds_left < 0:
+            raise ValueError("invoice_min_seconds_left must be non-negative")
+        self.invoice_payment_margin_seconds = float(invoice_payment_margin_seconds)
+        if self.invoice_payment_margin_seconds < 0:
+            raise ValueError(
+                "invoice_payment_margin_seconds must be non-negative"
+            )
         cache_ttl = (
             catalog_cache_ttl_seconds
             if catalog_cache_ttl_seconds is not None
@@ -683,10 +693,21 @@ class McpBitrefillClient:
                 },
             )
         )
-        return self._validated_invoice_snapshot(
+        snapshot = self._validated_invoice_snapshot(
             invoice,
             quote=quote,
         )
+        deadline = snapshot.get("expiresAtEpoch")
+        if deadline is not None:
+            seconds_left = int(deadline) - int(self._now())
+            if seconds_left < self.invoice_min_seconds_left:
+                # Refuse now, while the user's tokens have not moved: funding
+                # still has to run before this invoice could be paid.
+                raise ValueError(
+                    f"Bitrefill invoice expires too soon to fund "
+                    f"({seconds_left}s left)"
+                )
+        return snapshot
 
     def complete_purchase(
         self,
@@ -767,6 +788,15 @@ class McpBitrefillClient:
             and treasury_payment is None
             and not payment_observed
         ):
+            deadline = validated_prepared.get("expiresAtEpoch")
+            if deadline is not None and int(self._now()) > (
+                int(deadline) - self.invoice_payment_margin_seconds
+            ):
+                # Funding outran the invoice. The swapped USDC stays in the
+                # wallet; paying now would send it to a dead invoice.
+                raise ValueError(
+                    f"Bitrefill invoice {invoice_id} expired before payment"
+                )
             treasury_payment = self._pay_usdc_invoice(invoice, quote=quote)
             if checkpoint_callback is not None:
                 checkpoint_callback(
@@ -999,6 +1029,15 @@ class McpBitrefillClient:
             "packageValue": str(quote["packageValue"]),
             "paymentMethod": self.payment_method,
         }
+        # The deadline is fixed when the invoice is created; a reload happens
+        # after funding, so its own duration would move the deadline forward.
+        deadline = (
+            (fallback or {}).get("expiresAtEpoch")
+            if fallback is not None
+            else self._invoice_deadline(invoice)
+        )
+        if deadline is not None:
+            snapshot["expiresAtEpoch"] = int(deadline)
         if self.payment_method == "usdc_base":
             if isinstance(
                 invoice.get("payment_info") or invoice.get("paymentInfo"),
@@ -1181,6 +1220,28 @@ class McpBitrefillClient:
             or invoice.get("id")
             or ""
         ).strip()
+
+    def _invoice_deadline(self, invoice: dict[str, Any]) -> int | None:
+        """Absolute epoch second after which the invoice can no longer be paid.
+
+        Returned as an absolute deadline rather than a remaining duration
+        because funding runs between preparation and payment: a duration read
+        again after the swap would silently restart the clock.
+        """
+        raw = (
+            invoice.get("expiration_minutes")
+            if invoice.get("expiration_minutes") is not None
+            else invoice.get("expirationMinutes")
+        )
+        if raw is None:
+            return None
+        try:
+            minutes = Decimal(str(raw))
+        except (InvalidOperation, ValueError):
+            return None
+        if not minutes.is_finite() or minutes <= 0:
+            return None
+        return int(self._now()) + int(minutes * 60)
 
     def _invoice_status(self, invoice: dict[str, Any]) -> str:
         # The live server names this `invoice_status`; reading only `status`
