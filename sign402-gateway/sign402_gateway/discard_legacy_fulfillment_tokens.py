@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import json
+import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
@@ -101,3 +104,42 @@ def cleanup_legacy_fulfillment_tokens(
         "token_fields_removed": token_fields,
         "changed": changed,
     }
+
+
+def _argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Inspect or discard fulfillment-token fields from a "
+            "Sign402 user purchase store."
+        )
+    )
+    parser.add_argument(
+        "--path",
+        required=True,
+        type=Path,
+        help="absolute path to user-purchases.json",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="atomically remove token fields; default is dry run",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _argument_parser().parse_args(argv)
+    try:
+        report = cleanup_legacy_fulfillment_tokens(
+            args.path,
+            apply=args.apply,
+        )
+    except LegacyFulfillmentTokenCleanupError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(report, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -171,3 +171,98 @@ class DiscardLegacyFulfillmentTokensTests(unittest.TestCase):
                         path.stat().st_mtime_ns,
                         before_mtime_ns,
                     )
+
+    def test_invalid_document_shapes_fail_without_mutation(self):
+        module = cleanup_module()
+        cases = (
+            ("malformed", b'{"u":{"fulfillmentToken":"SECRET"'),
+            ("non-object-root", b"[]\n"),
+            ("non-object-record", b'{"u":"SECRET"}\n'),
+        )
+        for name, before in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "user-purchases.json"
+                    path.write_bytes(before)
+                    with self.assertRaises(
+                        module.LegacyFulfillmentTokenCleanupError
+                    ) as captured:
+                        module.cleanup_legacy_fulfillment_tokens(
+                            path,
+                            apply=True,
+                        )
+                    self.assertNotIn("SECRET", str(captured.exception))
+                    self.assertEqual(path.read_bytes(), before)
+
+    def test_missing_and_symlink_paths_fail_without_following_link(self):
+        module = cleanup_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target.json"
+            link = root / "link.json"
+            self.write_store(
+                target,
+                {"u": {"fulfillmentToken": PLAINTEXT_MARKER}},
+            )
+            link.symlink_to(target)
+            before = target.read_bytes()
+            for path in (root / "missing.json", link):
+                with self.subTest(path=path.name):
+                    with self.assertRaises(
+                        module.LegacyFulfillmentTokenCleanupError
+                    ):
+                        module.cleanup_legacy_fulfillment_tokens(
+                            path,
+                            apply=True,
+                        )
+            self.assertEqual(target.read_bytes(), before)
+
+    def test_cli_outputs_only_machine_readable_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-purchases.json"
+            self.write_store(
+                path,
+                {"u": {"fulfillmentToken": PLAINTEXT_MARKER}},
+            )
+            module = cleanup_module()
+            stdout = StringIO()
+            stderr = StringIO()
+
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = module.main(["--path", str(path)])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(stderr.getvalue(), "")
+            self.assertEqual(
+                json.loads(stdout.getvalue()),
+                {
+                    "mode": "dry-run",
+                    "records": 1,
+                    "plaintext_token_records": 1,
+                    "encrypted_token_records": 0,
+                    "token_fields_removed": 1,
+                    "changed": False,
+                },
+            )
+            self.assertNotIn(PLAINTEXT_MARKER, stdout.getvalue())
+
+    def test_cli_error_never_echoes_token_contents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user-purchases.json"
+            path.write_text(
+                '{"u":{"fulfillmentToken":"CLI-SECRET-MARKER"',
+                encoding="utf-8",
+            )
+            module = cleanup_module()
+            stdout = StringIO()
+            stderr = StringIO()
+
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = module.main(
+                    ["--path", str(path), "--apply"]
+                )
+
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertIn("valid JSON", stderr.getvalue())
+            self.assertNotIn("CLI-SECRET-MARKER", stderr.getvalue())
