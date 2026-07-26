@@ -345,6 +345,21 @@ def lookup_bitrefill_order(
             raise ValueError("recipient does not match order")
         raise ValueError("valid fulfillmentToken is required to reveal redemption")
 
+    if not str(provider_result.get("invoiceId") or "").strip():
+        # A poll budget that ran out after the treasury transfer leaves no
+        # `bitrefill` snapshot, but the invoice was created and paid, and the
+        # checkpoint still names it — so the order stays recoverable.
+        checkpoint = metadata.get("bitrefillCheckpoint")
+        checkpoint_invoice_id = (
+            str(checkpoint.get("invoiceId") or "").strip()
+            if isinstance(checkpoint, dict)
+            else ""
+        )
+        if checkpoint_invoice_id:
+            provider_result = {
+                **provider_result,
+                "invoiceId": checkpoint_invoice_id,
+            }
     if (
         bitrefill_client is None
         or not str(provider_result.get("invoiceId") or "").strip()

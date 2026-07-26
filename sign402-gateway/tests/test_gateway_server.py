@@ -644,6 +644,32 @@ class GatewayServerTests(unittest.TestCase):
         self.assertNotIn("test_key", repr(client))
         self.assertNotIn("test_key", repr(client._call_tool))
 
+    def test_bitrefill_client_factory_reads_the_invoice_poll_budget(self):
+        client = build_bitrefill_client_from_env(
+            {
+                "SIGN402_BITREFILL_MODE": "live",
+                "BITREFILL_API_KEY": "test_key",
+                "SIGN402_BITREFILL_INVOICE_POLL_ATTEMPTS": "40",
+                "SIGN402_BITREFILL_INVOICE_POLL_INTERVAL_SECONDS": "7.5",
+                "SIGN402_BITREFILL_INVOICE_MIN_SECONDS_LEFT": "240",
+            }
+        )
+
+        self.assertEqual(client.invoice_poll_attempts, 40)
+        self.assertEqual(client.invoice_poll_interval_seconds, 7.5)
+        self.assertEqual(client.invoice_min_seconds_left, 240.0)
+
+    def test_bitrefill_client_factory_keeps_poll_budget_defaults(self):
+        client = build_bitrefill_client_from_env(
+            {
+                "SIGN402_BITREFILL_MODE": "live",
+                "BITREFILL_API_KEY": "test_key",
+            }
+        )
+
+        self.assertEqual(client.invoice_poll_attempts, 12)
+        self.assertEqual(client.invoice_poll_interval_seconds, 5.0)
+
     def test_bitrefill_client_factory_builds_usdc_base_live_client_with_treasury(self):
         client = build_bitrefill_client_from_env(
             {

@@ -2737,6 +2737,57 @@ class BitrefillRunnerTests(unittest.TestCase):
                 "✅ Test Gift Card Code $25 is ready.\nCode: SECRET-CODE",
             )
 
+    def test_order_lookup_recovers_a_paid_invoice_from_the_checkpoint(self):
+        # A poll budget that runs out after the treasury transfer leaves the
+        # order without a `bitrefill` snapshot, but the invoice id survives in
+        # the checkpoint and the order is recoverable from it.
+        with tempfile.TemporaryDirectory() as tmp:
+            store = make_commerce_store(Path(tmp) / "orders.sqlite3")
+            store.save_quote(
+                {
+                    "quoteId": "quote_1",
+                    "productId": "test-gift-card-code",
+                    "productName": "Test Gift Card Code",
+                    "packageValue": "25",
+                    "expiresAtEpoch": 1_719_000_120,
+                }
+            )
+            store.advance_state(
+                "quote_1",
+                "FULFILLMENT_FAILED",
+                {
+                    "recipient": {"email": "buyer@example.com"},
+                    "bitrefillCheckpoint": {
+                        "invoiceId": "invoice_1",
+                        "status": "payment_confirmed",
+                    },
+                    "fulfillmentError": "Bitrefill provider request failed",
+                },
+            )
+            provider = RefreshBitrefillClient(
+                {
+                    "invoiceId": "invoice_1",
+                    "orderId": "order_1",
+                    "status": "delivered",
+                    "redemption": {
+                        "type": "bitrefill",
+                        "label": "Bitrefill redemption",
+                        "value": {"code": "RECOVERED-CODE"},
+                    },
+                }
+            )
+
+            result = lookup_bitrefill_order(
+                store,
+                "quote_1",
+                include_redemption=True,
+                recipient={"email": "buyer@example.com"},
+                bitrefill_client=provider,
+            )
+
+            self.assertEqual(result["redemption"]["value"]["code"], "RECOVERED-CODE")
+            self.assertEqual(store.get_quote("quote_1")["state"], "DELIVERED")
+
     def test_order_lookup_requires_fulfillment_token_when_no_recipient_stored(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = make_commerce_store(Path(tmp) / "orders.sqlite3")

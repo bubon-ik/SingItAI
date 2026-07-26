@@ -2118,6 +2118,18 @@ def build_bitrefill_client_from_env(env: dict[str, str] | None = None):
             ),
             payment_method=payment_method,
             treasury_client=treasury_client,
+            invoice_poll_attempts=int(
+                values.get("SIGN402_BITREFILL_INVOICE_POLL_ATTEMPTS", "12")
+            ),
+            invoice_poll_interval_seconds=float(
+                values.get(
+                    "SIGN402_BITREFILL_INVOICE_POLL_INTERVAL_SECONDS",
+                    "5",
+                )
+            ),
+            invoice_min_seconds_left=float(
+                values.get("SIGN402_BITREFILL_INVOICE_MIN_SECONDS_LEFT", "180")
+            ),
         )
     raise ValueError(f"unsupported SIGN402_BITREFILL_MODE: {mode}")
 
