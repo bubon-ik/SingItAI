@@ -646,12 +646,11 @@ class McpBitrefillClient:
             "requiredRecipientFields": deepcopy(product["requiredRecipientFields"]),
         }
 
-    def buy_product(
+    def prepare_purchase(
         self,
         *,
         quote: dict[str, Any],
         recipient: dict[str, Any],
-        checkpoint_callback: Any | None = None,
     ) -> dict[str, Any]:
         price_usd = Decimal(str(quote["priceUsd"]))
         if price_usd > self.max_purchase_usd:
@@ -681,27 +680,108 @@ class McpBitrefillClient:
                 },
             )
         )
-        invoice_id = self._invoice_id(invoice)
-        if not invoice_id:
-            raise ValueError("Bitrefill MCP invoice id is missing")
-        treasury_payment = None
-        self._checkpoint(
-            checkpoint_callback,
-            invoice=invoice,
-            treasury_payment=None,
+        return self._validated_invoice_snapshot(
+            invoice,
+            quote=quote,
         )
-        if self.payment_method == "usdc_base":
-            treasury_payment = self._pay_usdc_invoice(invoice, quote=quote)
-            self._checkpoint(
-                checkpoint_callback,
+
+    def complete_purchase(
+        self,
+        *,
+        quote: dict[str, Any],
+        prepared: dict[str, Any],
+        checkpoint_callback: Any | None = None,
+    ) -> dict[str, Any]:
+        validated_prepared = self._validate_prepared_purchase(
+            prepared,
+            quote=quote,
+        )
+        invoice_id = validated_prepared["invoiceId"]
+        invoice = self._normalize_invoice(
+            self._call_tool(
+                "get-invoice-by-id",
+                {"invoice_id": invoice_id},
+            )
+        )
+        if self._invoice_id(invoice) != invoice_id:
+            raise ValueError("Bitrefill MCP invoice id changed")
+        reloaded = self._validated_invoice_snapshot(
+            invoice,
+            quote=quote,
+            fallback=validated_prepared,
+        )
+        for key in (
+            "invoiceId",
+            "productId",
+            "packageValue",
+            "paymentMethod",
+            "paymentAmount",
+            "paymentAsset",
+            "paymentNetwork",
+        ):
+            if key in validated_prepared or key in reloaded:
+                if str(validated_prepared.get(key, "")) != str(
+                    reloaded.get(key, "")
+                ):
+                    raise ValueError(
+                        f"Bitrefill MCP prepared invoice {key} changed"
+                    )
+
+        treasury_payment = (
+            deepcopy(validated_prepared["treasuryPayment"])
+            if isinstance(validated_prepared.get("treasuryPayment"), dict)
+            else None
+        )
+        invoice_status = self._invoice_status(invoice)
+        if invoice_status in {"blocked", "denied", "payment_error"}:
+            raise ValueError(
+                f"Bitrefill invoice {invoice_id} failed ({invoice_status})"
+            )
+        if invoice_status in {
+            "complete",
+            "completed",
+            "delivered",
+            "all_delivered",
+        }:
+            return self._provider_result(
+                quote=quote,
                 invoice=invoice,
                 treasury_payment=treasury_payment,
             )
+        if self.payment_method == "usdc_base":
+            treasury_payment = self._pay_usdc_invoice(invoice, quote=quote)
+            if checkpoint_callback is not None:
+                checkpoint_callback(
+                    {
+                        **validated_prepared,
+                        "status": self._invoice_status(invoice),
+                        "treasuryPayment": deepcopy(treasury_payment),
+                    }
+                )
         invoice = self._poll_invoice(invoice_id)
         return self._provider_result(
             quote=quote,
             invoice=invoice,
             treasury_payment=treasury_payment,
+        )
+
+    def buy_product(
+        self,
+        *,
+        quote: dict[str, Any],
+        recipient: dict[str, Any],
+        checkpoint_callback: Any | None = None,
+    ) -> dict[str, Any]:
+        prepared = self.prepare_purchase(
+            quote=quote,
+            recipient=recipient,
+        )
+        if checkpoint_callback is not None:
+            checkpoint_callback(deepcopy(prepared))
+        return self.complete_purchase(
+            quote=quote,
+            prepared=prepared,
+            checkpoint_callback=checkpoint_callback,
         )
 
     def refresh_purchase(
@@ -746,19 +826,40 @@ class McpBitrefillClient:
                 return value
         return ""
 
-    def _pay_usdc_invoice(
-        self,
-        invoice: dict[str, Any],
-        *,
-        quote: dict[str, Any],
-    ) -> dict[str, Any]:
-        if self.treasury_client is None:
-            raise ValueError("treasury_client is required for usdc_base")
+    def _invoice_payment(self, invoice: dict[str, Any]) -> dict[str, Any]:
         payment = invoice.get("payment_info")
         if not isinstance(payment, dict):
             payment = invoice.get("paymentInfo")
         if not isinstance(payment, dict):
             raise ValueError("Bitrefill MCP payment info is missing")
+        return payment
+
+    def _invoice_item(self, invoice: dict[str, Any]) -> dict[str, Any] | None:
+        for key in ("cart_items", "cartItems", "items"):
+            items = invoice.get(key)
+            if isinstance(items, list):
+                return next(
+                    (item for item in items if isinstance(item, dict)),
+                    None,
+                )
+        cart = invoice.get("cart")
+        if isinstance(cart, dict):
+            for key in ("items", "cart_items", "cartItems"):
+                items = cart.get(key)
+                if isinstance(items, list):
+                    return next(
+                        (item for item in items if isinstance(item, dict)),
+                        None,
+                    )
+        return None
+
+    def _validated_payment_requirements(
+        self,
+        invoice: dict[str, Any],
+        *,
+        quote: dict[str, Any],
+    ) -> dict[str, str]:
+        payment = self._invoice_payment(invoice)
         address = str(payment.get("address") or "").strip()
         if not address:
             raise ValueError("Bitrefill MCP payment address is missing")
@@ -766,15 +867,17 @@ class McpBitrefillClient:
             payment.get("currency") or payment.get("asset") or ""
         ).strip().upper()
         if currency != "USDC":
-            raise ValueError(f"Bitrefill MCP expected USDC, got {currency or 'unknown'}")
+            raise ValueError(
+                f"Bitrefill MCP expected USDC, got {currency or 'unknown'}"
+            )
         network = str(
             payment.get("network")
             or payment.get("chain")
             or payment.get("chain_id")
             or payment.get("chainId")
-            or ""
+            or "base"
         ).strip().lower()
-        if network and network not in {"base", "base-mainnet", "8453"}:
+        if network not in {"base", "base-mainnet", "8453"}:
             raise ValueError("Bitrefill MCP payment network is not Base Mainnet")
         contract_address = str(
             payment.get("contract_address")
@@ -794,25 +897,145 @@ class McpBitrefillClient:
         if raw_amount is None:
             raise ValueError("Bitrefill MCP payment amount is missing")
         payment_amount = Decimal(str(raw_amount))
-        if payment_amount <= 0:
+        if not payment_amount.is_finite() or payment_amount <= 0:
             raise ValueError("Bitrefill MCP payment amount must be positive")
         if payment_amount > self.max_purchase_usd:
             raise ValueError(
                 f"Bitrefill invoice exceeds live Bitrefill max ${self.max_purchase_usd}"
             )
-        quoted_price = Decimal(str(quote["priceUsd"]))
-        invoice_cap = quoted_price * (
-            Decimal(10_000 + self.max_invoice_overage_bps) / Decimal(10_000)
+        approved_total = Decimal(
+            str(quote.get("totalUsd") or quote["priceUsd"])
         )
-        if payment_amount > invoice_cap:
+        if payment_amount > approved_total:
             raise ValueError(
-                f"Bitrefill invoice ${format(payment_amount, 'f')} exceeds quoted price "
-                f"${format(quoted_price, 'f')} by more than "
-                f"{self.max_invoice_overage_bps} bps"
+                f"Bitrefill invoice ${format(payment_amount, 'f')} exceeds "
+                f"approved total ${format(approved_total, 'f')}"
             )
+        return {
+            "address": address,
+            "amount": format(payment_amount, "f"),
+            "asset": "USDC",
+            "network": "base",
+        }
+
+    def _validated_invoice_snapshot(
+        self,
+        invoice: dict[str, Any],
+        *,
+        quote: dict[str, Any],
+        fallback: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        invoice_id = self._invoice_id(invoice)
+        if not invoice_id:
+            raise ValueError("Bitrefill MCP invoice id is missing")
+        provider_method = str(
+            invoice.get("payment_method")
+            or invoice.get("paymentMethod")
+            or (fallback or {}).get("paymentMethod")
+            or self.payment_method
+        ).strip().lower()
+        if provider_method != self.payment_method:
+            raise ValueError("Bitrefill MCP payment method changed")
+
+        item = self._invoice_item(invoice)
+        if any(key in invoice for key in ("cart_items", "cartItems", "items")):
+            if item is None:
+                raise ValueError("Bitrefill MCP invoice cart item is missing")
+        if item is not None:
+            provider_product = str(
+                item.get("product_id")
+                or item.get("productId")
+                or ""
+            ).strip()
+            provider_package = str(
+                item.get("package_value")
+                or item.get("packageValue")
+                or ""
+            ).strip()
+            if provider_product and provider_product != str(quote["productId"]):
+                raise ValueError("Bitrefill MCP invoice product changed")
+            if provider_package and provider_package != str(quote["packageValue"]):
+                raise ValueError("Bitrefill MCP invoice package changed")
+
+        snapshot: dict[str, Any] = {
+            "invoiceId": invoice_id,
+            "status": self._invoice_status(invoice),
+            "productId": str(quote["productId"]),
+            "packageValue": str(quote["packageValue"]),
+            "paymentMethod": self.payment_method,
+        }
+        if self.payment_method == "usdc_base":
+            if isinstance(
+                invoice.get("payment_info") or invoice.get("paymentInfo"),
+                dict,
+            ):
+                payment = self._validated_payment_requirements(
+                    invoice,
+                    quote=quote,
+                )
+                snapshot.update(
+                    {
+                        "paymentAmount": payment["amount"],
+                        "paymentAsset": payment["asset"],
+                        "paymentNetwork": payment["network"],
+                    }
+                )
+            elif fallback is not None:
+                snapshot.update(
+                    {
+                        "paymentAmount": str(fallback["paymentAmount"]),
+                        "paymentAsset": str(fallback["paymentAsset"]),
+                        "paymentNetwork": str(fallback["paymentNetwork"]),
+                    }
+                )
+            else:
+                raise ValueError("Bitrefill MCP payment info is missing")
+        return snapshot
+
+    def _validate_prepared_purchase(
+        self,
+        prepared: dict[str, Any],
+        *,
+        quote: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(prepared, dict):
+            raise ValueError("prepared Bitrefill invoice is invalid")
+        invoice_id = str(prepared.get("invoiceId", "")).strip()
+        if not invoice_id:
+            raise ValueError("prepared Bitrefill invoice id is missing")
+        expected = {
+            "productId": str(quote["productId"]),
+            "packageValue": str(quote["packageValue"]),
+            "paymentMethod": self.payment_method,
+        }
+        for key, value in expected.items():
+            if str(prepared.get(key, "")).strip() != value:
+                raise ValueError(f"prepared Bitrefill invoice {key} changed")
+        if self.payment_method == "usdc_base":
+            amount = Decimal(str(prepared.get("paymentAmount", "")))
+            approved_total = Decimal(
+                str(quote.get("totalUsd") or quote["priceUsd"])
+            )
+            if not amount.is_finite() or amount <= 0 or amount > approved_total:
+                raise ValueError("prepared Bitrefill invoice amount is invalid")
+            if str(prepared.get("paymentAsset", "")).upper() != "USDC":
+                raise ValueError("prepared Bitrefill invoice asset changed")
+            if str(prepared.get("paymentNetwork", "")).lower() != "base":
+                raise ValueError("prepared Bitrefill invoice network changed")
+        return deepcopy(prepared)
+
+    def _pay_usdc_invoice(
+        self,
+        invoice: dict[str, Any],
+        *,
+        quote: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self.treasury_client is None:
+            raise ValueError("treasury_client is required for usdc_base")
+        payment = self._validated_payment_requirements(invoice, quote=quote)
         transfer = self.treasury_client.transfer_usdc(
-            to_address=address,
-            amount=format(payment_amount, "f"),
+            to_address=payment["address"],
+            amount=payment["amount"],
             chain="base",
         )
         if not isinstance(transfer, dict):
@@ -829,7 +1052,7 @@ class McpBitrefillClient:
             "txId": transaction_hash,
             "network": "base",
             "asset": "USDC",
-            "amount": format(payment_amount, "f"),
+            "amount": payment["amount"],
         }
 
     def _poll_invoice(self, invoice_id: str) -> dict[str, Any]:

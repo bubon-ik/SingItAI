@@ -129,3 +129,25 @@ class BitrefillClientTests(unittest.TestCase):
         self.assertEqual(result["provider"], "bitrefill-test")
         self.assertIn("orderId", result)
         self.assertNotIn("buyer@example.com", str(result))
+
+    def test_test_purchase_client_supports_prepare_then_complete(self):
+        client = TestBitrefillClient()
+        quote = {
+            "quoteId": "quote_1",
+            "productId": "test-gift-card-code",
+            "packageId": "1",
+            "packageValue": "1",
+            "priceUsd": "1.00",
+            "totalUsd": "1.01",
+        }
+
+        prepared = client.prepare_purchase(quote=quote, recipient={})
+        result = client.complete_purchase(
+            quote=quote,
+            prepared=prepared,
+        )
+
+        self.assertEqual(prepared["productId"], "test-gift-card-code")
+        self.assertEqual(prepared["packageValue"], "1")
+        self.assertEqual(result["invoiceId"], prepared["invoiceId"])
+        self.assertTrue(result["ok"])

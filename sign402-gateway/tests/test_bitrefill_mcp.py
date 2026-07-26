@@ -1130,6 +1130,7 @@ APPROVED_QUOTE = {
     "packageId": "steam-usa<&>50",
     "packageValue": "50",
     "priceUsd": "50.00",
+    "totalUsd": "50.50",
     "recipientType": "none",
 }
 
@@ -1333,9 +1334,132 @@ class BitrefillMcpUsdcPurchaseTests(unittest.TestCase):
         payment.update(overrides)
         return payment
 
+    def _invoice(self, **overrides):
+        invoice = {
+            "invoice_id": "inv_prepare",
+            "status": "unpaid",
+            "payment_method": "usdc_base",
+            "cart_items": [
+                {
+                    "product_id": APPROVED_QUOTE["productId"],
+                    "package_value": APPROVED_QUOTE["packageValue"],
+                }
+            ],
+            "payment_info": self._payment_info(amount="50.50"),
+        }
+        invoice.update(overrides)
+        return invoice
+
+    def test_prepare_creates_and_validates_invoice_before_treasury_transfer(self):
+        caller = FakeMcpCaller([self._invoice()])
+        treasury = FakeTreasuryClient()
+        client = self._client(caller, treasury)
+
+        prepared = client.prepare_purchase(
+            quote=APPROVED_QUOTE,
+            recipient={},
+        )
+
+        self.assertEqual([name for name, _ in caller.calls], ["buy-products"])
+        self.assertEqual(
+            caller.calls[0][1]["cart_items"],
+            [{"product_id": "steam-usa", "package_value": "50"}],
+        )
+        self.assertNotIn("package_id", caller.calls[0][1]["cart_items"][0])
+        self.assertEqual(treasury.transfers, [])
+        self.assertEqual(
+            prepared,
+            {
+                "invoiceId": "inv_prepare",
+                "status": "unpaid",
+                "productId": "steam-usa",
+                "packageValue": "50",
+                "paymentMethod": "usdc_base",
+                "paymentAmount": "50.50",
+                "paymentAsset": "USDC",
+                "paymentNetwork": "base",
+            },
+        )
+        self.assertNotIn("0xBitrefill", str(prepared))
+
+    def test_prepare_rejects_invoice_mismatches_before_treasury_transfer(self):
+        invalid_invoices = {
+            "missing invoice id": self._invoice(invoice_id=""),
+            "missing cart item": self._invoice(cart_items=[]),
+            "wrong payment method": self._invoice(payment_method="balance"),
+            "wrong product": self._invoice(
+                cart_items=[
+                    {
+                        "product_id": "other-product",
+                        "package_value": "50",
+                    }
+                ]
+            ),
+            "wrong package": self._invoice(
+                cart_items=[
+                    {
+                        "product_id": "steam-usa",
+                        "package_value": "25",
+                    }
+                ]
+            ),
+            "wrong asset": self._invoice(
+                payment_info=self._payment_info(currency="BTC")
+            ),
+            "wrong network": self._invoice(
+                payment_info=self._payment_info(network="ethereum")
+            ),
+            "above approved total": self._invoice(
+                payment_info=self._payment_info(amount="50.51")
+            ),
+        }
+
+        for label, invoice in invalid_invoices.items():
+            with self.subTest(label=label):
+                treasury = FakeTreasuryClient()
+                client = self._client(FakeMcpCaller([invoice]), treasury)
+
+                with self.assertRaises(ValueError):
+                    client.prepare_purchase(
+                        quote=APPROVED_QUOTE,
+                        recipient={},
+                    )
+
+                self.assertEqual(treasury.transfers, [])
+
+    def test_complete_reloads_and_revalidates_same_prepared_invoice(self):
+        prepared_invoice = self._invoice()
+        reloaded_invoice = self._invoice(
+            status="complete",
+            orders=[{"order_id": "ord_prepare", "status": "delivered"}],
+        )
+        caller = FakeMcpCaller([prepared_invoice, reloaded_invoice])
+        treasury = FakeTreasuryClient()
+        client = self._client(caller, treasury)
+
+        prepared = client.prepare_purchase(
+            quote=APPROVED_QUOTE,
+            recipient={},
+        )
+        result = client.complete_purchase(
+            quote=APPROVED_QUOTE,
+            prepared=prepared,
+        )
+
+        self.assertEqual(
+            [name for name, _ in caller.calls],
+            ["buy-products", "get-invoice-by-id"],
+        )
+        self.assertEqual(result["invoiceId"], "inv_prepare")
+
     def test_valid_base_usdc_purchase_transfers_once_then_polls(self):
         caller = FakeMcpCaller(
             [
+                {
+                    "invoice_id": "inv_2",
+                    "status": "unpaid",
+                    "payment_info": self._payment_info(),
+                },
                 {
                     "invoice_id": "inv_2",
                     "status": "unpaid",
@@ -1375,6 +1499,15 @@ class BitrefillMcpUsdcPurchaseTests(unittest.TestCase):
     def test_documented_minimal_payment_info_is_accepted(self):
         caller = FakeMcpCaller(
             [
+                {
+                    "invoice_id": "inv_minimal",
+                    "status": "unpaid",
+                    "payment_info": {
+                        "address": "0xBitrefill",
+                        "altcoinPrice": "50.01",
+                        "currency": "USDC",
+                    },
+                },
                 {
                     "invoice_id": "inv_minimal",
                     "status": "unpaid",

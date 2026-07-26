@@ -40,6 +40,23 @@ class BitrefillClient(Protocol):
     ) -> dict[str, Any]:
         ...
 
+    def prepare_purchase(
+        self,
+        *,
+        quote: dict[str, Any],
+        recipient: dict[str, Any],
+    ) -> dict[str, Any]:
+        ...
+
+    def complete_purchase(
+        self,
+        *,
+        quote: dict[str, Any],
+        prepared: dict[str, Any],
+        checkpoint_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        ...
+
     def buy_product(
         self,
         *,
@@ -206,20 +223,43 @@ class TestBitrefillClient:
             "requiredRecipientFields": deepcopy(product["requiredRecipientFields"]),
         }
 
-    def buy_product(
+    def prepare_purchase(
         self,
         *,
         quote: dict[str, Any],
         recipient: dict[str, Any],
+    ) -> dict[str, Any]:
+        order_seed = f"{quote['quoteId']}:{quote['productId']}:{quote['packageId']}"
+        order_id = "test_bitrefill_" + hashlib.sha256(order_seed.encode("utf-8")).hexdigest()[:16]
+        return {
+            "invoiceId": "test_invoice_" + order_id[-8:],
+            "status": "unpaid",
+            "productId": str(quote["productId"]),
+            "packageValue": str(quote["packageValue"]),
+            "paymentMethod": "test",
+        }
+
+    def complete_purchase(
+        self,
+        *,
+        quote: dict[str, Any],
+        prepared: dict[str, Any],
         checkpoint_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
+        expected = self.prepare_purchase(quote=quote, recipient={})
+        if str(prepared.get("invoiceId", "")) != expected["invoiceId"]:
+            raise ValueError("prepared Bitrefill invoice does not match quote")
+        if str(prepared.get("productId", "")) != str(quote["productId"]):
+            raise ValueError("prepared Bitrefill product does not match quote")
+        if str(prepared.get("packageValue", "")) != str(quote["packageValue"]):
+            raise ValueError("prepared Bitrefill package does not match quote")
         order_seed = f"{quote['quoteId']}:{quote['productId']}:{quote['packageId']}"
         order_id = "test_bitrefill_" + hashlib.sha256(order_seed.encode("utf-8")).hexdigest()[:16]
         return {
             "ok": True,
             "provider": "bitrefill-test",
             "orderId": order_id,
-            "invoiceId": "test_invoice_" + order_id[-8:],
+            "invoiceId": expected["invoiceId"],
             "status": "delivered",
             "redemption": {
                 "type": "test",
@@ -227,6 +267,22 @@ class TestBitrefillClient:
                 "value": "TEST-REDEMPTION-NO-VALUE",
             },
         }
+
+    def buy_product(
+        self,
+        *,
+        quote: dict[str, Any],
+        recipient: dict[str, Any],
+        checkpoint_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        prepared = self.prepare_purchase(quote=quote, recipient=recipient)
+        if checkpoint_callback is not None:
+            checkpoint_callback(prepared)
+        return self.complete_purchase(
+            quote=quote,
+            prepared=prepared,
+            checkpoint_callback=checkpoint_callback,
+        )
 
     def refresh_purchase(
         self,
