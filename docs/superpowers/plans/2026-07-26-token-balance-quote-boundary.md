@@ -25,7 +25,7 @@
 ## File Structure
 
 - Modify `sign402-gateway/sign402_gateway/real_rate_pricing.py`: clamp quote discovery to the active cap and emit cap-source-specific terminal errors.
-- Modify `sign402-gateway/tests/test_real_rate_pricing.py`: reproduce the production boundary with fake quote clients and cover success, insufficient balance, unavailable quote, exactly-once, and sub-unit-cap behavior.
+- Modify `sign402-gateway/tests/test_real_rate_pricing.py`: reproduce the production boundary with fake quote clients and cover success, insufficient balance, unavailable quote, exactly-once, constructor and wallet sub-unit caps, and post-rounding cap enforcement.
 - No runner, server, configuration, database, or Hermes plugin file changes are required.
 
 ### Task 1: Implement the hard quote boundary with regression tests
@@ -136,9 +136,11 @@ Add these methods to `RealRatePricingTests` in
 Run from the isolated worktree:
 
 ```bash
+cd '/Users/mp/Documents/Berlin Hack/.worktrees/token-balance-quote-boundary'
+PYTHONPATH='/Users/mp/Documents/Berlin Hack/.worktrees/token-balance-quote-boundary/sign402-gateway' \
 '/Users/mp/Documents/Berlin Hack/payment-executor/.venv/bin/python' \
   -m unittest discover \
-  -s sign402-gateway/tests \
+  -s '/Users/mp/Documents/Berlin Hack/.worktrees/token-balance-quote-boundary/sign402-gateway/tests' \
   -p 'test_real_rate_pricing.py' \
   -q
 ```
@@ -204,28 +206,43 @@ rounded-cap error:
 This makes the unsuccessful exact-cap branch terminal, so it cannot loop or
 repeat a failed quote that is absent from `_quote_cache`.
 
-- [ ] **Step 4: Run the focused pricing suite and verify it passes**
+- [ ] **Step 4: Add safety characterization tests and run the focused pricing suite**
+
+Add two mutation-coverage tests for the safety branches already introduced:
+
+- Without a per-call `max_amount`, set constructor `max_singit` below one
+  token unit and assert the client never sees more than that cap and the exact
+  configured-maximum error is retained. This catches mutations to the clamped
+  initial probe and the constructor-cap diagnostic branch.
+- With a zero-decimal token and a fractional `max_amount`, make the binary
+  search find a fractional amount that rounds up to one token. Assert the
+  exact balance-insufficient error and that no quote exceeds the balance.
+  This catches removal or weakening of the post-rounding cap guard.
 
 Run:
 
 ```bash
+cd '/Users/mp/Documents/Berlin Hack/.worktrees/token-balance-quote-boundary'
+PYTHONPATH='/Users/mp/Documents/Berlin Hack/.worktrees/token-balance-quote-boundary/sign402-gateway' \
 '/Users/mp/Documents/Berlin Hack/payment-executor/.venv/bin/python' \
   -m unittest discover \
-  -s sign402-gateway/tests \
+  -s '/Users/mp/Documents/Berlin Hack/.worktrees/token-balance-quote-boundary/sign402-gateway/tests' \
   -p 'test_real_rate_pricing.py' \
   -q
 ```
 
-Expected: `Ran 16 tests` and `OK`.
+Expected: `Ran 18 tests` and `OK`.
 
 - [ ] **Step 5: Run the Bitrefill runner regression suite**
 
 Run:
 
 ```bash
+cd '/Users/mp/Documents/Berlin Hack/.worktrees/token-balance-quote-boundary'
+PYTHONPATH='/Users/mp/Documents/Berlin Hack/.worktrees/token-balance-quote-boundary/sign402-gateway' \
 '/Users/mp/Documents/Berlin Hack/payment-executor/.venv/bin/python' \
   -m unittest discover \
-  -s sign402-gateway/tests \
+  -s '/Users/mp/Documents/Berlin Hack/.worktrees/token-balance-quote-boundary/sign402-gateway/tests' \
   -p 'test_bitrefill_runner.py' \
   -q
 ```
@@ -262,14 +279,15 @@ tests.
 Run:
 
 ```bash
+cd '/Users/mp/Documents/Berlin Hack/.worktrees/token-balance-quote-boundary'
+PYTHONPATH='/Users/mp/Documents/Berlin Hack/.worktrees/token-balance-quote-boundary/sign402-gateway' \
 '/Users/mp/Documents/Berlin Hack/payment-executor/.venv/bin/python' \
   -m unittest discover \
-  -s sign402-gateway/tests \
+  -s '/Users/mp/Documents/Berlin Hack/.worktrees/token-balance-quote-boundary/sign402-gateway/tests' \
   -q
 ```
 
-Expected: all discovered gateway tests finish with `OK`; no live network
-purchase path is invoked.
+Expected: `Ran 564 tests` and `OK`; no live network purchase path is invoked.
 
 - [ ] **Step 2: Verify scope and repository cleanliness**
 
@@ -352,31 +370,64 @@ cd '/Users/mp/Documents/Berlin Hack'
   -q
 ```
 
-Expected: `Ran 16 tests` and `OK`.
+Expected: `Ran 18 tests` and `OK`.
 
-- [ ] **Step 4: Push `x402Bnkr` to its configured upstream**
+- [ ] **Step 4: Push the reviewed commit and verify the remote ref**
 
 Run:
 
 ```bash
-git -C '/Users/mp/Documents/Berlin Hack' push singitai x402Bnkr
+set -eu
+reviewed_commit=$(
+  git -C '/Users/mp/Documents/Berlin Hack' rev-parse HEAD
+)
+git -C '/Users/mp/Documents/Berlin Hack' cat-file \
+  -e "${reviewed_commit}^{commit}"
+git -C '/Users/mp/Documents/Berlin Hack' push \
+  singitai \
+  "${reviewed_commit}:refs/heads/x402Bnkr"
+pushed_commit=$(
+  git -C '/Users/mp/Documents/Berlin Hack' ls-remote \
+    --exit-code \
+    singitai \
+    refs/heads/x402Bnkr |
+  awk 'NR == 1 { print $1 }'
+)
+test "$pushed_commit" = "$reviewed_commit"
 git -C '/Users/mp/Documents/Berlin Hack' status --short --branch
+printf 'reviewed and pushed commit: %s\n' "$reviewed_commit"
 ```
 
-Expected: local `x402Bnkr` and `singitai/x402Bnkr` point to the same reviewed
-commit; unrelated untracked files remain untouched.
+Expected: the local reviewed commit is pushed explicitly to
+`singitai/x402Bnkr`, the fetched remote ref equals that captured commit, and
+unrelated untracked files remain untouched.
 
-- [ ] **Step 5: Fast-forward and test the production checkout**
+- [ ] **Step 5: Fetch that exact commit, fast-forward, and test production**
 
 Run:
 
 ```bash
-ssh hermes@164.68.104.44 '
 set -eu
+reviewed_commit=$(
+  git -C '/Users/mp/Documents/Berlin Hack' rev-parse HEAD
+)
+pushed_commit=$(
+  git -C '/Users/mp/Documents/Berlin Hack' ls-remote \
+    --exit-code \
+    singitai \
+    refs/heads/x402Bnkr |
+  awk 'NR == 1 { print $1 }'
+)
+test "$pushed_commit" = "$reviewed_commit"
+ssh hermes@164.68.104.44 sh -s -- "$reviewed_commit" <<'REMOTE'
+set -eu
+reviewed_commit=$1
 cd /home/hermes/apps/sign402
 test -z "$(git status --porcelain)"
-git fetch origin x402Bnkr
-git merge --ff-only origin/x402Bnkr
+git fetch 'git@github.com:bubon-ik/SingItAI.git' x402Bnkr
+test "$(git rev-parse FETCH_HEAD)" = "$reviewed_commit"
+git merge --ff-only "$reviewed_commit"
+test "$(git rev-parse HEAD)" = "$reviewed_commit"
 sign402-gateway/.venv/bin/python -m unittest discover \
   -s sign402-gateway/tests \
   -p "test_real_rate_pricing.py" \
@@ -386,11 +437,13 @@ sign402-gateway/.venv/bin/python -m unittest discover \
   -p "test_bitrefill_runner.py" \
   -q
 git rev-parse HEAD
-'
+REMOTE
 ```
 
-Expected: clean fast-forward, 16 pricing tests pass, 56 runner tests pass, and
-the reported server commit matches pushed `singitai/x402Bnkr`.
+Expected: `FETCH_HEAD` equals the captured reviewed commit, the checkout
+fast-forwards to that exact commit, server `HEAD` is asserted equal before
+tests, 18 pricing tests pass, 56 runner tests pass, and the reported server
+commit matches pushed `singitai/x402Bnkr`.
 
 - [ ] **Step 6: Restart only the gateway and verify health**
 

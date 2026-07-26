@@ -278,6 +278,27 @@ class RealRatePricingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "required SINGIT exceeds"):
             pricer.price_for_usdc("0.10")
 
+    def test_sub_unit_constructor_cap_retains_configured_maximum_error(self):
+        cap = Decimal("0.5")
+        client = LinearQuoteClient(Decimal("1"))
+        pricer = RealRateSingitPricer(
+            quote_client=client,
+            from_token="0xSINGIT",
+            to_token="USDC",
+            chain="base",
+            buffer_bps=0,
+            max_singit=format(cap, "f"),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "^required SINGIT exceeds configured maximum$",
+        ):
+            pricer.price_for_usdc("1")
+
+        self.assertEqual(client.amounts, [cap])
+        self.assertTrue(all(amount <= cap for amount in client.amounts))
+
     def test_skips_bankr_no_quote_amounts_while_searching(self):
         client = MinAmountQuoteClient(rate=Decimal("0.02"), minimum=Decimal("8"))
         pricer = RealRateSingitPricer(
@@ -429,6 +450,30 @@ class RealRatePricingTests(unittest.TestCase):
 
         self.assertEqual(result["requiredAmount"], "0.25")
         self.assertEqual(client.amounts.count(balance), 1)
+        self.assertTrue(all(amount <= balance for amount in client.amounts))
+
+    def test_zero_decimal_rounding_cannot_cross_fractional_wallet_balance(self):
+        balance = Decimal("0.5")
+        client = LinearQuoteClient(Decimal("1"))
+        pricer = RealRateSingitPricer(
+            quote_client=client,
+            from_token="0xTOKEN",
+            to_token="USDC",
+            chain="base",
+            buffer_bps=0,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "^selected payment token balance is insufficient at the current swap rate$",
+        ):
+            pricer.price_for_usdc(
+                "0.25",
+                decimals=0,
+                max_amount=format(balance, "f"),
+            )
+
+        self.assertNotIn(Decimal("1"), client.amounts)
         self.assertTrue(all(amount <= balance for amount in client.amounts))
 
 
