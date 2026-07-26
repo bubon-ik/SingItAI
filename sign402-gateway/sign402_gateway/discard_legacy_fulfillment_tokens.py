@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
+from .secure_state import SensitiveStateError, atomic_write_private_json
+
 
 class LegacyFulfillmentTokenCleanupError(RuntimeError):
     pass
@@ -71,11 +73,31 @@ def cleanup_legacy_fulfillment_tokens(
         "encryptedFulfillmentToken" in record for record in data.values()
     )
     token_fields = plaintext_records + encrypted_records
+    changed = False
+    if apply and token_fields:
+        cleaned = {
+            key: {
+                field: value
+                for field, value in record.items()
+                if field not in {
+                    "fulfillmentToken",
+                    "encryptedFulfillmentToken",
+                }
+            }
+            for key, record in data.items()
+        }
+        try:
+            atomic_write_private_json(Path(path), cleaned)
+        except (OSError, SensitiveStateError):
+            raise LegacyFulfillmentTokenCleanupError(
+                "purchase store could not be atomically updated"
+            ) from None
+        changed = True
     return {
         "mode": "apply" if apply else "dry-run",
         "records": len(data),
         "plaintext_token_records": plaintext_records,
         "encrypted_token_records": encrypted_records,
         "token_fields_removed": token_fields,
-        "changed": False,
+        "changed": changed,
     }
