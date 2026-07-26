@@ -11,6 +11,8 @@ redacted first, so provider output cannot carry credentials into the journal.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import re
@@ -26,6 +28,18 @@ _SECRET_NAME = re.compile(
     r"SECRET|PASSWORD|PRIVATE|MNEMONIC|SEED|CREDENTIAL|TOKEN|API_KEY|_KEY$",
     re.IGNORECASE,
 )
+_URL = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+_EVM_VALUE = re.compile(r"\b0x[a-fA-F0-9]{16,}\b")
+_ESIM_VALUE = re.compile(r"(?i)\bLPA:\S+")
+_QR_VALUE = re.compile(r"(?i)\b(?:qr|qrcode|qr_code)\s*[:=]\s*\S+")
+_BEARER_PAIR = re.compile(
+    r"(?i)\b("
+    r"pin|code|redemption|activation|activation_code|esim|"
+    r"secret|password|private_key|mnemonic|seed|credential|"
+    r"api_key|access_token|refresh_token"
+    r")\s*[:=]\s*\S+"
+)
+_PROVIDER_DIAGNOSTIC_LIMIT = 512
 
 
 def redact_secrets(text: str, *, env: Mapping[str, str] | None = None) -> str:
@@ -53,6 +67,74 @@ def bounded(text: str, *, limit: int = DEFAULT_DETAIL_LIMIT) -> str:
     if len(value) <= int(limit):
         return value
     return value[: int(limit)] + "…(truncated)"
+
+
+def _safe_provider_text(
+    value: Any,
+    *,
+    env: Mapping[str, str] | None,
+) -> str:
+    text = redact_secrets(str(value), env=env)
+    text = _URL.sub("<redacted:url>", text)
+    text = _EVM_VALUE.sub("<redacted:evm-value>", text)
+    text = _ESIM_VALUE.sub("<redacted:esim>", text)
+    text = _QR_VALUE.sub("<redacted:qr>", text)
+    text = _BEARER_PAIR.sub(
+        lambda match: f"{match.group(1)}=<redacted>",
+        text,
+    )
+    return bounded(text, limit=_PROVIDER_DIAGNOSTIC_LIMIT)
+
+
+def safe_provider_diagnostic(
+    detail: str,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, str | int]:
+    """Return a strict allowlist from provider error output.
+
+    Unparseable bodies are represented only by byte length and a fingerprint,
+    so payment links, addresses, redemption data, and other bearer values
+    cannot reach the journal.
+    """
+    raw = str(detail)
+    encoded = raw.encode("utf-8")
+    fingerprint = {
+        "bytes": len(encoded),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {"type": "unparseable", **fingerprint}
+    if not isinstance(parsed, Mapping):
+        return {"type": "non_object", **fingerprint}
+
+    source: Mapping[str, Any] = parsed
+    nested_error = parsed.get("error")
+    if isinstance(nested_error, Mapping):
+        source = {**parsed, **nested_error}
+
+    result: dict[str, str | int] = {}
+    aliases = {
+        "code": ("error_code", "errorCode", "code"),
+        "message": ("message", "error_message", "errorMessage"),
+        "status": ("status", "status_code", "statusCode"),
+        "requestId": (
+            "request_id",
+            "requestId",
+            "trace_id",
+            "traceId",
+        ),
+    }
+    for target, keys in aliases.items():
+        source_key = next((key for key in keys if source.get(key) is not None), None)
+        if source_key is None:
+            continue
+        result[target] = _safe_provider_text(source[source_key], env=env)
+    if result:
+        return result
+    return {"type": "no_allowlisted_fields", **fingerprint}
 
 
 def _context(fields: dict[str, Any]) -> str:

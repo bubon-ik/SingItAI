@@ -19,7 +19,11 @@ from mcp.client.streamable_http import streamable_http_client
 
 from .bankr_swap import BASE_USDC_MAINNET
 from .bitrefill import _infer_product_type, _money, _recipient_fields
-from .diagnostics import log_hidden_detail, log_swallowed_failure
+from .diagnostics import (
+    log_hidden_detail,
+    log_swallowed_failure,
+    safe_provider_diagnostic,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -42,16 +46,19 @@ def decode_mcp_tool_result(
     max_bytes: int = MAX_MCP_RESPONSE_BYTES,
 ) -> dict[str, Any]:
     if bool(getattr(result, "isError", False)):
-        # The provider's own words stay out of the exception (they can echo the
-        # API key back), but an operator needs them to act on the failure.
+        raw_detail = "\n".join(
+            str(block.text)
+            for block in getattr(result, "content", [])
+            if hasattr(block, "text")
+        ).strip()
         log_hidden_detail(
             logger,
             "Bitrefill MCP tool returned an error",
-            "\n".join(
-                str(block.text)
-                for block in getattr(result, "content", [])
-                if hasattr(block, "text")
-            ).strip(),
+            json.dumps(
+                safe_provider_diagnostic(raw_detail),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
         )
         raise ValueError("Bitrefill MCP tool failed")
 

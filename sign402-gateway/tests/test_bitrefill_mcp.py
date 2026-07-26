@@ -63,23 +63,60 @@ class BitrefillMcpDecodeTests(unittest.TestCase):
 
         self.assertNotIn("key_123", str(raised.exception))
 
-    def test_decoder_logs_the_tool_error_text_without_the_api_key(self):
+    def test_decoder_logs_only_safe_provider_error_fields(self):
         logger = logging.getLogger("sign402_gateway.bitrefill_mcp")
         api_key = "key_1234567890abcdef"
+        address = "0x1111111111111111111111111111111111111111"
         with patch.dict(os.environ, {"BITREFILL_API_KEY": api_key}, clear=False):
             with self.assertLogs(logger, level="ERROR") as captured:
                 with self.assertRaises(ValueError):
                     decode_mcp_tool_result(
                         FakeToolResult(
-                            text=f"package not purchasable {api_key}",
+                            text=json.dumps(
+                                {
+                                    "code": "PACKAGE_VALUE_INVALID",
+                                    "message": (
+                                        "package not purchasable "
+                                        f"{api_key} pay https://pay.example/inv "
+                                        f"to {address} pin=1234"
+                                    ),
+                                    "status": 422,
+                                    "request_id": "request_123",
+                                    "payment_link": "https://pay.example/secret",
+                                }
+                            ),
                             is_error=True,
                         )
                     )
 
         joined = "\n".join(captured.output)
+        self.assertIn("PACKAGE_VALUE_INVALID", joined)
         self.assertIn("package not purchasable", joined)
+        self.assertIn("request_123", joined)
         self.assertNotIn(api_key, joined)
         self.assertIn("<redacted:BITREFILL_API_KEY>", joined)
+        self.assertNotIn("https://", joined)
+        self.assertNotIn(address, joined)
+        self.assertNotIn("1234", joined)
+
+    def test_decoder_logs_only_fingerprint_for_unparseable_tool_error(self):
+        logger = logging.getLogger("sign402_gateway.bitrefill_mcp")
+        detail = (
+            "bad invoice at https://pay.example/secret "
+            "0x1111111111111111111111111111111111111111"
+        )
+
+        with self.assertLogs(logger, level="ERROR") as captured:
+            with self.assertRaises(ValueError):
+                decode_mcp_tool_result(
+                    FakeToolResult(text=detail, is_error=True)
+                )
+
+        joined = "\n".join(captured.output)
+        self.assertIn("sha256", joined)
+        self.assertNotIn(detail, joined)
+        self.assertNotIn("https://", joined)
+        self.assertNotIn("0x111111", joined)
 
     def test_decoder_rejects_oversized_response(self):
         with self.assertRaisesRegex(ValueError, "response is too large"):

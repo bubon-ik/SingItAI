@@ -1,3 +1,5 @@
+import hashlib
+import json
 import logging
 import unittest
 
@@ -5,6 +7,7 @@ from sign402_gateway.diagnostics import (
     bounded,
     log_swallowed_failure,
     redact_secrets,
+    safe_provider_diagnostic,
 )
 
 
@@ -55,6 +58,71 @@ class BoundedTests(unittest.TestCase):
 
     def test_short_text_is_returned_unchanged(self):
         self.assertEqual(bounded("abc", limit=8), "abc")
+
+
+class SafeProviderDiagnosticTests(unittest.TestCase):
+    def test_keeps_allowlisted_fields_and_filters_bearer_values(self):
+        detail = json.dumps(
+            {
+                "error_code": "PACKAGE_VALUE_INVALID",
+                "message": (
+                    "invalid package; pay https://pay.example/inv "
+                    "to 0x1111111111111111111111111111111111111111 "
+                    "pin=1234 esim=LPA:1$secret"
+                ),
+                "status": 422,
+                "trace_id": "trace_123",
+                "payment_link": "https://pay.example/secret",
+                "redemption": {"code": "GIFT-SECRET"},
+            }
+        )
+
+        diagnostic = safe_provider_diagnostic(detail, env={})
+
+        self.assertEqual(diagnostic["code"], "PACKAGE_VALUE_INVALID")
+        self.assertEqual(diagnostic["status"], "422")
+        self.assertEqual(diagnostic["requestId"], "trace_123")
+        rendered = str(diagnostic)
+        for secret in (
+            "https://",
+            "0x1111111111111111111111111111111111111111",
+            "1234",
+            "LPA:",
+            "GIFT-SECRET",
+        ):
+            self.assertNotIn(secret, rendered)
+
+    def test_filters_secret_environment_values_from_allowlisted_fields(self):
+        diagnostic = safe_provider_diagnostic(
+            json.dumps(
+                {
+                    "code": "PROVIDER_REJECTED",
+                    "message": "request used secret-provider-token",
+                    "request_id": "secret-provider-token",
+                }
+            ),
+            env={"BITREFILL_API_KEY": "secret-provider-token"},
+        )
+
+        rendered = str(diagnostic)
+        self.assertNotIn("secret-provider-token", rendered)
+        self.assertIn("<redacted:BITREFILL_API_KEY>", rendered)
+
+    def test_unparseable_body_returns_only_length_and_fingerprint(self):
+        detail = (
+            "raw address 0x1111111111111111111111111111111111111111 "
+            "https://pay.example/secret"
+        )
+
+        diagnostic = safe_provider_diagnostic(detail, env={})
+
+        self.assertEqual(diagnostic["type"], "unparseable")
+        self.assertEqual(diagnostic["bytes"], len(detail.encode("utf-8")))
+        self.assertEqual(
+            diagnostic["sha256"],
+            hashlib.sha256(detail.encode("utf-8")).hexdigest(),
+        )
+        self.assertNotIn(detail, str(diagnostic))
 
 
 class LogSwallowedFailureTests(unittest.TestCase):
