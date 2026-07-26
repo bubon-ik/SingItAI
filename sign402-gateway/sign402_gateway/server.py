@@ -103,7 +103,11 @@ from .bankr_llm_purchase import (
 from .bitrefill_quote import SERVICE_FEE_BPS
 from .bitrefill_runner import CdpWalletServiceError
 from .commerce_store import sanitize_bankr_reconciliation_snapshot
-from .diagnostics import log_hidden_detail, log_swallowed_failure
+from .diagnostics import (
+    configure_logging,
+    log_hidden_detail,
+    log_swallowed_failure,
+)
 from .numeric import format_decimal
 from .goplausible import fetch_x402_paid_resource, fetch_x402_payment_required, normalize_x402_payment_required
 from .real_rate_pricing import RealRateSingitPricer
@@ -2591,9 +2595,8 @@ def build_x402_payment_signature_builder(payment_executor_dir: Path):
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=os.getenv("SIGN402_LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    configure_logging(
+        level=os.getenv("SIGN402_LOG_LEVEL", "INFO"),
         stream=sys.stderr,
     )
     parser = argparse.ArgumentParser(description="Unified local gateway for Hermes Sign402.")

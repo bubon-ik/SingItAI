@@ -139,6 +139,25 @@ def safe_provider_diagnostic(
     return {"type": "no_allowlisted_fields", **fingerprint}
 
 
+TRANSPORT_LOGGERS = ("httpx", "httpcore", "hpack", "mcp")
+
+
+def configure_logging(*, level: str = "INFO", stream: Any | None = None) -> None:
+    """Turn on service logging without leaking request URLs.
+
+    httpx logs every request line at INFO, and the Bitrefill MCP endpoint
+    carries the API key in the URL path, so the transport loggers stay at
+    WARNING no matter what level the service runs at.
+    """
+    logging.basicConfig(
+        level=str(level).upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=stream,
+    )
+    for name in TRANSPORT_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def describe_payload_shape(
     value: Any,
     *,

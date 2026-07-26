@@ -1,10 +1,12 @@
 import hashlib
+import io
 import json
 import logging
 import unittest
 
 from sign402_gateway.diagnostics import (
     bounded,
+    configure_logging,
     describe_payload_shape,
     log_swallowed_failure,
     redact_secrets,
@@ -199,6 +201,24 @@ class LogSwallowedFailureTests(unittest.TestCase):
         self.assertNotIn("https://", joined)
         self.assertNotIn(address, joined)
         self.assertNotIn("secret-provider-value", joined)
+
+
+class ConfigureLoggingTests(unittest.TestCase):
+    def test_transport_loggers_are_silenced_so_urls_stay_out_of_the_journal(self):
+        # httpx logs every request URL at INFO, and the Bitrefill MCP URL
+        # carries the API key in its path.
+        for name in ("httpx", "httpcore"):
+            logging.getLogger(name).setLevel(logging.NOTSET)
+
+        configure_logging(level="INFO", stream=io.StringIO())
+
+        for name in ("httpx", "httpcore"):
+            logger = logging.getLogger(name)
+            self.assertGreaterEqual(logger.getEffectiveLevel(), logging.WARNING)
+        self.assertEqual(
+            logging.getLogger("sign402_gateway").getEffectiveLevel(),
+            logging.INFO,
+        )
 
 
 class DescribePayloadShapeTests(unittest.TestCase):
