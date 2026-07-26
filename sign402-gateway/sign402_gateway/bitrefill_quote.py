@@ -6,12 +6,35 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING
 from typing import Any
 
+from .bankr_swap import BASE_USDC_MAINNET
 from .numeric import format_decimal
 
 
 SINGIT_DECIMALS = 18
 DEFAULT_QUOTE_TTL_SECONDS = 120
 SERVICE_FEE_BPS = 100
+MAX_REPRICE_BPS = 500
+
+
+def _approved_maximum_atomic(
+    estimated_atomic: int,
+    *,
+    balance_atomic: int,
+    bps: int,
+) -> int:
+    estimate = int(estimated_atomic)
+    balance = int(balance_atomic)
+    allowance_bps = int(bps)
+    if estimate <= 0:
+        raise ValueError("estimated payment-token amount must be positive")
+    if balance < estimate:
+        raise ValueError("payment-token balance is below the estimated amount")
+    if not 0 <= allowance_bps <= MAX_REPRICE_BPS:
+        raise ValueError("Bitrefill max reprice bps must be from 0 to 500")
+    increased = (
+        estimate * (10_000 + allowance_bps) + 9_999
+    ) // 10_000
+    return min(increased, balance)
 
 
 def calculate_service_fee(price_usd: Any) -> tuple[Decimal, Decimal]:
@@ -101,6 +124,7 @@ def build_real_rate_quote(
     product: dict[str, Any],
     pricing: dict[str, Any],
     payment_token: dict[str, Any] | None = None,
+    max_reprice_bps: int = MAX_REPRICE_BPS,
     quote_id: str | None = None,
     now_epoch: int | None = None,
     ttl_seconds: int = DEFAULT_QUOTE_TTL_SECONDS,
@@ -165,16 +189,37 @@ def build_real_rate_quote(
         )
         return quote
     symbol = str(payment_token["symbol"])
+    decimals = int(payment_token["decimals"])
+    scale = Decimal(10) ** decimals
+    estimated_atomic = int(str(pricing[required_atomic_key]))
+    balance_atomic = int(Decimal(str(payment_token["balance"])) * scale)
+    effective_reprice_bps = (
+        0
+        if str(payment_token["address"]).casefold() == BASE_USDC_MAINNET.casefold()
+        else int(max_reprice_bps)
+    )
+    maximum_atomic = _approved_maximum_atomic(
+        estimated_atomic,
+        balance_atomic=balance_atomic,
+        bps=effective_reprice_bps,
+    )
+    estimated_amount = format_decimal(required_singit)
+    maximum_amount = format_decimal(Decimal(maximum_atomic) / scale)
     quote.update(
         {
             "paymentTokenAddress": str(payment_token["address"]),
             "paymentTokenSymbol": symbol,
-            "paymentTokenDecimals": int(payment_token["decimals"]),
+            "paymentTokenDecimals": decimals,
             "paymentTokenNative": bool(payment_token.get("native", False)),
-            "paymentTokenAmount": format_decimal(required_singit),
-            "maxPaymentTokenAtomic": str(pricing[required_atomic_key]),
+            "paymentTokenAmount": estimated_amount,
+            "estimatedPaymentTokenAmount": estimated_amount,
+            "estimatedPaymentTokenAtomic": str(estimated_atomic),
+            "maxPaymentTokenAmount": maximum_amount,
+            "maxPaymentTokenAtomic": str(maximum_atomic),
+            "maxRepriceBps": effective_reprice_bps,
             "quoteText": (
-                f"{product_name} ${value}: pay up to {format_decimal(required_singit)} "
+                f"{product_name} ${value}: estimated {estimated_amount} "
+                f"{symbol}, maximum {maximum_amount} "
                 f"{symbol} for about {pricing['expectedUsdc']} USDC. "
                 f"Quote expires in {ttl_seconds}s."
             ),
@@ -207,14 +252,25 @@ def build_purchase_commitment(
                 "totalUsd": str(quote["totalUsd"]),
             }
         )
-    if quote.get("maxPaymentTokenAtomic") is not None:
+    if quote.get("paymentTokenAddress") is not None:
+        required_fields = (
+            "estimatedPaymentTokenAtomic",
+            "maxPaymentTokenAtomic",
+            "maxRepriceBps",
+        )
+        if any(quote.get(field) is None for field in required_fields):
+            raise ValueError("quote does not contain a bounded payment-token maximum")
         commitment.update(
             {
                 "paymentTokenAddress": str(quote["paymentTokenAddress"]),
                 "paymentTokenSymbol": str(quote["paymentTokenSymbol"]),
                 "paymentTokenDecimals": int(quote["paymentTokenDecimals"]),
                 "paymentTokenNative": bool(quote.get("paymentTokenNative", False)),
+                "estimatedPaymentTokenAtomic": str(
+                    quote["estimatedPaymentTokenAtomic"]
+                ),
                 "maxPaymentTokenAtomic": str(quote["maxPaymentTokenAtomic"]),
+                "maxRepriceBps": int(quote["maxRepriceBps"]),
             }
         )
     else:

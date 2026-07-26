@@ -264,6 +264,7 @@ class BitrefillQuoteService:
         quote_id_provider: Callable[[], str] = new_quote_id,
         now_provider: Callable[[], int] = now_epoch,
         ttl_seconds: int = 120,
+        max_reprice_bps: int = 500,
     ):
         self.bitrefill_client = bitrefill_client
         self.store = store
@@ -273,6 +274,7 @@ class BitrefillQuoteService:
         self.quote_id_provider = quote_id_provider
         self.now_provider = now_provider
         self.ttl_seconds = int(ttl_seconds)
+        self.max_reprice_bps = int(max_reprice_bps)
 
     def __call__(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.quote(payload)
@@ -336,6 +338,7 @@ class BitrefillQuoteService:
                 product=product,
                 pricing=pricing,
                 payment_token=payment_token,
+                max_reprice_bps=self.max_reprice_bps,
                 quote_id=self.quote_id_provider(),
                 now_epoch=self.now_provider(),
                 ttl_seconds=self.ttl_seconds,
@@ -984,7 +987,12 @@ def _bitrefill_approval_context_lines(
         Decimal(str(quote.get("serviceFeeBps", 0))) / Decimal(100)
     )
     payment_symbol = str(quote.get("paymentTokenSymbol") or "").strip()
-    payment_amount = str(quote.get("paymentTokenAmount") or "").strip()
+    estimated_payment_amount = str(
+        quote.get("estimatedPaymentTokenAmount") or ""
+    ).strip()
+    maximum_payment_amount = str(
+        quote.get("maxPaymentTokenAmount") or ""
+    ).strip()
     lines = [
         "Action: BUY BITREFILL",
         f"Product: {str(quote.get('productName', quote.get('productId', '')))}",
@@ -993,11 +1001,16 @@ def _bitrefill_approval_context_lines(
         f"{_format_amount(str(quote.get('serviceFeeUsd', '')))} USD",
         f"Total: {_format_amount(str(quote.get('totalUsd', '')))} USD",
     ]
-    if payment_symbol and payment_amount:
+    if payment_symbol:
+        if not estimated_payment_amount or not maximum_payment_amount:
+            raise ValueError("quote does not contain a bounded payment-token maximum")
         lines.extend(
             [
                 f"Payment token: {payment_symbol}",
-                f"Maximum spend: {_format_amount(payment_amount)} {payment_symbol}",
+                f"Estimated spend: {_format_amount(estimated_payment_amount)} "
+                f"{payment_symbol}",
+                f"Maximum spend: {_format_amount(maximum_payment_amount)} "
+                f"{payment_symbol}",
             ]
         )
     else:

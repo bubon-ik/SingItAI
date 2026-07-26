@@ -119,7 +119,7 @@ class FixedWalletTokenPricer:
             "targetUsdc": str(target_usdc),
             "bufferedTargetUsdc": str(target_usdc),
             "requiredAmount": "0.11",
-            "requiredAmountAtomic": "110000",
+            "requiredAmountAtomic": "110000000000000000",
             "expectedUsdc": str(target_usdc),
             "minUsdc": str(target_usdc),
         }
@@ -214,6 +214,8 @@ class BitrefillRunnerTests(unittest.TestCase):
                 "totalUsd": "1.01",
                 "paymentTokenSymbol": "USDC",
                 "paymentTokenAmount": "1.01",
+                "estimatedPaymentTokenAmount": "1.01",
+                "maxPaymentTokenAmount": "1.0605",
                 "expiresAtEpoch": 220,
             },
             source_wallet="0x1111111111111111111111111111111111111111",
@@ -225,7 +227,8 @@ class BitrefillRunnerTests(unittest.TestCase):
         self.assertIn("Total: 1.01 USD", lines)
         self.assertNotIn("Cost: 1 USD", lines)
         self.assertIn("Payment token: USDC", lines)
-        self.assertIn("Maximum spend: 1.01 USDC", lines)
+        self.assertIn("Estimated spend: 1.01 USDC", lines)
+        self.assertIn("Maximum spend: 1.0605 USDC", lines)
 
     def test_bitrefill_approval_uses_committed_fee_rate_for_legacy_quote(self):
         lines = _bitrefill_approval_context_lines(
@@ -324,6 +327,17 @@ class BitrefillRunnerTests(unittest.TestCase):
             )
 
             self.assertEqual(quote["paymentTokenSymbol"], "SINGIT")
+            self.assertEqual(quote["estimatedPaymentTokenAmount"], "0.11")
+            self.assertEqual(
+                quote["estimatedPaymentTokenAtomic"],
+                "110000000000000000",
+            )
+            self.assertEqual(quote["maxPaymentTokenAmount"], "0.1155")
+            self.assertEqual(
+                quote["maxPaymentTokenAtomic"],
+                "115500000000000000",
+            )
+            self.assertEqual(quote["maxRepriceBps"], 500)
             self.assertEqual(
                 pricer.calls,
                 [
@@ -387,7 +401,11 @@ class BitrefillRunnerTests(unittest.TestCase):
             self.assertEqual(quote["serviceFeeUsd"], "0.01")
             self.assertEqual(quote["totalUsd"], "1.01")
             self.assertEqual(quote["paymentTokenAmount"], "1.01")
+            self.assertEqual(quote["estimatedPaymentTokenAmount"], "1.01")
+            self.assertEqual(quote["estimatedPaymentTokenAtomic"], "1010000")
+            self.assertEqual(quote["maxPaymentTokenAmount"], "1.01")
             self.assertEqual(quote["maxPaymentTokenAtomic"], "1010000")
+            self.assertEqual(quote["maxRepriceBps"], 0)
             self.assertEqual(quote["requiredUsdc"], "1.01")
             self.assertEqual(quote["bufferedTargetUsdc"], "1.01")
 
