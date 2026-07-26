@@ -1179,6 +1179,46 @@ class GatewayServerTests(unittest.TestCase):
         )
         self.assertEqual(result["txId"], result["transactionHash"])
 
+    def test_cdp_wallet_client_builds_exact_idempotent_invoice_payment(self):
+        completed = subprocess_completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "transactionHash": "0x" + "c" * 64,
+                    "network": "base",
+                    "token": (
+                        "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+                    ),
+                    "amountAtomic": "50500000",
+                    "from": "0xCDP",
+                    "to": "0x1111111111111111111111111111111111111111",
+                }
+            )
+        )
+        with patch("subprocess.run", return_value=completed) as run:
+            client = CdpWalletClient(service_dir=Path("/tmp/cdp"))
+            result = client.transfer_token_exact(
+                token_address=(
+                    "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+                ),
+                to_address="0x1111111111111111111111111111111111111111",
+                amount_atomic="50500000",
+                chain="base",
+                idempotency_key="bitrefill-pay:inv_1",
+            )
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[2], "transfer-token")
+        self.assertEqual(
+            command[command.index("--amount-atomic") + 1],
+            "50500000",
+        )
+        self.assertEqual(
+            command[command.index("--idempotency-key") + 1],
+            "bitrefill-pay:inv_1",
+        )
+        self.assertEqual(result["txId"], result["transactionHash"])
+
     def test_real_rate_pricer_env_builder_requires_max_singit(self):
         with self.assertRaisesRegex(ValueError, "SIGN402_MAX_SINGIT_PER_BITREFILL_ORDER"):
             build_real_rate_pricer_from_env(

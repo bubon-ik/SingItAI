@@ -728,7 +728,10 @@ class McpBitrefillClient:
                     )
 
         treasury_payment = (
-            deepcopy(validated_prepared["treasuryPayment"])
+            self._validated_treasury_payment(
+                validated_prepared["treasuryPayment"],
+                prepared=validated_prepared,
+            )
             if isinstance(validated_prepared.get("treasuryPayment"), dict)
             else None
         )
@@ -748,7 +751,19 @@ class McpBitrefillClient:
                 invoice=invoice,
                 treasury_payment=treasury_payment,
             )
-        if self.payment_method == "usdc_base":
+        payment_observed = invoice_status in {
+            "payment_detected",
+            "payment-detected",
+            "paid",
+            "confirmed",
+            "pending",
+            "processing",
+        }
+        if (
+            self.payment_method == "usdc_base"
+            and treasury_payment is None
+            and not payment_observed
+        ):
             treasury_payment = self._pay_usdc_invoice(invoice, quote=quote)
             if checkpoint_callback is not None:
                 checkpoint_callback(
@@ -1024,6 +1039,42 @@ class McpBitrefillClient:
                 raise ValueError("prepared Bitrefill invoice network changed")
         return deepcopy(prepared)
 
+    def _validated_treasury_payment(
+        self,
+        value: dict[str, Any],
+        *,
+        prepared: dict[str, Any],
+    ) -> dict[str, Any]:
+        tx_id = str(
+            value.get("txId")
+            or value.get("transactionHash")
+            or value.get("hash")
+            or ""
+        ).strip()
+        if not tx_id:
+            raise ValueError("stored Bitrefill treasury payment hash is missing")
+        amount_atomic = str(value.get("amountAtomic") or "").strip()
+        expected_atomic = Decimal(str(prepared["paymentAmount"])) * Decimal(
+            1_000_000
+        )
+        if (
+            not amount_atomic.isdigit()
+            or expected_atomic != expected_atomic.to_integral_value()
+            or Decimal(amount_atomic) != expected_atomic
+        ):
+            raise ValueError("stored Bitrefill treasury payment amount changed")
+        if str(value.get("asset", "")).upper() != "USDC":
+            raise ValueError("stored Bitrefill treasury payment asset changed")
+        if str(value.get("network", "")).lower() != "base":
+            raise ValueError("stored Bitrefill treasury payment network changed")
+        return {
+            "txId": tx_id,
+            "network": "base",
+            "asset": "USDC",
+            "amount": str(prepared["paymentAmount"]),
+            "amountAtomic": amount_atomic,
+        }
+
     def _pay_usdc_invoice(
         self,
         invoice: dict[str, Any],
@@ -1033,10 +1084,20 @@ class McpBitrefillClient:
         if self.treasury_client is None:
             raise ValueError("treasury_client is required for usdc_base")
         payment = self._validated_payment_requirements(invoice, quote=quote)
-        transfer = self.treasury_client.transfer_usdc(
+        payment_amount = Decimal(payment["amount"])
+        amount_atomic_decimal = payment_amount * Decimal(1_000_000)
+        if amount_atomic_decimal != amount_atomic_decimal.to_integral_value():
+            raise ValueError("Bitrefill invoice amount exceeds USDC precision")
+        amount_atomic = str(int(amount_atomic_decimal))
+        invoice_id = self._invoice_id(invoice)
+        if not invoice_id:
+            raise ValueError("Bitrefill MCP invoice id is missing")
+        transfer = self.treasury_client.transfer_token_exact(
+            token_address=BASE_USDC_MAINNET,
             to_address=payment["address"],
-            amount=payment["amount"],
+            amount_atomic=amount_atomic,
             chain="base",
+            idempotency_key=f"bitrefill-pay:{invoice_id}",
         )
         if not isinstance(transfer, dict):
             raise ValueError("Bitrefill treasury transfer result is invalid")
@@ -1053,6 +1114,7 @@ class McpBitrefillClient:
             "network": "base",
             "asset": "USDC",
             "amount": payment["amount"],
+            "amountAtomic": amount_atomic,
         }
 
     def _poll_invoice(self, invoice_id: str) -> dict[str, Any]:

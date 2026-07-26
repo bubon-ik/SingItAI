@@ -3413,6 +3413,23 @@ class CdpWalletClient:
         amount_atomic: str,
         chain: str = "base",
     ) -> dict[str, Any]:
+        return self.transfer_token_exact(
+            token_address=token_address,
+            to_address=to_address,
+            amount_atomic=amount_atomic,
+            chain=chain,
+            idempotency_key=f"bitrefill-return:{quote_id}",
+        )
+
+    def transfer_token_exact(
+        self,
+        *,
+        token_address: str,
+        to_address: str,
+        amount_atomic: str,
+        idempotency_key: str,
+        chain: str = "base",
+    ) -> dict[str, Any]:
         payload = self._run(
             [
                 "transfer-token",
@@ -3425,7 +3442,7 @@ class CdpWalletClient:
                 "--chain",
                 str(chain),
                 "--idempotency-key",
-                f"bitrefill-return:{quote_id}",
+                str(idempotency_key),
             ]
         )
         return self._with_tx_id(payload)

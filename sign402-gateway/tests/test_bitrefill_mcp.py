@@ -1138,10 +1138,31 @@ APPROVED_QUOTE = {
 class FakeTreasuryClient:
     def __init__(self):
         self.transfers = []
+        self.token_transfers = []
 
     def transfer_usdc(self, *, to_address, amount, chain="base"):
         self.transfers.append(
             {"to_address": to_address, "amount": amount, "chain": chain}
+        )
+        return {"ok": True, "txId": "0xUSDC"}
+
+    def transfer_token_exact(
+        self,
+        *,
+        token_address,
+        to_address,
+        amount_atomic,
+        chain,
+        idempotency_key,
+    ):
+        self.token_transfers.append(
+            {
+                "token_address": token_address,
+                "to_address": to_address,
+                "amount_atomic": amount_atomic,
+                "chain": chain,
+                "idempotency_key": idempotency_key,
+            }
         )
         return {"ok": True, "txId": "0xUSDC"}
 
@@ -1484,15 +1505,18 @@ class BitrefillMcpUsdcPurchaseTests(unittest.TestCase):
         result = client.buy_product(quote=APPROVED_QUOTE, recipient={})
 
         self.assertEqual(
-            treasury.transfers,
+            treasury.token_transfers,
             [
                 {
+                    "token_address": BASE_USDC_MAINNET,
                     "to_address": "0xBitrefill",
-                    "amount": "50.01",
+                    "amount_atomic": "50010000",
                     "chain": "base",
+                    "idempotency_key": "bitrefill-pay:inv_2",
                 }
             ],
         )
+        self.assertEqual(treasury.transfers, [])
         self.assertFalse(caller.calls[0][1]["return_payment_link"])
         self.assertEqual(result["treasuryPayment"]["txId"], "0xUSDC")
 
@@ -1534,7 +1558,10 @@ class BitrefillMcpUsdcPurchaseTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "delivered")
-        self.assertEqual(treasury.transfers[0]["amount"], "50.01")
+        self.assertEqual(
+            treasury.token_transfers[0]["amount_atomic"],
+            "50010000",
+        )
 
     def test_invalid_payment_requirements_never_transfer(self):
         invalid_cases = {
@@ -1563,6 +1590,89 @@ class BitrefillMcpUsdcPurchaseTests(unittest.TestCase):
                     client.buy_product(quote=APPROVED_QUOTE, recipient={})
 
                 self.assertEqual(treasury.transfers, [])
+                self.assertEqual(treasury.token_transfers, [])
+
+    def test_paid_checkpoint_prevents_second_invoice_payment(self):
+        caller = FakeMcpCaller(
+            [
+                self._invoice(invoice_id="inv_once"),
+                self._invoice(invoice_id="inv_once"),
+                self._invoice(
+                    invoice_id="inv_once",
+                    status="complete",
+                    orders=[{"order_id": "ord_once", "status": "delivered"}],
+                ),
+                self._invoice(
+                    invoice_id="inv_once",
+                    status="complete",
+                    orders=[{"order_id": "ord_once", "status": "delivered"}],
+                ),
+            ]
+        )
+        treasury = FakeTreasuryClient()
+        client = self._client(caller, treasury)
+        checkpoints = []
+
+        prepared = client.prepare_purchase(
+            quote=APPROVED_QUOTE,
+            recipient={},
+        )
+        client.complete_purchase(
+            quote=APPROVED_QUOTE,
+            prepared=prepared,
+            checkpoint_callback=checkpoints.append,
+        )
+        paid_checkpoint = checkpoints[-1]
+        result = client.complete_purchase(
+            quote=APPROVED_QUOTE,
+            prepared=paid_checkpoint,
+            checkpoint_callback=checkpoints.append,
+        )
+
+        self.assertEqual(result["status"], "delivered")
+        self.assertEqual(len(treasury.token_transfers), 1)
+        self.assertEqual(
+            treasury.token_transfers[0]["idempotency_key"],
+            "bitrefill-pay:inv_once",
+        )
+
+    def test_provider_payment_detected_status_never_rebroadcasts(self):
+        caller = FakeMcpCaller(
+            [
+                self._invoice(
+                    invoice_id="inv_detected",
+                    status="payment_detected",
+                ),
+                self._invoice(
+                    invoice_id="inv_detected",
+                    status="complete",
+                    orders=[
+                        {"order_id": "ord_detected", "status": "delivered"}
+                    ],
+                ),
+            ]
+        )
+        treasury = FakeTreasuryClient()
+        client = self._client(caller, treasury)
+        prepared = {
+            "invoiceId": "inv_detected",
+            "status": "unpaid",
+            "productId": "steam-usa",
+            "packageValue": "50",
+            "paymentMethod": "usdc_base",
+            "paymentAmount": "50.50",
+            "paymentAsset": "USDC",
+            "paymentNetwork": "base",
+        }
+
+        result = client.complete_purchase(
+            quote=APPROVED_QUOTE,
+            prepared=prepared,
+        )
+
+        self.assertEqual(result["status"], "delivered")
+        self.assertEqual(treasury.token_transfers, [])
+        self.assertEqual(treasury.transfers, [])
 
     def test_terminal_invoice_error_stops_polling(self):
         caller = FakeMcpCaller(
