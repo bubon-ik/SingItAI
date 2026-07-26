@@ -40,10 +40,16 @@ class RealRateSingitPricer:
         token = str(from_token or self.from_token)
         token_decimals = int(decimals) if decimals is not None else SINGIT_DECIMALS
         amount_quantum = Decimal(1).scaleb(-token_decimals)
+        balance_cap = max_amount is not None
         amount_cap = (
             Decimal(str(max_amount))
-            if max_amount is not None
+            if balance_cap
             else self.max_singit
+        )
+        cap_exhausted_message = (
+            "selected payment token balance is insufficient at the current swap rate"
+            if balance_cap
+            else "required SINGIT exceeds configured maximum"
         )
         if amount_cap <= 0:
             raise ValueError("payment token balance must be positive")
@@ -58,17 +64,24 @@ class RealRateSingitPricer:
             rounding=ROUND_CEILING,
         )
         low = Decimal("0")
-        high = Decimal("1")
+        high = min(Decimal("1"), amount_cap)
         high_quote = self._quote_or_none(high, token, token_decimals)
         while high_quote is None or Decimal(high_quote["toAmount"]) < buffered_target:
+            if high >= amount_cap:
+                if balance_cap and high_quote is None:
+                    raise ValueError(
+                        "unable to obtain a swap quote for the selected payment token balance"
+                    )
+                raise ValueError(cap_exhausted_message)
             low = high
-            high = self._next_high_amount(
-                current=high,
-                quote=high_quote,
-                buffered_target=buffered_target,
+            high = min(
+                self._next_high_amount(
+                    current=high,
+                    quote=high_quote,
+                    buffered_target=buffered_target,
+                ),
+                amount_cap,
             )
-            if high > amount_cap:
-                raise ValueError("required SINGIT exceeds configured maximum")
             high_quote = self._quote_or_none(high, token, token_decimals)
 
         best_amount = high
@@ -86,7 +99,7 @@ class RealRateSingitPricer:
 
         rounded_singit = best_amount.quantize(amount_quantum, rounding=ROUND_CEILING)
         if rounded_singit > amount_cap:
-            raise ValueError("required SINGIT exceeds configured maximum")
+            raise ValueError(cap_exhausted_message)
         rounded_singit = self._minimize_amount(
             amount=rounded_singit,
             buffered_target=buffered_target,

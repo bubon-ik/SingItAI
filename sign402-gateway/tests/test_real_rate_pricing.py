@@ -345,6 +345,92 @@ class RealRatePricingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "target USDC must be positive"):
             pricer.price_for_usdc("0")
 
+    def test_quotes_exact_wallet_balance_before_rejecting(self):
+        balance = Decimal("20750000.123456789")
+        client = MinAmountQuoteClient(
+            rate=Decimal("0.0000014"),
+            minimum=Decimal("20000000"),
+        )
+        pricer = RealRateSingitPricer(
+            quote_client=client,
+            from_token="0xSINGIT",
+            to_token="USDC",
+            chain="base",
+            buffer_bps=0,
+            max_singit="2000000000",
+        )
+
+        result = pricer.price_for_usdc(
+            "24.48",
+            max_amount=format(balance, "f"),
+        )
+
+        required = Decimal(result["requiredAmount"])
+        self.assertLess(required, balance)
+        self.assertGreaterEqual(Decimal(result["expectedUsdc"]), Decimal("24.48"))
+        self.assertEqual(client.amounts.count(balance), 1)
+        self.assertTrue(all(amount <= balance for amount in client.amounts))
+
+    def test_reports_insufficient_balance_after_exact_cap_quote(self):
+        balance = Decimal("5")
+        client = LinearQuoteClient(Decimal("0.01"))
+        pricer = RealRateSingitPricer(
+            quote_client=client,
+            from_token="0xTOKEN",
+            to_token="USDC",
+            chain="base",
+            buffer_bps=0,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "^selected payment token balance is insufficient at the current swap rate$",
+        ):
+            pricer.price_for_usdc("0.10", max_amount=format(balance, "f"))
+
+        self.assertEqual(client.amounts.count(balance), 1)
+        self.assertTrue(all(amount <= balance for amount in client.amounts))
+
+    def test_reports_unavailable_quote_after_exact_cap_attempt(self):
+        balance = Decimal("5")
+        client = WalletApiMinAmountQuoteClient(
+            rate=Decimal("0.01"),
+            minimum=Decimal("8"),
+        )
+        pricer = RealRateSingitPricer(
+            quote_client=client,
+            from_token="0xTOKEN",
+            to_token="USDC",
+            chain="base",
+            buffer_bps=0,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "^unable to obtain a swap quote for the selected payment token balance$",
+        ):
+            pricer.price_for_usdc("0.10", max_amount=format(balance, "f"))
+
+        self.assertEqual(client.amounts.count(balance), 1)
+        self.assertTrue(all(amount <= balance for amount in client.amounts))
+
+    def test_never_quotes_above_sub_unit_wallet_balance(self):
+        balance = Decimal("0.5")
+        client = LinearQuoteClient(Decimal("1"))
+        pricer = RealRateSingitPricer(
+            quote_client=client,
+            from_token="0xTOKEN",
+            to_token="USDC",
+            chain="base",
+            buffer_bps=0,
+        )
+
+        result = pricer.price_for_usdc("0.25", max_amount=format(balance, "f"))
+
+        self.assertEqual(result["requiredAmount"], "0.25")
+        self.assertEqual(client.amounts.count(balance), 1)
+        self.assertTrue(all(amount <= balance for amount in client.amounts))
+
 
 if __name__ == "__main__":
     unittest.main()
