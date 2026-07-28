@@ -1552,6 +1552,16 @@ def _redemption_has_nonempty_value(redemption: Any) -> bool:
     return has_value(redemption["value"])
 
 
+def _bitrefill_denomination_text(quote: dict[str, Any]) -> str:
+    package_value = str(quote.get("packageValue") or "").strip()
+    if not package_value:
+        return ""
+    currency = str(quote.get("currency") or "").strip().upper()
+    if not currency or currency == "USD":
+        return f" ${package_value}"
+    return f" {package_value} {currency}"
+
+
 def _bitrefill_purchase_telegram_text(
     quote: dict[str, Any],
     *,
@@ -1560,8 +1570,7 @@ def _bitrefill_purchase_telegram_text(
     transfer_tx_id: str = "",
 ) -> str:
     product_name = str(quote.get("productName") or quote.get("productId") or "Your item")
-    package_value = str(quote.get("packageValue") or "").strip()
-    value_text = f" ${package_value}" if package_value else ""
+    value_text = _bitrefill_denomination_text(quote)
     source_text = f" Paid from {_short_address(source_wallet)}." if source_wallet else ""
     payment_symbol = str(quote.get("paymentTokenSymbol") or "SINGIT")
     payment_amount = str(
@@ -1640,8 +1649,7 @@ def _bitrefill_delivery_telegram_text(
     redemption: Any | None = None,
 ) -> str:
     product_name = str(quote.get("productName") or quote.get("productId") or "Your item")
-    package_value = str(quote.get("packageValue") or "").strip()
-    value_text = f" ${package_value}" if package_value else ""
+    value_text = _bitrefill_denomination_text(quote)
     detail = _redemption_detail_text(redemption)
     if detail:
         return f"✅ {product_name}{value_text} is ready.\n{detail}"

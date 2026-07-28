@@ -25,6 +25,8 @@ from sign402_gateway.bitrefill_runner import (
     WalletPaymentTokenResolver,
     WalletBitrefillPurchaseRunner,
     _bitrefill_approval_context_lines,
+    _bitrefill_delivery_telegram_text,
+    _bitrefill_purchase_telegram_text,
     lookup_bitrefill_order,
 )
 from sign402_gateway.commerce_store import BitrefillCommerceStore
@@ -227,6 +229,32 @@ def wallet_execution_quote(quote: dict) -> dict:
 
 
 class BitrefillRunnerTests(unittest.TestCase):
+    def test_purchase_telegram_text_uses_product_currency_for_local_denomination(self):
+        text = _bitrefill_purchase_telegram_text(
+            {
+                "productName": "Wolt Czech Republic",
+                "packageValue": "500",
+                "currency": "CZK",
+                "paymentTokenSymbol": "SINGIT",
+            }
+        )
+
+        self.assertIn("✅ Wolt Czech Republic 500 CZK is ready.", text)
+        self.assertNotIn("$500", text)
+
+    def test_delivery_telegram_text_uses_product_currency_for_local_denomination(self):
+        text = _bitrefill_delivery_telegram_text(
+            {
+                "productName": "Example Euro Gift Card",
+                "packageValue": "25",
+                "currency": " eur ",
+            },
+            redemption={"value": {"code": "SECRET-CODE"}},
+        )
+
+        self.assertIn("✅ Example Euro Gift Card 25 EUR is ready.", text)
+        self.assertNotIn("$25", text)
+
     def test_wallet_reprice_above_approved_maximum_moves_no_funds(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = make_commerce_store(Path(tmp) / "orders.sqlite3")
