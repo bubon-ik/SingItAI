@@ -10,6 +10,7 @@ test("floor failure is classified pre_swap and never calls swap", async () => {
   await assert.rejects(
     executeStagedSwap({
       minUsdc: "23.9976",
+      sleep: async () => {},
       getPrice: async () => ({
         liquidityAvailable: true,
         minToAmount: 23795602n,

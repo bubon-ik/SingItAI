@@ -16,11 +16,27 @@ export function assertSwapMeetsMinUsdc(price, minUsdc) {
   if (!minUsdc) return;
   const minToAmountFloor = parseUnits(String(minUsdc), 6);
   if (!price || !price.liquidityAvailable) {
-    throw new Error(`No swap liquidity available to reach min ${minUsdc} USDC`);
+    throw floorError(
+      "no_liquidity",
+      `No swap liquidity available to reach min ${minUsdc} USDC`,
+    );
   }
   if (BigInt(price.minToAmount) < minToAmountFloor) {
-    throw new Error(
+    throw floorError(
+      "rate_moved",
       `Swap would receive min ${price.minToAmount} atomic USDC, below required ${minToAmountFloor} (${minUsdc} USDC)`,
     );
   }
+}
+
+/**
+ * Tag the failure with a closed-set reason code.
+ *
+ * The message itself never leaves this process, so the code is the only thing
+ * the gateway can act on when it decides what to tell the buyer.
+ */
+function floorError(reason, message) {
+  const error = new Error(message);
+  error.reason = reason;
+  return error;
 }

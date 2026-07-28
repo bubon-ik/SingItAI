@@ -15,7 +15,11 @@ import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
 import { assertSwapMeetsMinUsdc } from "./swap-floor.mjs";
 import { makePaymentRequirementsSelector } from "./payment-guard.mjs";
-import { executeStagedSwap, StagedCdpError } from "./staged-swap.mjs";
+import {
+  executeStagedSwap,
+  StagedCdpError,
+  stagedErrorPayload,
+} from "./staged-swap.mjs";
 import { returnErc20 } from "./token-return.mjs";
 import { humanTokenAmountToAtomic } from "./user-token-transfer.mjs";
 
@@ -537,11 +541,7 @@ function writeJson(payload) {
 
 main().catch((error) => {
   if (error instanceof StagedCdpError) {
-    process.stderr.write(`${JSON.stringify({
-      ok: false,
-      error: "CDP wallet service failed",
-      stage: error.stage === "pre_swap" ? "pre_swap" : "",
-    })}\n`);
+    process.stderr.write(`${JSON.stringify(stagedErrorPayload(error))}\n`);
     process.exitCode = 1;
     return;
   }

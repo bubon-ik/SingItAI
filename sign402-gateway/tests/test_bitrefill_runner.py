@@ -452,6 +452,85 @@ class BitrefillRunnerTests(unittest.TestCase):
                 )
             return_runner.assert_called_once()
 
+    def _refund_result_for_reason(self, reason):
+        """Run one pre-swap refund and hand back the buyer-facing result."""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = make_commerce_store(Path(tmp) / "orders.sqlite3")
+            quote = wallet_token_quote()
+            store.save_quote(quote)
+            fulfillment = BitrefillFulfillmentRunner(
+                store=store,
+                bitrefill_client=TestBitrefillClient(),
+                funding_runner=Mock(
+                    side_effect=CdpWalletServiceError(
+                        "CDP wallet service failed",
+                        stage="pre_swap",
+                        reason=reason,
+                    )
+                ),
+                now_provider=lambda: 102,
+            )
+            approval = Mock()
+            runner = WalletBitrefillPurchaseRunner(
+                store=store,
+                approval_client=approval,
+                fulfillment_runner=fulfillment,
+                user_funding_runner=Mock(
+                    return_value={
+                        "ok": True,
+                        "fromWallet": "0xUser",
+                        "transfer": {"txId": "0xTRANSFER"},
+                    }
+                ),
+                execution_pricer=Mock(return_value=wallet_execution_quote(quote)),
+                return_runner=Mock(
+                    return_value={
+                        "ok": True,
+                        "transactionHash": "0xRETURN",
+                        "network": "base",
+                        "token": quote["paymentTokenAddress"],
+                        "amountAtomic": "101000000",
+                        "from": "0xCDP",
+                        "to": "0xUser",
+                    }
+                ),
+                now_provider=lambda: 101,
+                fulfillment_token_provider=lambda: "fulfillment-secret",
+            )
+            approval.return_value = {
+                "approved": True,
+                "approvedHash": runner.payment_hash_for_quote(quote, recipient={}),
+            }
+            return runner.buy(
+                {"quoteId": quote["quoteId"], "telegramUserId": "u1"}
+            )
+
+    def test_missing_liquidity_is_not_reported_as_a_rate_change(self):
+        result = self._refund_result_for_reason("no_liquidity")
+
+        self.assertFalse(result["ok"])
+        self.assertIn("liquidity", result["telegramText"].casefold())
+        self.assertNotIn("exchange rate", result["telegramText"].casefold())
+        self.assertIn("returned to your wallet", result["telegramText"])
+
+    def test_an_unavailable_price_is_not_reported_as_a_rate_change(self):
+        result = self._refund_result_for_reason("price_unavailable")
+
+        self.assertFalse(result["ok"])
+        self.assertNotIn("exchange rate", result["telegramText"].casefold())
+        self.assertIn("returned to your wallet", result["telegramText"])
+
+    def test_a_real_rate_move_still_reads_as_a_rate_change(self):
+        result = self._refund_result_for_reason("rate_moved")
+
+        self.assertIn("exchange rate changed", result["telegramText"].casefold())
+        self.assertIn("returned to your wallet", result["telegramText"])
+
+    def test_an_unclassified_pre_swap_failure_keeps_the_generic_text(self):
+        result = self._refund_result_for_reason("")
+
+        self.assertIn("exchange rate changed", result["telegramText"].casefold())
+
     def test_unknown_swap_stage_never_returns_user_transfer(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = make_commerce_store(Path(tmp) / "orders.sqlite3")

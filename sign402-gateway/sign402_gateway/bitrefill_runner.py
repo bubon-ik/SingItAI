@@ -79,10 +79,40 @@ class RepriceRequiredError(ValueError):
     pass
 
 
+# Closed set: anything else the CDP service reports is provider text, not a
+# reason we are willing to act on or repeat back to the buyer.
+PRE_SWAP_REASONS = frozenset({"rate_moved", "no_liquidity", "price_unavailable"})
+
+
 class CdpWalletServiceError(ValueError):
-    def __init__(self, message: str, *, stage: str = ""):
+    def __init__(self, message: str, *, stage: str = "", reason: str = ""):
         super().__init__(message)
         self.stage = stage if stage == "pre_swap" else ""
+        self.reason = reason if reason in PRE_SWAP_REASONS else ""
+
+
+_REFUND_RETURNED = "The exact token amount was returned to your wallet."
+
+# A rate move, an empty pool and a broken price feed all abort at the same
+# point; telling the buyer they are the same thing sends them to check a rate
+# that never moved.
+_PRE_SWAP_REFUND_TEXT = {
+    "no_liquidity": (
+        f"There was not enough swap liquidity for this amount. "
+        f"{_REFUND_RETURNED}"
+    ),
+    "price_unavailable": (
+        f"The swap price could not be confirmed just now. {_REFUND_RETURNED}"
+    ),
+}
+
+
+def _pre_swap_refund_text(reason: str) -> str:
+    return _PRE_SWAP_REFUND_TEXT.get(
+        reason,
+        f"The exchange rate changed after the wallet transfer. "
+        f"{_REFUND_RETURNED}",
+    )
 
 
 def _amount_to_atomic(value: Any, *, decimals: int, field: str) -> int:
@@ -1156,10 +1186,7 @@ class WalletBitrefillPurchaseRunner:
                     "decision": "refunded_after_rate_change",
                     "quoteId": quote_id,
                     "paymentApprovalHash": payment_hash,
-                    "telegramText": (
-                        "The exchange rate changed after the wallet transfer. "
-                        "The exact token amount was returned to your wallet."
-                    ),
+                    "telegramText": _pre_swap_refund_text(exc.reason),
                 }
             self.store.advance_state(
                 quote_id,

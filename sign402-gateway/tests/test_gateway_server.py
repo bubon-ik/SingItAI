@@ -1138,6 +1138,89 @@ class GatewayServerTests(unittest.TestCase):
         self.assertEqual(captured.exception.stage, "pre_swap")
         self.assertEqual(str(captured.exception), "CDP wallet service failed")
 
+    def test_cdp_wallet_client_preserves_the_pre_swap_reason(self):
+        completed = subprocess_completed(
+            returncode=1,
+            stderr=json.dumps(
+                {
+                    "ok": False,
+                    "error": "CDP wallet service failed",
+                    "stage": "pre_swap",
+                    "reason": "no_liquidity",
+                }
+            ),
+        )
+        with patch("subprocess.run", return_value=completed):
+            client = CdpWalletClient(service_dir=Path("/tmp/cdp"))
+
+            with self.assertRaises(CdpWalletServiceError) as captured:
+                client.swap_singit_to_usdc(
+                    amount="1.25",
+                    from_token="0x1111111111111111111111111111111111111111",
+                    min_usdc="1.00",
+                    decimals=6,
+                )
+
+        self.assertEqual(captured.exception.reason, "no_liquidity")
+
+    def test_cdp_wallet_client_drops_an_unknown_reason(self):
+        completed = subprocess_completed(
+            returncode=1,
+            stderr=json.dumps(
+                {
+                    "ok": False,
+                    "error": "CDP wallet service failed",
+                    "stage": "pre_swap",
+                    "reason": "pool 0xdead reverted for taker 0xbeef",
+                }
+            ),
+        )
+        with patch("subprocess.run", return_value=completed):
+            client = CdpWalletClient(service_dir=Path("/tmp/cdp"))
+
+            with self.assertRaises(CdpWalletServiceError) as captured:
+                client.swap_singit_to_usdc(
+                    amount="1.25",
+                    from_token="0x1111111111111111111111111111111111111111",
+                    min_usdc="1.00",
+                    decimals=6,
+                )
+
+        self.assertEqual(captured.exception.reason, "")
+
+    def test_real_rate_pricer_keeps_a_safety_buffer_by_default(self):
+        pricer = build_real_rate_pricer_from_env(
+            {
+                "SIGN402_BITREFILL_PRICING_MODE": "bankr_real_rate",
+                "SIGN402_MAX_SINGIT_PER_BITREFILL_ORDER": "200000",
+            }
+        )
+
+        self.assertEqual(pricer.buffer_bps, 200)
+
+    def test_real_rate_pricer_buffer_is_configurable(self):
+        pricer = build_real_rate_pricer_from_env(
+            {
+                "SIGN402_BITREFILL_PRICING_MODE": "bankr_real_rate",
+                "SIGN402_MAX_SINGIT_PER_BITREFILL_ORDER": "200000",
+                "SIGN402_BITREFILL_PRICING_BUFFER_BPS": "350",
+            }
+        )
+
+        self.assertEqual(pricer.buffer_bps, 350)
+
+    def test_real_rate_pricer_rejects_a_negative_buffer(self):
+        with self.assertRaisesRegex(
+            ValueError, "SIGN402_BITREFILL_PRICING_BUFFER_BPS"
+        ):
+            build_real_rate_pricer_from_env(
+                {
+                    "SIGN402_BITREFILL_PRICING_MODE": "bankr_real_rate",
+                    "SIGN402_MAX_SINGIT_PER_BITREFILL_ORDER": "200000",
+                    "SIGN402_BITREFILL_PRICING_BUFFER_BPS": "-1",
+                }
+            )
+
     def test_cdp_wallet_client_unknown_errors_have_no_safe_stage(self):
         failures = [
             subprocess_completed(returncode=1, stderr="plain provider failure"),
@@ -1292,19 +1375,21 @@ class GatewayServerTests(unittest.TestCase):
         )
 
         self.assertIsInstance(pricer.quote_client, BankrWalletApiClient)
-        self.assertEqual(pricer.buffer_bps, 0)
+        self.assertEqual(pricer.buffer_bps, 200)
 
     def test_real_rate_pricer_env_builder_ignores_legacy_pricing_buffer(self):
+        base_env = {
+            "SIGN402_BITREFILL_PRICING_MODE": "bankr_real_rate",
+            "SIGN402_MAX_SINGIT_PER_BITREFILL_ORDER": "1000000",
+            "BANKR_API_KEY": "test_key",
+        }
+        default_buffer = build_real_rate_pricer_from_env(base_env).buffer_bps
+
         pricer = build_real_rate_pricer_from_env(
-            {
-                "SIGN402_BITREFILL_PRICING_MODE": "bankr_real_rate",
-                "SIGN402_MAX_SINGIT_PER_BITREFILL_ORDER": "1000000",
-                "SIGN402_BITREFILL_USDC_BUFFER_BPS": "1000",
-                "BANKR_API_KEY": "test_key",
-            }
+            {**base_env, "SIGN402_BITREFILL_USDC_BUFFER_BPS": "1000"}
         )
 
-        self.assertEqual(pricer.buffer_bps, 0)
+        self.assertEqual(pricer.buffer_bps, default_buffer)
 
     def test_bitrefill_max_reprice_env_is_bounded_to_five_percent(self):
         self.assertEqual(

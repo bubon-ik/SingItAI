@@ -2184,12 +2184,27 @@ def build_real_rate_pricer_from_env(env: dict[str, str] | None = None):
         else:
             bankr_cli = values.get("SIGN402_BANKR_CLI", DEFAULT_BANKR_CLI)
             swap_client = BankrSwapClient(bankr_cli=bankr_cli)
+    # The priced amount has to clear the same USDC floor again at swap time,
+    # seconds later. With no buffer the minimiser leaves the order one tick away
+    # from a refund, so a real margin is the default.
+    try:
+        buffer_bps = int(
+            values.get("SIGN402_BITREFILL_PRICING_BUFFER_BPS", "200")
+        )
+    except (TypeError, ValueError):
+        raise ValueError(
+            "SIGN402_BITREFILL_PRICING_BUFFER_BPS must be an integer"
+        ) from None
+    if buffer_bps < 0:
+        raise ValueError(
+            "SIGN402_BITREFILL_PRICING_BUFFER_BPS must be non-negative"
+        )
     return RealRateSingitPricer(
         quote_client=swap_client,
         from_token=values.get("SIGN402_BANKR_SWAP_FROM_TOKEN", DEFAULT_SINGIT_TOKEN_ADDRESS),
         to_token=values.get("SIGN402_BANKR_SWAP_TO_TOKEN", "USDC"),
         chain=values.get("SIGN402_BANKR_SWAP_CHAIN", "base"),
-        buffer_bps=0,
+        buffer_bps=buffer_bps,
         max_singit=max_singit,
     )
 
@@ -3494,6 +3509,7 @@ class CdpWalletClient:
                 command=subcommand,
             )
             stage = ""
+            reason = ""
             try:
                 error_payload = json.loads(result.stderr.strip())
             except (json.JSONDecodeError, TypeError):
@@ -3505,9 +3521,13 @@ class CdpWalletClient:
                 and error_payload.get("stage") == "pre_swap"
             ):
                 stage = "pre_swap"
+                # CdpWalletServiceError drops anything outside the closed set,
+                # so provider text can never reach a buyer-facing message.
+                reason = str(error_payload.get("reason") or "")
             raise CdpWalletServiceError(
                 "CDP wallet service failed",
                 stage=stage,
+                reason=reason,
             )
         try:
             payload = json.loads(result.stdout)
