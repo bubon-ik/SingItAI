@@ -3552,7 +3552,7 @@ class PluginRegistrationTests(unittest.TestCase):
         client.imessage_results["pending"] = {"ok": True, "pending": True}
         client.imessage_results["decision"] = {
             "ok": True,
-            "imessageText": "Sign402 test approval approved.",
+            "imessageText": "✅ Payment approved. Your purchase is being processed.",
         }
         plugin._client_factory = lambda: client
         plugin.register(context)
@@ -3584,7 +3584,12 @@ class PluginRegistrationTests(unittest.TestCase):
         )
         self.assertEqual(
             gateway.adapters["photon"].sent,
-            [("photon-chat", "Sign402 test approval approved.")],
+            [
+                (
+                    "photon-chat",
+                    "✅ Payment approved. Your purchase is being processed.",
+                )
+            ],
         )
 
     def test_photon_yes_resolves_shared_user_id_before_decision(self):
@@ -3594,7 +3599,7 @@ class PluginRegistrationTests(unittest.TestCase):
         client.imessage_results["pending"] = {"ok": True, "pending": True}
         client.imessage_results["decision"] = {
             "ok": True,
-            "imessageText": "Sign402 test approval approved.",
+            "imessageText": "✅ Payment approved. Your purchase is being processed.",
         }
         plugin._client_factory = lambda: client
 

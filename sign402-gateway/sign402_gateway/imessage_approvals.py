@@ -1884,9 +1884,27 @@ def _short_resource(resource_url: str) -> str:
 
 
 def _decision_text(action_type: str, final_status: str) -> str:
-    if action_type == "sign402_purchase":
-        return f"Sign402 payment {final_status}."
-    return f"Sign402 test approval {final_status}."
+    if final_status not in {"approved", "denied"}:
+        return f"Sign402 approval {final_status}."
+    if action_type == "sign402_test":
+        if final_status == "approved":
+            return "✅ Approval confirmed. You're ready to approve payments."
+        return "Approval declined. No changes were made."
+    if action_type in {
+        "sign402_purchase",
+        "sign402_bitrefill",
+        "sign402_bankr_llm",
+    }:
+        if final_status == "approved":
+            return "✅ Payment approved. Your purchase is being processed."
+        return "Payment declined. No funds were moved."
+    if action_type == "sign402_withdrawal":
+        if final_status == "approved":
+            return "✅ Withdrawal approved. Your transfer is being processed."
+        return "Withdrawal declined. No funds were moved."
+    if final_status == "approved":
+        return "✅ Approval confirmed. Your request is being processed."
+    return "Approval declined. No changes were made."
 
 
 def _link_failed() -> dict[str, Any]:

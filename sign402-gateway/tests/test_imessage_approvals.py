@@ -14,6 +14,7 @@ from sign402_gateway.imessage_approvals import (
     HermesCliNotifier,
     ImessageApprovalService,
     ImessageApprovalStore,
+    _decision_text,
     normalize_e164,
 )
 from sign402_gateway.user_wallets import ManagedBaseWalletService, UserWalletStore
@@ -105,6 +106,64 @@ class ImessageApprovalTests(unittest.TestCase):
         pairing = service.create_pairing("1045618308")
         service.link_photon_sender(pairing["code"], "+1 (555) 123-4567")
         return service, wallet_service, store, notifier
+
+    def test_decision_text_uses_action_appropriate_copy(self):
+        cases = (
+            (
+                "sign402_test",
+                "approved",
+                "✅ Approval confirmed. You're ready to approve payments.",
+            ),
+            (
+                "sign402_test",
+                "denied",
+                "Approval declined. No changes were made.",
+            ),
+            (
+                "sign402_purchase",
+                "approved",
+                "✅ Payment approved. Your purchase is being processed.",
+            ),
+            (
+                "sign402_bitrefill",
+                "approved",
+                "✅ Payment approved. Your purchase is being processed.",
+            ),
+            (
+                "sign402_bankr_llm",
+                "denied",
+                "Payment declined. No funds were moved.",
+            ),
+            (
+                "sign402_withdrawal",
+                "approved",
+                "✅ Withdrawal approved. Your transfer is being processed.",
+            ),
+            (
+                "sign402_withdrawal",
+                "denied",
+                "Withdrawal declined. No funds were moved.",
+            ),
+            (
+                "sign402_external",
+                "approved",
+                "✅ Approval confirmed. Your request is being processed.",
+            ),
+            (
+                "sign402_external",
+                "denied",
+                "Approval declined. No changes were made.",
+            ),
+            (
+                "sign402_bitrefill",
+                "pending",
+                "Sign402 approval pending.",
+            ),
+        )
+
+        for action_type, status, expected in cases:
+            with self.subTest(action_type=action_type, status=status):
+                self.assertEqual(_decision_text(action_type, status), expected)
 
     def test_normalize_e164_accepts_common_formatting(self):
         self.assertEqual(normalize_e164("+1 (555) 123-4567"), "+15551234567")
