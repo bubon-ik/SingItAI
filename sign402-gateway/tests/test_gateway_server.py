@@ -644,6 +644,35 @@ class GatewayServerTests(unittest.TestCase):
         self.assertNotIn("test_key", repr(client))
         self.assertNotIn("test_key", repr(client._call_tool))
 
+    def test_bitrefill_client_factory_attaches_the_affiliate_ref(self):
+        client = build_bitrefill_client_from_env(
+            {
+                "SIGN402_BITREFILL_MODE": "live",
+                "BITREFILL_API_KEY": "test_key",
+                "SIGN402_BITREFILL_MCP_URL": "https://bitrefill.example/mcp",
+                "SIGN402_BITREFILL_AFFILIATE_REF": "nrVGauph",
+            }
+        )
+
+        self.assertEqual(
+            client._call_tool._server_url,
+            "https://bitrefill.example/mcp/test_key?ref=nrVGauph",
+        )
+
+    def test_bitrefill_client_factory_omits_an_unset_affiliate_ref(self):
+        client = build_bitrefill_client_from_env(
+            {
+                "SIGN402_BITREFILL_MODE": "live",
+                "BITREFILL_API_KEY": "test_key",
+                "SIGN402_BITREFILL_MCP_URL": "https://bitrefill.example/mcp",
+            }
+        )
+
+        self.assertEqual(
+            client._call_tool._server_url,
+            "https://bitrefill.example/mcp/test_key",
+        )
+
     def test_bitrefill_client_factory_reads_the_invoice_poll_budget(self):
         client = build_bitrefill_client_from_env(
             {

@@ -218,6 +218,67 @@ class BitrefillMcpTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("api.bitrefill.com", repr(caller))
 
 
+class BitrefillMcpAffiliateTests(unittest.TestCase):
+    """The affiliate code rides as `?ref=` after the API-key path segment.
+
+    Bitrefill documents `?ref=` on the bare OAuth URL, but our key is a path
+    segment, so the query has to be appended last or the key lands inside it.
+    """
+
+    def _client(self, **overrides):
+        with tempfile.TemporaryDirectory() as root:
+            overrides.setdefault("catalog_cache_path", Path(root) / "catalog.json")
+            return McpBitrefillClient(api_key="key_123", **overrides)
+
+    def test_server_url_carries_affiliate_ref_after_the_key(self):
+        client = self._client(affiliate_ref="nrVGauph")
+
+        self.assertEqual(
+            client._call_tool._server_url,
+            "https://api.bitrefill.com/mcp/key_123?ref=nrVGauph",
+        )
+
+    def test_catalog_caller_carries_affiliate_ref_too(self):
+        client = self._client(affiliate_ref="nrVGauph")
+
+        self.assertEqual(
+            client._catalog_call_tool._server_url,
+            "https://api.bitrefill.com/mcp/key_123?ref=nrVGauph",
+        )
+
+    def test_server_url_has_no_query_without_an_affiliate_ref(self):
+        client = self._client()
+
+        self.assertEqual(
+            client._call_tool._server_url,
+            "https://api.bitrefill.com/mcp/key_123",
+        )
+
+    def test_blank_affiliate_ref_is_treated_as_unset(self):
+        client = self._client(affiliate_ref="   ")
+
+        self.assertEqual(
+            client._call_tool._server_url,
+            "https://api.bitrefill.com/mcp/key_123",
+        )
+
+    def test_rejects_affiliate_ref_already_pinned_to_the_mcp_url(self):
+        # The footgun: `.../mcp?ref=CODE` would put the API key inside the
+        # query string instead of the path.
+        with self.assertRaisesRegex(ValueError, "must not carry a query string"):
+            self._client(mcp_url="https://api.bitrefill.com/mcp?ref=nrVGauph")
+
+    def test_rejects_affiliate_ref_that_is_not_a_bare_code(self):
+        with self.assertRaisesRegex(ValueError, "SIGN402_BITREFILL_AFFILIATE_REF"):
+            self._client(affiliate_ref="nrVGauph&payment_method=balance")
+
+    def test_repr_does_not_leak_the_affiliate_ref(self):
+        client = self._client(affiliate_ref="nrVGauph")
+
+        self.assertNotIn("nrVGauph", repr(client))
+        self.assertNotIn("nrVGauph", repr(client._call_tool))
+
+
 class FakeMcpCaller:
     def __init__(self, responses):
         self.responses = list(responses)

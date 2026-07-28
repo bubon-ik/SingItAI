@@ -168,6 +168,7 @@ class McpBitrefillClient:
         *,
         api_key: str,
         mcp_url: str = "https://api.bitrefill.com/mcp",
+        affiliate_ref: str = "",
         max_purchase_usd: str = "5.00",
         max_invoice_overage_bps: int = 500,
         payment_method: str = "balance",
@@ -191,6 +192,19 @@ class McpBitrefillClient:
         base_url = str(mcp_url).strip().rstrip("/")
         if not base_url.startswith("https://"):
             raise ValueError("SIGN402_BITREFILL_MCP_URL must use https")
+        if "?" in base_url or "#" in base_url:
+            # The API key is a path segment, so a query already on the base URL
+            # would swallow it. The affiliate code belongs in `affiliate_ref`.
+            raise ValueError(
+                "SIGN402_BITREFILL_MCP_URL must not carry a query string"
+            )
+        self.affiliate_ref = str(affiliate_ref).strip()
+        if self.affiliate_ref and not all(
+            char.isalnum() or char in "-_" for char in self.affiliate_ref
+        ):
+            raise ValueError(
+                "SIGN402_BITREFILL_AFFILIATE_REF must be a bare affiliate code"
+            )
         self.max_purchase_usd = Decimal(str(max_purchase_usd))
         if self.max_purchase_usd <= 0:
             raise ValueError("SIGN402_BITREFILL_LIVE_MAX_USD must be positive")
@@ -260,6 +274,8 @@ class McpBitrefillClient:
         self._load_catalog_cache()
         self.sleeper = sleeper or time.sleep
         server_url = f"{base_url}/{urllib.parse.quote(key, safe='')}"
+        if self.affiliate_ref:
+            server_url = f"{server_url}?ref={self.affiliate_ref}"
         self._call_tool = call_tool or McpToolCaller(server_url)
         if catalog_call_tool is not None:
             self._catalog_call_tool = catalog_call_tool

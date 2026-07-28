@@ -2109,6 +2109,7 @@ def build_bitrefill_client_from_env(env: dict[str, str] | None = None):
                 "SIGN402_BITREFILL_MCP_URL",
                 "https://api.bitrefill.com/mcp",
             ),
+            affiliate_ref=values.get("SIGN402_BITREFILL_AFFILIATE_REF", ""),
             max_purchase_usd=values.get(
                 "SIGN402_BITREFILL_LIVE_MAX_USD",
                 DEFAULT_BITREFILL_LIVE_MAX_USD,
