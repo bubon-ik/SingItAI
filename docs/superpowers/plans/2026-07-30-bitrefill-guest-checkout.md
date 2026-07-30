@@ -176,7 +176,7 @@ tests `tests/test_bitrefill_mcp.py`, `tests/test_bitrefill_runner.py`.
 
 - [x] Full gateway suite (738 tests) and plugin suite (175 tests) green.
 - [x] The account path is unchanged: the provider client is called with exactly the arguments it always was, because the guest arguments are omitted when unset. The one new call on that path is the plugin asking the gateway whether an address is required, which answers `false` and buys as before.
-- [ ] One live low-value purchase in guest mode, then confirm attribution appears in the affiliate dashboard.
+- [x] One live low-value purchase in guest mode, then confirm attribution appears in the affiliate dashboard. **Done 2026-07-30: ALZA.CZ Czech Republic 100 CZK credited 0.00000074 BTC.** Guest checkout is live in production with `SIGN402_BITREFILL_CHECKOUT_MODE=guest`.
 
 ## How The Anonymous Session Actually Works (verified 2026-07-30)
 
