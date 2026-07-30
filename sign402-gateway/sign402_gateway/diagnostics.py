@@ -33,12 +33,15 @@ _EVM_VALUE = re.compile(r"\b0x[a-fA-F0-9]{16,}\b")
 _ESIM_VALUE = re.compile(r"(?i)\bLPA:\S+")
 _QR_VALUE = re.compile(r"(?i)\b(?:qr|qrcode|qr_code)\s*[:=]\s*\S+")
 _BEARER_PAIR = re.compile(
-    r"(?i)\b("
+    r"(?i)(?<![\w-])("
     r"pin|code|redemption|activation|activation_code|esim|"
     r"secret|password|private_key|mnemonic|seed|credential|"
-    r"api_key|access_token|refresh_token"
+    r"api_key|access_token|refresh_token|invoice_access_token|"
+    r"invoiceAccessToken|access_link|accessLink|email"
     r")\s*[:=]\s*\S+"
 )
+# The buyer's address also reaches us unlabelled, inside provider prose.
+_EMAIL_VALUE = re.compile(r"(?i)\b[^\s@\"'<>]+@[^\s@\"'<>]+\.[^\s@\"'<>.,;]+")
 _PROVIDER_DIAGNOSTIC_LIMIT = 512
 
 
@@ -81,6 +84,7 @@ def _safe_provider_text(
     text = _EVM_VALUE.sub("<redacted:evm-value>", text)
     text = _ESIM_VALUE.sub("<redacted:esim>", text)
     text = _QR_VALUE.sub("<redacted:qr>", text)
+    text = _EMAIL_VALUE.sub("<redacted:email>", text)
     text = _BEARER_PAIR.sub(
         lambda match: f"{match.group(1)}=<redacted>",
         text,

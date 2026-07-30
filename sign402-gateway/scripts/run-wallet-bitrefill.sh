@@ -17,6 +17,9 @@ fi
 missing=()
 [[ -n "${BITREFILL_API_KEY:-}" ]] || missing+=("BITREFILL_API_KEY")
 [[ -n "${FIREFLY_PORT:-}" ]] || missing+=("FIREFLY_PORT")
+if [[ "${SIGN402_BITREFILL_CHECKOUT_MODE:-account}" == "guest" ]]; then
+  [[ -n "${SIGN402_WALLET_MASTER_KEY:-}" ]] || missing+=("SIGN402_WALLET_MASTER_KEY")
+fi
 
 if (( ${#missing[@]} > 0 )); then
   echo "Missing required env: ${missing[*]}" >&2
@@ -28,6 +31,10 @@ export SIGN402_BITREFILL_MODE="${SIGN402_BITREFILL_MODE:-live}"
 export SIGN402_BITREFILL_MCP_URL="${SIGN402_BITREFILL_MCP_URL:-https://api.bitrefill.com/mcp}"
 export SIGN402_BITREFILL_AFFILIATE_REF="${SIGN402_BITREFILL_AFFILIATE_REF:-nrVGauph}"
 export SIGN402_BITREFILL_PAYMENT_METHOD="${SIGN402_BITREFILL_PAYMENT_METHOD:-usdc_base}"
+# "account" keeps the signed-in MCP session; "guest" buys anonymously so the
+# affiliate ref above is actually credited. Guest checkout needs
+# SIGN402_WALLET_MASTER_KEY set, or the gateway refuses to start.
+export SIGN402_BITREFILL_CHECKOUT_MODE="${SIGN402_BITREFILL_CHECKOUT_MODE:-account}"
 export SIGN402_BITREFILL_USDC_TREASURY_MODE="${SIGN402_BITREFILL_USDC_TREASURY_MODE:-cdp_wallet}"
 export SIGN402_BITREFILL_PRICING_MODE="${SIGN402_BITREFILL_PRICING_MODE:-bankr_real_rate}"
 export SIGN402_BITREFILL_PRICING_BUFFER_BPS="${SIGN402_BITREFILL_PRICING_BUFFER_BPS:-200}"

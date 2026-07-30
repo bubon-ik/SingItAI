@@ -855,7 +855,15 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                     status=400,
                 )
                 return
-            self._send_json({"ok": True, "email": mask_email(stored or "")})
+            self._send_json(
+                {
+                    "ok": True,
+                    "email": mask_email(stored or ""),
+                    "required": bool(
+                        getattr(self.server, "buyer_email_required", False)
+                    ),
+                }
+            )
         except ValueError as exc:
             # `user_emails` never quotes the address into its errors, so this
             # message is safe to return.
@@ -2009,6 +2017,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         user_wallet_api_token: str,
         user_spend_limit_store: "UserSpendLimitStore",
         buyer_email_store: "BuyerEmailStore | None" = None,
+        buyer_email_required: bool = False,
         bankr_llm_purchase_service,
         user_token_transfer_client,
         imessage_approval_service,
@@ -2039,6 +2048,9 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         self.user_wallet_api_token = user_wallet_api_token
         self.user_spend_limit_store = user_spend_limit_store
         self.buyer_email_store = buyer_email_store
+        # Guest checkout cannot create an invoice without one, so the chat
+        # client has to ask for it before it starts a purchase.
+        self.buyer_email_required = buyer_email_required
         self.bankr_llm_purchase_service = bankr_llm_purchase_service
         self.user_token_transfer_client = user_token_transfer_client
         self.imessage_approval_service = imessage_approval_service
@@ -2132,6 +2144,25 @@ def _bitrefill_live_limit_settings(
     }
 
 
+def bitrefill_checkout_mode(env: dict[str, str] | None = None) -> str:
+    """Read which Bitrefill checkout the gateway buys through.
+
+    `account` is the default and the historical behaviour. `guest` opens an
+    unauthenticated MCP session so the purchase is attributable to our
+    affiliate code, which a purchase from our own account never is.
+    """
+    values = os.environ if env is None else env
+    mode = (
+        values.get("SIGN402_BITREFILL_CHECKOUT_MODE", "account").strip().lower()
+        or "account"
+    )
+    if mode not in {"account", "guest"}:
+        raise ValueError(
+            f"unsupported SIGN402_BITREFILL_CHECKOUT_MODE: {mode}"
+        )
+    return mode
+
+
 def build_bitrefill_client_from_env(env: dict[str, str] | None = None):
     from .bitrefill import TestBitrefillClient
     from .bitrefill_mcp import McpBitrefillClient
@@ -2172,6 +2203,7 @@ def build_bitrefill_client_from_env(env: dict[str, str] | None = None):
                 values.get("SIGN402_BITREFILL_LIVE_MAX_INVOICE_OVERAGE_BPS", "500")
             ),
             payment_method=payment_method,
+            checkout_mode=bitrefill_checkout_mode(values),
             treasury_client=treasury_client,
             invoice_poll_attempts=int(
                 values.get("SIGN402_BITREFILL_INVOICE_POLL_ATTEMPTS", "12")
@@ -2417,6 +2449,14 @@ def build_server(
         if sensitive_state_key
         else None
     )
+    checkout_mode = bitrefill_checkout_mode()
+    if checkout_mode == "guest" and sensitive_state_cipher is None:
+        # A guest order is only reachable again through its invoice access
+        # token, and the buyer's address is personal data. Neither may be
+        # written in the clear, so refuse here rather than at the first sale.
+        raise ValueError(
+            "SIGN402_WALLET_MASTER_KEY is required for guest Bitrefill checkout"
+        )
     event_store = LatestEventStore(event_store_path)
     user_event_store = UserPurchaseStore(
         event_store_path.parent / "user-purchases.json",
@@ -2471,6 +2511,9 @@ def build_server(
         store=bitrefill_commerce_store,
         bitrefill_client=bitrefill_client,
         funding_runner=bitrefill_funding_runner,
+        buyer_email_provider=(
+            buyer_email_store.get_email if checkout_mode == "guest" else None
+        ),
     )
     bitrefill_settlement_preparation_runner = BitrefillSettlementPreparationRunner(
         store=bitrefill_commerce_store,
@@ -2598,6 +2641,7 @@ def build_server(
         user_wallet_api_token=os.getenv("SIGN402_WALLET_API_TOKEN", ""),
         user_spend_limit_store=user_spend_limit_store,
         buyer_email_store=buyer_email_store,
+        buyer_email_required=checkout_mode == "guest",
         bankr_llm_purchase_service=None,
         user_token_transfer_client=user_token_transfer_client,
         imessage_approval_service=imessage_approval_service,

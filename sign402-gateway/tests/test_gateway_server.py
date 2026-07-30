@@ -620,6 +620,61 @@ class GatewayServerTests(unittest.TestCase):
                 self.assertEqual(server_constructor.call_count, 1)
                 self.assertEqual(list(root.iterdir()), [])
 
+    def test_build_server_refuses_guest_checkout_without_a_master_key(self):
+        # Guest checkout has to persist a bearer token and a buyer's address;
+        # neither may land in the clear because a key was never set.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch.dict(
+                        os.environ,
+                        {"SIGN402_BITREFILL_CHECKOUT_MODE": "guest"},
+                        clear=True,
+                    )
+                )
+                for target in (
+                    "sign402_gateway.server.build_approval_client_from_env",
+                    "sign402_gateway.server.build_payment_executor",
+                    (
+                        "sign402_gateway.server."
+                        "build_x402_payment_signature_builder"
+                    ),
+                    "sign402_gateway.server.CdpBaseX402PaymentClient",
+                    "sign402_gateway.server.BankrCliX402PaymentClient",
+                    "sign402_gateway.server.build_bitrefill_client_from_env",
+                    "sign402_gateway.server.build_wallet_service_from_env",
+                ):
+                    stack.enter_context(patch(target, return_value=Mock()))
+                server_constructor = stack.enter_context(
+                    patch(
+                        "sign402_gateway.server.Sign402GatewayServer",
+                        return_value=Mock(),
+                    )
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "SIGN402_WALLET_MASTER_KEY",
+                ):
+                    build_server(
+                        "127.0.0.1",
+                        0,
+                        firefly_port=None,
+                        approval_provider="disabled",
+                        payment_executor_dir=root / "payment-executor",
+                        event_store_path=root / "latest-run.json",
+                        agent_state_path=root / "agent-state.json",
+                        cdp_x402_service_dir=root / "cdp-x402-service",
+                        bitrefill_commerce_store_path=root / "orders.sqlite3",
+                        user_wallet_store_path=root / "user-wallets.json",
+                        user_spend_limit_store_path=root / "spend-limits.json",
+                        buyer_email_store_path=root / "buyer-emails.sqlite3",
+                        imessage_approval_store_path=root / "approvals.json",
+                    )
+
+                server_constructor.assert_not_called()
+
     def test_bitrefill_client_factory_defaults_to_safe_test_mode(self):
         client = build_bitrefill_client_from_env({})
 
@@ -722,6 +777,39 @@ class GatewayServerTests(unittest.TestCase):
         )
 
         self.assertIsInstance(client, McpBitrefillClient)
+
+    def test_bitrefill_client_factory_defaults_to_account_checkout(self):
+        client = build_bitrefill_client_from_env(
+            {
+                "SIGN402_BITREFILL_MODE": "live",
+                "BITREFILL_API_KEY": "test_key",
+            }
+        )
+
+        self.assertEqual(client.checkout_mode, "account")
+
+    def test_bitrefill_client_factory_reads_the_guest_checkout_mode(self):
+        client = build_bitrefill_client_from_env(
+            {
+                "SIGN402_BITREFILL_MODE": "live",
+                "BITREFILL_API_KEY": "test_key",
+                "SIGN402_BITREFILL_PAYMENT_METHOD": "usdc_base",
+                "SIGN402_BITREFILL_CHECKOUT_MODE": "guest",
+            }
+        )
+
+        self.assertEqual(client.checkout_mode, "guest")
+
+    def test_bitrefill_client_factory_rejects_guest_checkout_on_balance(self):
+        # A guest has no Bitrefill account, so it has no balance to spend.
+        with self.assertRaisesRegex(ValueError, "guest"):
+            build_bitrefill_client_from_env(
+                {
+                    "SIGN402_BITREFILL_MODE": "live",
+                    "BITREFILL_API_KEY": "test_key",
+                    "SIGN402_BITREFILL_CHECKOUT_MODE": "guest",
+                }
+            )
 
     def test_bitrefill_client_factory_rejects_unknown_mode(self):
         with self.assertRaisesRegex(ValueError, "unsupported SIGN402_BITREFILL_MODE"):
@@ -1703,6 +1791,34 @@ class GatewayServerTests(unittest.TestCase):
         body = self.response_json(handler)
         self.assertTrue(body["ok"])
         self.assertEqual(body["email"], "")
+
+    def test_buyer_email_route_reports_that_guest_checkout_needs_one(self):
+        server = self._buyer_email_server()
+        server.buyer_email_store.get_email.return_value = None
+        server.buyer_email_required = True
+
+        handler = self.make_handler(
+            "/agent/buyer-email",
+            {"telegramUserId": "u1", "action": "get"},
+            server=server,
+            headers=self.llm_auth_headers(),
+        )
+
+        body = self.response_json(handler)
+        self.assertTrue(body["required"])
+
+    def test_buyer_email_route_reports_no_requirement_on_the_account_path(self):
+        server = self._buyer_email_server()
+        server.buyer_email_store.get_email.return_value = None
+
+        handler = self.make_handler(
+            "/agent/buyer-email",
+            {"telegramUserId": "u1", "action": "get"},
+            server=server,
+            headers=self.llm_auth_headers(),
+        )
+
+        self.assertFalse(self.response_json(handler)["required"])
 
     def test_buyer_email_route_stores_an_address(self):
         server = self._buyer_email_server()

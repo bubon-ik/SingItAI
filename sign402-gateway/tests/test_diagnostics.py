@@ -95,6 +95,46 @@ class SafeProviderDiagnosticTests(unittest.TestCase):
         ):
             self.assertNotIn(secret, rendered)
 
+    def test_filters_guest_checkout_bearer_values_and_the_buyer_email(self):
+        # A guest invoice is readable by whoever holds its access token, and
+        # the buyer's address is personal data we only hold to deliver codes.
+        detail = json.dumps(
+            {
+                "error_code": "INVOICE_UNREADABLE",
+                "message": (
+                    "invoice_access_token=tok_live_secret_value "
+                    "access_link=https://bitrefill.example/i/abc "
+                    "email: buyer@example.com"
+                ),
+                "status": 403,
+            }
+        )
+
+        diagnostic = safe_provider_diagnostic(detail, env={})
+
+        self.assertEqual(diagnostic["code"], "INVOICE_UNREADABLE")
+        rendered = str(diagnostic)
+        for secret in (
+            "tok_live_secret_value",
+            "bitrefill.example",
+            "buyer@example.com",
+        ):
+            self.assertNotIn(secret, rendered)
+
+    def test_filters_a_buyer_email_that_carries_no_label(self):
+        diagnostic = safe_provider_diagnostic(
+            json.dumps(
+                {
+                    "code": "CART_REJECTED",
+                    "message": "buyer@example.com is not deliverable",
+                }
+            ),
+            env={},
+        )
+
+        self.assertNotIn("buyer@example.com", str(diagnostic))
+        self.assertIn("<redacted:email>", str(diagnostic))
+
     def test_filters_secret_environment_values_from_allowlisted_fields(self):
         diagnostic = safe_provider_diagnostic(
             json.dumps(
