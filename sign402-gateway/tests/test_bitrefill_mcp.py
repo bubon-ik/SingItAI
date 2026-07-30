@@ -319,63 +319,14 @@ class BitrefillMcpGuestCheckoutTests(unittest.TestCase):
             overrides.setdefault("payment_method", "usdc_base")
             return McpBitrefillClient(api_key="key_123", **overrides)
 
-    def test_guest_mode_sends_no_api_key_on_the_purchase_session(self):
+    def test_guest_mode_still_authenticates_every_session(self):
+        # Bitrefill has no anonymous MCP endpoint: without an Authorization
+        # header the handshake itself answers 401, which takes browsing and
+        # buying down together. What makes an order a guest order is the email.
         client = self._client(checkout_mode="guest")
 
-        self.assertEqual(client._call_tool._api_key, "")
-
-    def test_guest_mode_still_authenticates_every_read(self):
-        # Browsing has nothing to do with attribution, and Bitrefill answers an
-        # unauthenticated MCP session with 401 before any tool is called — so an
-        # anonymous read caller takes search, listing and product details with it.
-        client = self._client(checkout_mode="guest")
-
+        self.assertEqual(client._call_tool._api_key, "key_123")
         self.assertEqual(client._catalog_call_tool._api_key, "key_123")
-        self.assertEqual(client._browse_call_tool._api_key, "key_123")
-
-    def test_guest_mode_searches_over_the_authenticated_session(self):
-        client = self._client(checkout_mode="guest")
-        client._browse_call_tool = FakeMcpCaller([{"products": []}])
-        client._call_tool = FakeMcpCaller([])
-
-        client.search_products(
-            query="amazon",
-            country="CZ",
-            category="",
-            product_type="",
-            include_test_products=False,
-        )
-
-        self.assertEqual(
-            [name for name, _ in client._browse_call_tool.calls],
-            ["search-products"],
-        )
-        self.assertEqual(client._call_tool.calls, [])
-
-    def test_guest_mode_reads_product_details_over_the_authenticated_session(self):
-        client = self._client(checkout_mode="guest")
-        client._browse_call_tool = FakeMcpCaller(
-            [
-                {
-                    "product": {
-                        "id": "amazon-cz",
-                        "name": "Amazon",
-                        "country": "CZ",
-                        "currency": "CZK",
-                        "packages": [{"value": "10", "price": "10.00"}],
-                    }
-                }
-            ]
-        )
-        client._call_tool = FakeMcpCaller([])
-
-        client.get_product_details(product_id="amazon-cz", country="CZ")
-
-        self.assertEqual(
-            [name for name, _ in client._browse_call_tool.calls],
-            ["get-product-details"],
-        )
-        self.assertEqual(client._call_tool.calls, [])
 
     def test_guest_mode_keeps_the_affiliate_ref(self):
         client = self._client(checkout_mode="guest")
@@ -1704,8 +1655,9 @@ class BitrefillMcpUsdcPurchaseTests(unittest.TestCase):
 
         self.assertEqual(prepared["invoiceAccessToken"], "tok_secret")
 
-    def test_guest_checkout_fails_when_no_access_token_comes_back(self):
-        # Without it there is no way to poll this invoice again.
+    def test_guest_checkout_survives_an_invoice_without_an_access_token(self):
+        # The session authenticates either way, so a missing token is not a
+        # reason to refuse a sale the buyer already approved.
         caller = FakeMcpCaller([self._invoice()])
         client = self._client(
             caller,
@@ -1713,12 +1665,14 @@ class BitrefillMcpUsdcPurchaseTests(unittest.TestCase):
             checkout_mode="guest",
         )
 
-        with self.assertRaisesRegex(ValueError, "invoice access token"):
-            client.prepare_purchase(
-                quote=APPROVED_QUOTE,
-                recipient={},
-                buyer_email="buyer@example.com",
-            )
+        prepared = client.prepare_purchase(
+            quote=APPROVED_QUOTE,
+            recipient={},
+            buyer_email="buyer@example.com",
+        )
+
+        self.assertEqual(prepared["invoiceId"], "inv_prepare")
+        self.assertNotIn("invoiceAccessToken", prepared)
 
     def test_account_checkout_stores_no_access_token(self):
         caller = FakeMcpCaller(
@@ -1758,18 +1712,19 @@ class BitrefillMcpUsdcPurchaseTests(unittest.TestCase):
         _name, arguments = caller.calls[0]
         self.assertNotIn("invoice_access_token", arguments)
 
-    def test_guest_polling_without_a_stored_token_names_no_secret(self):
-        caller = FakeMcpCaller([])
+    def test_guest_polling_without_a_token_still_reads_the_invoice(self):
+        caller = FakeMcpCaller([self._invoice(status="paid")])
         client = self._client(
             caller,
             FakeTreasuryClient(),
             checkout_mode="guest",
         )
 
-        with self.assertRaisesRegex(ValueError, "invoice access token"):
-            client.invoice_status(invoice_id="inv_prepare")
+        client.invoice_status(invoice_id="inv_prepare")
 
-        self.assertEqual(caller.calls, [])
+        name, arguments = caller.calls[0]
+        self.assertEqual(name, "get-invoice-by-id")
+        self.assertNotIn("invoice_access_token", arguments)
 
     def test_guest_checkout_refuses_to_buy_without_an_email(self):
         # Bitrefill requires it: without an address a closed chat loses the
@@ -1856,22 +1811,29 @@ class BitrefillMcpUsdcPurchaseTests(unittest.TestCase):
         self.assertEqual(name, "get-invoice-by-id")
         self.assertEqual(arguments["invoice_access_token"], "tok_secret")
 
-    def test_guest_completion_without_a_stored_token_names_no_secret(self):
-        # Losing the token is loud: the invoice cannot be read again without it.
-        caller = FakeMcpCaller([])
+    def test_guest_completion_without_a_stored_token_still_finishes(self):
+        caller = FakeMcpCaller(
+            [
+                self._invoice(
+                    status="complete",
+                    orders=[{"order_id": "ord_1", "status": "delivered"}],
+                )
+            ]
+        )
         client = self._client(
             caller,
             FakeTreasuryClient(),
             checkout_mode="guest",
         )
 
-        with self.assertRaisesRegex(ValueError, "invoice access token"):
-            client.complete_purchase(
-                quote=APPROVED_QUOTE,
-                prepared=self._guest_prepared(),
-            )
+        result = client.complete_purchase(
+            quote=APPROVED_QUOTE,
+            prepared=self._guest_prepared(),
+        )
 
-        self.assertEqual(caller.calls, [])
+        self.assertEqual(result["status"], "delivered")
+        _name, arguments = caller.calls[0]
+        self.assertNotIn("invoice_access_token", arguments)
 
     def test_guest_polling_after_payment_carries_the_token(self):
         caller = FakeMcpCaller(

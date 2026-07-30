@@ -317,24 +317,14 @@ class McpBitrefillClient:
         server_url = base_url
         if self.affiliate_ref:
             server_url = f"{server_url}?ref={self.affiliate_ref}"
-        # A guest purchase must be anonymous: authenticating as the affiliate's
-        # own account is exactly what stops the commission being attributed.
-        # Only the purchase session drops the key. Browsing decides nothing
-        # about attribution, and Bitrefill answers an unauthenticated session
-        # with 401 at connection time, so an anonymous catalog caller would take
-        # search, listing and product details down with it.
-        session_key = "" if self.checkout_mode == "guest" else key
+        # Every session authenticates, guest checkout included. Bitrefill has no
+        # anonymous MCP endpoint: `api.bitrefill.com/mcp` answers 401 at the
+        # handshake without an Authorization header, `/mcp/guest` is 410 and
+        # there is no `mcp.` host. What makes an order a guest order is the
+        # buyer's `email` on the cart, which takes it off our account.
         self._call_tool = call_tool or McpToolCaller(
             server_url,
-            api_key=session_key,
-        )
-        # Reads that only answer "what can I buy": same endpoint and timeout as
-        # the purchase caller, but always authenticated. In account mode the two
-        # would be identical, so nothing extra is built there.
-        self._browse_call_tool = (
-            McpToolCaller(server_url, api_key=key)
-            if call_tool is None and self.checkout_mode == "guest"
-            else self._call_tool
+            api_key=key,
         )
         if catalog_call_tool is not None:
             self._catalog_call_tool = catalog_call_tool
@@ -656,7 +646,7 @@ class McpBitrefillClient:
         type_text = str(product_type).strip().lower()
         if type_text:
             arguments["type"] = type_text
-        payload = self._browse_call_tool("search-products", arguments)
+        payload = self._call_tool("search-products", arguments)
         products = self._normalize_product_rows(
             payload,
             fallback_country=arguments["country"],
@@ -678,7 +668,7 @@ class McpBitrefillClient:
         product_id_text = str(product_id).strip()
         if not product_id_text:
             raise ValueError("productId is required")
-        payload = self._browse_call_tool(
+        payload = self._call_tool(
             "get-product-details",
             {"product_id": product_id_text, "currency": "USD"},
         )
@@ -1130,11 +1120,11 @@ class McpBitrefillClient:
             access_token = self._invoice_access_token(invoice) or str(
                 (fallback or {}).get("invoiceAccessToken") or ""
             )
-            if not access_token:
-                raise ValueError(
-                    "Bitrefill guest invoice carries no invoice access token"
-                )
-            snapshot["invoiceAccessToken"] = access_token
+            # Kept when the provider issues one, and not demanded when it does
+            # not: the session authenticates either way, and Bitrefill's own
+            # answer is that the buyer's email is the delivery backstop.
+            if access_token:
+                snapshot["invoiceAccessToken"] = access_token
         # The deadline is fixed when the invoice is created; a reload happens
         # after funding, so its own duration would move the deadline forward.
         deadline = (
@@ -1367,18 +1357,14 @@ class McpBitrefillClient:
     ) -> dict[str, Any]:
         """Read one invoice, carrying the guest bearer token when there is one.
 
-        A guest invoice belongs to nobody's account, so this token is the only
-        thing that authorises the read.
+        A guest invoice is not filed under our account, so the token is what
+        identifies it when the provider issued one.
         """
         arguments: dict[str, Any] = {"invoice_id": str(invoice_id)}
         if self.checkout_mode == "guest":
             token = str(invoice_access_token or "").strip()
-            if not token:
-                raise ValueError(
-                    "a stored invoice access token is required to read a "
-                    "guest invoice"
-                )
-            arguments["invoice_access_token"] = token
+            if token:
+                arguments["invoice_access_token"] = token
         return self._normalize_invoice(
             self._call_tool("get-invoice-by-id", arguments)
         )
