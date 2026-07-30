@@ -2390,6 +2390,16 @@ class PluginRegistrationTests(unittest.TestCase):
 
         self.assertIn(("set", "buyer@example.com"), client.buyer_email_calls)
         self.assertEqual(len(client.bitrefill_calls), 1)
+        # The order announces itself once, when it actually starts — not again
+        # either side of the question about the address.
+        self.assertEqual(
+            [
+                message
+                for _chat, message, *_rest in gateway.adapters["telegram"].sent
+                if message == plugin._TELEGRAM_BITREFILL_STARTED_MESSAGE
+            ],
+            [plugin._TELEGRAM_BITREFILL_STARTED_MESSAGE],
+        )
         self.assertEqual(client.bitrefill_calls[-1][2], "amazon-cz")
         # Only the masked form may be repeated back into the chat log.
         transcript = "\n".join(

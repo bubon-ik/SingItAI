@@ -1533,7 +1533,6 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
                 token_selector,
                 user_access_token=_user_access_token(client, identity),
             )
-            _send_fixed_reply(gateway, source, _TELEGRAM_BITREFILL_STARTED_MESSAGE)
             _run_in_background(
                 lambda: _execute_telegram_bitrefill_request(
                     product_id=product_id,
@@ -2336,7 +2335,6 @@ def _start_bitrefill_purchase_from_wizard(
         "previousSession": previous_session,
         "operationGeneration": generation,
     }
-    _send_fixed_reply(gateway, source, _TELEGRAM_BITREFILL_STARTED_MESSAGE)
     try:
         _run_in_background(
             lambda: _execute_telegram_bitrefill_request(
@@ -3050,6 +3048,9 @@ def _execute_telegram_bitrefill_request(
             }
             _send_fixed_reply(gateway, source, _BUYER_EMAIL_REQUIRED_PROMPT)
             return
+        # Announced here rather than at the call sites: until the address is
+        # settled the order has not started, and saying so twice is a lie once.
+        _send_fixed_reply(gateway, source, _TELEGRAM_BITREFILL_STARTED_MESSAGE)
         text = client.execute_bitrefill_purchase(
             identity,
             product_id=product_id,
