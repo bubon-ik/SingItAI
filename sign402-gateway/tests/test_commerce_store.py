@@ -884,5 +884,92 @@ class CommerceStoreTests(unittest.TestCase):
                 )
 
 
+
+
+class InvoiceAccessStateTests(unittest.TestCase):
+    """A guest invoice is reachable only through its own bearer token."""
+
+    def _store(self, path, **kwargs):
+        store = BitrefillCommerceStore(path, **kwargs)
+        store.save_quote(
+            {
+                "quoteId": "q1",
+                "productId": "p1",
+                "packageId": "pkg1",
+                "packageValue": "10",
+                "expiresAtEpoch": 999,
+            }
+        )
+        return store
+
+    def test_the_access_token_is_encrypted_in_raw_sqlite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.sqlite3"
+            store = self._store(path, cipher=make_cipher())
+
+            store.advance_state(
+                "q1",
+                "INVOICE_CREATED",
+                {"invoiceAccess": {"invoiceAccessToken": "tok_secret"}},
+            )
+
+            raw = raw_metadata(path, "q1")
+            self.assertNotIn("invoiceAccess", raw)
+            self.assertNotIn("tok_secret", json.dumps(raw))
+            self.assertIn("encryptedInvoiceAccess", raw)
+            self.assertEqual(
+                store.get_quote("q1")["metadata"]["invoiceAccess"],
+                {"invoiceAccessToken": "tok_secret"},
+            )
+            self.assertNotIn(
+                "encryptedInvoiceAccess",
+                store.get_quote("q1")["metadata"],
+            )
+
+    def test_writing_the_reserved_key_directly_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(
+                Path(tmp) / "orders.sqlite3",
+                cipher=make_cipher(),
+            )
+
+            with self.assertRaises(SensitiveStateError):
+                store.advance_state(
+                    "q1",
+                    "INVOICE_CREATED",
+                    {"encryptedInvoiceAccess": "smuggled"},
+                )
+
+    def test_without_a_cipher_the_write_fails_instead_of_storing_plaintext(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.sqlite3"
+            store = self._store(path)
+            before = store.get_quote("q1")
+
+            with self.assertRaises(SensitiveStateError):
+                store.advance_state(
+                    "q1",
+                    "INVOICE_CREATED",
+                    {"invoiceAccess": {"invoiceAccessToken": "tok_secret"}},
+                )
+
+            self.assertEqual(store.get_quote("q1"), before)
+            self.assertNotIn("tok_secret", json.dumps(raw_metadata(path, "q1")))
+
+    def test_a_non_object_access_record_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(
+                Path(tmp) / "orders.sqlite3",
+                cipher=make_cipher(),
+            )
+
+            with self.assertRaises(ValueError):
+                store.advance_state(
+                    "q1",
+                    "INVOICE_CREATED",
+                    {"invoiceAccess": "tok_secret"},
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

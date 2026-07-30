@@ -371,6 +371,16 @@ def _assert_reserved_snapshots_are_canonical(
             raise SensitiveStateError(error)
 
 
+# Metadata the store owns end to end: the caller supplies the plain key, the
+# row only ever holds the encrypted one, and the reserved name cannot be
+# written from outside. Guest invoice access is bearer value — whoever holds
+# the token can read the buyer's redemption codes.
+_ENCRYPTED_METADATA_FIELDS = (
+    ("recipient", "encryptedRecipient", "recipient"),
+    ("invoiceAccess", "encryptedInvoiceAccess", "invoice access"),
+)
+
+
 class BitrefillCommerceStore:
     def __init__(
         self,
@@ -568,20 +578,22 @@ class BitrefillCommerceStore:
         quote: dict[str, Any],
     ) -> dict[str, Any]:
         update = deepcopy(metadata)
-        if "encryptedRecipient" in update:
-            raise SensitiveStateError(
-                "encryptedRecipient is reserved for the commerce store"
-            )
-        if "recipient" in update:
+        for plain_key, encrypted_key, label in _ENCRYPTED_METADATA_FIELDS:
+            if encrypted_key in update:
+                raise SensitiveStateError(
+                    f"{encrypted_key} is reserved for the commerce store"
+                )
+            if plain_key not in update:
+                continue
             if self.cipher is None:
                 raise SensitiveStateError(
                     "SIGN402_WALLET_MASTER_KEY is required "
-                    "to persist Bitrefill recipient state"
+                    f"to persist Bitrefill {label} state"
                 )
-            recipient = update.pop("recipient")
-            if not isinstance(recipient, dict):
-                raise ValueError("recipient must be an object")
-            update["encryptedRecipient"] = self.cipher.encrypt_json(recipient)
+            value = update.pop(plain_key)
+            if not isinstance(value, dict):
+                raise ValueError(f"{plain_key} must be an object")
+            update[encrypted_key] = self.cipher.encrypt_json(value)
         for key, sanitizer in (
             ("bitrefill", sanitize_bitrefill_provider_snapshot),
             ("bitrefillCheckpoint", sanitize_bitrefill_checkpoint),
@@ -598,15 +610,17 @@ class BitrefillCommerceStore:
 
     def _decoded_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
         decoded = deepcopy(metadata)
-        if "encryptedRecipient" in decoded:
-            encrypted = decoded.pop("encryptedRecipient")
+        for plain_key, encrypted_key, label in _ENCRYPTED_METADATA_FIELDS:
+            if encrypted_key not in decoded:
+                continue
+            encrypted = decoded.pop(encrypted_key)
             if self.cipher is None:
                 raise SensitiveStateError(
                     "SIGN402_WALLET_MASTER_KEY is required "
-                    "to read Bitrefill recipient state"
+                    f"to read Bitrefill {label} state"
                 )
-            decoded.pop("recipient", None)
-            decoded["recipient"] = self.cipher.decrypt_json(str(encrypted))
+            decoded.pop(plain_key, None)
+            decoded[plain_key] = self.cipher.decrypt_json(str(encrypted))
         return decoded
 
     def _init_db(self) -> None:

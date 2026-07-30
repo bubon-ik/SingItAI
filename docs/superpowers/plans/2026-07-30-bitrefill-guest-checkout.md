@@ -76,11 +76,11 @@
 - Persisting `invoiceAccess` without a configured cipher raises `SensitiveStateError` rather than storing plaintext.
 
 **Steps:**
-- [ ] Test: round-trip encrypt/decrypt of an invoice access record.
-- [ ] Test: the reserved key cannot be supplied by a caller.
-- [ ] Test: no cipher configured is a hard failure, not a plaintext write.
-- [ ] Test: the raw token never appears in the stored row.
-- [ ] Implement.
+- [x] Test: round-trip encrypt/decrypt of an invoice access record.
+- [x] Test: the reserved key cannot be supplied by a caller.
+- [x] Test: no cipher configured is a hard failure, not a plaintext write.
+- [x] Test: the raw token never appears in the stored row.
+- [x] Implement, generalising the existing recipient mechanism to a field table.
 
 ### Task 4: Guest Polling
 
