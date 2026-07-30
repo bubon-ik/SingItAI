@@ -217,6 +217,91 @@ class BitrefillMcpTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("key_123", repr(caller))
         self.assertNotIn("api.bitrefill.com", repr(caller))
 
+    async def test_tool_caller_sends_the_api_key_as_a_bearer_header(self):
+        # Bitrefill shut down the key-in-path endpoint with HTTP 410 and told
+        # clients to authenticate with an Authorization header instead.
+        session = SimpleNamespace(
+            initialize=AsyncMock(),
+            list_tools=AsyncMock(
+                return_value=SimpleNamespace(
+                    tools=[SimpleNamespace(name="search-products")]
+                )
+            ),
+            call_tool=AsyncMock(
+                return_value=FakeToolResult(structured={"products": []})
+            ),
+        )
+        caller = McpToolCaller(
+            "https://api.bitrefill.com/mcp",
+            api_key="key_123",
+        )
+
+        with (
+            patch(
+                "sign402_gateway.bitrefill_mcp.httpx.AsyncClient",
+                return_value=AsyncContext(Mock()),
+            ) as async_client,
+            patch(
+                "sign402_gateway.bitrefill_mcp.streamable_http_client",
+                return_value=AsyncContext((Mock(), Mock(), Mock())),
+            ) as streamable,
+            patch(
+                "sign402_gateway.bitrefill_mcp.ClientSession",
+                return_value=AsyncContext(session),
+            ),
+        ):
+            await caller._call("search-products", {"query": "Steam"})
+
+        headers = async_client.call_args.kwargs["headers"]
+        self.assertEqual(headers["Authorization"], "Bearer key_123")
+        self.assertEqual(
+            streamable.call_args.args[0],
+            "https://api.bitrefill.com/mcp",
+        )
+
+    async def test_tool_caller_sends_no_auth_header_without_a_key(self):
+        session = SimpleNamespace(
+            initialize=AsyncMock(),
+            list_tools=AsyncMock(
+                return_value=SimpleNamespace(
+                    tools=[SimpleNamespace(name="search-products")]
+                )
+            ),
+            call_tool=AsyncMock(
+                return_value=FakeToolResult(structured={"products": []})
+            ),
+        )
+        caller = McpToolCaller("https://api.bitrefill.com/mcp")
+
+        with (
+            patch(
+                "sign402_gateway.bitrefill_mcp.httpx.AsyncClient",
+                return_value=AsyncContext(Mock()),
+            ) as async_client,
+            patch(
+                "sign402_gateway.bitrefill_mcp.streamable_http_client",
+                return_value=AsyncContext((Mock(), Mock(), Mock())),
+            ),
+            patch(
+                "sign402_gateway.bitrefill_mcp.ClientSession",
+                return_value=AsyncContext(session),
+            ),
+        ):
+            await caller._call("search-products", {"query": "Steam"})
+
+        self.assertNotIn(
+            "Authorization",
+            async_client.call_args.kwargs.get("headers", {}),
+        )
+
+    def test_tool_caller_repr_never_leaks_the_api_key(self):
+        caller = McpToolCaller(
+            "https://api.bitrefill.com/mcp",
+            api_key="key_123",
+        )
+
+        self.assertNotIn("key_123", repr(caller))
+
 
 class BitrefillMcpAffiliateTests(unittest.TestCase):
     """The affiliate code rides as `?ref=` after the API-key path segment.
@@ -235,7 +320,7 @@ class BitrefillMcpAffiliateTests(unittest.TestCase):
 
         self.assertEqual(
             client._call_tool._server_url,
-            "https://api.bitrefill.com/mcp/key_123?ref=nrVGauph",
+            "https://api.bitrefill.com/mcp?ref=nrVGauph",
         )
 
     def test_catalog_caller_carries_affiliate_ref_too(self):
@@ -243,7 +328,7 @@ class BitrefillMcpAffiliateTests(unittest.TestCase):
 
         self.assertEqual(
             client._catalog_call_tool._server_url,
-            "https://api.bitrefill.com/mcp/key_123?ref=nrVGauph",
+            "https://api.bitrefill.com/mcp?ref=nrVGauph",
         )
 
     def test_server_url_has_no_query_without_an_affiliate_ref(self):
@@ -251,7 +336,7 @@ class BitrefillMcpAffiliateTests(unittest.TestCase):
 
         self.assertEqual(
             client._call_tool._server_url,
-            "https://api.bitrefill.com/mcp/key_123",
+            "https://api.bitrefill.com/mcp",
         )
 
     def test_blank_affiliate_ref_is_treated_as_unset(self):
@@ -259,7 +344,7 @@ class BitrefillMcpAffiliateTests(unittest.TestCase):
 
         self.assertEqual(
             client._call_tool._server_url,
-            "https://api.bitrefill.com/mcp/key_123",
+            "https://api.bitrefill.com/mcp",
         )
 
     def test_rejects_affiliate_ref_already_pinned_to_the_mcp_url(self):
@@ -277,6 +362,18 @@ class BitrefillMcpAffiliateTests(unittest.TestCase):
 
         self.assertNotIn("nrVGauph", repr(client))
         self.assertNotIn("nrVGauph", repr(client._call_tool))
+
+    def test_the_api_key_never_lands_in_the_url(self):
+        client = self._client(affiliate_ref="nrVGauph")
+
+        self.assertNotIn("key_123", client._call_tool._server_url)
+        self.assertNotIn("key_123", client._catalog_call_tool._server_url)
+
+    def test_both_callers_authenticate_with_the_api_key(self):
+        client = self._client()
+
+        self.assertEqual(client._call_tool._api_key, "key_123")
+        self.assertEqual(client._catalog_call_tool._api_key, "key_123")
 
 
 class FakeMcpCaller:
@@ -405,10 +502,13 @@ class BitrefillMcpCatalogTests(unittest.TestCase):
         self.assertEqual(client.catalog_cache_ttl_seconds, 321.0)
         self.assertEqual(client.catalog_cache_path, Path(tmpdir) / "catalog.json")
         self.assertEqual(caller_factory.call_count, 2)
-        self.assertEqual(caller_factory.call_args_list[0].kwargs, {})
+        self.assertEqual(
+            caller_factory.call_args_list[0].kwargs,
+            {"api_key": "key_123"},
+        )
         self.assertEqual(
             caller_factory.call_args_list[1].kwargs,
-            {"timeout_seconds": 7.0},
+            {"api_key": "key_123", "timeout_seconds": 7.0},
         )
 
     def test_concurrent_cold_catalog_requests_are_single_flight(self):

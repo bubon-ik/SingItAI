@@ -656,7 +656,7 @@ class GatewayServerTests(unittest.TestCase):
 
         self.assertEqual(
             client._call_tool._server_url,
-            "https://bitrefill.example/mcp/test_key?ref=nrVGauph",
+            "https://bitrefill.example/mcp?ref=nrVGauph",
         )
 
     def test_bitrefill_client_factory_omits_an_unset_affiliate_ref(self):
@@ -670,7 +670,7 @@ class GatewayServerTests(unittest.TestCase):
 
         self.assertEqual(
             client._call_tool._server_url,
-            "https://bitrefill.example/mcp/test_key",
+            "https://bitrefill.example/mcp",
         )
 
     def test_bitrefill_client_factory_reads_the_invoice_poll_budget(self):

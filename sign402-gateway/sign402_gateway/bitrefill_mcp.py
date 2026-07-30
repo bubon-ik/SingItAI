@@ -94,6 +94,7 @@ class McpToolCaller:
         self,
         server_url: str,
         *,
+        api_key: str = "",
         timeout_seconds: float = 60.0,
         max_response_bytes: int = MAX_MCP_RESPONSE_BYTES,
     ):
@@ -101,6 +102,9 @@ class McpToolCaller:
         if not url:
             raise ValueError("Bitrefill MCP server URL is required")
         self._server_url = url
+        # Bitrefill retired the key-in-path endpoint (HTTP 410) and now expects
+        # the key in an Authorization header, so it never rides in the URL.
+        self._api_key = str(api_key).strip()
         self.timeout_seconds = float(timeout_seconds)
         if self.timeout_seconds <= 0:
             raise ValueError("Bitrefill MCP timeout must be positive")
@@ -135,9 +139,13 @@ class McpToolCaller:
         tool_name: str,
         arguments: dict[str, Any],
     ) -> dict[str, Any]:
+        headers = (
+            {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
+        )
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(self.timeout_seconds),
             follow_redirects=False,
+            headers=headers,
         ) as http_client:
             async with streamable_http_client(
                 self._server_url,
@@ -273,10 +281,10 @@ class McpBitrefillClient:
         )
         self._load_catalog_cache()
         self.sleeper = sleeper or time.sleep
-        server_url = f"{base_url}/{urllib.parse.quote(key, safe='')}"
+        server_url = base_url
         if self.affiliate_ref:
             server_url = f"{server_url}?ref={self.affiliate_ref}"
-        self._call_tool = call_tool or McpToolCaller(server_url)
+        self._call_tool = call_tool or McpToolCaller(server_url, api_key=key)
         if catalog_call_tool is not None:
             self._catalog_call_tool = catalog_call_tool
         elif call_tool is not None:
@@ -284,6 +292,7 @@ class McpBitrefillClient:
         else:
             self._catalog_call_tool = McpToolCaller(
                 server_url,
+                api_key=key,
                 timeout_seconds=self.catalog_timeout_seconds,
             )
 
