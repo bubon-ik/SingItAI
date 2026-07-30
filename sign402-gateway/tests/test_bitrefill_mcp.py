@@ -317,16 +317,29 @@ class BitrefillMcpGuestCheckoutTests(unittest.TestCase):
             # Production pays in USDC; the balance default belongs to the
             # account path only.
             overrides.setdefault("payment_method", "usdc_base")
+            overrides.setdefault(
+                "guest_authorizer",
+                SimpleNamespace(token=lambda: "guest_token_1"),
+            )
             return McpBitrefillClient(api_key="key_123", **overrides)
 
-    def test_guest_mode_still_authenticates_every_session(self):
-        # Bitrefill has no anonymous MCP endpoint: without an Authorization
-        # header the handshake itself answers 401, which takes browsing and
-        # buying down together. What makes an order a guest order is the email.
+    def test_guest_mode_buys_over_an_anonymous_token(self):
+        # Not "no Authorization header" — that is answered with an OAuth
+        # challenge. The bearer is an anonymous token tied to no account.
         client = self._client(checkout_mode="guest")
 
-        self.assertEqual(client._call_tool._api_key, "key_123")
+        self.assertEqual(client._call_tool._api_key, "")
+        self.assertEqual(client._call_tool._token_provider(), "guest_token_1")
+
+    def test_guest_mode_keeps_our_own_key_for_reads(self):
+        client = self._client(checkout_mode="guest")
+
         self.assertEqual(client._catalog_call_tool._api_key, "key_123")
+        self.assertIsNone(client._catalog_call_tool._token_provider)
+
+    def test_guest_mode_refuses_to_build_without_an_authorizer(self):
+        with self.assertRaisesRegex(ValueError, "anonymous MCP authorizer"):
+            self._client(checkout_mode="guest", guest_authorizer=None)
 
     def test_guest_mode_keeps_the_affiliate_ref(self):
         client = self._client(checkout_mode="guest")

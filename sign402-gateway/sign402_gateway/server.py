@@ -2165,6 +2165,7 @@ def bitrefill_checkout_mode(env: dict[str, str] | None = None) -> str:
 
 def build_bitrefill_client_from_env(env: dict[str, str] | None = None):
     from .bitrefill import TestBitrefillClient
+    from .bitrefill_guest_auth import GuestMcpAuthorizer, build_http_request
     from .bitrefill_mcp import McpBitrefillClient
 
     values = os.environ if env is None else env
@@ -2188,12 +2189,22 @@ def build_bitrefill_client_from_env(env: dict[str, str] | None = None):
                 treasury_client = BankrTreasuryClient()
             else:
                 raise ValueError(f"unsupported SIGN402_BITREFILL_USDC_TREASURY_MODE: {treasury_mode}")
+        mcp_url = values.get(
+            "SIGN402_BITREFILL_MCP_URL",
+            "https://api.bitrefill.com/mcp",
+        )
+        checkout_mode = bitrefill_checkout_mode(values)
+        guest_authorizer = (
+            GuestMcpAuthorizer(
+                mcp_url=mcp_url,
+                request=build_http_request(),
+            )
+            if checkout_mode == "guest"
+            else None
+        )
         return McpBitrefillClient(
             api_key=values["BITREFILL_API_KEY"],
-            mcp_url=values.get(
-                "SIGN402_BITREFILL_MCP_URL",
-                "https://api.bitrefill.com/mcp",
-            ),
+            mcp_url=mcp_url,
             affiliate_ref=values.get("SIGN402_BITREFILL_AFFILIATE_REF", ""),
             max_purchase_usd=values.get(
                 "SIGN402_BITREFILL_LIVE_MAX_USD",
@@ -2203,7 +2214,8 @@ def build_bitrefill_client_from_env(env: dict[str, str] | None = None):
                 values.get("SIGN402_BITREFILL_LIVE_MAX_INVOICE_OVERAGE_BPS", "500")
             ),
             payment_method=payment_method,
-            checkout_mode=bitrefill_checkout_mode(values),
+            checkout_mode=checkout_mode,
+            guest_authorizer=guest_authorizer,
             treasury_client=treasury_client,
             invoice_poll_attempts=int(
                 values.get("SIGN402_BITREFILL_INVOICE_POLL_ATTEMPTS", "12")

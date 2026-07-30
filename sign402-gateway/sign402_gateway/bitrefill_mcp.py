@@ -95,6 +95,7 @@ class McpToolCaller:
         server_url: str,
         *,
         api_key: str = "",
+        token_provider: Any | None = None,
         timeout_seconds: float = 60.0,
         max_response_bytes: int = MAX_MCP_RESPONSE_BYTES,
     ):
@@ -105,6 +106,9 @@ class McpToolCaller:
         # Bitrefill retired the key-in-path endpoint (HTTP 410) and now expects
         # the key in an Authorization header, so it never rides in the URL.
         self._api_key = str(api_key).strip()
+        # A guest session authenticates as nobody: the bearer is a short-lived
+        # anonymous token, fetched per call so an expiry heals itself.
+        self._token_provider = token_provider
         self.timeout_seconds = float(timeout_seconds)
         if self.timeout_seconds <= 0:
             raise ValueError("Bitrefill MCP timeout must be positive")
@@ -139,9 +143,12 @@ class McpToolCaller:
         tool_name: str,
         arguments: dict[str, Any],
     ) -> dict[str, Any]:
-        headers = (
-            {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
+        bearer = (
+            str(self._token_provider() or "").strip()
+            if self._token_provider is not None
+            else self._api_key
         )
+        headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(self.timeout_seconds),
             follow_redirects=False,
@@ -209,6 +216,7 @@ class McpBitrefillClient:
         invoice_min_seconds_left: float = 180.0,
         invoice_payment_margin_seconds: float = 30.0,
         sleeper: Any | None = None,
+        guest_authorizer: Any | None = None,
         call_tool: Any | None = None,
         catalog_call_tool: Any | None = None,
         catalog_cache_ttl_seconds: float | None = None,
@@ -317,15 +325,24 @@ class McpBitrefillClient:
         server_url = base_url
         if self.affiliate_ref:
             server_url = f"{server_url}?ref={self.affiliate_ref}"
-        # Every session authenticates, guest checkout included. Bitrefill has no
-        # anonymous MCP endpoint: `api.bitrefill.com/mcp` answers 401 at the
-        # handshake without an Authorization header, `/mcp/guest` is 410 and
-        # there is no `mcp.` host. What makes an order a guest order is the
-        # buyer's `email` on the cart, which takes it off our account.
-        self._call_tool = call_tool or McpToolCaller(
-            server_url,
-            api_key=key,
-        )
+        # The purchase session is the only one that decides attribution, and in
+        # guest mode it must belong to nobody: it authenticates with an
+        # anonymous token, obtained by registering a throwaway OAuth client.
+        # Reads keep our own key — they decide nothing and cost a token less.
+        self._guest_authorizer = guest_authorizer
+        if call_tool is not None:
+            self._call_tool = call_tool
+        elif self.checkout_mode == "guest":
+            if guest_authorizer is None:
+                raise ValueError(
+                    "guest checkout requires an anonymous MCP authorizer"
+                )
+            self._call_tool = McpToolCaller(
+                server_url,
+                token_provider=guest_authorizer.token,
+            )
+        else:
+            self._call_tool = McpToolCaller(server_url, api_key=key)
         if catalog_call_tool is not None:
             self._catalog_call_tool = catalog_call_tool
         elif call_tool is not None:

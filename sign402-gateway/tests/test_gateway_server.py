@@ -799,6 +799,22 @@ class GatewayServerTests(unittest.TestCase):
         )
 
         self.assertEqual(client.checkout_mode, "guest")
+        # The purchase session carries no account credential at all: its bearer
+        # is minted anonymously, which is what makes the order attributable.
+        self.assertIsNotNone(client._guest_authorizer)
+        self.assertEqual(client._call_tool._api_key, "")
+        self.assertNotIn("test_key", repr(client._call_tool))
+
+    def test_bitrefill_client_factory_leaves_account_mode_unauthorized(self):
+        client = build_bitrefill_client_from_env(
+            {
+                "SIGN402_BITREFILL_MODE": "live",
+                "BITREFILL_API_KEY": "test_key",
+            }
+        )
+
+        self.assertIsNone(client._guest_authorizer)
+        self.assertEqual(client._call_tool._api_key, "test_key")
 
     def test_bitrefill_client_factory_rejects_guest_checkout_on_balance(self):
         # A guest has no Bitrefill account, so it has no balance to spend.

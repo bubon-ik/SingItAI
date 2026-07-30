@@ -178,6 +178,23 @@ tests `tests/test_bitrefill_mcp.py`, `tests/test_bitrefill_runner.py`.
 - [x] The account path is unchanged: the provider client is called with exactly the arguments it always was, because the guest arguments are omitted when unset. The one new call on that path is the plugin asking the gateway whether an address is required, which answers `false` and buys as before.
 - [ ] One live low-value purchase in guest mode, then confirm attribution appears in the affiliate dashboard.
 
+## How The Anonymous Session Actually Works (verified 2026-07-30)
+
+"Unauthenticated MCP session" does not mean sending no `Authorization` header —
+that is answered with an OAuth challenge (`401`, `WWW-Authenticate: Bearer`) and
+kills the connection before any tool runs. Bitrefill supports **anonymous
+dynamic client registration**, so a session belonging to no account is obtained
+by registering a throwaway client:
+
+1. `GET /.well-known/oauth-protected-resource` → `resource`, `authorization_servers`
+2. `GET /.well-known/oauth-authorization-server/oauth/mcp` → `registration_endpoint`, `token_endpoint`
+3. `POST /oauth/mcp/register` with `redirect_uris` (required even for a headless client) → `client_id`, `client_secret`
+4. `POST /oauth/mcp/token` with `grant_type=client_credentials` **and `resource`** (rejected without it) → `access_token`, 6h
+5. MCP session with that bearer on `…/mcp?ref=<code>` → `search-products`, `get-product-details`, `buy-products`, `get-invoice-by-id` all available
+
+Probed end to end from the shipped code: the anonymous session returns the real
+catalog and product details. `SIGN402_BITREFILL_AFFILIATE_REF` stays on the URL.
+
 ## Known Limits
 
 - Guest checkout is wired for the managed-wallet chat flow. The agent route `/agent/buy-bitrefill` has no Telegram user and therefore no stored address, so in guest mode it fails at invoice creation instead of buying.
