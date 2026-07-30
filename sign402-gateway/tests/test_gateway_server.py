@@ -1666,6 +1666,114 @@ class GatewayServerTests(unittest.TestCase):
             "X-Sign402-User-Token": user_token,
         }
 
+    def _buyer_email_server(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "u1"
+        server.buyer_email_store = Mock()
+        return server
+
+    def test_buyer_email_route_reports_a_masked_address(self):
+        server = self._buyer_email_server()
+        server.buyer_email_store.get_email.return_value = "buyer@example.com"
+
+        handler = self.make_handler(
+            "/agent/buyer-email",
+            {"telegramUserId": "u1", "action": "get"},
+            server=server,
+            headers=self.llm_auth_headers(),
+        )
+
+        body = self.response_json(handler)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["email"], "b***@example.com")
+        # The full address is personal data and must not travel in a response.
+        self.assertNotIn("buyer@example.com", self.response_text(handler))
+
+    def test_buyer_email_route_reports_when_none_is_stored(self):
+        server = self._buyer_email_server()
+        server.buyer_email_store.get_email.return_value = None
+
+        handler = self.make_handler(
+            "/agent/buyer-email",
+            {"telegramUserId": "u1", "action": "get"},
+            server=server,
+            headers=self.llm_auth_headers(),
+        )
+
+        body = self.response_json(handler)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["email"], "")
+
+    def test_buyer_email_route_stores_an_address(self):
+        server = self._buyer_email_server()
+        server.buyer_email_store.set_email.return_value = "buyer@example.com"
+
+        handler = self.make_handler(
+            "/agent/buyer-email",
+            {
+                "telegramUserId": "u1",
+                "action": "set",
+                "email": "Buyer@Example.com",
+            },
+            server=server,
+            headers=self.llm_auth_headers(),
+        )
+
+        body = self.response_json(handler)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["email"], "b***@example.com")
+        server.buyer_email_store.set_email.assert_called_once_with(
+            "u1",
+            "Buyer@Example.com",
+        )
+
+    def test_buyer_email_route_rejects_an_invalid_address(self):
+        server = self._buyer_email_server()
+        server.buyer_email_store.set_email.side_effect = ValueError(
+            "that is not a valid email address"
+        )
+
+        handler = self.make_handler(
+            "/agent/buyer-email",
+            {"telegramUserId": "u1", "action": "set", "email": "nope"},
+            server=server,
+            headers=self.llm_auth_headers(),
+        )
+
+        body = self.response_json(handler)
+        self.assertFalse(body["ok"])
+        self.assertNotIn("nope", self.response_text(handler))
+
+    def test_buyer_email_route_forgets_an_address(self):
+        server = self._buyer_email_server()
+        server.buyer_email_store.forget_email.return_value = True
+
+        handler = self.make_handler(
+            "/agent/buyer-email",
+            {"telegramUserId": "u1", "action": "forget"},
+            server=server,
+            headers=self.llm_auth_headers(),
+        )
+
+        body = self.response_json(handler)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["email"], "")
+        server.buyer_email_store.forget_email.assert_called_once_with("u1")
+
+    def test_buyer_email_route_rejects_an_unknown_action(self):
+        server = self._buyer_email_server()
+
+        handler = self.make_handler(
+            "/agent/buyer-email",
+            {"telegramUserId": "u1", "action": "drop-table"},
+            server=server,
+            headers=self.llm_auth_headers(),
+        )
+
+        self.assertFalse(self.response_json(handler)["ok"])
+        server.buyer_email_store.set_email.assert_not_called()
+        server.buyer_email_store.forget_email.assert_not_called()
+
     def test_kill_switch_blocks_every_transaction_route_before_dispatch(self):
         routes = {
             "/approve-payment": "_handle_approve_payment",

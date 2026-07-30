@@ -33,6 +33,7 @@ DEFAULT_BITREFILL_COMMERCE_STORE_PATH = ROOT_DIR / "demo-dashboard" / "bitrefill
 DEFAULT_BITREFILL_LIVE_MAX_USD = "5.00"
 DEFAULT_CDP_X402_SERVICE_DIR = ROOT_DIR / "cdp-x402-service"
 DEFAULT_USER_SPEND_LIMIT_STORE_PATH = Path.home() / ".sign402" / "user-spend-limits.json"
+DEFAULT_BUYER_EMAIL_STORE_PATH = Path.home() / ".sign402" / "buyer-emails.sqlite3"
 DEFAULT_BASE_REPORT_URL = "http://127.0.0.1:4021/paid/sign402-report"
 LOCAL_BANKR_CLI = ROOT_DIR / ".tools" / "bankr-cli" / "node_modules" / ".bin" / "bankr"
 DEFAULT_BANKR_CLI = str(LOCAL_BANKR_CLI) if LOCAL_BANKR_CLI.exists() else "bankr"
@@ -117,6 +118,7 @@ from .secure_state import (
     SensitiveStateError,
     atomic_write_private_json,
 )
+from .user_emails import BuyerEmailStore, mask_email
 from .user_wallets import (
     BASE_NATIVE_ETH_ASSET_ID,
     DEFAULT_USER_WALLET_STORE_PATH,
@@ -598,6 +600,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         if path == "/agent/spending-limits":
             self._handle_agent_spending_limits()
             return
+        if path == "/agent/buyer-email":
+            self._handle_agent_buyer_email()
+            return
         if path == "/agent/withdraw/tokens":
             self._handle_agent_withdraw_tokens()
             return
@@ -808,6 +813,53 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=503)
         except Exception as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_buyer_email(self) -> None:
+        """Read, set, or forget the address a guest invoice delivers to.
+
+        Responses carry only the masked form: the caller already knows the
+        address it just sent, and nothing downstream needs the rest.
+        """
+        try:
+            payload = self._read_json()
+            telegram_user_id = _require_authenticated_user(self, payload)
+            store = getattr(self.server, "buyer_email_store", None)
+            if store is None:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "telegramText": (
+                            "Buyer email is not configured on this gateway."
+                        ),
+                    },
+                    status=503,
+                )
+                return
+            action = str(payload.get("action") or "get").strip().lower()
+            if action == "get":
+                stored = store.get_email(telegram_user_id)
+            elif action == "set":
+                stored = store.set_email(
+                    telegram_user_id,
+                    _read_required_text(payload, "email"),
+                )
+            elif action == "forget":
+                store.forget_email(telegram_user_id)
+                stored = None
+            else:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "telegramText": "Unsupported buyer email action.",
+                    },
+                    status=400,
+                )
+                return
+            self._send_json({"ok": True, "email": mask_email(stored or "")})
+        except ValueError as exc:
+            # `user_emails` never quotes the address into its errors, so this
+            # message is safe to return.
+            self._send_json({"ok": False, "telegramText": str(exc)}, status=400)
 
     def _handle_agent_last_purchase(self) -> None:
         try:
@@ -1956,6 +2008,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         user_wallet_service,
         user_wallet_api_token: str,
         user_spend_limit_store: "UserSpendLimitStore",
+        buyer_email_store: "BuyerEmailStore | None" = None,
         bankr_llm_purchase_service,
         user_token_transfer_client,
         imessage_approval_service,
@@ -1985,6 +2038,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         self.user_wallet_service = user_wallet_service
         self.user_wallet_api_token = user_wallet_api_token
         self.user_spend_limit_store = user_spend_limit_store
+        self.buyer_email_store = buyer_email_store
         self.bankr_llm_purchase_service = bankr_llm_purchase_service
         self.user_token_transfer_client = user_token_transfer_client
         self.imessage_approval_service = imessage_approval_service
@@ -2327,6 +2381,7 @@ def build_server(
     bitrefill_commerce_store_path: Path = DEFAULT_BITREFILL_COMMERCE_STORE_PATH,
     user_wallet_store_path: Path = DEFAULT_USER_WALLET_STORE_PATH,
     user_spend_limit_store_path: Path = DEFAULT_USER_SPEND_LIMIT_STORE_PATH,
+    buyer_email_store_path: Path = DEFAULT_BUYER_EMAIL_STORE_PATH,
     imessage_approval_store_path: Path = DEFAULT_IMESSAGE_APPROVAL_STORE_PATH,
 ) -> Sign402GatewayServer:
     from .bitrefill_runner import (
@@ -2368,6 +2423,10 @@ def build_server(
         cipher=sensitive_state_cipher,
     )
     user_spend_limit_store = UserSpendLimitStore(user_spend_limit_store_path)
+    buyer_email_store = BuyerEmailStore(
+        buyer_email_store_path,
+        cipher=sensitive_state_cipher,
+    )
     agent_state_store = AgentStateStore(agent_state_path)
     bitrefill_commerce_store = BitrefillCommerceStore(
         bitrefill_commerce_store_path,
@@ -2538,6 +2597,7 @@ def build_server(
         user_wallet_service=user_wallet_service,
         user_wallet_api_token=os.getenv("SIGN402_WALLET_API_TOKEN", ""),
         user_spend_limit_store=user_spend_limit_store,
+        buyer_email_store=buyer_email_store,
         bankr_llm_purchase_service=None,
         user_token_transfer_client=user_token_transfer_client,
         imessage_approval_service=imessage_approval_service,
