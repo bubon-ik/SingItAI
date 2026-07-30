@@ -89,6 +89,12 @@ class UserWalletTests(unittest.TestCase):
         self.assertRegex(result["wallet"]["address"], r"^0x[a-fA-F0-9]{40}$")
         self.assertIn("Spending is disabled", result["telegramText"])
         self.assertNotIn("private", result["wallet"])
+        # Naming one channel misleads: either iMessage or WhatsApp unlocks
+        # spending, and "a small amount only" read as a warning about the
+        # wallet's safety.
+        self.assertIn("WhatsApp", result["telegramText"])
+        self.assertIn("iMessage", result["telegramText"])
+        self.assertNotIn("small amount", result["telegramText"])
 
         row = store.get_wallet_by_telegram_user_id("1045618308")
         self.assertIsNotNone(row)

@@ -374,8 +374,7 @@ class ManagedBaseWalletService:
                 "balanceUnavailable": True,
                 "telegramText": (
                     f"Base agent wallet: {safe_wallet['address']}\n\n"
-                    "Balance lookup is not configured yet. Spending is disabled until "
-                    "iMessage approval is configured."
+                    f"Balance lookup is not configured yet. {_SPENDING_DISABLED_LINE}"
                 ),
             }
 
@@ -391,8 +390,7 @@ class ManagedBaseWalletService:
                 "balanceUnavailable": True,
                 "telegramText": (
                     f"Base agent wallet: {safe_wallet['address']}\n\n"
-                    "Balance lookup is unavailable right now. Spending is disabled "
-                    "until iMessage approval is configured."
+                    f"Balance lookup is unavailable right now. {_SPENDING_DISABLED_LINE}"
                 ),
             }
         response = {
@@ -535,18 +533,24 @@ def _safe_wallet(wallet: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Either approval channel unlocks spending, so naming only one sends users
+# looking for a setting they do not need.
+_SPENDING_DISABLED_LINE = (
+    "Spending is disabled until iMessage or WhatsApp approval is configured."
+)
+
+
 def _wallet_response(wallet: dict[str, Any], *, created: bool) -> dict[str, Any]:
     safe_wallet = _safe_wallet(wallet)
     if created:
         text = (
             f"Your Base agent wallet is ready:\n{safe_wallet['address']}\n\n"
-            "Fund this wallet with a small amount only.\n"
-            "Spending is disabled until iMessage approval is configured."
+            f"{_SPENDING_DISABLED_LINE}"
         )
     else:
         text = (
             f"Your Base agent wallet:\n{safe_wallet['address']}\n\n"
-            "Spending is disabled until iMessage approval is configured."
+            f"{_SPENDING_DISABLED_LINE}"
         )
     return {
         "ok": True,
@@ -596,7 +600,7 @@ def _balance_text(
             contract = str(token.get("contractAddress", ""))
             lines.append(f"- {symbol}: {value} ({_short_address(contract)})")
     lines.append("")
-    lines.append("Spending is disabled until iMessage approval is configured.")
+    lines.append(_SPENDING_DISABLED_LINE)
     return "\n".join(lines)
 
 

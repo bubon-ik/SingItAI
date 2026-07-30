@@ -32,6 +32,9 @@ _TELEGRAM_ONLY_MESSAGE = (
 _UNEXPECTED_ERROR_MESSAGE = (
     "Wallet service is temporarily unavailable. Please try again."
 )
+_INVALID_WALLET_RESPONSE = (
+    "Wallet service returned an invalid response. Please try again."
+)
 _IMESSAGE_UNEXPECTED_ERROR_MESSAGE = (
     "iMessage approval service is temporarily unavailable. Please try again."
 )
@@ -325,8 +328,16 @@ def _build_start_handler():
             return _TELEGRAM_ONLY_MESSAGE
         try:
             client = _client_factory()
-            wallet_text = await asyncio.to_thread(_create_wallet_text, client, identity)
-            return _start_text(wallet_text, support_id=identity.user_id)
+            address = await asyncio.to_thread(
+                _create_wallet_address,
+                client,
+                identity,
+            )
+            # Hermes sends this return value itself, so parse_mode is not ours
+            # to set here and the markup has to come off.
+            return _html_to_plain(
+                _start_text(address, support_id=identity.user_id)
+            )
         except GatewayClientError as exc:
             return exc.user_message
         except Exception as exc:
@@ -444,19 +455,74 @@ def _build_llm_code_handler():
     return _build_llm_handler("verify")
 
 
-def _start_text(wallet_text: str, *, support_id: str = "") -> str:
-    support = str(support_id or "").strip()
-    support_line = f"Support ID: {support}\n\n" if support else ""
+def _start_text(wallet_address: str, *, support_id: str = "") -> str:
+    """The welcome screen, as Telegram HTML.
+
+    HTML rather than MarkdownV2: only `&`, `<` and `>` need escaping, so a dot
+    or a dash in dynamic text cannot make Telegram reject the whole message.
+    Paths that cannot set parse_mode render this through `_html_to_plain`.
+    """
+    address = _html_escape(str(wallet_address or "").strip())
+    support = _html_escape(str(support_id or "").strip())
+    support_block = (
+        f"\n\nSupport ID: <code>{support}</code> — quote it if you contact support."
+        if support
+        else ""
+    )
     return (
-        "Welcome to Sign402.\n\n"
-        f"{wallet_text.strip()}\n\n"
-        f"{support_line}"
-        "Next steps:\n"
-        "1. Wallet - fund this Base wallet with ETH for gas and USDC/SINGIT for payments.\n"
-        "2. Balance - check ETH, USDC, and SINGIT.\n"
-        "3. Connect iMessage or Connect WhatsApp - link approvals for your phone number.\n"
-        "4. Limits - review or set spending limits.\n"
-        "5. Buy - use the buttons or send a request like: buy crypto news"
+        "<b>SingIt</b> — gift cards, eSIMs and mobile top-ups in 180+ countries, "
+        "paid with crypto.\n\n"
+        "Nothing moves until you approve it on your phone.\n\n"
+        "<b>Your Base wallet</b>\n"
+        f"<code>{address}</code>\n"
+        "Tap to copy. Add ETH for gas, and USDC or SINGIT to pay with.\n\n"
+        "<b>Before your first purchase</b>\n"
+        "1. <b>Wallet</b> — fund the address above.\n"
+        "2. <b>Connect WhatsApp</b> or <b>Connect iMessage</b> — approvals go to "
+        "your phone. Spending stays off until one is linked.\n"
+        "3. <b>Limits</b> — cap how much can be spent per day.\n\n"
+        "<b>Then just ask</b>\n"
+        "Send something like <code>buy amazon 25 usd</code>, or use the buttons "
+        "below. <b>Balance</b> shows what you hold, /help lists every command."
+        f"{support_block}"
+    )
+
+
+class _HtmlText(str):
+    """A message body already formatted as Telegram HTML.
+
+    A str subclass so every existing sender keeps working unchanged; only the
+    Telegram send paths look for it, and everything else stays plain text.
+    """
+
+
+def _telegram_send_form(text) -> tuple[str, str]:
+    """Return the body and parse_mode for one Telegram send."""
+    if isinstance(text, _HtmlText):
+        if len(text) <= _TELEGRAM_MESSAGE_CHUNK_SIZE:
+            return str(text), "HTML"
+        # Chunking splits on raw characters and would cut a tag in half, which
+        # Telegram rejects outright. Plain text always sends.
+        return _html_to_plain(text), ""
+    return str(text or ""), ""
+
+
+def _html_escape(value: str) -> str:
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _html_to_plain(text: str) -> str:
+    """Render Telegram HTML as plain text for senders without parse_mode."""
+    without_tags = re.sub(r"<[^>]+>", "", str(text))
+    return (
+        without_tags.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
     )
 
 
@@ -1117,9 +1183,11 @@ def _telegram_public_command_result(
 ) -> tuple[str, dict | None]:
     client = _client_factory()
     if command == "start":
-        text = _start_text(
-            _create_wallet_text(client, identity),
-            support_id=identity.user_id,
+        text = _HtmlText(
+            _start_text(
+                _create_wallet_address(client, identity),
+                support_id=identity.user_id,
+            )
         )
     elif command == "wallet":
         text = _create_wallet_text(client, identity)
@@ -1217,7 +1285,11 @@ def _telegram_public_command_result(
         text = _llm_result_text(result)
     else:
         raise ValueError("unsupported Telegram background command")
-    return str(text), _telegram_main_menu_reply_markup()
+    # Coerce non-strings, but keep _HtmlText intact: a bare str() would drop the
+    # marker and the buyer would see raw tags.
+    return (
+        text if isinstance(text, str) else str(text)
+    ), _telegram_main_menu_reply_markup()
 
 
 def _handle_telegram_public_command_request(*, command: str, args: str = "", source, gateway):
@@ -1255,8 +1327,12 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
     try:
         if command == "start":
             client = _client_factory()
-            wallet_text = _create_wallet_text(client, identity)
-            text = _start_text(wallet_text, support_id=identity.user_id)
+            text = _HtmlText(
+                _start_text(
+                    _create_wallet_address(client, identity),
+                    support_id=identity.user_id,
+                )
+            )
         elif command == "help":
             text = _help_text()
         elif command == "wallet":
@@ -2571,13 +2647,34 @@ def _remember_user_access_token(identity: TelegramIdentity, result: object) -> s
     return token
 
 
-def _create_wallet_text(client, identity: TelegramIdentity) -> str:
+def _create_wallet_result(client, identity: TelegramIdentity) -> dict:
+    """Create or fetch the wallet once, and keep the caller's token.
+
+    Creating a wallet revokes any previously issued user token, so callers must
+    share one result rather than each asking for their own.
+    """
     result = client.create_wallet(identity)
     _remember_user_access_token(identity, result)
-    telegram_text = result.get("telegramText") if isinstance(result, dict) else None
+    if not isinstance(result, dict):
+        raise GatewayClientError(_INVALID_WALLET_RESPONSE)
+    return result
+
+
+def _create_wallet_text(client, identity: TelegramIdentity) -> str:
+    result = _create_wallet_result(client, identity)
+    telegram_text = result.get("telegramText")
     if not isinstance(telegram_text, str) or not telegram_text.strip():
-        raise GatewayClientError("Wallet service returned an invalid response. Please try again.")
+        raise GatewayClientError(_INVALID_WALLET_RESPONSE)
     return telegram_text.strip()
+
+
+def _create_wallet_address(client, identity: TelegramIdentity) -> str:
+    result = _create_wallet_result(client, identity)
+    wallet = result.get("wallet")
+    address = wallet.get("address") if isinstance(wallet, dict) else None
+    if not isinstance(address, str) or not address.strip():
+        raise GatewayClientError(_INVALID_WALLET_RESPONSE)
+    return address.strip()
 
 
 def _user_access_token(client, identity: TelegramIdentity) -> str | None:
@@ -3049,6 +3146,8 @@ def _send_fixed_reply(gateway, source, text: str, *, reply_markup: dict | None =
 def _send_via_gateway_adapter(gateway, source, text: str) -> None:
     if gateway is None:
         return
+    # This adapter takes text only, so HTML would arrive as visible tags.
+    text = _html_to_plain(text) if isinstance(text, _HtmlText) else text
     adapters = getattr(gateway, "adapters", {}) or {}
     adapter = adapters.get(_platform_name(source))
     if adapter is None:
@@ -3087,6 +3186,9 @@ def _schedule_telegram_reply(
     )
     if adapter is None or not chat_id:
         return False
+    # Coerce non-strings, but keep _HtmlText so the send path can still ask for
+    # HTML parsing; a bare str() would drop the marker.
+    body = text if isinstance(text, str) else str(text)
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -3100,7 +3202,7 @@ def _schedule_telegram_reply(
             adapter,
             source,
             chat_id,
-            str(text),
+            body,
             reply_markup,
         )
         return True
@@ -3111,7 +3213,7 @@ def _schedule_telegram_reply(
         adapter,
         source,
         chat_id,
-        str(text),
+        body,
         reply_markup,
     )
     return True
@@ -3170,16 +3272,19 @@ async def _send_telegram_reply_async(
     *,
     reply_markup: dict | None,
 ) -> None:
+    body, parse_mode = _telegram_send_form(text)
     bot = getattr(adapter, "_bot", None)
     send_message = getattr(bot, "send_message", None)
     if callable(send_message):
         markup = _telegram_reply_markup_object(reply_markup)
-        for chunk in _telegram_message_chunks(text):
+        extra = {"parse_mode": parse_mode} if parse_mode else {}
+        for chunk in _telegram_message_chunks(body):
             await send_message(
                 chat_id=chat_id,
                 text=chunk,
                 reply_markup=markup,
                 disable_web_page_preview=True,
+                **extra,
             )
         return
     sent = await asyncio.to_thread(
@@ -3191,7 +3296,11 @@ async def _send_telegram_reply_async(
     if not sent:
         send = getattr(adapter, "send", None)
         if callable(send):
-            await send(chat_id, text)
+            # This adapter takes text only; HTML would arrive as visible tags.
+            await send(
+                chat_id,
+                _html_to_plain(text) if isinstance(text, _HtmlText) else text,
+            )
 
 
 def _telegram_reply_markup_object(reply_markup: dict | None):
@@ -3231,13 +3340,16 @@ def _send_telegram_reply_direct(
     if not token or not chat_id:
         return False
 
+    body, parse_mode = _telegram_send_form(text)
     try:
-        for chunk in _telegram_message_chunks(text):
+        for chunk in _telegram_message_chunks(body):
             payload_fields = {
                 "chat_id": chat_id,
                 "text": chunk,
                 "disable_web_page_preview": "true",
             }
+            if parse_mode:
+                payload_fields["parse_mode"] = parse_mode
             if reply_markup is not None:
                 payload_fields["reply_markup"] = json.dumps(
                     reply_markup,

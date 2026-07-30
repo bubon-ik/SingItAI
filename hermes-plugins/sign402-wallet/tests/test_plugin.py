@@ -138,6 +138,7 @@ class FakeClient:
             ],
         }
         self.access_token = "user-access-token"
+        self.wallet_address = "0xabc"
         self.create_wallet_calls = []
         self.limits_calls = []
         self.limits_result = "Current spending limits."
@@ -170,7 +171,11 @@ class FakeClient:
         self.create_wallet_calls.append(identity.user_id)
         if self.error:
             raise self.error
-        return {"telegramText": self.result, "accessToken": self.access_token}
+        return {
+            "telegramText": self.result,
+            "accessToken": self.access_token,
+            "wallet": {"address": self.wallet_address},
+        }
 
     def execute(self, operation, identity, *, user_access_token=None):
         self.calls.append((operation, identity))
@@ -532,6 +537,35 @@ class TelegramAsyncReplyTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
         self.assertEqual([call[1] for call in bot.calls], ["loop reply", "thread reply"])
 
+    async def test_html_bodies_reach_the_bot_with_html_parsing(self):
+        plugin = load_plugin()
+        bot = ControlledTelegramBot()
+        gateway = FakeGateway(adapter_key="telegram", adapter=FakeAdapter(bot))
+        source = FakeSource(FakePlatform("telegram"), "user-a", chat_id="chat-a")
+
+        plugin._send_fixed_reply(
+            gateway,
+            source,
+            plugin._HtmlText("<b>SingIt</b>"),
+            reply_markup=None,
+        )
+        await asyncio.wait_for(bot.started.wait(), timeout=0.2)
+
+        self.assertEqual(bot.calls[0]["text"], "<b>SingIt</b>")
+        self.assertEqual(bot.calls[0]["parse_mode"], "HTML")
+
+    async def test_plain_bodies_reach_the_bot_without_a_parse_mode(self):
+        plugin = load_plugin()
+        bot = ControlledTelegramBot()
+        gateway = FakeGateway(adapter_key="telegram", adapter=FakeAdapter(bot))
+        source = FakeSource(FakePlatform("telegram"), "user-a", chat_id="chat-a")
+
+        plugin._send_fixed_reply(gateway, source, "USDC < SINGIT", reply_markup=None)
+        await asyncio.wait_for(bot.started.wait(), timeout=0.2)
+
+        self.assertEqual(bot.calls[0]["text"], "USDC < SINGIT")
+        self.assertNotIn("parse_mode", bot.calls[0])
+
     async def test_active_bot_send_preserves_reply_keyboard_without_direct_http(self):
         plugin = load_plugin()
         bot = ControlledTelegramBot()
@@ -586,6 +620,171 @@ class TelegramAsyncReplyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(completed)
         self.assertEqual(adapter.sent, [])
+
+
+WALLET_ADDRESS = "0x4F809dF4F11339c30F626cC08943f3F9Bd29B32b"
+
+
+class WelcomeScreenTests(unittest.TestCase):
+    """The first screen a new user ever sees."""
+
+    def setUp(self):
+        self.plugin = load_plugin()
+        self.text = self.plugin._start_text(
+            WALLET_ADDRESS,
+            support_id="1045618308",
+        )
+
+    def test_it_opens_with_what_the_product_does(self):
+        opening = self.text.splitlines()[0]
+
+        self.assertIn("SingIt", opening)
+        self.assertNotIn(WALLET_ADDRESS, opening)
+
+    def test_it_uses_the_name_on_the_bot(self):
+        self.assertNotIn("Sign402", self.text)
+
+    def test_it_makes_the_address_copyable(self):
+        self.assertIn(f"<code>{WALLET_ADDRESS}</code>", self.text)
+
+    def test_it_does_not_warn_about_how_much_to_fund(self):
+        # "a small amount only" reads as a warning that the wallet is unsafe.
+        self.assertNotIn("small amount", self.text)
+
+    def test_it_names_both_approval_channels(self):
+        self.assertIn("WhatsApp", self.text)
+        self.assertIn("iMessage", self.text)
+
+    def test_it_says_what_the_support_id_is_for(self):
+        self.assertIn("1045618308", self.text)
+        self.assertIn("support", self.text.casefold())
+
+    def test_it_names_the_tokens_to_fund(self):
+        for token in ("ETH", "USDC", "SINGIT"):
+            self.assertIn(token, self.text)
+
+
+class HtmlToPlainTests(unittest.TestCase):
+    """Paths that cannot set parse_mode must not show raw markup."""
+
+    def test_it_drops_tags_and_unescapes_entities(self):
+        plugin = load_plugin()
+
+        self.assertEqual(
+            plugin._html_to_plain("<b>Pay</b> with USDC &amp; SINGIT"),
+            "Pay with USDC & SINGIT",
+        )
+
+    def test_it_keeps_line_structure(self):
+        plugin = load_plugin()
+
+        self.assertEqual(
+            plugin._html_to_plain("<b>One</b>\n\n<code>Two</code>"),
+            "One\n\nTwo",
+        )
+
+    def test_the_welcome_screen_survives_the_conversion(self):
+        plugin = load_plugin()
+        plain = plugin._html_to_plain(
+            plugin._start_text(WALLET_ADDRESS, support_id="1045618308")
+        )
+
+        self.assertNotIn("<", plain)
+        self.assertIn(WALLET_ADDRESS, plain)
+        self.assertIn("SingIt", plain)
+
+
+class TelegramSendFormTests(unittest.TestCase):
+    """Only messages that opt in are parsed as HTML."""
+
+    def test_plain_text_is_sent_without_a_parse_mode(self):
+        plugin = load_plugin()
+
+        self.assertEqual(
+            plugin._telegram_send_form("USDC < SINGIT & ETH"),
+            ("USDC < SINGIT & ETH", ""),
+        )
+
+    def test_html_text_asks_for_html_parsing(self):
+        plugin = load_plugin()
+
+        body, parse_mode = plugin._telegram_send_form(
+            plugin._HtmlText("<b>SingIt</b>")
+        )
+
+        self.assertEqual(body, "<b>SingIt</b>")
+        self.assertEqual(parse_mode, "HTML")
+
+    def test_html_too_long_to_send_whole_falls_back_to_plain(self):
+        # Chunking cuts on raw characters and would split a tag in half.
+        plugin = load_plugin()
+        long_html = plugin._HtmlText(
+            "<b>x</b>" * plugin._TELEGRAM_MESSAGE_CHUNK_SIZE
+        )
+
+        body, parse_mode = plugin._telegram_send_form(long_html)
+
+        self.assertEqual(parse_mode, "")
+        self.assertNotIn("<", body)
+
+
+class CommandResultFormattingTests(unittest.TestCase):
+    def test_start_keeps_its_html_marker_through_the_command_result(self):
+        # A bare str() here would strip the marker and the buyer would see tags.
+        plugin = load_plugin()
+        plugin._client_factory = lambda: FakeClient()
+
+        text, _markup = plugin._telegram_public_command_result(
+            "start",
+            "",
+            plugin.TelegramIdentity(user_id="1045618308"),
+        )
+
+        self.assertIsInstance(text, plugin._HtmlText)
+
+    def test_other_commands_stay_plain(self):
+        plugin = load_plugin()
+        plugin._client_factory = lambda: FakeClient(result="Balances: none")
+
+        text, _markup = plugin._telegram_public_command_result(
+            "balance",
+            "",
+            plugin.TelegramIdentity(user_id="1045618308"),
+        )
+
+        self.assertNotIsInstance(text, plugin._HtmlText)
+        self.assertIsInstance(text, str)
+
+
+class WalletAddressExtractionTests(unittest.TestCase):
+    """The welcome screen formats the address itself, so it needs the field."""
+
+    def test_it_reads_the_structured_address(self):
+        plugin = load_plugin()
+        client = FakeClient()
+        client.wallet_address = WALLET_ADDRESS
+
+        address = plugin._create_wallet_address(client, plugin.TelegramIdentity(user_id="u1"))
+
+        self.assertEqual(address, WALLET_ADDRESS)
+        self.assertEqual(client.create_wallet_calls, ["u1"])
+
+    def test_it_creates_the_wallet_only_once(self):
+        plugin = load_plugin()
+        client = FakeClient()
+        client.wallet_address = WALLET_ADDRESS
+
+        plugin._create_wallet_address(client, plugin.TelegramIdentity(user_id="u1"))
+
+        self.assertEqual(len(client.create_wallet_calls), 1)
+
+    def test_a_response_without_an_address_is_rejected(self):
+        plugin = load_plugin()
+        client = FakeClient()
+        client.wallet_address = ""
+
+        with self.assertRaises(plugin.GatewayClientError):
+            plugin._create_wallet_address(client, plugin.TelegramIdentity(user_id="u1"))
 
 
 class PaidToolIntentTests(unittest.TestCase):
@@ -1333,15 +1532,15 @@ class PluginRegistrationTests(unittest.TestCase):
         )
         text = gateway.adapters["telegram"].sent[-1][1]
 
-        self.assertIn("Welcome to Sign402.", text)
-        self.assertIn("Your Base agent wallet:\n0xabc", text)
+        # This adapter cannot set parse_mode, so the markup must be gone.
+        self.assertNotIn("<", text)
+        self.assertIn("SingIt", text)
+        self.assertIn("0xabc", text)
         self.assertIn("Support ID: 1045618308", text)
         self.assertIn("1. Wallet", text)
-        self.assertIn("2. Balance", text)
-        self.assertIn("3. Connect iMessage", text)
-        self.assertIn("phone number", text)
-        self.assertIn("4. Limits", text)
-        self.assertIn("5. Buy", text)
+        self.assertIn("2. Connect WhatsApp or Connect iMessage", text)
+        self.assertIn("your phone", text)
+        self.assertIn("3. Limits", text)
         self.assertEqual(client.calls, [])
         self.assertEqual(client.create_wallet_calls, ["1045618308"])
 
@@ -1368,7 +1567,7 @@ class PluginRegistrationTests(unittest.TestCase):
             {"action": "skip", "reason": "sign402-imessage-handled"},
         )
         self.assertEqual(client.create_wallet_calls, ["1045618308"])
-        self.assertIn("Welcome to Sign402.", gateway.adapters["telegram"].sent[-1][1])
+        self.assertIn("SingIt", gateway.adapters["telegram"].sent[-1][1])
 
     def test_help_is_answered_with_pilot_commands(self):
         plugin = load_plugin()
