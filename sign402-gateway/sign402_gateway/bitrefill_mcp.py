@@ -317,12 +317,24 @@ class McpBitrefillClient:
         server_url = base_url
         if self.affiliate_ref:
             server_url = f"{server_url}?ref={self.affiliate_ref}"
-        # A guest session must be anonymous: authenticating as the affiliate's
+        # A guest purchase must be anonymous: authenticating as the affiliate's
         # own account is exactly what stops the commission being attributed.
+        # Only the purchase session drops the key. Browsing decides nothing
+        # about attribution, and Bitrefill answers an unauthenticated session
+        # with 401 at connection time, so an anonymous catalog caller would take
+        # search, listing and product details down with it.
         session_key = "" if self.checkout_mode == "guest" else key
         self._call_tool = call_tool or McpToolCaller(
             server_url,
             api_key=session_key,
+        )
+        # Reads that only answer "what can I buy": same endpoint and timeout as
+        # the purchase caller, but always authenticated. In account mode the two
+        # would be identical, so nothing extra is built there.
+        self._browse_call_tool = (
+            McpToolCaller(server_url, api_key=key)
+            if call_tool is None and self.checkout_mode == "guest"
+            else self._call_tool
         )
         if catalog_call_tool is not None:
             self._catalog_call_tool = catalog_call_tool
@@ -331,7 +343,7 @@ class McpBitrefillClient:
         else:
             self._catalog_call_tool = McpToolCaller(
                 server_url,
-                api_key=session_key,
+                api_key=key,
                 timeout_seconds=self.catalog_timeout_seconds,
             )
 
@@ -644,7 +656,7 @@ class McpBitrefillClient:
         type_text = str(product_type).strip().lower()
         if type_text:
             arguments["type"] = type_text
-        payload = self._call_tool("search-products", arguments)
+        payload = self._browse_call_tool("search-products", arguments)
         products = self._normalize_product_rows(
             payload,
             fallback_country=arguments["country"],
@@ -666,7 +678,7 @@ class McpBitrefillClient:
         product_id_text = str(product_id).strip()
         if not product_id_text:
             raise ValueError("productId is required")
-        payload = self._call_tool(
+        payload = self._browse_call_tool(
             "get-product-details",
             {"product_id": product_id_text, "currency": "USD"},
         )

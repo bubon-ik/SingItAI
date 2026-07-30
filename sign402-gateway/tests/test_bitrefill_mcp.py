@@ -319,11 +319,63 @@ class BitrefillMcpGuestCheckoutTests(unittest.TestCase):
             overrides.setdefault("payment_method", "usdc_base")
             return McpBitrefillClient(api_key="key_123", **overrides)
 
-    def test_guest_mode_sends_no_api_key(self):
+    def test_guest_mode_sends_no_api_key_on_the_purchase_session(self):
         client = self._client(checkout_mode="guest")
 
         self.assertEqual(client._call_tool._api_key, "")
-        self.assertEqual(client._catalog_call_tool._api_key, "")
+
+    def test_guest_mode_still_authenticates_every_read(self):
+        # Browsing has nothing to do with attribution, and Bitrefill answers an
+        # unauthenticated MCP session with 401 before any tool is called — so an
+        # anonymous read caller takes search, listing and product details with it.
+        client = self._client(checkout_mode="guest")
+
+        self.assertEqual(client._catalog_call_tool._api_key, "key_123")
+        self.assertEqual(client._browse_call_tool._api_key, "key_123")
+
+    def test_guest_mode_searches_over_the_authenticated_session(self):
+        client = self._client(checkout_mode="guest")
+        client._browse_call_tool = FakeMcpCaller([{"products": []}])
+        client._call_tool = FakeMcpCaller([])
+
+        client.search_products(
+            query="amazon",
+            country="CZ",
+            category="",
+            product_type="",
+            include_test_products=False,
+        )
+
+        self.assertEqual(
+            [name for name, _ in client._browse_call_tool.calls],
+            ["search-products"],
+        )
+        self.assertEqual(client._call_tool.calls, [])
+
+    def test_guest_mode_reads_product_details_over_the_authenticated_session(self):
+        client = self._client(checkout_mode="guest")
+        client._browse_call_tool = FakeMcpCaller(
+            [
+                {
+                    "product": {
+                        "id": "amazon-cz",
+                        "name": "Amazon",
+                        "country": "CZ",
+                        "currency": "CZK",
+                        "packages": [{"value": "10", "price": "10.00"}],
+                    }
+                }
+            ]
+        )
+        client._call_tool = FakeMcpCaller([])
+
+        client.get_product_details(product_id="amazon-cz", country="CZ")
+
+        self.assertEqual(
+            [name for name, _ in client._browse_call_tool.calls],
+            ["get-product-details"],
+        )
+        self.assertEqual(client._call_tool.calls, [])
 
     def test_guest_mode_keeps_the_affiliate_ref(self):
         client = self._client(checkout_mode="guest")
