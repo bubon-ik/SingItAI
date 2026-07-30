@@ -328,6 +328,28 @@ class GatewayClient:
             timeout=self.purchase_timeout,
         )
 
+    def _buyer_email_request(
+        self,
+        identity: TelegramIdentity,
+        *,
+        action: str,
+        email: str | None = None,
+        user_access_token: str | None = None,
+    ) -> dict:
+        user_token = str(user_access_token or "").strip()
+        if not user_token:
+            raise GatewayClientError(_AUTH_FAILED)
+        payload = {"telegramUserId": identity.user_id, "action": str(action)}
+        if email is not None:
+            payload["email"] = str(email).strip()
+        return self._post(
+            _BUYER_EMAIL_PATH,
+            payload,
+            token=self.api_token,
+            operation="buyer-email",
+            user_token=user_token,
+        )
+
     def execute_buyer_email(
         self,
         identity: TelegramIdentity,
@@ -340,23 +362,40 @@ class GatewayClient:
 
         Returns the masked address; the gateway never sends the full one back.
         """
-        user_token = str(user_access_token or "").strip()
-        if not user_token:
-            raise GatewayClientError(_AUTH_FAILED)
-        payload = {"telegramUserId": identity.user_id, "action": str(action)}
-        if email is not None:
-            payload["email"] = str(email).strip()
-        result = self._post(
-            _BUYER_EMAIL_PATH,
-            payload,
-            token=self.api_token,
-            operation="buyer-email",
-            user_token=user_token,
+        result = self._buyer_email_request(
+            identity,
+            action=action,
+            email=email,
+            user_access_token=user_access_token,
         )
         masked = result.get("email")
         if not isinstance(masked, str):
             raise GatewayClientError(_INVALID_RESPONSE)
         return masked.strip()
+
+    def execute_buyer_email_state(
+        self,
+        identity: TelegramIdentity,
+        *,
+        user_access_token: str | None = None,
+    ) -> dict:
+        """Report the masked address and whether a purchase needs one.
+
+        Only the gateway knows which checkout it buys through, so it is also
+        the only place that can say whether an address is mandatory.
+        """
+        result = self._buyer_email_request(
+            identity,
+            action="get",
+            user_access_token=user_access_token,
+        )
+        masked = result.get("email")
+        if not isinstance(masked, str):
+            raise GatewayClientError(_INVALID_RESPONSE)
+        return {
+            "email": masked.strip(),
+            "required": bool(result.get("required")),
+        }
 
     def execute_spending_limits(
         self,

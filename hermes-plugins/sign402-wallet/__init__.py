@@ -1746,6 +1746,13 @@ def _handle_telegram_bitrefill_wizard_message(*, event, source, gateway):
                 source=source,
                 gateway=gateway,
             )
+        if stage == "awaiting-buyer-email":
+            return _handle_bitrefill_buyer_email_input(
+                identity=identity,
+                text=text,
+                source=source,
+                gateway=gateway,
+            )
     except GatewayClientError as exc:
         _send_fixed_reply(gateway, source, exc.user_message)
         return dict(_SKIP_RESULT)
@@ -2949,6 +2956,69 @@ def _execute_telegram_withdraw_request(
         _send_fixed_reply(gateway, source, _UNEXPECTED_ERROR_MESSAGE)
 
 
+_BUYER_EMAIL_REQUIRED_PROMPT = (
+    "One thing first: this order needs a delivery email.\n\n"
+    "Your gift card codes are sent there as well as here, so you keep them "
+    "even if this chat is lost.\n\n"
+    "Send the address to continue, or Back to cancel."
+)
+
+
+def _buyer_email_is_missing(client, identity, user_access_token: str) -> bool:
+    """Say whether this purchase has to stop and ask for an address first.
+
+    Only the gateway knows whether it checks out as a guest, so a client that
+    predates the question is treated as not needing one.
+    """
+    reader = getattr(client, "execute_buyer_email_state", None)
+    if not callable(reader):
+        return False
+    state = reader(identity, user_access_token=user_access_token)
+    if not isinstance(state, dict) or not state.get("required"):
+        return False
+    return not str(state.get("email") or "").strip()
+
+
+def _handle_bitrefill_buyer_email_input(
+    *,
+    identity: TelegramIdentity,
+    text: str,
+    source,
+    gateway,
+):
+    user_id = str(identity.user_id)
+    session = _BITREFILL_SESSIONS.get(user_id, {})
+    pending = session.get("pendingPurchase")
+    if not isinstance(pending, dict):
+        _BITREFILL_SESSIONS.pop(user_id, None)
+        _send_fixed_reply(
+            gateway,
+            source,
+            "That order is no longer pending. Start it again from Buy Bitrefill.",
+            reply_markup=_telegram_main_menu_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+    client = _client_factory()
+    masked = client.execute_buyer_email(
+        identity,
+        action="set",
+        email=str(text or "").strip(),
+        user_access_token=_user_access_token(client, identity),
+    )
+    _send_fixed_reply(gateway, source, f"Delivery email saved: {masked}")
+    _start_bitrefill_purchase_from_wizard(
+        identity=identity,
+        product=({"productId": str(pending.get("productId") or "")}),
+        package=({"packageId": str(pending.get("packageId") or "")}),
+        country=str(pending.get("country") or _bitrefill_country(user_id)),
+        recipient=dict(pending.get("recipient") or {}),
+        payment_token=dict(pending.get("paymentToken") or {}),
+        source=source,
+        gateway=gateway,
+    )
+    return dict(_SKIP_RESULT)
+
+
 def _execute_telegram_bitrefill_request(
     *,
     product_id: str,
@@ -2965,6 +3035,21 @@ def _execute_telegram_bitrefill_request(
     try:
         client = _client_factory()
         token = _user_access_token(client, identity)
+        if _buyer_email_is_missing(client, identity, token):
+            # Guest checkout cannot open an invoice without an address, so ask
+            # before anything is bought and keep the order to resume with.
+            _BITREFILL_SESSIONS[user_id] = {
+                "stage": "awaiting-buyer-email",
+                "pendingPurchase": {
+                    "productId": product_id,
+                    "packageId": package_id,
+                    "country": country,
+                    "recipient": dict(recipient or {}),
+                    "paymentToken": dict(payment_token or {}),
+                },
+            }
+            _send_fixed_reply(gateway, source, _BUYER_EMAIL_REQUIRED_PROMPT)
+            return
         text = client.execute_bitrefill_purchase(
             identity,
             product_id=product_id,

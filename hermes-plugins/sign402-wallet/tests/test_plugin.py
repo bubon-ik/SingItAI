@@ -166,6 +166,9 @@ class FakeClient:
             ],
         }
         self.withdraw_result = "Withdrawal sent."
+        self.buyer_email_calls = []
+        self.buyer_email_masked = ""
+        self.buyer_email_required = False
 
     def create_wallet(self, identity):
         self.create_wallet_calls.append(identity.user_id)
@@ -239,6 +242,28 @@ class FakeClient:
         if self.error:
             raise self.error
         return self.bitrefill_result
+
+    def execute_buyer_email_state(self, identity, *, user_access_token=None):
+        self.buyer_email_calls.append(("state", None))
+        return {
+            "email": self.buyer_email_masked,
+            "required": self.buyer_email_required,
+        }
+
+    def execute_buyer_email(
+        self,
+        identity,
+        *,
+        action,
+        email=None,
+        user_access_token=None,
+    ):
+        self.buyer_email_calls.append((action, email))
+        if action == "set":
+            self.buyer_email_masked = "b***@example.com"
+        elif action == "forget":
+            self.buyer_email_masked = ""
+        return self.buyer_email_masked
 
     def search_bitrefill_products(
         self,
@@ -2296,6 +2321,81 @@ class PluginRegistrationTests(unittest.TestCase):
         dispatch("2")
 
         self.assertEqual(client.bitrefill_calls[-1][6]["symbol"], "OTHER")
+
+    def test_guest_purchase_without_an_email_asks_instead_of_buying(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.buyer_email_required = True
+        plugin._client_factory = lambda: client
+        plugin._background_runner = lambda callback: callback()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        def dispatch(text):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    text,
+                    "1045618308",
+                    username="AlpskyKnedlik",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        dispatch("Buy Bitrefill")
+        dispatch("Search Products")
+        dispatch("amazon")
+        dispatch("1")
+        dispatch("1")
+        dispatch("1")
+
+        self.assertEqual(client.bitrefill_calls, [])
+        self.assertIn("email", gateway.adapters["telegram"].sent[-1][1].casefold())
+        self.assertEqual(
+            plugin._BITREFILL_SESSIONS["1045618308"]["stage"],
+            "awaiting-buyer-email",
+        )
+
+    def test_guest_purchase_resumes_once_the_address_is_stored(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.buyer_email_required = True
+        plugin._client_factory = lambda: client
+        plugin._background_runner = lambda callback: callback()
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        def dispatch(text):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(
+                    text,
+                    "1045618308",
+                    username="AlpskyKnedlik",
+                    platform="telegram",
+                    chat_id="telegram-chat",
+                ),
+                gateway=gateway,
+            )
+
+        dispatch("Buy Bitrefill")
+        dispatch("Search Products")
+        dispatch("amazon")
+        dispatch("1")
+        dispatch("1")
+        dispatch("1")
+        dispatch("buyer@example.com")
+
+        self.assertIn(("set", "buyer@example.com"), client.buyer_email_calls)
+        self.assertEqual(len(client.bitrefill_calls), 1)
+        self.assertEqual(client.bitrefill_calls[-1][2], "amazon-cz")
+        # Only the masked form may be repeated back into the chat log.
+        transcript = "\n".join(
+            str(message) for _chat, message, *_rest in gateway.adapters["telegram"].sent
+        )
+        self.assertNotIn("buyer@example.com", transcript)
 
     def test_bitrefill_button_opens_country_aware_search_flow(self):
         plugin = load_plugin()

@@ -126,22 +126,41 @@
 - [x] Gateway route `/agent/buyer-email` with get/set/forget, returning only the masked address.
 - [x] Client method plus `/email`, `/email <address>` and `/forget_email` commands.
 - [x] Test: the address is never echoed unmasked back into chat.
-- [ ] Test: buying without a stored email asks for it instead of creating an invoice.
-- [ ] Test: a supplied address is stored and the purchase resumes.
+- [x] Test: buying without a stored email asks for it instead of creating an invoice.
+- [x] Test: a supplied address is stored and the purchase resumes.
 
-**Remaining:** the purchase flow still has to prompt for a missing address and
-hold the pending quote. Commands and storage are in place, so this is the last
-piece of Task 6.
+**Note:** the welcome screen was left alone. Guest mode is off by default, and
+on the account path nothing is emailed at all, so an unconditional "your codes
+also go to your email" line would be false. `/help` lists `/email` and
+`/forget_email`, which is the discoverability path.
 
 ### Task 7: Diagnostics And Wiring
 
 **Files:** Modify `diagnostics.py`, `server.py`, `scripts/run-wallet-bitrefill.sh`, `.env.wallet-bitrefill.example`; tests `tests/test_diagnostics.py`, `tests/test_gateway_server.py`.
 
 **Steps:**
-- [ ] Test: `invoice_access_token`, `access_link`, and the buyer email are filtered out of provider diagnostics.
-- [ ] Test: the factory reads `SIGN402_BITREFILL_CHECKOUT_MODE` and defaults to `account`.
-- [ ] Test: guest mode without a configured cipher refuses to start.
-- [ ] Implement, and document both settings.
+- [x] Test: `invoice_access_token`, `access_link`, and the buyer email are filtered out of provider diagnostics.
+- [x] Test: the factory reads `SIGN402_BITREFILL_CHECKOUT_MODE` and defaults to `account`.
+- [x] Test: guest mode without a configured cipher refuses to start.
+- [x] Implement, and document both settings.
+
+### Task 8: End-To-End Wiring (added during execution)
+
+Tasks 1–4 built the guest pieces but nothing joined them: the stored buyer
+email never reached `prepare_purchase`, and the access token was captured into a
+checkpoint whose sanitizer silently drops unknown keys, so it was lost before
+the first poll. Guest mode could not have completed a purchase.
+
+**Files:** `bitrefill_mcp.py`, `bitrefill_runner.py`, `bitrefill.py`, `server.py`;
+tests `tests/test_bitrefill_mcp.py`, `tests/test_bitrefill_runner.py`.
+
+**Steps:**
+- [x] Test: `complete_purchase`, the post-payment poll, and `refresh_purchase` carry the token in guest mode and omit it in account mode.
+- [x] Test: preparation stores the token under `invoiceAccess` and leaves it out of both the row and the returned checkpoint.
+- [x] Test: a token that cannot be persisted fails the purchase loudly, naming no secret.
+- [x] Test: the wallet purchase runner names the buyer when it prepares.
+- [x] Test: order lookup refreshes a guest order with its stored token.
+- [x] Implement, passing `buyer_email` and `invoice_access_token` only when set so the account path calls the provider client exactly as before.
 
 ---
 
@@ -155,6 +174,11 @@ piece of Task 6.
 
 ## Verification
 
-- Full gateway suite and plugin suite green.
-- A guest purchase against the account path stays byte-identical in behaviour when the flag is off.
-- One live low-value purchase in guest mode, then confirm attribution appears in the affiliate dashboard.
+- [x] Full gateway suite (738 tests) and plugin suite (175 tests) green.
+- [x] The account path is unchanged: the provider client is called with exactly the arguments it always was, because the guest arguments are omitted when unset. The one new call on that path is the plugin asking the gateway whether an address is required, which answers `false` and buys as before.
+- [ ] One live low-value purchase in guest mode, then confirm attribution appears in the affiliate dashboard.
+
+## Known Limits
+
+- Guest checkout is wired for the managed-wallet chat flow. The agent route `/agent/buy-bitrefill` has no Telegram user and therefore no stored address, so in guest mode it fails at invoice creation instead of buying.
+- `buy_product` (the unprepared path) keeps its access token only in memory for the length of the call, so a later redemption re-read of such an order falls back to `redemptionUnavailable`. The codes still reach the buyer's email.
