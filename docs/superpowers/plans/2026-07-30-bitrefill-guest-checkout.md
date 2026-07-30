@@ -106,12 +106,12 @@
 - Validation reuses the address rules already applied to Bankr LLM purchases.
 
 **Steps:**
-- [ ] Test: set/get round-trip returns the address, and the stored row holds no plaintext.
-- [ ] Test: an invalid address is rejected before storage.
-- [ ] Test: reading an unset user returns nothing rather than raising.
-- [ ] Test: forget removes the row and later reads return nothing.
-- [ ] Test: API responses expose only the masked form.
-- [ ] Implement.
+- [x] Test: set/get round-trip returns the address, and the stored row holds no plaintext.
+- [x] Test: an invalid address is rejected before storage.
+- [x] Test: reading an unset user returns nothing rather than raising.
+- [x] Test: forget removes the row and later reads return nothing.
+- [x] Test: `mask_email` exposes only the masked form.
+- [x] Implement `user_emails.py`; the gateway routes remain for Task 6's wiring.
 
 ### Task 6: Telegram Email Capture
 
