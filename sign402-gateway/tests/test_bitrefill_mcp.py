@@ -303,6 +303,59 @@ class BitrefillMcpTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("key_123", repr(caller))
 
 
+class BitrefillMcpGuestCheckoutTests(unittest.TestCase):
+    """A purchase from the affiliate's own account earns no commission.
+
+    Bitrefill's fix is to buy as an anonymous guest, so the session carries no
+    API key at all while the affiliate ref stays on the URL.
+    """
+
+    def _client(self, **overrides):
+        with tempfile.TemporaryDirectory() as root:
+            overrides.setdefault("catalog_cache_path", Path(root) / "catalog.json")
+            overrides.setdefault("affiliate_ref", "nrVGauph")
+            # Production pays in USDC; the balance default belongs to the
+            # account path only.
+            overrides.setdefault("payment_method", "usdc_base")
+            return McpBitrefillClient(api_key="key_123", **overrides)
+
+    def test_guest_mode_sends_no_api_key(self):
+        client = self._client(checkout_mode="guest")
+
+        self.assertEqual(client._call_tool._api_key, "")
+        self.assertEqual(client._catalog_call_tool._api_key, "")
+
+    def test_guest_mode_keeps_the_affiliate_ref(self):
+        client = self._client(checkout_mode="guest")
+
+        self.assertEqual(
+            client._call_tool._server_url,
+            "https://api.bitrefill.com/mcp?ref=nrVGauph",
+        )
+
+    def test_account_mode_still_authenticates(self):
+        client = self._client()
+
+        self.assertEqual(client.checkout_mode, "account")
+        self.assertEqual(client._call_tool._api_key, "key_123")
+
+    def test_an_unknown_checkout_mode_is_rejected(self):
+        with self.assertRaisesRegex(
+            ValueError, "SIGN402_BITREFILL_CHECKOUT_MODE"
+        ):
+            self._client(checkout_mode="anonymous")
+
+    def test_guest_mode_cannot_pay_from_the_account_balance(self):
+        # A guest has no Bitrefill account, so there is no balance to spend.
+        with self.assertRaisesRegex(ValueError, "guest checkout"):
+            self._client(checkout_mode="guest", payment_method="balance")
+
+    def test_guest_mode_pays_with_usdc(self):
+        client = self._client(checkout_mode="guest", payment_method="usdc_base")
+
+        self.assertEqual(client.payment_method, "usdc_base")
+
+
 class BitrefillMcpAffiliateTests(unittest.TestCase):
     """The affiliate code rides as `?ref=` after the API-key path segment.
 

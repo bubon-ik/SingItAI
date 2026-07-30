@@ -177,6 +177,7 @@ class McpBitrefillClient:
         api_key: str,
         mcp_url: str = "https://api.bitrefill.com/mcp",
         affiliate_ref: str = "",
+        checkout_mode: str = "account",
         max_purchase_usd: str = "5.00",
         max_invoice_overage_bps: int = 500,
         payment_method: str = "balance",
@@ -219,9 +220,19 @@ class McpBitrefillClient:
         self.max_invoice_overage_bps = int(max_invoice_overage_bps)
         if self.max_invoice_overage_bps < 0:
             raise ValueError("max_invoice_overage_bps must be non-negative")
+        self.checkout_mode = str(checkout_mode).strip().lower() or "account"
+        if self.checkout_mode not in {"account", "guest"}:
+            raise ValueError(
+                "SIGN402_BITREFILL_CHECKOUT_MODE must be 'account' or 'guest'"
+            )
         self.payment_method = str(payment_method).strip().lower() or "balance"
         if self.payment_method not in {"balance", "usdc_base"}:
             raise ValueError("unsupported Bitrefill payment method")
+        if self.checkout_mode == "guest" and self.payment_method == "balance":
+            # A guest has no Bitrefill account, so there is no balance to spend.
+            raise ValueError(
+                "guest checkout cannot pay from the Bitrefill account balance"
+            )
         self.treasury_client = treasury_client
         self.invoice_poll_attempts = int(invoice_poll_attempts)
         if self.invoice_poll_attempts <= 0:
@@ -284,7 +295,13 @@ class McpBitrefillClient:
         server_url = base_url
         if self.affiliate_ref:
             server_url = f"{server_url}?ref={self.affiliate_ref}"
-        self._call_tool = call_tool or McpToolCaller(server_url, api_key=key)
+        # A guest session must be anonymous: authenticating as the affiliate's
+        # own account is exactly what stops the commission being attributed.
+        session_key = "" if self.checkout_mode == "guest" else key
+        self._call_tool = call_tool or McpToolCaller(
+            server_url,
+            api_key=session_key,
+        )
         if catalog_call_tool is not None:
             self._catalog_call_tool = catalog_call_tool
         elif call_tool is not None:
@@ -292,7 +309,7 @@ class McpBitrefillClient:
         else:
             self._catalog_call_tool = McpToolCaller(
                 server_url,
-                api_key=key,
+                api_key=session_key,
                 timeout_seconds=self.catalog_timeout_seconds,
             )
 

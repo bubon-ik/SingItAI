@@ -15,7 +15,7 @@
 - The account path stays fully working; `SIGN402_BITREFILL_CHECKOUT_MODE` selects between `account` (default) and `guest`.
 - `invoice_access_token` and `access_link` are bearer values: never logged, never returned in an API response, never stored in plaintext.
 - A guest purchase must not start without a stored, validated buyer email.
-- Losing the invoice access token must fail loudly at write time, not silently at delivery time.
+- Losing the invoice access token must fail loudly at write time, not silently at delivery time — the buyer's email is the backstop, not an excuse to drop it quietly.
 - Chat stays the primary delivery path; email is the receipt trail.
 - Guest mode cannot use `payment_method` `balance` or `cashback`; selecting them together is a configuration error.
 - No change to funding, swap, approval, or the token-return path.
@@ -45,11 +45,11 @@
 - The affiliate ref stays on the URL query in both modes.
 
 **Steps:**
-- [ ] Test: guest mode builds both callers without an API key and keeps `?ref=`.
-- [ ] Test: account mode is unchanged and still sends the bearer header.
-- [ ] Test: an unknown checkout mode is rejected at construction.
-- [ ] Test: `guest` with `payment_method` `balance` or `cashback` is rejected — a guest has no account balance.
-- [ ] Implement.
+- [x] Test: guest mode builds both callers without an API key and keeps `?ref=`.
+- [x] Test: account mode is unchanged and still sends the bearer header.
+- [x] Test: an unknown checkout mode is rejected at construction.
+- [x] Test: `guest` with `payment_method: balance` is rejected — a guest has no account balance.
+- [x] Implement.
 
 ### Task 2: Buyer Email On The Cart
 
@@ -141,15 +141,13 @@
 
 ---
 
-## Open Questions For Bitrefill
+## Answers From Bitrefill (2026-07-30)
 
-These do not block the build, but each can change one detail:
-
-1. What carries the affiliate code on an anonymous session — the URL query, or a field on `buy-products`?
-2. Does the 25 tx/day cap apply per anonymous client, per IP, or per affiliate?
-3. Is `email` mandatory for a guest invoice?
-4. Does `invoice_access_token` expire, and is there any recovery if it is lost?
-5. What is the refund path for an undelivered guest order?
+1. **The affiliate code stays on the MCP URL** and survives a guest purchase; they verified it with a Hermes agent.
+2. **The 25 tx/day cap no longer applies** — the purchase is not made from our account. This removes the need for the order-count guard that was previously an open item.
+3. **`email` is mandatory.** Any burner address is fine. It matches their own website's guest checkout, and exists precisely so a closed chat does not lose the product.
+4. **Losing the invoice access token is not fatal** — the buyer has the codes in their email. Storage is still required for polling inside the purchase flow, but it is no longer the only route to the product.
+5. **Support is unchanged:** help.bitrefill.com or their support email, for guest and logged-in orders alike. They plan to surface it through MCP later.
 
 ## Verification
 
