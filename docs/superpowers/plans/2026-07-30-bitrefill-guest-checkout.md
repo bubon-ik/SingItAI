@@ -123,11 +123,15 @@
 - The welcome screen mentions that a code also goes to the buyer's email.
 
 **Steps:**
+- [x] Gateway route `/agent/buyer-email` with get/set/forget, returning only the masked address.
+- [x] Client method plus `/email`, `/email <address>` and `/forget_email` commands.
+- [x] Test: the address is never echoed unmasked back into chat.
 - [ ] Test: buying without a stored email asks for it instead of creating an invoice.
 - [ ] Test: a supplied address is stored and the purchase resumes.
-- [ ] Test: an invalid address is rejected with a plain message and no invoice.
-- [ ] Test: the address is never echoed unmasked back into chat.
-- [ ] Implement.
+
+**Remaining:** the purchase flow still has to prompt for a missing address and
+hold the pending quote. Commands and storage are in place, so this is the last
+piece of Task 6.
 
 ### Task 7: Diagnostics And Wiring
 

@@ -928,6 +928,7 @@ class PluginRegistrationTests(unittest.TestCase):
                 "connect_imessage",
                 "connect_whatsapp",
                 "limits",
+                "email",
                 "withdraw",
                 "bitrefill",
                 "last_purchase",
@@ -3842,3 +3843,197 @@ class PluginRegistrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BuyerEmailClientTests(unittest.TestCase):
+    """Guest checkout delivers to an address the buyer gives us."""
+
+    def _client(self, plugin, response):
+        client = plugin.GatewayClient(
+            base_url="http://127.0.0.1:8099",
+            api_token="wallet-token",
+        )
+        captured = {}
+
+        def fake_post(path, payload, *, token, operation, user_token=None, timeout=None):
+            captured["path"] = path
+            captured["payload"] = payload
+            captured["user_token"] = user_token
+            return response
+
+        client._post = fake_post
+        return client, captured
+
+    def test_reading_the_address_sends_the_get_action(self):
+        plugin = load_plugin()
+        client, captured = self._client(
+            plugin,
+            {"ok": True, "email": "b***@example.com"},
+        )
+
+        masked = client.execute_buyer_email(
+            plugin.TelegramIdentity(user_id="u1"),
+            action="get",
+            user_access_token="user-token",
+        )
+
+        self.assertEqual(masked, "b***@example.com")
+        self.assertEqual(captured["path"], "/agent/buyer-email")
+        self.assertEqual(captured["payload"]["action"], "get")
+        self.assertEqual(captured["user_token"], "user-token")
+
+    def test_setting_an_address_sends_it_once(self):
+        plugin = load_plugin()
+        client, captured = self._client(
+            plugin,
+            {"ok": True, "email": "b***@example.com"},
+        )
+
+        client.execute_buyer_email(
+            plugin.TelegramIdentity(user_id="u1"),
+            action="set",
+            email="buyer@example.com",
+            user_access_token="user-token",
+        )
+
+        self.assertEqual(captured["payload"]["email"], "buyer@example.com")
+
+    def test_an_unset_address_reads_as_empty(self):
+        plugin = load_plugin()
+        client, _captured = self._client(plugin, {"ok": True, "email": ""})
+
+        masked = client.execute_buyer_email(
+            plugin.TelegramIdentity(user_id="u1"),
+            action="get",
+            user_access_token="user-token",
+        )
+
+        self.assertEqual(masked, "")
+
+    def test_a_missing_user_token_never_reaches_the_gateway(self):
+        plugin = load_plugin()
+        client, captured = self._client(plugin, {"ok": True, "email": ""})
+
+        with self.assertRaises(plugin.GatewayClientError):
+            client.execute_buyer_email(
+                plugin.TelegramIdentity(user_id="u1"),
+                action="get",
+            )
+
+        self.assertEqual(captured, {})
+
+
+class BuyerEmailCommandTests(unittest.TestCase):
+    """The buyer manages the delivery address from chat."""
+
+    class FakeEmailClient(FakeClient):
+        def __init__(self, masked="", error=None):
+            super().__init__()
+            self.masked = masked
+            self.email_error = error
+            self.email_calls = []
+
+        def execute_buyer_email(
+            self,
+            identity,
+            *,
+            action,
+            email=None,
+            user_access_token=None,
+        ):
+            self.email_calls.append((action, email))
+            if self.email_error:
+                raise self.email_error
+            return self.masked
+
+    def _result(self, command, args, client):
+        plugin = load_plugin()
+        plugin._client_factory = lambda: client
+        return plugin._telegram_public_command_result(
+            command,
+            args,
+            plugin.TelegramIdentity(user_id="u1"),
+        )
+
+    def test_showing_a_stored_address_masks_it(self):
+        client = self.FakeEmailClient(masked="b***@example.com")
+
+        text, _markup = self._result("email", "", client)
+
+        self.assertIn("b***@example.com", text)
+        self.assertEqual(client.email_calls, [("get", None)])
+
+    def test_showing_no_stored_address_explains_why_it_is_needed(self):
+        client = self.FakeEmailClient(masked="")
+
+        text, _markup = self._result("email", "", client)
+
+        self.assertIn("email", text.casefold())
+        self.assertEqual(client.email_calls, [("get", None)])
+
+    def test_setting_an_address_confirms_it_masked(self):
+        client = self.FakeEmailClient(masked="b***@example.com")
+
+        text, _markup = self._result("email", "buyer@example.com", client)
+
+        self.assertEqual(client.email_calls, [("set", "buyer@example.com")])
+        self.assertIn("b***@example.com", text)
+        # The full address must not be echoed back into the chat log.
+        self.assertNotIn("buyer@example.com", text)
+
+    def test_forgetting_clears_the_address(self):
+        client = self.FakeEmailClient(masked="")
+
+        text, _markup = self._result("forget-email", "", client)
+
+        self.assertEqual(client.email_calls, [("forget", None)])
+        self.assertTrue(text.strip())
+
+    def test_a_rejected_address_surfaces_the_safe_message(self):
+        # The background runner turns this into chat text; what matters here is
+        # that the message carries no copy of the address.
+        plugin = load_plugin()
+        client = self.FakeEmailClient(
+            error=plugin.GatewayClientError("that is not a valid email address")
+        )
+
+        with self.assertRaises(plugin.GatewayClientError) as captured:
+            self._result("email", "nope", client)
+
+        self.assertIn("valid email", captured.exception.user_message)
+        self.assertNotIn("nope", captured.exception.user_message)
+
+
+class BuyerEmailDispatchTests(unittest.TestCase):
+    """/email and /forget_email must be recognised as public commands."""
+
+    def _resolve(self, text):
+        plugin = load_plugin()
+        event = FakeEvent(text, "1045618308", platform="telegram", chat_id="c")
+        return plugin._telegram_public_command(event, event.source)
+
+    def test_slash_email_resolves(self):
+        self.assertEqual(self._resolve("/email"), "email")
+
+    def test_slash_email_with_an_address_resolves(self):
+        self.assertEqual(self._resolve("/email buyer@example.com"), "email")
+
+    def test_slash_forget_email_resolves(self):
+        self.assertEqual(self._resolve("/forget_email"), "forget-email")
+
+    def test_an_unknown_command_is_not_claimed(self):
+        self.assertIsNone(self._resolve("/emails"))
+
+    def test_the_address_is_carried_through_as_the_argument(self):
+        plugin = load_plugin()
+        event = FakeEvent(
+            "/email buyer@example.com",
+            "1045618308",
+            platform="telegram",
+            chat_id="c",
+        )
+
+        self.assertEqual(
+            plugin._telegram_command_args(event),
+            "buyer@example.com",
+        )

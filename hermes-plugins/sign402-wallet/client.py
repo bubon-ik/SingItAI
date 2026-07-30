@@ -41,6 +41,7 @@ _BITREFILL_LIST_PATH = "/agent/list-bitrefill-products"
 _BITREFILL_PRODUCT_PATH = "/agent/get-bitrefill-product"
 _PAID_TOOL_PATH = "/agent/buy-tool"
 _SPENDING_LIMITS_PATH = "/agent/spending-limits"
+_BUYER_EMAIL_PATH = "/agent/buyer-email"
 _WITHDRAW_TOKENS_PATH = "/agent/withdraw/tokens"
 _WITHDRAW_PATH = "/agent/withdraw"
 _LLM_OPERATION_PATHS = {
@@ -326,6 +327,36 @@ class GatewayClient:
             operation="get-bitrefill-product",
             timeout=self.purchase_timeout,
         )
+
+    def execute_buyer_email(
+        self,
+        identity: TelegramIdentity,
+        *,
+        action: str,
+        email: str | None = None,
+        user_access_token: str | None = None,
+    ) -> str:
+        """Read, set, or forget the address a guest invoice delivers to.
+
+        Returns the masked address; the gateway never sends the full one back.
+        """
+        user_token = str(user_access_token or "").strip()
+        if not user_token:
+            raise GatewayClientError(_AUTH_FAILED)
+        payload = {"telegramUserId": identity.user_id, "action": str(action)}
+        if email is not None:
+            payload["email"] = str(email).strip()
+        result = self._post(
+            _BUYER_EMAIL_PATH,
+            payload,
+            token=self.api_token,
+            operation="buyer-email",
+            user_token=user_token,
+        )
+        masked = result.get("email")
+        if not isinstance(masked, str):
+            raise GatewayClientError(_INVALID_RESPONSE)
+        return masked.strip()
 
     def execute_spending_limits(
         self,

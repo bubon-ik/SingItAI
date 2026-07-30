@@ -77,6 +77,8 @@ _TELEGRAM_PUBLIC_COMMAND_STARTED_MESSAGES = {
     "balance": "Checking balance…",
     "last-purchase": "Loading last purchase…",
     "limits": "Loading spending limits…",
+    "email": "Loading delivery email…",
+    "forget-email": "Forgetting delivery email…",
     "set-limits": "Updating spending limits…",
     "connect-imessage": "Loading approval settings…",
     "connect-whatsapp": "Loading approval settings…",
@@ -92,6 +94,7 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "connect_imessage", "description": "Select or link iMessage approvals"},
     {"command": "connect_whatsapp", "description": "Select or link WhatsApp approvals"},
     {"command": "limits", "description": "Show or set spending limits"},
+    {"command": "email", "description": "Show or set your delivery email"},
     {"command": "withdraw", "description": "Withdraw Base assets"},
     {"command": "bitrefill", "description": "Buy Bitrefill with a wallet token"},
     {"command": "last_purchase", "description": "Reveal latest purchase"},
@@ -534,6 +537,8 @@ def _help_text() -> str:
         "/connect_imessage - Select or link iMessage approvals\n"
         "/connect_whatsapp - Select or link WhatsApp approvals\n"
         "/limits - View or set spending limits\n"
+        "/email - Show or set the email your codes are sent to\n"
+        "/forget_email - Clear your delivery email\n"
         "/bitrefill <product> <amount> <country> <token> - Buy with a wallet token\n"
         "/last_purchase - Reveal your latest purchase\n"
         "/llm_buy <usd> <email> - Buy Bankr LLM credits\n"
@@ -1176,6 +1181,49 @@ def _start_telegram_background_operation(
     return dict(_SKIP_RESULT)
 
 
+def _buyer_email_text(client, identity, command: str, args: str) -> str:
+    """Show, set, or clear the address a guest order is delivered to.
+
+    Only the masked address is ever repeated back: the chat log is not a place
+    to leave the buyer's full address lying around.
+    """
+    token = _user_access_token(client, identity)
+    if command == "forget-email":
+        client.execute_buyer_email(
+            identity,
+            action="forget",
+            user_access_token=token,
+        )
+        return (
+            "Delivery email cleared. You will be asked for one on your next "
+            "purchase."
+        )
+    address = str(args or "").strip()
+    if address:
+        masked = client.execute_buyer_email(
+            identity,
+            action="set",
+            email=address,
+            user_access_token=token,
+        )
+        return f"Delivery email saved: {masked}"
+    masked = client.execute_buyer_email(
+        identity,
+        action="get",
+        user_access_token=token,
+    )
+    if masked:
+        return (
+            f"Delivery email: {masked}\n"
+            "Send /email <address> to change it, or /forget_email to clear it."
+        )
+    return (
+        "No delivery email saved yet. Your gift card codes are sent to it as "
+        "well as here, so you keep them if this chat is lost.\n"
+        "Send /email <address> to set one."
+    )
+
+
 def _telegram_public_command_result(
     command: str,
     args: str,
@@ -1197,6 +1245,8 @@ def _telegram_public_command_result(
             identity,
             user_access_token=_user_access_token(client, identity),
         )
+    elif command in {"email", "forget-email"}:
+        text = _buyer_email_text(client, identity, command, args)
     elif command in {"limits", "set-limits"}:
         parsed_limits = _parse_limit_args(command, args)
         if parsed_limits is None:
@@ -3605,6 +3655,8 @@ def _telegram_public_command(event, source) -> str | None:
         "last-purchase",
         "limits",
         "set-limits",
+        "email",
+        "forget-email",
         "withdraw",
         "connect-imessage",
         "connect-whatsapp",
