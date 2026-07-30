@@ -1096,6 +1096,15 @@ class McpBitrefillClient:
             "packageValue": str(quote["packageValue"]),
             "paymentMethod": self.payment_method,
         }
+        if self.checkout_mode == "guest":
+            access_token = self._invoice_access_token(invoice) or str(
+                (fallback or {}).get("invoiceAccessToken") or ""
+            )
+            if not access_token:
+                raise ValueError(
+                    "Bitrefill guest invoice carries no invoice access token"
+                )
+            snapshot["invoiceAccessToken"] = access_token
         # The deadline is fixed when the invoice is created; a reload happens
         # after funding, so its own duration would move the deadline forward.
         deadline = (
@@ -1309,6 +1318,37 @@ class McpBitrefillClient:
         if not minutes.is_finite() or minutes <= 0:
             return None
         return int(self._now()) + int(minutes * 60)
+
+    def _invoice_access_token(self, invoice: dict[str, Any]) -> str:
+        return str(
+            invoice.get("invoice_access_token")
+            or invoice.get("invoiceAccessToken")
+            or ""
+        ).strip()
+
+    def invoice_status(
+        self,
+        *,
+        invoice_id: str,
+        invoice_access_token: str = "",
+    ) -> dict[str, Any]:
+        """Read one invoice, carrying the guest bearer token when there is one.
+
+        A guest invoice belongs to nobody's account, so this token is the only
+        thing that authorises the read.
+        """
+        arguments: dict[str, Any] = {"invoice_id": str(invoice_id)}
+        if self.checkout_mode == "guest":
+            token = str(invoice_access_token or "").strip()
+            if not token:
+                raise ValueError(
+                    "a stored invoice access token is required to read a "
+                    "guest invoice"
+                )
+            arguments["invoice_access_token"] = token
+        return self._normalize_invoice(
+            self._call_tool("get-invoice-by-id", arguments)
+        )
 
     def _invoice_status(self, invoice: dict[str, Any]) -> str:
         # The live server names this `invoice_status`; reading only `status`

@@ -91,10 +91,10 @@
 - `complete_purchase` and status polling pass `invoice_access_token` to `get-invoice-by-id` in guest mode.
 
 **Steps:**
-- [ ] Test: guest mode fails preparation when the provider returns no access token.
-- [ ] Test: `get-invoice-by-id` carries the token in guest mode and omits it in account mode.
-- [ ] Test: a redemption poll with a missing stored token raises a recoverable error naming no secret.
-- [ ] Implement.
+- [x] Test: guest mode fails preparation when the provider returns no access token.
+- [x] Test: `get-invoice-by-id` carries the token in guest mode and omits it in account mode.
+- [x] Test: a redemption poll with a missing stored token raises a recoverable error naming no secret.
+- [x] Implement `invoice_status` plus token capture in the invoice snapshot.
 
 ### Task 5: Buyer Email Store
 
