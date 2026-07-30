@@ -60,11 +60,11 @@
 - Guest mode sends `email` alongside `cart_items` on `buy-products`; account mode never sends it.
 
 **Steps:**
-- [ ] Test: guest mode refuses to prepare a purchase without a buyer email.
-- [ ] Test: guest mode passes `email` through to `buy-products`.
-- [ ] Test: account mode omits `email` even when one is supplied.
-- [ ] Test: the email never appears in a raised error message.
-- [ ] Implement.
+- [x] Test: guest mode refuses to prepare a purchase without a buyer email.
+- [x] Test: guest mode passes `email` through to `buy-products`.
+- [x] Test: account mode omits `email` even when one is supplied.
+- [x] Test: the email never appears in a raised error message.
+- [x] Implement, including the protocol and deterministic client.
 
 ### Task 3: Invoice Access Token Storage
 

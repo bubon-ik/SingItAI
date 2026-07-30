@@ -1614,6 +1614,70 @@ class BitrefillMcpUsdcPurchaseTests(unittest.TestCase):
         invoice.update(overrides)
         return invoice
 
+    def test_guest_checkout_sends_the_buyer_email_with_the_cart(self):
+        caller = FakeMcpCaller([self._invoice()])
+        client = self._client(
+            caller,
+            FakeTreasuryClient(),
+            checkout_mode="guest",
+        )
+
+        client.prepare_purchase(
+            quote=APPROVED_QUOTE,
+            recipient={},
+            buyer_email="buyer@example.com",
+        )
+
+        name, arguments = caller.calls[0]
+        self.assertEqual(name, "buy-products")
+        self.assertEqual(arguments["email"], "buyer@example.com")
+
+    def test_guest_checkout_refuses_to_buy_without_an_email(self):
+        # Bitrefill requires it: without an address a closed chat loses the
+        # product for good.
+        caller = FakeMcpCaller([])
+        client = self._client(
+            caller,
+            FakeTreasuryClient(),
+            checkout_mode="guest",
+        )
+
+        with self.assertRaisesRegex(ValueError, "buyer email is required"):
+            client.prepare_purchase(quote=APPROVED_QUOTE, recipient={})
+
+        self.assertEqual(caller.calls, [])
+
+    def test_account_checkout_never_sends_an_email(self):
+        caller = FakeMcpCaller([self._invoice()])
+        client = self._client(caller, FakeTreasuryClient())
+
+        client.prepare_purchase(
+            quote=APPROVED_QUOTE,
+            recipient={},
+            buyer_email="buyer@example.com",
+        )
+
+        _name, arguments = caller.calls[0]
+        self.assertNotIn("email", arguments)
+
+    def test_a_rejected_email_is_not_echoed_into_the_error(self):
+        caller = FakeMcpCaller([])
+        client = self._client(
+            caller,
+            FakeTreasuryClient(),
+            checkout_mode="guest",
+        )
+
+        with self.assertRaises(ValueError) as captured:
+            client.prepare_purchase(
+                quote=APPROVED_QUOTE,
+                recipient={},
+                buyer_email="not-an-address",
+            )
+
+        self.assertNotIn("not-an-address", str(captured.exception))
+        self.assertEqual(caller.calls, [])
+
     def test_prepare_unwraps_the_live_response_envelope(self):
         # The live MCP server returns the invoice under `response`, alongside
         # `agent_instructions`, instead of at the top level.

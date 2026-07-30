@@ -45,6 +45,7 @@ class BitrefillClient(Protocol):
         *,
         quote: dict[str, Any],
         recipient: dict[str, Any],
+        buyer_email: str = "",
     ) -> dict[str, Any]:
         ...
 
@@ -228,6 +229,9 @@ class TestBitrefillClient:
         *,
         quote: dict[str, Any],
         recipient: dict[str, Any],
+        # Accepted so both implementations stay swappable; the deterministic
+        # client never contacts Bitrefill, so it has nowhere to send a receipt.
+        buyer_email: str = "",
     ) -> dict[str, Any]:
         order_seed = f"{quote['quoteId']}:{quote['productId']}:{quote['packageId']}"
         order_id = "test_bitrefill_" + hashlib.sha256(order_seed.encode("utf-8")).hexdigest()[:16]

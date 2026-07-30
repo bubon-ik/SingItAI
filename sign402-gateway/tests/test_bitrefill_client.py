@@ -151,3 +151,28 @@ class BitrefillClientTests(unittest.TestCase):
         self.assertEqual(prepared["packageValue"], "1")
         self.assertEqual(result["invoiceId"], prepared["invoiceId"])
         self.assertTrue(result["ok"])
+
+
+class BitrefillClientContractTests(unittest.TestCase):
+    """Both implementations must stay swappable behind one protocol."""
+
+    def test_the_test_client_accepts_a_buyer_email(self):
+        client = TestBitrefillClient()
+        quote = client.quote_product(
+            product_id="test-gift-card-code",
+            package_id="1",
+            country="US",
+            recipient={},
+        )
+
+        prepared = client.prepare_purchase(
+            quote={**quote, "quoteId": "quote_1"},
+            recipient={},
+            buyer_email="buyer@example.com",
+        )
+
+        self.assertTrue(str(prepared["invoiceId"]))
+
+
+if __name__ == "__main__":
+    unittest.main()

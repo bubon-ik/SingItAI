@@ -168,6 +168,28 @@ class McpToolCaller:
                     )
 
 
+def _validated_buyer_email(value: Any) -> str:
+    """Check the guest buyer's address without repeating it back.
+
+    The address is personal data, so a rejection says what is wrong and never
+    quotes the value into an error that may be logged or shown.
+    """
+    email = str(value or "").strip()
+    if not email:
+        raise ValueError("a buyer email is required for guest checkout")
+    local, separator, domain = email.partition("@")
+    if (
+        not separator
+        or not local
+        or "." not in domain
+        or domain.startswith(".")
+        or domain.endswith(".")
+        or any(character.isspace() for character in email)
+    ):
+        raise ValueError("the buyer email is not a valid address")
+    return email
+
+
 class McpBitrefillClient:
     __test__ = False
 
@@ -706,6 +728,7 @@ class McpBitrefillClient:
         *,
         quote: dict[str, Any],
         recipient: dict[str, Any],
+        buyer_email: str = "",
     ) -> dict[str, Any]:
         price_usd = Decimal(str(quote["priceUsd"]))
         if price_usd > self.max_purchase_usd:
@@ -725,15 +748,17 @@ class McpBitrefillClient:
         )
         if refill_input:
             item["refill_input"] = refill_input
+        arguments: dict[str, Any] = {
+            "cart_items": [item],
+            "payment_method": self.payment_method,
+            "return_payment_link": False,
+        }
+        if self.checkout_mode == "guest":
+            # Bitrefill requires the address on a guest invoice: it is where the
+            # codes land if the buyer ever loses the chat.
+            arguments["email"] = _validated_buyer_email(buyer_email)
         invoice = self._normalize_invoice(
-            self._call_tool(
-                "buy-products",
-                {
-                    "cart_items": [item],
-                    "payment_method": self.payment_method,
-                    "return_payment_link": False,
-                },
-            )
+            self._call_tool("buy-products", arguments)
         )
         snapshot = self._validated_invoice_snapshot(
             invoice,
