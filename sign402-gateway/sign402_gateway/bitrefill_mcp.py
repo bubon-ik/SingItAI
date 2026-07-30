@@ -782,24 +782,31 @@ class McpBitrefillClient:
         quote: dict[str, Any],
         prepared: dict[str, Any],
         checkpoint_callback: Any | None = None,
+        invoice_access_token: str = "",
     ) -> dict[str, Any]:
         validated_prepared = self._validate_prepared_purchase(
             prepared,
             quote=quote,
         )
         invoice_id = validated_prepared["invoiceId"]
-        invoice = self._normalize_invoice(
-            self._call_tool(
-                "get-invoice-by-id",
-                {"invoice_id": invoice_id},
-            )
+        access_token = str(invoice_access_token or "").strip()
+        invoice = self.invoice_status(
+            invoice_id=invoice_id,
+            invoice_access_token=access_token,
         )
         if self._invoice_id(invoice) != invoice_id:
             raise ValueError("Bitrefill MCP invoice id changed")
         reloaded = self._validated_invoice_snapshot(
             invoice,
             quote=quote,
-            fallback=validated_prepared,
+            # The stored token is the one the checkpoint sanitizer drops on the
+            # way into the database, so hand it back here rather than expecting
+            # the reload to repeat it.
+            fallback=(
+                {**validated_prepared, "invoiceAccessToken": access_token}
+                if access_token
+                else validated_prepared
+            ),
         )
         for key in (
             "invoiceId",
@@ -873,7 +880,10 @@ class McpBitrefillClient:
                         "treasuryPayment": deepcopy(treasury_payment),
                     }
                 )
-        invoice = self._poll_invoice(invoice_id)
+        invoice = self._poll_invoice(
+            invoice_id,
+            invoice_access_token=access_token,
+        )
         return self._provider_result(
             quote=quote,
             invoice=invoice,
@@ -886,10 +896,12 @@ class McpBitrefillClient:
         quote: dict[str, Any],
         recipient: dict[str, Any],
         checkpoint_callback: Any | None = None,
+        buyer_email: str = "",
     ) -> dict[str, Any]:
         prepared = self.prepare_purchase(
             quote=quote,
             recipient=recipient,
+            buyer_email=buyer_email,
         )
         if checkpoint_callback is not None:
             checkpoint_callback(deepcopy(prepared))
@@ -897,18 +909,24 @@ class McpBitrefillClient:
             quote=quote,
             prepared=prepared,
             checkpoint_callback=checkpoint_callback,
+            invoice_access_token=str(
+                prepared.get("invoiceAccessToken") or ""
+            ),
         )
 
     def refresh_purchase(
         self,
         provider_result: dict[str, Any],
         quote: dict[str, Any],
+        *,
+        invoice_access_token: str = "",
     ) -> dict[str, Any]:
         invoice_id = str(provider_result.get("invoiceId", "")).strip()
         if not invoice_id:
             raise ValueError("Bitrefill provider result is missing invoiceId")
-        invoice = self._normalize_invoice(
-            self._call_tool("get-invoice-by-id", {"invoice_id": invoice_id})
+        invoice = self.invoice_status(
+            invoice_id=invoice_id,
+            invoice_access_token=invoice_access_token,
         )
         treasury_payment = (
             deepcopy(provider_result["treasuryPayment"])
@@ -1252,15 +1270,18 @@ class McpBitrefillClient:
             "amountAtomic": amount_atomic,
         }
 
-    def _poll_invoice(self, invoice_id: str) -> dict[str, Any]:
+    def _poll_invoice(
+        self,
+        invoice_id: str,
+        *,
+        invoice_access_token: str = "",
+    ) -> dict[str, Any]:
         last_invoice: dict[str, Any] = {"invoice_id": invoice_id}
         terminal_errors = {"blocked", "denied", "payment_error"}
         for attempt in range(self.invoice_poll_attempts):
-            invoice = self._normalize_invoice(
-                self._call_tool(
-                    "get-invoice-by-id",
-                    {"invoice_id": invoice_id},
-                )
+            invoice = self.invoice_status(
+                invoice_id=invoice_id,
+                invoice_access_token=invoice_access_token,
             )
             last_invoice = invoice
             status = self._invoice_status(invoice)

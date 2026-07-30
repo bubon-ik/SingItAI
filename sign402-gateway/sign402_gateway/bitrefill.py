@@ -55,6 +55,7 @@ class BitrefillClient(Protocol):
         quote: dict[str, Any],
         prepared: dict[str, Any],
         checkpoint_callback: Callable[[dict[str, Any]], None] | None = None,
+        invoice_access_token: str = "",
     ) -> dict[str, Any]:
         ...
 
@@ -64,6 +65,7 @@ class BitrefillClient(Protocol):
         quote: dict[str, Any],
         recipient: dict[str, Any],
         checkpoint_callback: Callable[[dict[str, Any]], None] | None = None,
+        buyer_email: str = "",
     ) -> dict[str, Any]:
         ...
 
@@ -71,6 +73,8 @@ class BitrefillClient(Protocol):
         self,
         provider_result: dict[str, Any],
         quote: dict[str, Any],
+        *,
+        invoice_access_token: str = "",
     ) -> dict[str, Any]:
         ...
 
@@ -249,6 +253,9 @@ class TestBitrefillClient:
         quote: dict[str, Any],
         prepared: dict[str, Any],
         checkpoint_callback: Callable[[dict[str, Any]], None] | None = None,
+        # The deterministic client issues no guest invoices, so there is never
+        # a token to carry; it is accepted to keep both clients swappable.
+        invoice_access_token: str = "",
     ) -> dict[str, Any]:
         expected = self.prepare_purchase(quote=quote, recipient={})
         if str(prepared.get("invoiceId", "")) != expected["invoiceId"]:
@@ -278,8 +285,13 @@ class TestBitrefillClient:
         quote: dict[str, Any],
         recipient: dict[str, Any],
         checkpoint_callback: Callable[[dict[str, Any]], None] | None = None,
+        buyer_email: str = "",
     ) -> dict[str, Any]:
-        prepared = self.prepare_purchase(quote=quote, recipient=recipient)
+        prepared = self.prepare_purchase(
+            quote=quote,
+            recipient=recipient,
+            buyer_email=buyer_email,
+        )
         if checkpoint_callback is not None:
             checkpoint_callback(prepared)
         return self.complete_purchase(
@@ -292,6 +304,8 @@ class TestBitrefillClient:
         self,
         provider_result: dict[str, Any],
         quote: dict[str, Any],
+        *,
+        invoice_access_token: str = "",
     ) -> dict[str, Any]:
         refreshed = deepcopy(provider_result)
         refreshed.update(

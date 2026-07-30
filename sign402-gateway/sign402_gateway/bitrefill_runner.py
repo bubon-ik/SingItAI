@@ -326,6 +326,30 @@ def _fulfillment_token_matches(metadata: dict[str, Any], fulfillment_token: str 
     return hmac.compare_digest(supplied_hash, expected_hash)
 
 
+def _buyer_email_argument(buyer_email: str) -> dict[str, str]:
+    return {"buyer_email": buyer_email} if buyer_email else {}
+
+
+def _invoice_access_argument(invoice_access_token: str) -> dict[str, str]:
+    return (
+        {"invoice_access_token": invoice_access_token}
+        if invoice_access_token
+        else {}
+    )
+
+
+def _stored_invoice_access_token(metadata: Any) -> str:
+    """Read the guest bearer token the store decrypted for this order.
+
+    Account-mode orders never have one, so an empty string is the normal answer
+    and every caller treats it as "send no token".
+    """
+    stored = metadata.get("invoiceAccess") if isinstance(metadata, dict) else None
+    if not isinstance(stored, dict):
+        return ""
+    return str(stored.get("invoiceAccessToken") or "").strip()
+
+
 def lookup_bitrefill_order(
     store: BitrefillCommerceStore,
     quote_id: str,
@@ -396,7 +420,11 @@ def lookup_bitrefill_order(
     ):
         return {**status_result, "redemptionUnavailable": True}
     try:
-        refreshed = bitrefill_client.refresh_purchase(provider_result, quote)
+        refreshed = bitrefill_client.refresh_purchase(
+            provider_result,
+            quote,
+            **_invoice_access_argument(_stored_invoice_access_token(metadata)),
+        )
         if not isinstance(refreshed, dict):
             raise ValueError("Bitrefill refresh must return an object")
         store.checkpoint(quote_id, {"bitrefill": refreshed})
@@ -1016,6 +1044,9 @@ class WalletBitrefillPurchaseRunner:
             {
                 "quoteId": quote_id,
                 "fulfillmentToken": fulfillment_token,
+                # Guest checkout resolves the buyer's delivery address from
+                # this id; the account path ignores it.
+                "telegramUserId": telegram_user_id,
             }
         )
         if not isinstance(prepared, dict) or not str(
@@ -1302,11 +1333,15 @@ class BitrefillFulfillmentRunner:
         bitrefill_client: BitrefillClient,
         funding_runner: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         now_provider: Callable[[], int] = now_epoch,
+        buyer_email_provider: Callable[[str], str | None] | None = None,
     ):
         self.store = store
         self.bitrefill_client = bitrefill_client
         self.funding_runner = funding_runner
         self.now_provider = now_provider
+        # Set only in guest checkout, where Bitrefill requires the buyer's own
+        # address on the cart. The account path has nowhere to send it.
+        self.buyer_email_provider = buyer_email_provider
 
     def __call__(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.fulfill(payload)
@@ -1349,6 +1384,19 @@ class BitrefillFulfillmentRunner:
             )
         return quote_id, record, effective_quote
 
+    def _buyer_email(self, payload: dict[str, Any]) -> str:
+        if self.buyer_email_provider is None:
+            return ""
+        telegram_user_id = str(payload.get("telegramUserId", "") or "").strip()
+        if not telegram_user_id:
+            return ""
+        return str(self.buyer_email_provider(telegram_user_id) or "").strip()
+
+    def _persisted_invoice_access_token(self, quote_id: str) -> str:
+        return _stored_invoice_access_token(
+            self.store.get_quote(quote_id)["metadata"]
+        )
+
     def prepare(self, payload: dict[str, Any]) -> dict[str, Any]:
         quote_id, record, effective_quote = self._authorized_context(payload)
         if record["state"] not in {"USER_APPROVED", "FIREFLY_APPROVED"}:
@@ -1364,14 +1412,28 @@ class BitrefillFulfillmentRunner:
                     if isinstance(metadata.get("recipient"), dict)
                     else {}
                 ),
+                # Sent only when guest checkout supplied one, so the account
+                # path calls the provider client exactly as it always has.
+                **_buyer_email_argument(self._buyer_email(payload)),
             )
             if not isinstance(prepared, dict):
                 raise ValueError("Bitrefill prepared invoice is invalid")
-            self.store.advance_state(
-                quote_id,
-                "INVOICE_CREATED",
-                {"bitrefillCheckpoint": prepared},
-            )
+            checkpoint = {
+                key: value
+                for key, value in prepared.items()
+                if key != "invoiceAccessToken"
+            }
+            access_token = str(prepared.get("invoiceAccessToken") or "").strip()
+            update: dict[str, Any] = {"bitrefillCheckpoint": checkpoint}
+            if access_token:
+                # Bearer value: the store owns it from here, encrypted, and the
+                # checkpoint sanitizer would drop it on the floor otherwise.
+                update["invoiceAccess"] = {"invoiceAccessToken": access_token}
+            self.store.advance_state(quote_id, "INVOICE_CREATED", update)
+            if access_token and not self._persisted_invoice_access_token(quote_id):
+                raise ValueError(
+                    "Bitrefill guest invoice access token was not persisted"
+                )
         except Exception as exc:
             log_swallowed_failure(
                 logger,
@@ -1484,6 +1546,9 @@ class BitrefillFulfillmentRunner:
                         quote_id,
                         {"bitrefillCheckpoint": checkpoint},
                     ),
+                    **_invoice_access_argument(
+                        _stored_invoice_access_token(metadata)
+                    ),
                 )
             else:
                 result = self.bitrefill_client.buy_product(
@@ -1497,6 +1562,7 @@ class BitrefillFulfillmentRunner:
                         quote_id,
                         {"bitrefillCheckpoint": checkpoint},
                     ),
+                    **_buyer_email_argument(self._buyer_email(payload)),
                 )
         except Exception as exc:
             log_swallowed_failure(

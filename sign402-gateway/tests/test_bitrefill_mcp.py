@@ -1765,6 +1765,131 @@ class BitrefillMcpUsdcPurchaseTests(unittest.TestCase):
         self.assertNotIn("not-an-address", str(captured.exception))
         self.assertEqual(caller.calls, [])
 
+    def _guest_prepared(self, **overrides):
+        prepared = {
+            "invoiceId": "inv_prepare",
+            "status": "unpaid",
+            "productId": APPROVED_QUOTE["productId"],
+            "packageValue": APPROVED_QUOTE["packageValue"],
+            "paymentMethod": "usdc_base",
+            "paymentAmount": "50.50",
+            "paymentAsset": "USDC",
+            "paymentNetwork": "base",
+        }
+        prepared.update(overrides)
+        return prepared
+
+    def test_guest_completion_reads_the_invoice_with_its_token(self):
+        caller = FakeMcpCaller(
+            [
+                self._invoice(
+                    status="complete",
+                    orders=[{"order_id": "ord_1", "status": "delivered"}],
+                )
+            ]
+        )
+        client = self._client(
+            caller,
+            FakeTreasuryClient(),
+            checkout_mode="guest",
+        )
+
+        client.complete_purchase(
+            quote=APPROVED_QUOTE,
+            prepared=self._guest_prepared(),
+            invoice_access_token="tok_secret",
+        )
+
+        name, arguments = caller.calls[0]
+        self.assertEqual(name, "get-invoice-by-id")
+        self.assertEqual(arguments["invoice_access_token"], "tok_secret")
+
+    def test_guest_completion_without_a_stored_token_names_no_secret(self):
+        # Losing the token is loud: the invoice cannot be read again without it.
+        caller = FakeMcpCaller([])
+        client = self._client(
+            caller,
+            FakeTreasuryClient(),
+            checkout_mode="guest",
+        )
+
+        with self.assertRaisesRegex(ValueError, "invoice access token"):
+            client.complete_purchase(
+                quote=APPROVED_QUOTE,
+                prepared=self._guest_prepared(),
+            )
+
+        self.assertEqual(caller.calls, [])
+
+    def test_guest_polling_after_payment_carries_the_token(self):
+        caller = FakeMcpCaller(
+            [
+                self._invoice(status="unpaid"),
+                self._invoice(
+                    status="complete",
+                    orders=[{"order_id": "ord_1", "status": "delivered"}],
+                ),
+            ]
+        )
+        treasury = FakeTreasuryClient()
+        client = self._client(caller, treasury, checkout_mode="guest")
+
+        client.complete_purchase(
+            quote=APPROVED_QUOTE,
+            prepared=self._guest_prepared(),
+            invoice_access_token="tok_secret",
+        )
+
+        self.assertEqual(len(treasury.token_transfers), 1)
+        self.assertEqual(
+            [arguments.get("invoice_access_token") for _, arguments in caller.calls],
+            ["tok_secret", "tok_secret"],
+        )
+
+    def test_guest_refresh_carries_the_token(self):
+        caller = FakeMcpCaller(
+            [
+                self._invoice(
+                    status="complete",
+                    orders=[{"order_id": "ord_1", "status": "delivered"}],
+                )
+            ]
+        )
+        client = self._client(
+            caller,
+            FakeTreasuryClient(),
+            checkout_mode="guest",
+        )
+
+        client.refresh_purchase(
+            {"invoiceId": "inv_prepare", "orderId": "ord_1"},
+            APPROVED_QUOTE,
+            invoice_access_token="tok_secret",
+        )
+
+        name, arguments = caller.calls[0]
+        self.assertEqual(name, "get-invoice-by-id")
+        self.assertEqual(arguments["invoice_access_token"], "tok_secret")
+
+    def test_account_completion_still_sends_no_token(self):
+        caller = FakeMcpCaller(
+            [
+                self._invoice(
+                    status="complete",
+                    orders=[{"order_id": "ord_1", "status": "delivered"}],
+                )
+            ]
+        )
+        client = self._client(caller, FakeTreasuryClient())
+
+        client.complete_purchase(
+            quote=APPROVED_QUOTE,
+            prepared=self._guest_prepared(),
+        )
+
+        _name, arguments = caller.calls[0]
+        self.assertNotIn("invoice_access_token", arguments)
+
     def test_prepare_unwraps_the_live_response_envelope(self):
         # The live MCP server returns the invoice under `response`, alongside
         # `agent_instructions`, instead of at the top level.

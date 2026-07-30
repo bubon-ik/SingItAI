@@ -3413,5 +3413,257 @@ class BitrefillRunnerTests(unittest.TestCase):
             )
 
 
+GUEST_ACCESS_TOKEN = "GUEST-ACCESS-TOKEN-MARKER"
+
+
+class GuestBitrefillClient:
+    """A live-shaped client that only works when the guest token comes back."""
+
+    def __init__(self):
+        self.buyer_emails = []
+        self.completion_tokens = []
+        self.refresh_tokens = []
+
+    def prepare_purchase(self, *, quote, recipient, buyer_email=""):
+        self.buyer_emails.append(buyer_email)
+        return {
+            "invoiceId": "invoice_guest_1",
+            "status": "unpaid",
+            "productId": str(quote["productId"]),
+            "packageValue": str(quote["packageValue"]),
+            "paymentMethod": "usdc_base",
+            "invoiceAccessToken": GUEST_ACCESS_TOKEN,
+        }
+
+    def complete_purchase(
+        self,
+        *,
+        quote,
+        prepared,
+        checkpoint_callback=None,
+        invoice_access_token="",
+    ):
+        self.completion_tokens.append(invoice_access_token)
+        return self._delivered()
+
+    def refresh_purchase(self, provider_result, quote, *, invoice_access_token=""):
+        self.refresh_tokens.append(invoice_access_token)
+        return self._delivered()
+
+    def _delivered(self):
+        return {
+            "ok": True,
+            "provider": "bitrefill-mcp",
+            "invoiceId": "invoice_guest_1",
+            "orderId": "order_guest_1",
+            "status": "delivered",
+            "redemption": {
+                "type": "bitrefill",
+                "label": "Bitrefill redemption",
+                "value": "GUEST-CODE",
+            },
+        }
+
+
+class BitrefillGuestCheckoutTests(unittest.TestCase):
+    def _approved_quote(self, store, *, quote_id="quote_guest_1"):
+        store.save_quote(
+            {
+                "quoteId": quote_id,
+                "productId": "test-gift-card-link",
+                "productType": "gift_card",
+                "packageId": "1",
+                "packageValue": "1",
+                "priceUsd": "1.00",
+                "expiresAtEpoch": 1_719_000_120,
+                "maxSingitAtomic": "101000000000000000000",
+            }
+        )
+        store.advance_state(
+            quote_id,
+            "USER_APPROVED",
+            {
+                "fulfillmentTokenHash": hashlib.sha256(
+                    b"fulfill_guest_secret"
+                ).hexdigest()
+            },
+        )
+
+    def _runner(self, store, client, **overrides):
+        return BitrefillFulfillmentRunner(
+            store=store,
+            bitrefill_client=client,
+            now_provider=lambda: 1_719_000_001,
+            **overrides,
+        )
+
+    def test_prepare_sends_the_stored_buyer_email(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = make_commerce_store(Path(tmp) / "orders.sqlite3")
+            self._approved_quote(store)
+            client = GuestBitrefillClient()
+            runner = self._runner(
+                store,
+                client,
+                buyer_email_provider=lambda user_id: (
+                    "buyer@example.com" if user_id == "user_1" else ""
+                ),
+            )
+
+            runner.prepare(
+                {
+                    "quoteId": "quote_guest_1",
+                    "fulfillmentToken": "fulfill_guest_secret",
+                    "telegramUserId": "user_1",
+                }
+            )
+
+            self.assertEqual(client.buyer_emails, ["buyer@example.com"])
+
+    def test_prepare_keeps_the_access_token_out_of_the_row_and_the_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "orders.sqlite3"
+            store = make_commerce_store(path)
+            self._approved_quote(store)
+            runner = self._runner(store, GuestBitrefillClient())
+
+            prepared = runner.prepare(
+                {
+                    "quoteId": "quote_guest_1",
+                    "fulfillmentToken": "fulfill_guest_secret",
+                }
+            )
+
+            self.assertNotIn("invoiceAccessToken", prepared)
+            self.assertNotIn(GUEST_ACCESS_TOKEN, sqlite_text(path))
+            self.assertEqual(
+                store.get_quote("quote_guest_1")["metadata"]["invoiceAccess"],
+                {"invoiceAccessToken": GUEST_ACCESS_TOKEN},
+            )
+
+    def test_prepare_fails_loudly_when_the_token_cannot_be_persisted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = BitrefillCommerceStore(Path(tmp) / "orders.sqlite3")
+            self._approved_quote(store)
+            runner = self._runner(store, GuestBitrefillClient())
+
+            with self.assertRaises(ValueError) as captured:
+                runner.prepare(
+                    {
+                        "quoteId": "quote_guest_1",
+                        "fulfillmentToken": "fulfill_guest_secret",
+                    }
+                )
+
+            self.assertNotIn(GUEST_ACCESS_TOKEN, str(captured.exception))
+            self.assertEqual(
+                store.get_quote("quote_guest_1")["state"],
+                "FULFILLMENT_FAILED",
+            )
+
+    def test_fulfill_completes_with_the_stored_access_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = make_commerce_store(Path(tmp) / "orders.sqlite3")
+            self._approved_quote(store)
+            client = GuestBitrefillClient()
+            runner = self._runner(store, client)
+            runner.prepare(
+                {
+                    "quoteId": "quote_guest_1",
+                    "fulfillmentToken": "fulfill_guest_secret",
+                }
+            )
+
+            result = runner.fulfill(
+                {
+                    "quoteId": "quote_guest_1",
+                    "fulfillmentToken": "fulfill_guest_secret",
+                }
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(client.completion_tokens, [GUEST_ACCESS_TOKEN])
+
+    def test_wallet_purchase_names_the_buyer_when_preparing(self):
+        # The invoice is created inside `prepare`, so that is the only place
+        # the buyer's stored address can still be attached to the cart.
+        with tempfile.TemporaryDirectory() as tmp:
+            store = make_commerce_store(Path(tmp) / "orders.sqlite3")
+            quote_service = BitrefillQuoteService(
+                bitrefill_client=TestBitrefillClient(),
+                store=store,
+                singit_usd_price_provider=lambda: "0.01",
+                quote_id_provider=lambda: "quote_1",
+                now_provider=lambda: 1_719_000_000,
+            )
+            quote = quote_service.quote(
+                {
+                    "productId": "test-gift-card-link",
+                    "packageId": "1",
+                    "country": "US",
+                }
+            )
+            fulfillment = Mock()
+            fulfillment.prepare.return_value = {"invoiceId": "invoice_guest_1"}
+            approval = Mock()
+            runner = WalletBitrefillPurchaseRunner(
+                store=store,
+                approval_client=approval,
+                fulfillment_runner=fulfillment,
+                user_funding_runner=Mock(
+                    return_value={
+                        "ok": True,
+                        "fromWallet": "0xUser",
+                        "transfer": {"txId": "0xTRANSFER"},
+                    }
+                ),
+                now_provider=lambda: 1_719_000_001,
+                fulfillment_token_provider=lambda: "fulfill_secret_1",
+            )
+            approval.return_value = {
+                "approved": True,
+                "approvedHash": runner.payment_hash_for_quote(
+                    quote,
+                    recipient={},
+                ),
+            }
+
+            runner.buy({"quoteId": "quote_1", "telegramUserId": "user_1"})
+
+            self.assertEqual(
+                fulfillment.prepare.call_args.args[0]["telegramUserId"],
+                "user_1",
+            )
+
+    def test_order_lookup_refreshes_with_the_stored_access_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = make_commerce_store(Path(tmp) / "orders.sqlite3")
+            self._approved_quote(store)
+            client = GuestBitrefillClient()
+            runner = self._runner(store, client)
+            runner.prepare(
+                {
+                    "quoteId": "quote_guest_1",
+                    "fulfillmentToken": "fulfill_guest_secret",
+                }
+            )
+            runner.fulfill(
+                {
+                    "quoteId": "quote_guest_1",
+                    "fulfillmentToken": "fulfill_guest_secret",
+                }
+            )
+
+            lookup_bitrefill_order(
+                store,
+                "quote_guest_1",
+                include_redemption=True,
+                fulfillment_token="fulfill_guest_secret",
+                bitrefill_client=client,
+            )
+
+            self.assertEqual(client.refresh_tokens, [GUEST_ACCESS_TOKEN])
+
+
 if __name__ == "__main__":
     unittest.main()
