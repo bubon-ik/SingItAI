@@ -13,9 +13,10 @@ from .numeric import format_decimal
 SINGIT_DECIMALS = 18
 DEFAULT_QUOTE_TTL_SECONDS = 120
 SERVICE_FEE_BPS = 100
-# Bitrefill publishes catalog prices rounded to the cent, so an invoice may come
-# back up to a cent above the listed price.
-PROVIDER_ROUNDING_ALLOWANCE_USD = Decimal("0.01")
+# Bitrefill will not issue a USDC invoice below this, whatever the product
+# costs: a 25 ARS card listed at $0.01 invoices at $0.02. Observed, not
+# documented — if they move the floor, this is the one line to change.
+PROVIDER_MIN_INVOICE_USD = Decimal("0.02")
 MAX_REPRICE_BPS = 500
 
 
@@ -40,22 +41,29 @@ def _approved_maximum_atomic(
     return min(increased, balance)
 
 
-def calculate_service_fee(price_usd: Any) -> tuple[Decimal, Decimal]:
-    """Return the service fee and the amount the buyer approves and funds.
+def chargeable_price_usd(price_usd: Any) -> Decimal:
+    """Return what Bitrefill will actually invoice for a listed price.
 
-    The total is also the ceiling the provider invoice has to fit under, and
-    Bitrefill quotes catalog prices rounded to the cent: a product listed at
-    $0.01 can invoice at $0.02. On an order of a dollar or more the 1% fee
-    already covers that cent, but below it the fee does not, and the purchase
-    dies at invoice creation with nothing wrong on either side. So the total
-    reserves a cent of rounding room where the fee alone is too thin — which
-    leaves every order of $1.00 and up exactly as it was.
+    Their USDC invoice has a floor, so the cheapest products cost more than the
+    catalog says. Quoting the listed price instead would have the buyer approve
+    and fund less than the invoice, and the purchase dies at invoice creation —
+    which is exactly what happened to a 25 ARS card listed at $0.01.
     """
     price = Decimal(str(price_usd))
     if price <= 0:
         raise ValueError("product priceUsd must be positive")
+    return max(price, PROVIDER_MIN_INVOICE_USD)
+
+
+def calculate_service_fee(price_usd: Any) -> tuple[Decimal, Decimal]:
+    """Return the service fee and the amount the buyer approves and funds.
+
+    The total doubles as the ceiling the provider invoice is checked against,
+    so it is built from the price that will really be invoiced.
+    """
+    price = chargeable_price_usd(price_usd)
     fee = price * Decimal(SERVICE_FEE_BPS) / Decimal(10_000)
-    return fee, max(price + fee, price + PROVIDER_ROUNDING_ALLOWANCE_USD)
+    return fee, price + fee
 
 
 def new_quote_id() -> str:
@@ -90,7 +98,9 @@ def build_quote(
     if not value:
         raise ValueError("packageValue is required")
 
-    price_usd = Decimal(str(product.get("priceUsd", value)))
+    # The quote states what the buyer will be charged, which the provider
+    # floor can lift above the catalog price.
+    price_usd = chargeable_price_usd(product.get("priceUsd", value))
     singit_price = Decimal(str(singit_usd_price))
     service_fee_usd, total_usd = calculate_service_fee(price_usd)
     if singit_price <= 0:
@@ -148,7 +158,9 @@ def build_real_rate_quote(
         raise ValueError("selected Bitrefill product does not match request")
     if str(request.get("packageId", "")).strip() != package_id:
         raise ValueError("selected Bitrefill package does not match request")
-    price_usd = Decimal(str(product.get("priceUsd", product.get("packageValue", ""))))
+    price_usd = chargeable_price_usd(
+        product.get("priceUsd", product.get("packageValue", ""))
+    )
     service_fee_usd, total_usd = calculate_service_fee(price_usd)
     if Decimal(str(pricing["targetUsdc"])) != total_usd:
         raise ValueError("pricing targetUsdc must equal Bitrefill totalUsd")
