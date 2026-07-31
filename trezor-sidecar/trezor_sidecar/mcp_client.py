@@ -61,8 +61,8 @@ def decode_tool_result(result: Any, max_bytes: int = 65536) -> dict[str, Any]:
             raise _unavailable()
     except SafeError:
         raise
-    except Exception as error:
-        raise _unavailable() from error
+    except Exception:
+        raise _unavailable() from None
     raise _unavailable()
 
 
@@ -81,8 +81,8 @@ class McpToolCaller:
             return asyncio.run(self._call_async(name, arguments))
         except SafeError:
             raise
-        except Exception as error:
-            raise _unavailable() from error
+        except Exception:
+            raise _unavailable() from None
 
     async def _call_async(
         self, name: str, arguments: dict[str, Any]
@@ -100,18 +100,32 @@ class McpToolCaller:
             ) as (read_stream, write_stream, _):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
-                    tools = await session.list_tools()
-                    self._require_tool(_field(tools, "tools", ()), name)
+                    await self._confirm_tool(session, name)
                     result = await session.call_tool(name, arguments)
         return decode_tool_result(result)
 
     @staticmethod
-    def _require_tool(tools: Any, name: str) -> None:
+    async def _confirm_tool(session: Any, name: str) -> None:
+        cursor = None
+        seen_cursors = set()
+        while True:
+            tools = await session.list_tools(cursor=cursor)
+            if McpToolCaller._contains_tool(_field(tools, "tools", ()), name):
+                return
+            next_cursor = _field(tools, "nextCursor")
+            if next_cursor is None:
+                raise _unavailable()
+            if not isinstance(next_cursor, str) or next_cursor in seen_cursors:
+                raise _unavailable()
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
+    @staticmethod
+    def _contains_tool(tools: Any, name: str) -> bool:
         if not isinstance(tools, Sequence) or isinstance(tools, (str, bytes)):
-            raise _unavailable()
+            return False
         available = {_field(tool, "name") for tool in tools}
-        if name not in available:
-            raise _unavailable()
+        return name in available
 
 
 class TrezorMcpClient:
