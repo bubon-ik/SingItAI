@@ -1,7 +1,10 @@
 import sqlite3
+import stat
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
+from multiprocessing import get_context
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -65,6 +68,39 @@ class AlteredFixedFieldsIntent(PurchaseIntent):
     @property
     def payment_network(self):
         return "Ethereum Mainnet"
+
+
+def approve_in_process(database, private_key, intent, counter, start, results):
+    account = Account.from_key(private_key)
+
+    class ProcessTrezor:
+        def sign_typed_data(self, path, data):
+            with counter.get_lock():
+                counter.value += 1
+            time.sleep(0.2)
+            return {"signature": account.sign_message(
+                encode_typed_data(full_message=data)
+            ).signature.hex()}
+
+    settings = SidecarSettings(
+        enabled=True,
+        mcp_token="test-mcp-token",
+        api_token="test-api-token",
+        max_usd=Decimal("2"),
+        base_rpc_url="https://base.example.invalid",
+        state_path=Path(database),
+    )
+    service = TrezorSidecarService(
+        settings,
+        ProcessTrezor(),
+        SidecarStore(Path(database)),
+    )
+    start.wait(timeout=2)
+    try:
+        approved = service.approve_intent(intent, 1_700_000_000)
+        results.put(("ok", approved.intent_id))
+    except Exception as error:
+        results.put(("error", type(error).__name__, str(error)))
 
 
 class TrezorSidecarServiceTests(TestCase):
@@ -138,6 +174,69 @@ class TrezorSidecarServiceTests(TestCase):
         self.assertNotEqual(repaired.pairing_id, first.pairing_id)
         self.assertEqual(store.get_pairing(), repaired)
 
+    def test_settings_snapshot_is_read_only_and_cannot_redirect_device_path(self):
+        original = SidecarSettings(
+            enabled=True,
+            mcp_token="test-mcp-token",
+            api_token="test-api-token",
+            max_usd=Decimal("2"),
+            base_rpc_url="https://base.example.invalid",
+            state_path=self.database,
+        )
+        store = SidecarStore(self.database)
+        trezor = FakeTrezor()
+        service = TrezorSidecarService(original, trezor, store)
+        redirected = SidecarSettings(
+            enabled=True,
+            mcp_token="replacement-token",
+            api_token="replacement-api-token",
+            max_usd=Decimal("999"),
+            base_rpc_url="https://replacement.example.invalid",
+            state_path=self.database,
+            derivation_path="m/44'/60'/0'/0/9",
+        )
+
+        with self.assertRaises(AttributeError):
+            service.settings = redirected
+        object.__setattr__(original, "derivation_path", "m/44'/60'/0'/0/8")
+        service.pair()
+
+        self.assertEqual(service.settings.derivation_path, FIXED_PATH)
+        self.assertEqual(trezor.get_calls, [FIXED_PATH])
+        self.assertEqual(stat.S_IMODE(service._device_lock_path.stat().st_mode), 0o600)
+
+    def test_invalid_or_raising_pair_clock_fails_before_device(self):
+        invalid_clocks = (
+            lambda: float("nan"),
+            lambda: float("inf"),
+            lambda: -float("inf"),
+            lambda: 1 << 63,
+            lambda: (_ for _ in ()).throw(RuntimeError("canary clock detail")),
+            lambda: (_ for _ in ()).throw(SafeError("canary", "canary safe detail")),
+        )
+        for clock in invalid_clocks:
+            with self.subTest(clock=clock):
+                service, _, trezor = self.make_service(clock=clock)
+                with self.assertRaisesRegex(SafeError, "clock") as raised:
+                    service.pair()
+                self.assertEqual(raised.exception.code, "invalid_clock")
+                self.assertNotIn("canary", str(raised.exception))
+                self.assertIsNone(raised.exception.__cause__)
+                self.assertEqual(trezor.get_calls, [])
+
+    def test_unsafe_device_lock_path_fails_closed_before_device(self):
+        service, _, trezor = self.make_service()
+        target = Path(self.temporary.name) / "lock-target"
+        target.touch(mode=0o600)
+        service._device_lock_path.symlink_to(target)
+
+        with self.assertRaisesRegex(SafeError, "device lock") as raised:
+            service.pair()
+
+        self.assertEqual(raised.exception.code, "device_lock_unavailable")
+        self.assertEqual(trezor.get_calls, [])
+        self.assertFalse(target.read_bytes())
+
     def test_pairing_accepts_only_closed_address_result_paths(self):
         service, _, trezor = self.make_service()
         trezor.address_result = {"payload": {"address": trezor.address}}
@@ -182,6 +281,7 @@ class TrezorSidecarServiceTests(TestCase):
         self.assertEqual(record.state, PaymentState.DEVICE_APPROVED)
         self.assertEqual(record.approved_at, 1_700_000_000)
         self.assertEqual(trezor.sign_calls[0][0], FIXED_PATH)
+        self.assertEqual(trezor.sign_calls[0][1], build_typed_data(intent))
         self.assertEqual(trezor.sign_calls[0][1]["domain"]["chainId"], 8453)
         self.assertEqual(trezor.sign_calls[0][1]["message"]["paymentAsset"], "USDC")
         self.assertEqual(trezor.sign_calls[0][1]["message"]["paymentNetwork"], "Base Mainnet")
@@ -260,11 +360,11 @@ class TrezorSidecarServiceTests(TestCase):
         self.assertEqual(store.get_intent(intent.intent_id).approved_at, 1_700_000_000)
 
     def test_identical_approved_replay_survives_later_expiry_and_cap_change(self):
-        service, _, trezor = self.make_service()
+        service, store, trezor = self.make_service()
         service.pair()
         intent = self.valid_intent(expires_at=1_700_000_001)
         service.approve_intent(intent, now=1_700_000_000)
-        service.settings = SidecarSettings(
+        alternate_settings = SidecarSettings(
             enabled=True,
             mcp_token="test-mcp-token",
             api_token="test-api-token",
@@ -272,8 +372,9 @@ class TrezorSidecarServiceTests(TestCase):
             base_rpc_url="https://base.example.invalid",
             state_path=self.database,
         )
+        replay_service = TrezorSidecarService(alternate_settings, trezor, store)
 
-        replay = service.approve_intent(intent, now=1_700_000_002)
+        replay = replay_service.approve_intent(intent, now=1_700_000_002)
 
         self.assertEqual(replay, intent)
         self.assertEqual(len(trezor.sign_calls), 1)
@@ -404,6 +505,35 @@ class TrezorSidecarServiceTests(TestCase):
         self.assertEqual(results, (intent, intent))
         self.assertEqual(len(trezor.sign_calls), 1)
         self.assertEqual(store.get_intent(intent.intent_id).approved_at, 1_700_000_000)
+
+    def test_cross_process_identical_approvals_prompt_device_once(self):
+        account = Account.create()
+        service, store, _ = self.make_service(trezor=FakeTrezor(account))
+        service.pair()
+        intent = self.valid_intent()
+        context = get_context("fork")
+        counter = context.Value("i", 0)
+        start = context.Event()
+        results = context.Queue()
+        processes = [
+            context.Process(
+                target=approve_in_process,
+                args=(self.database, account.key, intent, counter, start, results),
+            )
+            for _ in range(2)
+        ]
+        for process in processes:
+            process.start()
+        start.set()
+        for process in processes:
+            process.join(timeout=5)
+            self.assertFalse(process.is_alive())
+            self.assertEqual(process.exitcode, 0)
+
+        outputs = sorted(results.get(timeout=2) for _ in processes)
+        self.assertEqual(outputs, [("ok", intent.intent_id), ("ok", intent.intent_id)])
+        self.assertEqual(counter.value, 1)
+        self.assertEqual(store.get_intent(intent.intent_id).state, PaymentState.DEVICE_APPROVED)
 
 
 if __name__ == "__main__":

@@ -5,11 +5,17 @@ shapes, verifies every typed-data signature locally, and never gives signing
 material to the durable store.
 """
 
+import fcntl
+import math
+import os
 import re
+import stat
 import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
+from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 
@@ -27,6 +33,7 @@ from .store import SidecarStore
 _ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}\Z")
 _SIGNATURE = re.compile(r"(?:0x)?[0-9a-fA-F]{130}\Z")
 _USDC_ATOMIC_PER_USD = Decimal(1_000_000)
+_SIGNED_TIMESTAMP_MAX = (1 << 63) - 1
 _DEVICE_LOCK = threading.Lock()
 
 
@@ -48,6 +55,14 @@ def _fixed_configuration() -> SafeError:
         "The sidecar is not configured for the fixed Base account.",
         503,
     )
+
+
+def _invalid_clock() -> SafeError:
+    return _safe("invalid_clock", "The sidecar clock is invalid.", 503)
+
+
+def _device_lock_unavailable() -> SafeError:
+    return _safe("device_lock_unavailable", "The Trezor device lock is unavailable.", 503)
 
 
 def _invalid_signature() -> SafeError:
@@ -93,56 +108,171 @@ class TrezorSidecarService:
             raise ValueError("settings must be SidecarSettings")
         if not callable(clock):
             raise ValueError("clock must be callable")
-        self.settings = settings
+        self._settings = replace(settings)
         self.trezor = trezor
         self.store = store
         self._clock = clock
+        self._device_lock_path = store.path.with_name(store.path.name + ".device.lock")
 
-    def _require_enabled(self) -> None:
-        if not self.settings.enabled:
+    @property
+    def settings(self) -> SidecarSettings:
+        return self._settings
+
+    @staticmethod
+    def _require_enabled(settings: SidecarSettings) -> None:
+        if not settings.enabled:
             raise _disabled()
 
-    def _require_fixed_configuration(self) -> None:
+    @staticmethod
+    def _require_fixed_configuration(settings: SidecarSettings) -> None:
         if (
-            self.settings.chain_id != BASE_CHAIN_ID
-            or self.settings.derivation_path != EVM_DERIVATION_PATH
+            settings.chain_id != BASE_CHAIN_ID
+            or settings.derivation_path != EVM_DERIVATION_PATH
         ):
             raise _fixed_configuration()
 
     def _now(self) -> int:
-        value = self._clock()
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise _fixed_configuration()
-        timestamp = int(value)
-        if timestamp <= 0:
-            raise _fixed_configuration()
+        try:
+            value = self._clock()
+        except Exception:
+            raise _invalid_clock() from None
+        if isinstance(value, bool):
+            raise _invalid_clock()
+        if isinstance(value, int):
+            timestamp = value
+        elif isinstance(value, float) and math.isfinite(value):
+            timestamp = int(value)
+        else:
+            raise _invalid_clock()
+        if not 0 < timestamp <= _SIGNED_TIMESTAMP_MAX:
+            raise _invalid_clock()
         return timestamp
 
-    def _device_address(self) -> str:
+    @staticmethod
+    def _validate_lock_directory(info: os.stat_result) -> None:
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise _device_lock_unavailable()
+
+    @staticmethod
+    def _validate_lock_file(info: os.stat_result) -> None:
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink != 1
+        ):
+            raise _device_lock_unavailable()
+
+    def _open_device_lock(self) -> int:
+        directory = None
+        descriptor = None
         try:
-            result = self.trezor.get_base_address(self.settings.derivation_path)
+            directory = os.open(
+                self._device_lock_path.parent,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
+            self._validate_lock_directory(os.fstat(directory))
+            try:
+                descriptor = os.open(
+                    self._device_lock_path.name,
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=directory,
+                )
+                os.fchmod(descriptor, 0o600)
+            except FileExistsError:
+                info = os.stat(
+                    self._device_lock_path.name,
+                    dir_fd=directory,
+                    follow_symlinks=False,
+                )
+                self._validate_lock_file(info)
+                descriptor = os.open(
+                    self._device_lock_path.name,
+                    os.O_RDWR | os.O_NOFOLLOW,
+                    dir_fd=directory,
+                )
+            self._validate_lock_file(os.fstat(descriptor))
+            result = descriptor
+            descriptor = None
+            return result
+        except SafeError:
+            raise
+        except Exception:
+            raise _device_lock_unavailable() from None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if directory is not None:
+                os.close(directory)
+
+    @contextmanager
+    def _device_guard(self, *, blocking: bool = True):
+        """Coordinate device operations across threads and sidecar processes.
+
+        The boolean result lets the later payment service use the same guard
+        non-blockingly and map contention to its specified ``device_busy``
+        response without weakening Task 6's blocking idempotent replay.
+        """
+        if not isinstance(blocking, bool):
+            raise ValueError("blocking must be a boolean")
+        thread_acquired = _DEVICE_LOCK.acquire(blocking=blocking)
+        if not thread_acquired:
+            yield False
+            return
+        descriptor = None
+        file_acquired = False
+        try:
+            descriptor = self._open_device_lock()
+            operation = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+            try:
+                fcntl.flock(descriptor, operation)
+                file_acquired = True
+            except BlockingIOError:
+                yield False
+                return
+            yield True
+        except SafeError:
+            raise
+        except Exception:
+            raise _device_lock_unavailable() from None
+        finally:
+            if file_acquired and descriptor is not None:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            if descriptor is not None:
+                os.close(descriptor)
+            _DEVICE_LOCK.release()
+
+    def _device_address(self, settings: SidecarSettings) -> str:
+        try:
+            result = self.trezor.get_base_address(settings.derivation_path)
             address = _closed_field(result, "address")
             return _normalize_address(address)
-        except SafeError as error:
-            if error.code == "trezor_unavailable":
-                raise _unavailable() from None
+        except SafeError:
             raise _unavailable() from None
         except Exception:
             raise _unavailable() from None
 
     def pair(self, allow_repair: bool = False) -> Pairing:
-        self._require_enabled()
-        self._require_fixed_configuration()
         if not isinstance(allow_repair, bool):
             raise _safe("invalid_request", "Pairing repair flag must be a boolean.")
 
-        with _DEVICE_LOCK:
-            address = self._device_address()
+        with self._device_guard() as acquired:
+            if not acquired:
+                raise _device_lock_unavailable()
+            settings = self._settings
+            self._require_enabled(settings)
+            self._require_fixed_configuration(settings)
             now = self._now()
+            address = self._device_address(settings)
             current = self.store.get_pairing()
             if current is not None and (
                 current.address != address
-                or current.derivation_path != self.settings.derivation_path
+                or current.derivation_path != settings.derivation_path
             ):
                 if not allow_repair:
                     raise _safe(
@@ -153,7 +283,7 @@ class TrezorSidecarService:
                 candidate = Pairing(
                     pairing_id=uuid.uuid4().hex,
                     address=address,
-                    derivation_path=self.settings.derivation_path,
+                    derivation_path=settings.derivation_path,
                     created_at=now,
                     updated_at=now,
                 )
@@ -169,7 +299,7 @@ class TrezorSidecarService:
                 candidate = Pairing(
                     pairing_id=uuid.uuid4().hex,
                     address=address,
-                    derivation_path=self.settings.derivation_path,
+                    derivation_path=settings.derivation_path,
                     created_at=now,
                     updated_at=now,
                 )
@@ -197,11 +327,16 @@ class TrezorSidecarService:
         if intent.payment_asset != "USDC" or intent.payment_network != "Base Mainnet":
             raise _safe("invalid_intent", "Purchase intent fixed fields are invalid.")
 
-    def _validate_intent(self, intent: PurchaseIntent, now: int) -> None:
+    def _validate_intent(
+        self,
+        settings: SidecarSettings,
+        intent: PurchaseIntent,
+        now: int,
+    ) -> None:
         self._validate_fixed_intent(intent)
         if intent.expires_at <= now:
             raise _safe("intent_expired", "Purchase intent has expired.")
-        maximum = self.settings.max_usd
+        maximum = settings.max_usd
         if (
             not isinstance(maximum, Decimal)
             or not maximum.is_finite()
@@ -239,10 +374,10 @@ class TrezorSidecarService:
                 raise _safe("intent_conflict", "Purchase intent could not be recorded.", 409) from None
             return existing
 
-    def _signature(self, intent: PurchaseIntent) -> str:
+    def _signature(self, settings: SidecarSettings, intent: PurchaseIntent) -> str:
         try:
             result = self.trezor.sign_typed_data(
-                self.settings.derivation_path,
+                settings.derivation_path,
                 build_typed_data(intent),
             )
         except SafeError as error:
@@ -268,17 +403,19 @@ class TrezorSidecarService:
         return signature
 
     def approve_intent(self, intent: PurchaseIntent, now: int) -> PurchaseIntent:
-        self._require_enabled()
-        self._require_fixed_configuration()
-        now = self._validate_now(now)
-
-        with _DEVICE_LOCK:
+        with self._device_guard() as acquired:
+            if not acquired:
+                raise _device_lock_unavailable()
+            settings = self._settings
+            self._require_enabled(settings)
+            self._require_fixed_configuration(settings)
+            now = self._validate_now(now)
             pairing = self.store.get_pairing()
             if pairing is None:
                 raise _safe("not_paired", "A Trezor must be paired before approval.", 409)
             if (
                 pairing.derivation_path != EVM_DERIVATION_PATH
-                or pairing.derivation_path != self.settings.derivation_path
+                or pairing.derivation_path != settings.derivation_path
             ):
                 raise _safe("pairing_mismatch", "The stored Trezor pairing is invalid.", 409)
 
@@ -286,10 +423,10 @@ class TrezorSidecarService:
             existing = self._existing_intent(intent)
             if existing is not None and existing.state is PaymentState.DEVICE_APPROVED:
                 return existing.intent
-            self._validate_intent(intent, now)
+            self._validate_intent(settings, intent, now)
             self._insert_intent(intent, now)
 
-            signature = self._signature(intent)
+            signature = self._signature(settings, intent)
             try:
                 signer = to_checksum_address(recover_intent_signer(intent, signature))
             except Exception:
