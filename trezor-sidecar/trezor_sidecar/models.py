@@ -6,6 +6,7 @@ from eth_utils import to_checksum_address
 
 _BYTES32_HEX_LENGTH = 66
 _UINT64_MAX = (1 << 64) - 1
+_UINT256_MAX = (1 << 256) - 1
 
 
 class PaymentState(str, Enum):
@@ -79,12 +80,20 @@ class PurchaseIntent:
         object.__setattr__(
             self,
             "quoted_total_usd_micros",
-            _positive_int(self.quoted_total_usd_micros, "quoted_total_usd_micros"),
+            _positive_int(
+                self.quoted_total_usd_micros,
+                "quoted_total_usd_micros",
+                maximum=_UINT256_MAX,
+            ),
         )
         object.__setattr__(
             self,
             "max_payment_usdc_atomic",
-            _positive_int(self.max_payment_usdc_atomic, "max_payment_usdc_atomic"),
+            _positive_int(
+                self.max_payment_usdc_atomic,
+                "max_payment_usdc_atomic",
+                maximum=_UINT256_MAX,
+            ),
         )
         object.__setattr__(self, "recipient_hash", _bytes32(self.recipient_hash, "recipient_hash"))
         object.__setattr__(

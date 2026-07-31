@@ -101,6 +101,15 @@ class PurchaseIntentTests(TestCase):
         with self.assertRaisesRegex(ValueError, "max_payment_usdc_atomic"):
             self.make_intent(max_payment_usdc_atomic=True)
 
+    def test_uint256_amounts_accept_the_limit_and_reject_overflow(self):
+        uint256_max = (1 << 256) - 1
+        for field in ("quoted_total_usd_micros", "max_payment_usdc_atomic"):
+            with self.subTest(field=field, value="maximum"):
+                self.make_intent(**{field: uint256_max})
+            with self.subTest(field=field, value="overflow"):
+                with self.assertRaisesRegex(ValueError, field):
+                    self.make_intent(**{field: uint256_max + 1})
+
     def test_rejects_non_positive_or_boolean_expiration(self):
         with self.assertRaisesRegex(ValueError, "expires_at"):
             self.make_intent(expires_at=0)
