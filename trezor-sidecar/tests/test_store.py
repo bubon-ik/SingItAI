@@ -1,4 +1,5 @@
 import inspect
+import os
 import sqlite3
 import stat
 from pathlib import Path
@@ -74,6 +75,155 @@ class SidecarStoreTests(TestCase):
 
         self.assertEqual(self.store.save_pairing(replacement, allow_repair=True), replacement)
         self.assertEqual(self.store.get_pairing(), replacement)
+
+    def test_pairing_timestamps_cannot_move_backwards(self):
+        # Break caught: a pairing repair makes its audit clock older than trusted state.
+        original = Pairing(
+            pairing_id="base",
+            address="0x1111111111111111111111111111111111111111",
+            derivation_path="m/44'/60'/0'/0/0",
+            created_at=10,
+            updated_at=20,
+        )
+        backwards = Pairing(
+            pairing_id="base",
+            address="0x2222222222222222222222222222222222222222",
+            derivation_path="m/44'/60'/0'/0/0",
+            created_at=10,
+            updated_at=19,
+        )
+        invalid_order = Pairing(
+            pairing_id="other",
+            address="0x3333333333333333333333333333333333333333",
+            derivation_path="m/44'/60'/0'/0/0",
+            created_at=21,
+            updated_at=20,
+        )
+
+        self.store.save_pairing(original)
+        with self.assertRaisesRegex(ValueError, "updated_at"):
+            self.store.save_pairing(invalid_order, allow_repair=True)
+        with self.assertRaisesRegex(ValueError, "updated_at"):
+            self.store.save_pairing(backwards, allow_repair=True)
+
+    def test_rejects_symlinked_parent_without_touching_target(self):
+        # Break caught: a state path symlink redirects chmod or SQLite writes outside its boundary.
+        root = Path(self.temporary.name)
+        target = root / "unrelated"
+        target.mkdir()
+        sentinel = target / "sentinel.txt"
+        sentinel.write_text("keep")
+        os.chmod(target, 0o755)
+        linked_parent = root / "linked-state"
+        linked_parent.symlink_to(target, target_is_directory=True)
+
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            SidecarStore(linked_parent / "state.db")
+
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+        self.assertEqual(sentinel.read_text(), "keep")
+        self.assertFalse((target / "state.db").exists())
+
+    def test_rejects_symlinked_database_without_touching_target(self):
+        # Break caught: a database symlink lets initialization alter another file.
+        root = Path(self.temporary.name)
+        target = root / "unrelated.db"
+        with sqlite3.connect(target) as connection:
+            connection.execute("CREATE TABLE sentinel (value TEXT)")
+            connection.execute("INSERT INTO sentinel VALUES ('keep')")
+        os.chmod(target, 0o640)
+        linked_database = root / "linked.db"
+        linked_database.symlink_to(target)
+
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            SidecarStore(linked_database)
+
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o640)
+        with sqlite3.connect(target) as connection:
+            self.assertEqual(connection.execute("SELECT value FROM sentinel").fetchone()[0], "keep")
+
+    def test_sqlite_timestamp_range_is_signed_64_bit(self):
+        # Break caught: values accepted by models overflow SQLite INTEGER bindings.
+        maximum = (1 << 63) - 1
+        maximum_intent = self.make_intent(
+            intent_id="0x" + "33" * 32,
+            expires_at=maximum,
+        )
+        inserted = self.store.insert_intent(maximum_intent, created_at=maximum)
+        approved = self.store.approve_intent(maximum_intent.intent_id, approved_at=maximum)
+        payment = self.store.create_payment(
+            payment_id="pay-max",
+            intent_id=maximum_intent.intent_id,
+            invoice_id="invoice-max",
+            idempotency_key="key-max",
+            pay_to="0x1111111111111111111111111111111111111111",
+            amount_atomic="1",
+            expires_at=maximum,
+            created_at=maximum,
+        )
+        pairing = Pairing(
+            pairing_id="base",
+            address="0x1111111111111111111111111111111111111111",
+            derivation_path="m/44'/60'/0'/0/0",
+            created_at=maximum,
+            updated_at=maximum,
+        )
+
+        self.assertEqual(inserted.created_at, maximum)
+        self.assertEqual(approved.approved_at, maximum)
+        self.assertEqual(payment.updated_at, maximum)
+        self.assertEqual(self.store.save_pairing(pairing), pairing)
+        with self.assertRaisesRegex(ValueError, "expires_at"):
+            self.store.insert_intent(
+                self.make_intent(intent_id="0x" + "44" * 32, expires_at=maximum + 1),
+                created_at=1,
+            )
+        with self.assertRaisesRegex(ValueError, "created_at"):
+            self.store.insert_intent(
+                self.make_intent(intent_id="0x" + "55" * 32),
+                created_at=maximum + 1,
+            )
+        with self.assertRaisesRegex(ValueError, "updated_at"):
+            self.store.save_pairing(
+                Pairing(
+                    pairing_id="other",
+                    address="0x2222222222222222222222222222222222222222",
+                    derivation_path="m/44'/60'/0'/0/0",
+                    created_at=maximum,
+                    updated_at=maximum + 1,
+                ),
+                allow_repair=True,
+            )
+
+    def test_store_connections_enable_wal_and_foreign_keys_after_reopen(self):
+        # Break caught: a new store connection loses durability or referential checks.
+        for store in (self.store, SidecarStore(self.path)):
+            connection = store._connect()
+            try:
+                self.assertEqual(connection.execute("PRAGMA journal_mode").fetchone()[0].lower(), "wal")
+                self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(
+                        """INSERT INTO payments
+                        (payment_id, intent_id, invoice_id, idempotency_key, pay_to, amount_atomic,
+                         expires_at, state, created_at, updated_at, tx_hash)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+                        (
+                            "invalid-reference",
+                            "0x" + "ff" * 32,
+                            "invalid-invoice",
+                            "invalid-key",
+                            "0x1111111111111111111111111111111111111111",
+                            "1",
+                            1,
+                            PaymentState.INVOICE_CREATED.value,
+                            1,
+                            1,
+                        ),
+                    )
+                connection.rollback()
+            finally:
+                connection.close()
 
     def test_intent_approval_persists_every_intent_field_after_reopen(self):
         # Break caught: an approved intent loses its commitment or immutable purchase terms.

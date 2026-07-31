@@ -5,8 +5,10 @@ coordinate approvals and payments. Sensitive signing payloads and personal
 fulfilment data never enter this store.
 """
 
+import errno
 import os
 import sqlite3
+import stat
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -15,7 +17,7 @@ from typing import Iterator
 from .models import IntentRecord, Pairing, PaymentRequest, PaymentState, PaymentView, PurchaseIntent
 
 
-_UINT64_MAX = (1 << 64) - 1
+_SQLITE_INT_MAX = (1 << 63) - 1
 _UINT256_MAX = (1 << 256) - 1
 _TEXT_LIMIT = 256
 _DERIVATION_LIMIT = 160
@@ -47,7 +49,7 @@ def _text(value: object, name: str, *, limit: int = _TEXT_LIMIT) -> str:
 
 
 def _timestamp(value: object, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= _UINT64_MAX:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= _SQLITE_INT_MAX:
         raise ValueError(f"{name} must be a positive integer")
     return value
 
@@ -67,18 +69,109 @@ def _amount(value: object, name: str) -> tuple[int, str]:
 
 
 class SidecarStore:
-    """A per-sidecar SQLite database with short transactions and CAS updates."""
+    """A per-sidecar SQLite database with short transactions and CAS updates.
+
+    The final state directory is either created by this class as ``0700`` or
+    must already be a same-user, non-symlink directory with exactly that mode.
+    The database is created with ``O_EXCL`` and mode ``0600`` before SQLite
+    opens it. Existing database paths are checked through a no-follow
+    descriptor before every connection. This makes any symlink or unsafe file
+    a fail-closed error, rather than allowing SQLite or chmod to follow it.
+    """
 
     def __init__(self, path: Path):
         if not isinstance(path, Path):
             raise ValueError("path must be a Path")
-        self.path = path
-        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(self.path.parent, 0o700)
+        self.path = Path(os.path.abspath(os.fspath(path)))
+        self._prepare_database()
         self._initialize()
-        os.chmod(self.path, 0o600)
+
+    @staticmethod
+    def _directory_flags() -> int:
+        return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+    @staticmethod
+    def _validate_state_directory(info: os.stat_result) -> None:
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError("state parent must be a real directory, not a symlink")
+        if info.st_uid != os.getuid():
+            raise ValueError("state parent must be owned by the current user")
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            raise ValueError("state parent must have mode 0700")
+
+    @staticmethod
+    def _validate_database(info: os.stat_result) -> None:
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("state database must be a regular file, not a symlink")
+        if info.st_uid != os.getuid():
+            raise ValueError("state database must be owned by the current user")
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            raise ValueError("state database must have mode 0600")
+
+    def _state_directory_fd(self) -> int:
+        """Open the final state directory without traversing a symlink.
+
+        Only the final component may be created, so callers cannot accidentally
+        chmod or create through an arbitrary existing state parent. Ancestors
+        are left alone: platform-managed paths can legitimately contain an
+        ancestor symlink, but the supplied state directory itself may not.
+        """
+        parent = self.path.parent
+        try:
+            descriptor = os.open(parent, self._directory_flags())
+        except FileNotFoundError:
+            try:
+                ancestor = os.open(parent.parent, self._directory_flags())
+            except OSError as error:
+                if error.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise ValueError("state parent must be a real directory, not a symlink") from None
+                raise
+            try:
+                os.mkdir(parent.name, 0o700, dir_fd=ancestor)
+                descriptor = os.open(parent.name, self._directory_flags(), dir_fd=ancestor)
+            finally:
+                os.close(ancestor)
+            os.fchmod(descriptor, 0o700)
+        except OSError as error:
+            if error.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise ValueError("state parent must be a real directory, not a symlink") from None
+            raise
+        self._validate_state_directory(os.fstat(descriptor))
+        return descriptor
+
+    def _prepare_database(self) -> None:
+        directory = self._state_directory_fd()
+        try:
+            try:
+                info = os.stat(self.path.name, dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                descriptor = os.open(
+                    self.path.name,
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=directory,
+                )
+                try:
+                    os.fchmod(descriptor, 0o600)
+                    self._validate_database(os.fstat(descriptor))
+                finally:
+                    os.close(descriptor)
+                return
+            self._validate_database(info)
+            descriptor = os.open(
+                self.path.name,
+                os.O_RDWR | os.O_NOFOLLOW,
+                dir_fd=directory,
+            )
+            try:
+                self._validate_database(os.fstat(descriptor))
+            finally:
+                os.close(descriptor)
+        finally:
+            os.close(directory)
 
     def _connect(self) -> sqlite3.Connection:
+        self._prepare_database()
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
@@ -203,6 +296,10 @@ class SidecarStore:
             raise ValueError("allow_repair must be a boolean")
         _text(pairing.pairing_id, "pairing_id")
         _text(pairing.derivation_path, "derivation_path", limit=_DERIVATION_LIMIT)
+        _timestamp(pairing.created_at, "created_at")
+        _timestamp(pairing.updated_at, "updated_at")
+        if pairing.updated_at < pairing.created_at:
+            raise ValueError("updated_at cannot be earlier than created_at")
         with self._transaction() as connection:
             current_row = connection.execute("SELECT * FROM pairings WHERE singleton = 1").fetchone()
             if current_row is None:
@@ -241,6 +338,8 @@ class SidecarStore:
                 return current
             if not allow_repair:
                 raise ValueError("different Trezor pairing requires explicit repair")
+            if pairing.updated_at < current.updated_at:
+                raise ValueError("updated_at cannot move backwards")
             connection.execute(
                 """UPDATE pairings
                 SET pairing_id = ?, address = ?, derivation_path = ?, created_at = ?, updated_at = ?
@@ -267,6 +366,7 @@ class SidecarStore:
         if not isinstance(intent, PurchaseIntent):
             raise ValueError("intent must be a PurchaseIntent")
         created_at = _timestamp(created_at, "created_at")
+        _timestamp(intent.expires_at, "expires_at")
         _text(intent.product_slug, "product_slug")
         _text(intent.package_id, "package_id")
         _text(intent.denomination, "denomination", limit=_DENOMINATION_LIMIT)
