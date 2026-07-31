@@ -1743,8 +1743,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"decision": "rejected", "ok": False, "error": str(exc)}, status=400)
             return
 
-        if not self._acquire_firefly():
-            self._send_json(_busy_payload(), status=409)
+        if not self._acquire_purchase_slot(user_id):
+            self._send_json(_busy_payload(own_order=bool(user_id)), status=409)
             return
 
         try:
@@ -1776,7 +1776,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json({"decision": "rejected", "ok": False, "error": str(exc)}, status=400)
         finally:
-            self._release_firefly()
+            self._release_purchase_slot(user_id)
 
     def _handle_agent_get_bitrefill_order(self) -> None:
         if not self._legacy_operator_request_allowed():
@@ -1954,6 +1954,46 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
 
         self.server.firefly_busy = False
 
+    def _user_purchase_lock(self, telegram_user_id: str):
+        locks = getattr(self.server, "user_purchase_locks", None)
+        guard = getattr(self.server, "user_purchase_locks_guard", None)
+        if not isinstance(locks, dict) or guard is None:
+            return None
+        with guard:
+            lock = locks.get(telegram_user_id)
+            if lock is None:
+                lock = threading.Lock()
+                locks[telegram_user_id] = lock
+            return lock
+
+    def _acquire_purchase_slot(self, telegram_user_id: str) -> bool:
+        """Hold this buyer's own slot, leaving every other buyer free.
+
+        A managed-wallet purchase waits minutes for an approval on the buyer's
+        phone, and it never touches the Firefly device — it approves over
+        iMessage or WhatsApp and signs with the buyer's own key. Holding the
+        Firefly lock across that wait stopped *everyone* from buying while one
+        person made up their mind. Serialising per buyer keeps the property
+        that matters — one order at a time each — and drops the one that never
+        made sense here.
+        """
+        if not telegram_user_id:
+            return self._acquire_firefly()
+        lock = self._user_purchase_lock(telegram_user_id)
+        if lock is None:
+            return self._acquire_firefly()
+        return lock.acquire(blocking=False)
+
+    def _release_purchase_slot(self, telegram_user_id: str) -> None:
+        if not telegram_user_id:
+            self._release_firefly()
+            return
+        lock = self._user_purchase_lock(telegram_user_id)
+        if lock is None:
+            self._release_firefly()
+            return
+        lock.release()
+
     def _read_buy_tool_cache(self, cache_key: str) -> dict[str, Any] | None:
         cache = getattr(self.server, "buy_tool_response_cache", None)
         if not isinstance(cache, dict):
@@ -2056,6 +2096,10 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         self.imessage_approval_service = imessage_approval_service
         self.imessage_approval_api_token = imessage_approval_api_token
         self.firefly_lock = threading.Lock()
+        # One slot per buyer for managed-wallet purchases, which approve on the
+        # buyer's own phone and never reach the Firefly device.
+        self.user_purchase_locks: dict[str, threading.Lock] = {}
+        self.user_purchase_locks_guard = threading.Lock()
         self.buy_tool_response_cache: dict[str, dict[str, Any]] = {}
 
 
@@ -6809,7 +6853,16 @@ def _evm_transaction_url(tx_id: str, network: str) -> str:
     return ""
 
 
-def _busy_payload() -> dict[str, Any]:
+def _busy_payload(*, own_order: bool = False) -> dict[str, Any]:
+    """Say which kind of collision this is: the buyer's own, or the device's."""
+    if own_order:
+        return {
+            "approved": False,
+            "error": "purchase_in_progress",
+            "message": (
+                "An order for this buyer is already waiting for approval."
+            ),
+        }
     return {
         "approved": False,
         "error": "firefly_busy",

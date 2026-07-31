@@ -4434,6 +4434,80 @@ class GatewayServerTests(unittest.TestCase):
         self.assertIn("Too many purchase attempts", self.response_text(second))
         server.bitrefill_wallet_purchase_runner.assert_called_once()
 
+    def _concurrent_purchase_server(self):
+        server = DummyServer()
+        server.firefly_busy = False
+        server.user_purchase_locks = {}
+        server.user_purchase_locks_guard = threading.Lock()
+        server.user_wallet_service.resolve_telegram_user_id.side_effect = (
+            lambda token: {
+                "user-token-1": "1045618308",
+                "user-token-2": "2222222222",
+            }.get(token)
+        )
+        return server
+
+    def test_a_buyer_waiting_for_approval_does_not_block_another_buyer(self):
+        # The approval wait is minutes long and runs on the buyer's own phone.
+        # Holding a server-wide lock across it stopped everyone else buying.
+        server = self._concurrent_purchase_server()
+        holding = threading.Event()
+        release = threading.Event()
+
+        def purchase(payload):
+            if str(payload.get("telegramUserId")) == "1045618308":
+                holding.set()
+                release.wait(5)
+            return {"ok": True, "quoteId": payload.get("quoteId")}
+
+        server.bitrefill_wallet_purchase_runner = Mock(side_effect=purchase)
+        waiting_response: dict[str, str] = {}
+
+        def start_waiting_purchase():
+            handler = self.make_handler(
+                "/agent/buy-wallet-bitrefill",
+                {"quoteId": "quote_1", "telegramUserId": "1045618308"},
+                server=server,
+                headers=self.llm_auth_headers("user-token-1"),
+            )
+            waiting_response["text"] = self.response_text(handler)
+
+        with patch.dict(
+            os.environ,
+            {
+                "SIGN402_USER_PURCHASES_PER_HOUR": "10",
+                "SIGN402_USER_REQUESTS_PER_MINUTE": "100",
+            },
+        ):
+            with patch("sys.stderr", io.StringIO()):
+                waiter = threading.Thread(target=start_waiting_purchase)
+                waiter.start()
+                try:
+                    self.assertTrue(holding.wait(5))
+                    same_buyer = self.make_handler(
+                        "/agent/buy-wallet-bitrefill",
+                        {"quoteId": "quote_2", "telegramUserId": "1045618308"},
+                        server=server,
+                        headers=self.llm_auth_headers("user-token-1"),
+                    )
+                    other_buyer = self.make_handler(
+                        "/agent/buy-wallet-bitrefill",
+                        {"quoteId": "quote_3", "telegramUserId": "2222222222"},
+                        server=server,
+                        headers=self.llm_auth_headers("user-token-2"),
+                    )
+                finally:
+                    release.set()
+                    waiter.join(5)
+
+        self.assertIn("HTTP/1.0 200 OK", waiting_response["text"])
+        # A second order from the same buyer still waits its turn.
+        same_buyer_text = self.response_text(same_buyer)
+        self.assertIn("HTTP/1.0 409", same_buyer_text)
+        self.assertIn("purchase_in_progress", same_buyer_text)
+        # A different buyer is not made to wait for a stranger's decision.
+        self.assertIn("HTTP/1.0 200 OK", self.response_text(other_buyer))
+
     def test_agent_spending_limits_rejects_user_limits_above_operator_ceiling(self):
         server = DummyServer()
         server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"

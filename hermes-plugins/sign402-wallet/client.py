@@ -56,6 +56,10 @@ _GATEWAY_ERROR_TEXTS = {
         "Another purchase is waiting for approval right now. Nothing was "
         "charged — give it a moment and send your order again."
     ),
+    "purchase_in_progress": (
+        "Your previous order is still waiting for approval. Approve or decline "
+        "it first — nothing was charged for this one."
+    ),
 }
 _WITHDRAW_TOKENS_PATH = "/agent/withdraw/tokens"
 _WITHDRAW_PATH = "/agent/withdraw"

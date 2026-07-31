@@ -546,6 +546,37 @@ class GatewayClientTests(unittest.TestCase):
         self.assertIn("Nothing was charged", message)
         self.assertIn("again", message)
 
+    def test_execute_bitrefill_purchase_explains_the_buyers_own_pending_order(self):
+        error = HTTPError(
+            "http://127.0.0.1:8099/agent/buy-wallet-bitrefill",
+            409,
+            "Conflict",
+            {},
+            io.BytesIO(
+                b'{"approved":false,"error":"purchase_in_progress",'
+                b'"message":"An order for this buyer is already waiting for approval."}'
+            ),
+        )
+        opener = RecordingOpener(error=error)
+
+        with self.assertRaises(GatewayClientError) as raised:
+            self.make_client(opener).execute_bitrefill_purchase(
+                TelegramIdentity(user_id="1045618308"),
+                product_id="carrefour-argentina",
+                package_id="50",
+                country="AR",
+                payment_token={
+                    "contractAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                    "symbol": "USDC",
+                    "decimals": 6,
+                },
+                user_access_token="user-token-1",
+            )
+
+        message = raised.exception.user_message
+        self.assertIn("previous order", message)
+        self.assertNotIn("purchase_in_progress", message)
+
     def test_execute_bitrefill_purchase_hides_upstream_stack_traces(self):
         error = HTTPError(
             "http://127.0.0.1:8099/agent/quote-bitrefill",
