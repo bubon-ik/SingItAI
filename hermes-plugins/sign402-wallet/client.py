@@ -49,6 +49,14 @@ _SPEND_LIMIT_HINT = (
     "Send /limits to see your current limits, or "
     "/set_limits <max per transaction> <daily cap> to raise them."
 )
+# Gateway error codes that are states, not faults: the buyer can act on them,
+# so they travel as plain sentences rather than as the identifier we log.
+_GATEWAY_ERROR_TEXTS = {
+    "firefly_busy": (
+        "Another purchase is waiting for approval right now. Nothing was "
+        "charged — give it a moment and send your order again."
+    ),
+}
 _WITHDRAW_TOKENS_PATH = "/agent/withdraw/tokens"
 _WITHDRAW_PATH = "/agent/withdraw"
 _LLM_OPERATION_PATHS = {
@@ -615,6 +623,9 @@ class GatewayClient:
             # Already written for the buyer, and it leads with the fix — a
             # "request failed" prefix would bury that under noise.
             return f"{error}\n\n{_SPEND_LIMIT_HINT}"
+        readable = _GATEWAY_ERROR_TEXTS.get(error)
+        if readable is not None:
+            return readable
         live_max_match = re.search(
             r"exceeds live Bitrefill max\s+(\$[0-9]+(?:\.[0-9]+)?)",
             error,

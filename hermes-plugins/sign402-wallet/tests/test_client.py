@@ -512,6 +512,40 @@ class GatewayClientTests(unittest.TestCase):
         self.assertIn("116.4328 USDC", message)
         self.assertIn("/set_limits", message)
 
+    def test_execute_bitrefill_purchase_explains_a_busy_approval_channel(self):
+        # `firefly_busy` is an internal code for "someone else is mid-approval".
+        # The buyer needs to know it is transient and cost them nothing.
+        error = HTTPError(
+            "http://127.0.0.1:8099/agent/buy-wallet-bitrefill",
+            409,
+            "Conflict",
+            {},
+            io.BytesIO(
+                b'{"approved":false,"error":"firefly_busy",'
+                b'"message":"Firefly is already handling another approval request."}'
+            ),
+        )
+        opener = RecordingOpener(error=error)
+
+        with self.assertRaises(GatewayClientError) as raised:
+            self.make_client(opener).execute_bitrefill_purchase(
+                TelegramIdentity(user_id="1045618308"),
+                product_id="carrefour-argentina",
+                package_id="50",
+                country="AR",
+                payment_token={
+                    "contractAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                    "symbol": "USDC",
+                    "decimals": 6,
+                },
+                user_access_token="user-token-1",
+            )
+
+        message = raised.exception.user_message
+        self.assertNotIn("firefly", message.casefold())
+        self.assertIn("Nothing was charged", message)
+        self.assertIn("again", message)
+
     def test_execute_bitrefill_purchase_hides_upstream_stack_traces(self):
         error = HTTPError(
             "http://127.0.0.1:8099/agent/quote-bitrefill",
