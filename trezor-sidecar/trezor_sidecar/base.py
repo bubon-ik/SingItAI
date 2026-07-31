@@ -120,9 +120,17 @@ class BaseRpcClient:
                     "POST",
                     self._url,
                     json=request,
-                    headers={"accept": "application/json"},
+                    headers={
+                        "accept": "application/json",
+                        "accept-encoding": "identity",
+                    },
                 ) as response:
                     if response.status_code != 200:
+                        raise _rpc_unavailable()
+                    content_encoding = response.headers.get(
+                        "content-encoding", ""
+                    ).strip().lower()
+                    if content_encoding not in ("", "identity"):
                         raise _rpc_unavailable()
                     content_length = response.headers.get("content-length")
                     if content_length is not None:

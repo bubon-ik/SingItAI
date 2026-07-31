@@ -26,13 +26,43 @@ class RpcQueue:
     def __init__(self, replies):
         self.replies = list(replies)
         self.requests = []
+        self.http_requests = []
 
     def __call__(self, request):
+        self.http_requests.append(request)
         self.requests.append(json.loads(request.content))
+        if not self.replies:
+            raise UnexpectedRpcRequest(
+                f"unexpected JSON-RPC request: {self.requests[-1]['method']}"
+            )
         reply = self.replies.pop(0)
         if isinstance(reply, httpx.Response):
             return reply
         return httpx.Response(200, json=reply)
+
+
+class UnexpectedRpcRequest(BaseException):
+    pass
+
+
+class NeverReadStream(httpx.SyncByteStream):
+    def __init__(self):
+        self.read_attempted = False
+
+    def __iter__(self):
+        self.read_attempted = True
+        raise AssertionError("encoded response body must not be consumed")
+        yield b""  # pragma: no cover
+
+
+class ChunkedStream(httpx.SyncByteStream):
+    def __init__(self, content, chunk_size=1024):
+        self.content = content
+        self.chunk_size = chunk_size
+
+    def __iter__(self):
+        for offset in range(0, len(self.content), self.chunk_size):
+            yield self.content[offset:offset + self.chunk_size]
 
 
 def rpc_result(request_id, result):
@@ -68,47 +98,106 @@ class BaseRpcTests(TestCase):
                 "data": "0x70a08231" + "0" * 24 + RECIPIENT[2:],
             }, "latest"],
         )
+        self.assertEqual(
+            [request.headers["accept-encoding"] for request in queue.http_requests],
+            ["identity", "identity", "identity"],
+        )
 
-    def assert_rpc_refused(self, client):
+    def assert_rpc_refused(self, client, queue=None, expected_methods=None):
         with self.assertRaisesRegex(SafeError, r"Base RPC is unavailable\.") as raised:
             client.get_balances(RECIPIENT)
         self.assertEqual(raised.exception.code, "base_rpc_unavailable")
         self.assertEqual(raised.exception.status, 503)
         self.assertIsNone(raised.exception.__cause__)
+        if queue is not None:
+            self.assertEqual(
+                [request["method"] for request in queue.requests],
+                expected_methods,
+            )
 
     def test_wrong_chain_is_refused_before_balance_reads(self):
-        client, queue = self.make_client(rpc_result(1, "0x1"))
+        client, queue = self.make_client(
+            rpc_result(1, "0x1"),
+            rpc_result(2, "0x1"),
+            rpc_result(3, "0x" + (1).to_bytes(32, "big").hex()),
+        )
 
-        self.assert_rpc_refused(client)
-
-        self.assertEqual(len(queue.requests), 1)
+        self.assert_rpc_refused(client, queue, ["eth_chainId"])
 
     def test_redirect_is_refused(self):
-        client, _ = self.make_client(
-            httpx.Response(302, headers={"location": "https://canary.invalid"})
+        client, queue = self.make_client(
+            httpx.Response(
+                302,
+                headers={"location": "https://canary.invalid"},
+                json=rpc_result(1, "0x2105"),
+            ),
+            rpc_result(2, "0x1"),
+            rpc_result(3, "0x" + (1).to_bytes(32, "big").hex()),
         )
-        self.assert_rpc_refused(client)
+        self.assert_rpc_refused(client, queue, ["eth_chainId"])
 
-    def test_response_over_64_kib_is_refused(self):
-        client, _ = self.make_client(httpx.Response(200, content=b"x" * 65_537))
-        self.assert_rpc_refused(client)
-
-    def test_wrong_json_rpc_id_is_refused(self):
-        client, _ = self.make_client(rpc_result(2, "0x2105"))
-        self.assert_rpc_refused(client)
-
-    def test_json_rpc_error_is_refused_without_provider_content(self):
-        client, _ = self.make_client({
+    def test_valid_streamed_response_over_64_kib_without_length_is_refused(self):
+        oversized = json.dumps({
             "jsonrpc": "2.0",
             "id": 1,
-            "error": {"code": -32000, "message": "canary provider secret"},
-        })
+            "result": "0x2105",
+            "padding": "x" * 65_536,
+        }).encode()
+        response = httpx.Response(200, stream=ChunkedStream(oversized))
+        self.assertIsNone(response.headers.get("content-length"))
+        client, queue = self.make_client(
+            response,
+            rpc_result(2, "0x1"),
+            rpc_result(3, "0x" + (1).to_bytes(32, "big").hex()),
+        )
+        self.assert_rpc_refused(client, queue, ["eth_chainId"])
+
+    def test_encoded_response_is_refused_before_body_is_consumed(self):
+        for encoding in ("gzip", "deflate", "br"):
+            with self.subTest(encoding=encoding):
+                stream = NeverReadStream()
+                response = httpx.Response(
+                    200,
+                    headers={"content-encoding": encoding},
+                    stream=stream,
+                )
+                client, queue = self.make_client(
+                    response,
+                    rpc_result(2, "0x1"),
+                    rpc_result(3, "0x" + (1).to_bytes(32, "big").hex()),
+                )
+
+                self.assert_rpc_refused(client, queue, ["eth_chainId"])
+                self.assertFalse(stream.read_attempted)
+
+    def test_wrong_json_rpc_id_is_refused(self):
+        client, queue = self.make_client(
+            rpc_result(2, "0x2105"),
+            rpc_result(2, "0x1"),
+            rpc_result(3, "0x" + (1).to_bytes(32, "big").hex()),
+        )
+        self.assert_rpc_refused(client, queue, ["eth_chainId"])
+
+    def test_json_rpc_error_is_refused_without_provider_content(self):
+        client, queue = self.make_client(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32000, "message": "canary provider secret"},
+                "result": "0x2105",
+            },
+            rpc_result(2, "0x1"),
+            rpc_result(3, "0x" + (1).to_bytes(32, "big").hex()),
+        )
 
         with self.assertRaises(SafeError) as raised:
             client.get_balances(RECIPIENT)
 
         self.assertNotIn("canary", str(raised.exception))
         self.assertIsNone(raised.exception.__cause__)
+        self.assertEqual(
+            [request["method"] for request in queue.requests], ["eth_chainId"]
+        )
 
     def test_malformed_json_rpc_envelope_is_refused(self):
         for response in (
@@ -118,41 +207,55 @@ class BaseRpcTests(TestCase):
             {"jsonrpc": "2.0", "id": 1},
         ):
             with self.subTest(response=response):
-                client, _ = self.make_client(response)
-                self.assert_rpc_refused(client)
+                client, queue = self.make_client(
+                    response,
+                    rpc_result(2, "0x1"),
+                    rpc_result(3, "0x" + (1).to_bytes(32, "big").hex()),
+                )
+                self.assert_rpc_refused(client, queue, ["eth_chainId"])
 
     def test_duplicate_json_rpc_fields_are_refused(self):
         response = httpx.Response(
             200,
             content=b'{"jsonrpc":"2.0","id":999,"id":1,"result":"0x2105"}',
         )
-        client, _ = self.make_client(
+        client, queue = self.make_client(
             response,
             rpc_result(2, "0x1"),
             rpc_result(3, "0x" + (1).to_bytes(32, "big").hex()),
         )
-        self.assert_rpc_refused(client)
+        self.assert_rpc_refused(client, queue, ["eth_chainId"])
 
     def test_malformed_quantities_are_refused(self):
+        word = rpc_result(3, "0x" + (1).to_bytes(32, "big").hex())
         cases = (
-            (rpc_result(1, "8453"),),
-            (rpc_result(1, "0x02105"),),
-            (rpc_result(1, "0x2105"), rpc_result(2, "0x00")),
             (
+                (rpc_result(1, "8453"), rpc_result(2, "0x1"), word),
+                ["eth_chainId"],
+            ),
+            (
+                (rpc_result(1, "0x02105"), rpc_result(2, "0x1"), word),
+                ["eth_chainId"],
+            ),
+            (
+                (rpc_result(1, "0x2105"), rpc_result(2, "0x00"), word),
+                ["eth_chainId", "eth_getBalance"],
+            ),
+            ((
                 rpc_result(1, "0x2105"),
                 rpc_result(2, "0x1"),
                 rpc_result(3, "0x1"),
-            ),
-            (
+            ), ["eth_chainId", "eth_getBalance", "eth_call"]),
+            ((
                 rpc_result(1, "0x2105"),
                 rpc_result(2, "0x1"),
                 rpc_result(3, "0x" + "gg" * 32),
-            ),
+            ), ["eth_chainId", "eth_getBalance", "eth_call"]),
         )
-        for replies in cases:
+        for replies, expected_methods in cases:
             with self.subTest(replies=replies):
-                client, _ = self.make_client(*replies)
-                self.assert_rpc_refused(client)
+                client, queue = self.make_client(*replies)
+                self.assert_rpc_refused(client, queue, expected_methods)
 
     def test_transport_failure_is_safe(self):
         def fail(_request):
@@ -358,3 +461,32 @@ class BaseTransactionTests(TestCase):
                     expected_recipient=recipient,
                     expected_amount_atomic=amount,
                 )
+
+    def test_oversized_raw_transaction_is_refused(self):
+        oversized = "0x02" + "00" * 131_072
+        self.assert_verification_refused(oversized)
+
+    def test_nonminimal_rlp_list_framing_is_refused(self):
+        raw = bytes.fromhex(self.signed()[2:])
+        self.assertEqual(raw[1], 0xF8)
+        nonminimal = raw[:1] + b"\xf9\x00" + raw[2:]
+        self.assert_verification_refused("0x" + nonminimal.hex())
+
+    def test_high_s_signature_with_adjusted_parity_is_refused(self):
+        curve_order = int(
+            "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+            16,
+        )
+        raw_tx = self.signed()
+        raw = bytes.fromhex(raw_tx[2:])
+        fields = rlp.decode(raw[1:], strict=True)
+        parity = int.from_bytes(fields[9], "big")
+        low_s = int.from_bytes(fields[11], "big")
+        fields[9] = (1 - parity).to_bytes(1, "big") if parity == 0 else b""
+        fields[11] = (curve_order - low_s).to_bytes(32, "big")
+        high_s = "0x02" + rlp.encode(fields).hex()
+
+        self.assertEqual(
+            Account.recover_transaction(high_s).lower(), self.account.address.lower()
+        )
+        self.assert_verification_refused(high_s)
