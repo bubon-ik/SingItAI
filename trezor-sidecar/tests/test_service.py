@@ -8,10 +8,12 @@ from multiprocessing import get_context
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
+from unittest.mock import patch
 
 from eth_account import Account
 from eth_account.messages import encode_typed_data
 
+import trezor_sidecar.service as service_module
 from trezor_sidecar.config import SidecarSettings
 from trezor_sidecar.errors import SafeError
 from trezor_sidecar.intent import build_typed_data
@@ -205,6 +207,51 @@ class TrezorSidecarServiceTests(TestCase):
         self.assertEqual(trezor.get_calls, [FIXED_PATH])
         self.assertEqual(stat.S_IMODE(service._device_lock_path.stat().st_mode), 0o600)
 
+    def test_settings_property_returns_independent_defensive_copies(self):
+        service, _, trezor = self.make_service()
+        first = service.settings
+        second = service.settings
+
+        self.assertIsNot(first, second)
+        object.__setattr__(first, "enabled", False)
+        object.__setattr__(first, "chain_id", 1)
+        object.__setattr__(first, "max_usd", Decimal("0.01"))
+        object.__setattr__(first, "derivation_path", "m/44'/60'/0'/0/7")
+        service.pair()
+        service.approve_intent(self.valid_intent(), now=1_700_000_000)
+
+        self.assertTrue(second.enabled)
+        self.assertEqual(second.chain_id, 8453)
+        self.assertEqual(second.max_usd, Decimal("2"))
+        self.assertEqual(second.derivation_path, FIXED_PATH)
+        self.assertEqual(service.settings.derivation_path, FIXED_PATH)
+        self.assertEqual(trezor.get_calls, [FIXED_PATH])
+        self.assertEqual(trezor.sign_calls[0][0], FIXED_PATH)
+
+    def test_inflight_pairing_uses_fresh_snapshot_when_exposed_copy_is_mutated(self):
+        clock_entered = threading.Event()
+        release_clock = threading.Event()
+
+        def controlled_clock():
+            clock_entered.set()
+            release_clock.wait(timeout=2)
+            return 1_700_000_000
+
+        service, _, trezor = self.make_service(clock=controlled_clock)
+        exposed = service.settings
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pairing = pool.submit(service.pair)
+            self.assertTrue(clock_entered.wait(timeout=2))
+            object.__setattr__(exposed, "enabled", False)
+            object.__setattr__(exposed, "chain_id", 1)
+            object.__setattr__(exposed, "max_usd", Decimal("0.01"))
+            object.__setattr__(exposed, "derivation_path", "m/44'/60'/0'/0/6")
+            release_clock.set()
+            result = pairing.result(timeout=2)
+
+        self.assertEqual(result.derivation_path, FIXED_PATH)
+        self.assertEqual(trezor.get_calls, [FIXED_PATH])
+
     def test_invalid_or_raising_pair_clock_fails_before_device(self):
         invalid_clocks = (
             lambda: float("nan"),
@@ -236,6 +283,43 @@ class TrezorSidecarServiceTests(TestCase):
         self.assertEqual(raised.exception.code, "device_lock_unavailable")
         self.assertEqual(trezor.get_calls, [])
         self.assertFalse(target.read_bytes())
+
+    def test_guard_cleanup_preserves_operation_error_and_releases_thread_lock(self):
+        service, _, _ = self.make_service()
+        service.pair()
+        original_error = SafeError("original", "original operation error")
+        real_flock = service_module.fcntl.flock
+        real_close = service_module.os.close
+        close_calls = 0
+
+        def failing_unlock(descriptor, operation):
+            if operation == service_module.fcntl.LOCK_UN:
+                raise OSError("canary unlock failure")
+            return real_flock(descriptor, operation)
+
+        def failing_lock_close(descriptor):
+            nonlocal close_calls
+            close_calls += 1
+            real_close(descriptor)
+            if close_calls == 2:
+                raise OSError("canary close failure")
+
+        caught = None
+        with (
+            patch.object(service_module.fcntl, "flock", side_effect=failing_unlock),
+            patch.object(service_module.os, "close", side_effect=failing_lock_close),
+        ):
+            try:
+                with service._device_guard():
+                    raise original_error
+            except BaseException as error:
+                caught = error
+
+        with service._device_guard(blocking=False) as acquired_after_cleanup:
+            pass
+
+        self.assertIs(caught, original_error)
+        self.assertTrue(acquired_after_cleanup)
 
     def test_pairing_accepts_only_closed_address_result_paths(self):
         service, _, trezor = self.make_service()

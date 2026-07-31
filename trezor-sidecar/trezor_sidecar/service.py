@@ -116,7 +116,10 @@ class TrezorSidecarService:
 
     @property
     def settings(self) -> SidecarSettings:
-        return self._settings
+        return self._settings_snapshot()
+
+    def _settings_snapshot(self) -> SidecarSettings:
+        return replace(self._settings)
 
     @staticmethod
     def _require_enabled(settings: SidecarSettings) -> None:
@@ -226,26 +229,44 @@ class TrezorSidecarService:
             return
         descriptor = None
         file_acquired = False
+        primary_error = None
         try:
-            descriptor = self._open_device_lock()
-            operation = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
             try:
+                descriptor = self._open_device_lock()
+                operation = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
                 fcntl.flock(descriptor, operation)
-                file_acquired = True
             except BlockingIOError:
                 yield False
                 return
+            except SafeError:
+                raise
+            except Exception:
+                raise _device_lock_unavailable() from None
+            file_acquired = True
             yield True
-        except SafeError:
+        except BaseException as error:
+            primary_error = error
             raise
-        except Exception:
-            raise _device_lock_unavailable() from None
         finally:
+            cleanup_error = None
             if file_acquired and descriptor is not None:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                except BaseException as error:
+                    cleanup_error = error
             if descriptor is not None:
-                os.close(descriptor)
-            _DEVICE_LOCK.release()
+                try:
+                    os.close(descriptor)
+                except BaseException as error:
+                    if cleanup_error is None:
+                        cleanup_error = error
+            try:
+                _DEVICE_LOCK.release()
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+            if cleanup_error is not None and primary_error is None:
+                raise _device_lock_unavailable() from None
 
     def _device_address(self, settings: SidecarSettings) -> str:
         try:
@@ -264,7 +285,7 @@ class TrezorSidecarService:
         with self._device_guard() as acquired:
             if not acquired:
                 raise _device_lock_unavailable()
-            settings = self._settings
+            settings = self._settings_snapshot()
             self._require_enabled(settings)
             self._require_fixed_configuration(settings)
             now = self._now()
@@ -406,7 +427,7 @@ class TrezorSidecarService:
         with self._device_guard() as acquired:
             if not acquired:
                 raise _device_lock_unavailable()
-            settings = self._settings
+            settings = self._settings_snapshot()
             self._require_enabled(settings)
             self._require_fixed_configuration(settings)
             now = self._validate_now(now)
