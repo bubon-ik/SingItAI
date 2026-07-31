@@ -13,11 +13,25 @@ from sign402_gateway.bitrefill_quote import (
 
 
 class BitrefillQuoteTests(unittest.TestCase):
-    def test_service_fee_is_one_percent_without_a_minimum(self):
+    def test_service_fee_is_one_percent(self):
+        fee, total = quote_module.calculate_service_fee("10.00")
+
+        self.assertEqual(fee, Decimal("0.10"))
+        self.assertEqual(total, Decimal("10.10"))
+
+    def test_a_sub_dollar_order_reserves_a_cent_of_provider_rounding(self):
+        # Bitrefill publishes catalog prices rounded to the cent, so a $0.10
+        # product can invoice at $0.11. Under a dollar the 1% fee is thinner
+        # than that cent, and the purchase would die at invoice creation.
         fee, total = quote_module.calculate_service_fee("0.10")
 
         self.assertEqual(fee, Decimal("0.001"))
-        self.assertEqual(total, Decimal("0.101"))
+        self.assertEqual(total, Decimal("0.11"))
+
+    def test_a_dollar_order_is_covered_by_the_fee_alone(self):
+        _fee, total = quote_module.calculate_service_fee("1.00")
+
+        self.assertEqual(total, Decimal("1.01"))
 
     def test_build_quote_charges_one_percent_with_atomic_precision(self):
         quote = build_quote(
@@ -43,11 +57,12 @@ class BitrefillQuoteTests(unittest.TestCase):
 
         self.assertEqual(quote["serviceFeeBps"], 100)
         self.assertEqual(quote["serviceFeeUsd"], "0.001")
-        self.assertEqual(quote["totalUsd"], "0.101")
-        self.assertEqual(quote["singitAmount"], "10.1")
+        # Funding has to cover the ceiling the invoice is checked against.
+        self.assertEqual(quote["totalUsd"], "0.11")
+        self.assertEqual(quote["singitAmount"], "11")
         self.assertEqual(
             quote["maxSingitAtomic"],
-            str(int(Decimal("10.1") * 10**SINGIT_DECIMALS)),
+            str(int(Decimal("11") * 10**SINGIT_DECIMALS)),
         )
         self.assertNotIn("marginBps", quote)
 
@@ -130,10 +145,10 @@ class BitrefillQuoteTests(unittest.TestCase):
             now_epoch=1_719_000_000,
         )
 
-        self.assertEqual(quote["singitAmount"], "10.1")
+        self.assertEqual(quote["singitAmount"], "11")
         self.assertEqual(
             quote["maxSingitAtomic"],
-            str(int(Decimal("10.1") * 10**SINGIT_DECIMALS)),
+            str(int(Decimal("11") * 10**SINGIT_DECIMALS)),
         )
 
     def test_build_real_rate_quote_uses_bankr_pricing_result(self):
@@ -155,12 +170,12 @@ class BitrefillQuoteTests(unittest.TestCase):
             },
             pricing={
                 "pricingMode": "bankr_real_rate",
-                "targetUsdc": "0.101",
-                "bufferedTargetUsdc": "0.101",
+                "targetUsdc": "0.11",
+                "bufferedTargetUsdc": "0.11",
                 "requiredSingit": "25000",
                 "requiredSingitAtomic": "25000000000000000000000",
-                "expectedUsdc": "0.101",
-                "minUsdc": "0.101",
+                "expectedUsdc": "0.11",
+                "minUsdc": "0.11",
             },
             quote_id="quote_real_1",
             now_epoch=1_719_000_000,
@@ -171,8 +186,8 @@ class BitrefillQuoteTests(unittest.TestCase):
         self.assertEqual(quote["singitAmount"], "25000")
         self.assertEqual(quote["maxSingitAtomic"], "25000000000000000000000")
         self.assertEqual(quote["serviceFeeUsd"], "0.001")
-        self.assertEqual(quote["totalUsd"], "0.101")
-        self.assertEqual(quote["requiredUsdc"], "0.101")
+        self.assertEqual(quote["totalUsd"], "0.11")
+        self.assertEqual(quote["requiredUsdc"], "0.11")
         self.assertIn("real-rate", quote["quoteText"])
 
     def test_build_real_rate_quote_binds_selected_payment_token(self):
@@ -194,12 +209,12 @@ class BitrefillQuoteTests(unittest.TestCase):
             },
             pricing={
                 "pricingMode": "bankr_real_rate",
-                "targetUsdc": "0.101",
-                "bufferedTargetUsdc": "0.101",
+                "targetUsdc": "0.11",
+                "bufferedTargetUsdc": "0.11",
                 "requiredAmount": "0.11",
                 "requiredAmountAtomic": "110000",
-                "expectedUsdc": "0.101",
-                "minUsdc": "0.101",
+                "expectedUsdc": "0.11",
+                "minUsdc": "0.11",
             },
             payment_token={
                 "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",

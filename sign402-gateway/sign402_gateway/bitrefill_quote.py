@@ -13,6 +13,9 @@ from .numeric import format_decimal
 SINGIT_DECIMALS = 18
 DEFAULT_QUOTE_TTL_SECONDS = 120
 SERVICE_FEE_BPS = 100
+# Bitrefill publishes catalog prices rounded to the cent, so an invoice may come
+# back up to a cent above the listed price.
+PROVIDER_ROUNDING_ALLOWANCE_USD = Decimal("0.01")
 MAX_REPRICE_BPS = 500
 
 
@@ -38,11 +41,21 @@ def _approved_maximum_atomic(
 
 
 def calculate_service_fee(price_usd: Any) -> tuple[Decimal, Decimal]:
+    """Return the service fee and the amount the buyer approves and funds.
+
+    The total is also the ceiling the provider invoice has to fit under, and
+    Bitrefill quotes catalog prices rounded to the cent: a product listed at
+    $0.01 can invoice at $0.02. On an order of a dollar or more the 1% fee
+    already covers that cent, but below it the fee does not, and the purchase
+    dies at invoice creation with nothing wrong on either side. So the total
+    reserves a cent of rounding room where the fee alone is too thin — which
+    leaves every order of $1.00 and up exactly as it was.
+    """
     price = Decimal(str(price_usd))
     if price <= 0:
         raise ValueError("product priceUsd must be positive")
     fee = price * Decimal(SERVICE_FEE_BPS) / Decimal(10_000)
-    return fee, price + fee
+    return fee, max(price + fee, price + PROVIDER_ROUNDING_ALLOWANCE_USD)
 
 
 def new_quote_id() -> str:

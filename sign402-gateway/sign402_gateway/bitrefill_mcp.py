@@ -1621,11 +1621,20 @@ class McpBitrefillClient:
                 or package.get("amount")
                 or value
             )
+            price_usd = _money(price)
+            try:
+                priced = Decimal(str(price_usd))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if priced <= 0:
+                # Bitrefill lists some denominations at $0. They cannot be
+                # quoted, so offering them only produces a dead end.
+                continue
             normalized.append(
                 {
                     "packageId": package_id,
                     "value": value,
-                    "priceUsd": _money(price),
+                    "priceUsd": price_usd,
                 }
             )
         product_range = raw.get("range")

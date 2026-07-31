@@ -552,6 +552,39 @@ class BitrefillMcpCatalogTests(unittest.TestCase):
             ["get-product-details"],
         )
 
+    def test_denominations_priced_at_zero_are_not_offered(self):
+        # Bitrefill lists some of these (Carrefour Argentina 5 ARS is $0). They
+        # cannot be quoted at all, so showing them is a dead end for the buyer.
+        caller = FakeMcpCaller(
+            [
+                {
+                    "product": {
+                        "id": "carrefour-argentina",
+                        "name": "Carrefour Argentina",
+                        "country_code": "AR",
+                        "currency": "ARS",
+                        "recipient_type": "none",
+                        "packages": [
+                            {"package_value": "50", "payment_price": "0.03"},
+                            {"package_value": "5", "payment_price": "0"},
+                            {"package_value": "25", "payment_price": "0.01"},
+                        ],
+                    }
+                }
+            ]
+        )
+        client = McpBitrefillClient(api_key="key_123", call_tool=caller)
+
+        details = client.get_product_details(
+            product_id="carrefour-argentina",
+            country="AR",
+        )
+
+        self.assertEqual(
+            [package["value"] for package in details["packages"]],
+            ["50", "25"],
+        )
+
     def test_catalog_cache_settings_and_short_timeout_come_from_environment(self):
         with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
             os.environ,
