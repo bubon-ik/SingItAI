@@ -6234,12 +6234,6 @@ def _operator_user_wallet_ceilings() -> dict[str, int | None]:
     }
 
 
-def _format_usdc_atomic(value: int | None) -> str:
-    if value is None:
-        return "unlimited"
-    return format_decimal(Decimal(int(value)) / Decimal("1000000"))
-
-
 def _payload_has_spending_limit_update(payload: dict[str, Any]) -> bool:
     return any(
         key in payload
@@ -6725,6 +6719,11 @@ def _erc20_log_amount_atomic(log: dict[str, Any]) -> str | None:
 
 
 def _format_usdc_atomic(value: Any) -> str:
+    """Render an atomic USDC amount as the figure a person reads.
+
+    Accepts the int limits carry and the strings swap payloads carry; `None` is
+    an absent limit, which reads as unlimited rather than as zero.
+    """
     if value is None:
         return "unlimited"
     return format_decimal(Decimal(str(value)) / Decimal(1_000_000))
