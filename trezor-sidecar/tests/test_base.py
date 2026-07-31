@@ -1,5 +1,6 @@
 import json
 from unittest import TestCase
+from unittest.mock import patch
 
 import httpx
 import rlp
@@ -462,9 +463,40 @@ class BaseTransactionTests(TestCase):
                     expected_amount_atomic=amount,
                 )
 
-    def test_oversized_raw_transaction_is_refused(self):
-        oversized = "0x02" + "00" * 131_072
-        self.assert_verification_refused(oversized)
+    def test_oversized_structurally_valid_transaction_is_refused_before_decoding(self):
+        raw = bytes.fromhex(self.signed()[2:])
+        fields = rlp.decode(raw[1:], strict=True)
+        fields[7] += b"\x00" * 131_072
+        oversized_raw = b"\x02" + rlp.encode(fields)
+        oversized = "0x" + oversized_raw.hex()
+
+        decoded = rlp.decode(oversized_raw[1:], strict=True)
+        self.assertEqual(len(decoded), 12)
+        self.assertGreater(len(oversized_raw), 131_072)
+        self.assertEqual(len(decoded[7]), 68 + 131_072)
+
+        class RlpDecodeReached(BaseException):
+            pass
+
+        with patch(
+            "trezor_sidecar.base.rlp.decode", side_effect=RlpDecodeReached
+        ):
+            self.assert_verification_refused(oversized)
+
+        class SignerRecoveryReached(BaseException):
+            pass
+
+        with (
+            patch(
+                "trezor_sidecar.base._MAX_RAW_TRANSACTION_BYTES",
+                len(oversized_raw),
+            ),
+            patch(
+                "trezor_sidecar.base.Account.recover_transaction",
+                side_effect=SignerRecoveryReached,
+            ),
+        ):
+            self.assert_verification_refused(oversized)
 
     def test_nonminimal_rlp_list_framing_is_refused(self):
         raw = bytes.fromhex(self.signed()[2:])
