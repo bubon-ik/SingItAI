@@ -42,6 +42,13 @@ _BITREFILL_PRODUCT_PATH = "/agent/get-bitrefill-product"
 _PAID_TOOL_PATH = "/agent/buy-tool"
 _SPENDING_LIMITS_PATH = "/agent/spending-limits"
 _BUYER_EMAIL_PATH = "/agent/buyer-email"
+# The gateway writes this one for the buyer, so it travels to chat unchanged;
+# only the command that fixes it is added here, where the commands are defined.
+_SPEND_LIMIT_PREFIX = "Raise your spending limit to continue."
+_SPEND_LIMIT_HINT = (
+    "Send /limits to see your current limits, or "
+    "/set_limits <max per transaction> <daily cap> to raise them."
+)
 _WITHDRAW_TOKENS_PATH = "/agent/withdraw/tokens"
 _WITHDRAW_PATH = "/agent/withdraw"
 _LLM_OPERATION_PATHS = {
@@ -604,6 +611,10 @@ class GatewayClient:
         error = str(payload.get("error") or "").strip()
         if not error:
             return None
+        if error.startswith(_SPEND_LIMIT_PREFIX):
+            # Already written for the buyer, and it leads with the fix — a
+            # "request failed" prefix would bury that under noise.
+            return f"{error}\n\n{_SPEND_LIMIT_HINT}"
         live_max_match = re.search(
             r"exceeds live Bitrefill max\s+(\$[0-9]+(?:\.[0-9]+)?)",
             error,

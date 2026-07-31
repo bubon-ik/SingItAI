@@ -477,6 +477,41 @@ class GatewayClientTests(unittest.TestCase):
             "product or ask the operator to raise the Bitrefill limit.",
         )
 
+    def test_execute_bitrefill_purchase_leads_with_the_limit_fix(self):
+        # The buyer's first line has to be what to do, not "request failed".
+        error = HTTPError(
+            "http://127.0.0.1:8099/agent/buy-wallet-bitrefill",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(
+                b'{"ok":false,"error":"Raise your spending limit to continue. '
+                b'This purchase needs 116.4328 USDC, but your limit is 50 USDC '
+                b'per transaction."}'
+            ),
+        )
+        opener = RecordingOpener(error=error)
+
+        with self.assertRaises(GatewayClientError) as raised:
+            self.make_client(opener).execute_bitrefill_purchase(
+                TelegramIdentity(user_id="1045618308"),
+                product_id="alza-czech-republic",
+                package_id="100",
+                country="CZ",
+                payment_token={
+                    "contractAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                    "symbol": "USDC",
+                    "decimals": 6,
+                },
+                user_access_token="user-token-1",
+            )
+
+        message = raised.exception.user_message
+        self.assertTrue(message.startswith("Raise your spending limit"))
+        self.assertNotIn("Bitrefill request failed", message)
+        self.assertIn("116.4328 USDC", message)
+        self.assertIn("/set_limits", message)
+
     def test_execute_bitrefill_purchase_hides_upstream_stack_traces(self):
         error = HTTPError(
             "http://127.0.0.1:8099/agent/quote-bitrefill",

@@ -6326,6 +6326,37 @@ def _user_wallet_spend_scope(
     }
 
 
+SPEND_LIMIT_MESSAGE_PREFIX = "Raise your spending limit to continue."
+
+
+def _spend_limit_message(
+    amount_atomic: int,
+    *,
+    per_tx_cap: int | None = None,
+    daily_cap: int | None = None,
+    spent_today: int = 0,
+) -> str:
+    """Say which limit stopped the purchase, in the units the buyer thinks in.
+
+    This text reaches the buyer's chat, so it leads with what to do about it and
+    quotes USDC rather than the atomic amounts the caps are stored in — a cap
+    read as `50000000` tells nobody they are $50 short.
+    """
+    needed = _format_usdc_atomic(amount_atomic)
+    if per_tx_cap is not None:
+        return (
+            f"{SPEND_LIMIT_MESSAGE_PREFIX} This purchase needs {needed} USDC, "
+            f"but your limit is {_format_usdc_atomic(per_tx_cap)} USDC per "
+            "transaction."
+        )
+    remaining = max(int(daily_cap or 0) - int(spent_today), 0)
+    return (
+        f"{SPEND_LIMIT_MESSAGE_PREFIX} This purchase needs {needed} USDC, but "
+        f"only {_format_usdc_atomic(remaining)} USDC is left of your "
+        f"{_format_usdc_atomic(daily_cap)} USDC daily limit."
+    )
+
+
 def _enforce_user_wallet_spend_limits(
     server: Sign402GatewayServer,
     telegram_user_id: str,
@@ -6341,7 +6372,7 @@ def _enforce_user_wallet_spend_limits(
     amount = scope["amount"]
     if scope["maxPerTx"] is not None and amount > int(scope["maxPerTx"]):
         raise ValueError(
-            f"x402 amount {amount} exceeds the per-transaction cap {int(scope['maxPerTx'])}"
+            _spend_limit_message(amount, per_tx_cap=int(scope["maxPerTx"]))
         )
     if scope["dailyCap"] is None:
         return
@@ -6354,8 +6385,11 @@ def _enforce_user_wallet_spend_limits(
     )
     if spent_today + amount > int(scope["dailyCap"]):
         raise ValueError(
-            f"x402 amount {amount} exceeds the daily spending cap {int(scope['dailyCap'])}; "
-            f"spent today {spent_today} (SIGN402_USER_WALLET_DAILY_ATOMIC_CAP)"
+            _spend_limit_message(
+                amount,
+                daily_cap=int(scope["dailyCap"]),
+                spent_today=spent_today,
+            )
         )
 
 
@@ -6387,7 +6421,7 @@ def _reserve_user_wallet_spend(
 
     if scope["maxPerTx"] is not None and amount > int(scope["maxPerTx"]):
         raise ValueError(
-            f"x402 amount {amount} exceeds the per-transaction cap {int(scope['maxPerTx'])}"
+            _spend_limit_message(amount, per_tx_cap=int(scope["maxPerTx"]))
         )
     spent_today = int(
         server.user_spend_limit_store.spent_today_atomic(
@@ -6397,8 +6431,11 @@ def _reserve_user_wallet_spend(
         )
     )
     raise ValueError(
-        f"x402 amount {amount} exceeds the daily spending cap {int(scope['dailyCap'])}; "
-        f"spent today {spent_today} (SIGN402_USER_WALLET_DAILY_ATOMIC_CAP)"
+        _spend_limit_message(
+            amount,
+            daily_cap=int(scope["dailyCap"]),
+            spent_today=spent_today,
+        )
     )
 
 

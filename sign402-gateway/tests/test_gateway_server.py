@@ -58,6 +58,7 @@ from sign402_gateway.server import (
     UserWalletX402Buyer,
     build_bitrefill_funding_runner_from_env,
     build_bitrefill_user_funding_runner_from_env,
+    _spend_limit_message,
     build_bitrefill_client_from_env,
     build_approval_client_from_env,
     build_server,
@@ -674,6 +675,38 @@ class GatewayServerTests(unittest.TestCase):
                     )
 
                 server_constructor.assert_not_called()
+
+    def test_spend_limit_message_leads_with_the_fix_and_quotes_usdc(self):
+        # The buyer reads this in chat: atomic units tell them nothing, and the
+        # first thing they need is what to do about it.
+        message = _spend_limit_message(116_432_800, per_tx_cap=50_000_000)
+
+        self.assertTrue(message.startswith("Raise your spending limit"))
+        self.assertIn("116.4328 USDC", message)
+        self.assertIn("50 USDC per transaction", message)
+        self.assertNotIn("116432800", message)
+        self.assertNotIn("50000000", message)
+
+    def test_spend_limit_message_reports_what_is_left_of_the_daily_cap(self):
+        message = _spend_limit_message(
+            30_000_000,
+            daily_cap=50_000_000,
+            spent_today=45_000_000,
+        )
+
+        self.assertTrue(message.startswith("Raise your spending limit"))
+        self.assertIn("5 USDC is left", message)
+        self.assertIn("50 USDC daily limit", message)
+
+    def test_spend_limit_message_never_reports_a_negative_remainder(self):
+        message = _spend_limit_message(
+            1_000_000,
+            daily_cap=50_000_000,
+            spent_today=60_000_000,
+        )
+
+        self.assertIn("0 USDC is left", message)
+        self.assertNotIn("-", message)
 
     def test_bitrefill_client_factory_defaults_to_safe_test_mode(self):
         client = build_bitrefill_client_from_env({})
@@ -4556,7 +4589,8 @@ class GatewayServerTests(unittest.TestCase):
         body = json.loads(response.split("\r\n\r\n", 1)[1])
 
         self.assertIn("HTTP/1.0 400", response)
-        self.assertIn("per-transaction cap", body["error"])
+        self.assertIn("per transaction", body["error"])
+        self.assertIn("Raise your spending limit", body["error"])
         server.imessage_approval_service.request_purchase_approval.assert_not_called()
         server.user_wallet_service.decrypt_private_key_for_future_signing.assert_not_called()
         server.user_x402_buyer.assert_not_called()
@@ -4607,8 +4641,10 @@ class GatewayServerTests(unittest.TestCase):
         body = json.loads(response.split("\r\n\r\n", 1)[1])
 
         self.assertIn("HTTP/1.0 400", response)
-        self.assertIn("per-transaction cap", body["error"])
-        self.assertIn("500", body["error"])
+        self.assertIn("per transaction", body["error"])
+        # Readable USDC, not the atomic cap a buyer cannot interpret.
+        self.assertIn("0.0005 USDC", body["error"])
+        self.assertNotIn("500 ", body["error"])
         server.imessage_approval_service.request_purchase_approval.assert_not_called()
         server.user_wallet_service.decrypt_private_key_for_future_signing.assert_not_called()
 
@@ -4763,7 +4799,8 @@ class GatewayServerTests(unittest.TestCase):
         body = json.loads(response.split("\r\n\r\n", 1)[1])
 
         self.assertIn("HTTP/1.0 400", response)
-        self.assertIn("daily spending cap", body["error"])
+        self.assertIn("daily limit", body["error"])
+        self.assertIn("Raise your spending limit", body["error"])
         server.user_spend_limit_store.spent_today_atomic.assert_any_call(
             "1045618308",
             asset="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
@@ -6629,7 +6666,7 @@ class GatewayServerTests(unittest.TestCase):
 
         response = self.response_text(handler)
         self.assertIn("HTTP/1.0 400", response)
-        self.assertIn("cap", response.lower())
+        self.assertIn("raise your spending limit", response.lower())
 
     def test_quote_bitrefill_accepts_1020_total_at_personal_limit(self):
         server = DummyServer()
