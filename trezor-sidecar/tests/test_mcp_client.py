@@ -6,7 +6,12 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from trezor_sidecar.errors import SafeError
-from trezor_sidecar.mcp_client import McpToolCaller, TrezorMcpClient, decode_tool_result
+from trezor_sidecar.mcp_client import (
+    ALLOWED_TOOLS,
+    McpToolCaller,
+    TrezorMcpClient,
+    decode_tool_result,
+)
 
 
 class RecordingCaller:
@@ -242,6 +247,26 @@ class TrezorMcpClientTests(TestCase):
 
         with self.assertRaisesRegex(SafeError, "Trezor Suite is unavailable."):
             decode_tool_result(result, max_bytes=3)
+
+    def test_caller_default_allow_list_is_unchanged_by_the_override(self):
+        # Break caught: an operator preview widens what the sidecar may call.
+        caller = McpToolCaller("canary-secret")
+
+        self.assertEqual(caller._allowed_tools, ALLOWED_TOOLS)
+        self.assertNotIn("trezor_sign_message", caller._allowed_tools)
+        with self.assertRaisesRegex(SafeError, "Trezor Suite is unavailable."):
+            caller("trezor_sign_message", {"coin": "base"})
+
+    def test_caller_override_admits_only_its_own_tools(self):
+        # Break caught: a narrow override silently keeps the default set too.
+        caller = McpToolCaller(
+            "canary-secret", allowed_tools=frozenset({"trezor_sign_message"})
+        )
+
+        for name in ("trezor_send_transaction", "trezor_sign_typed_data"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(SafeError, "Trezor Suite is unavailable."):
+                    caller(name, {"coin": "base"})
 
     def test_caller_repr_redacts_token_and_fixed_url(self):
         representation = repr(McpToolCaller("canary-secret"))

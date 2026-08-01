@@ -87,15 +87,23 @@ def decode_tool_result(result: Any, max_bytes: int = 65536) -> dict[str, Any]:
 
 
 class McpToolCaller:
-    def __init__(self, token: str, timeout_seconds: float = 120.0):
+    def __init__(
+        self,
+        token: str,
+        timeout_seconds: float = 120.0,
+        allowed_tools: frozenset[str] = ALLOWED_TOOLS,
+    ):
         self._token = token
         self.timeout_seconds = timeout_seconds
+        # The sidecar always uses the default set. Operator-only preview tools
+        # pass their own narrower set rather than widening this one.
+        self._allowed_tools = frozenset(allowed_tools)
 
     def __repr__(self) -> str:
         return f"McpToolCaller(timeout_seconds={self.timeout_seconds})"
 
     def __call__(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        if name not in ALLOWED_TOOLS:
+        if name not in self._allowed_tools:
             raise _unavailable()
         try:
             return asyncio.run(self._call_async(name, arguments))
