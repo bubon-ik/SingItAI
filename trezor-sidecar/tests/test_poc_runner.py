@@ -14,9 +14,16 @@ from unittest.mock import MagicMock, patch
 
 from trezor_sidecar.base import BASE_USDC_ADDRESS
 from trezor_sidecar.errors import SafeError
-from trezor_sidecar.models import LOCAL_INTENT_TEST_ID, PaymentState, PaymentView, PurchaseIntent
+from trezor_sidecar.models import (
+    LOCAL_INTENT_TEST_ID,
+    IntentRecord,
+    PaymentState,
+    PaymentView,
+    PurchaseIntent,
+)
 from trezor_sidecar.poc_runner import (
     PreparedAddressBitrefillClient,
+    _approved_purchase_snapshot,
     SidecarTreasuryClient,
     TrezorPocRunner,
     build_parser,
@@ -94,6 +101,43 @@ class FakeStore:
         self.generation = 0
         self.reserved_generations = []
         self._lock = threading.Lock()
+        # Locally the sidecar shares this database and the approved intent is
+        # already here. Remotely it was recorded on the user's machine, so
+        # this starts empty and the runner has to record what it verified.
+        self.intents = {}
+
+    def get_intent(self, intent_id):
+        return self.intents.get(intent_id)
+
+    def insert_intent(self, intent, *, created_at):
+        existing = self.intents.get(intent.intent_id)
+        if existing is not None:
+            if existing.intent != intent:
+                raise ValueError("intent conflicts with existing intent_id")
+            return existing
+        record = IntentRecord(
+            intent=intent, state=PaymentState.QUOTED, created_at=created_at
+        )
+        self.intents[intent.intent_id] = record
+        return record
+
+    def approve_intent(self, intent_id, *, approved_at, pairing_id):
+        current = self.intents.get(intent_id)
+        if current is None:
+            raise ValueError("intent not found")
+        if current.state is PaymentState.DEVICE_APPROVED:
+            if current.approved_pairing_id != pairing_id:
+                raise ValueError("intent approval belongs to a different pairing")
+            return current
+        record = IntentRecord(
+            intent=current.intent,
+            state=PaymentState.DEVICE_APPROVED,
+            created_at=current.created_at,
+            approved_at=approved_at,
+            approved_pairing_id=pairing_id,
+        )
+        self.intents[intent_id] = record
+        return record
 
     def get_payment(self, payment_id):
         if self.payment is not None and self.payment.payment_id == payment_id:
@@ -1088,6 +1132,83 @@ class TrezorPocRunnerTests(TestCase):
         self.assertEqual(len(sidecar.pay_calls), 1)
         self.assertEqual(result["status"], "complete")
         self.assertEqual(store.records, [("invoice-1", "test-gift", "1000000", "usdc_base", NOW + 1)])
+
+    def test_remote_approval_is_recorded_so_the_purchase_can_be_reserved(self):
+        # Break caught: on a VPS the approval lives in the user's sidecar
+        # database, so reserve_purchase_attempt sees no approved intent and
+        # every remote purchase dies as "intent is not approved".
+        runner, _bitrefill, sidecar, store, _events = self.make_runner()
+        self.assertEqual(store.intents, {})
+
+        result = runner.buy(
+            quote=valid_quote(),
+            recipient={"email": "buyer@example.com"},
+            buyer_email="buyer@example.com",
+            now=NOW,
+        )
+
+        self.assertEqual(result["status"], "complete")
+        record = next(iter(store.intents.values()))
+        self.assertIs(record.state, PaymentState.DEVICE_APPROVED)
+        self.assertEqual(record.approved_pairing_id, "pair-1")
+        self.assertEqual(sidecar.pair_calls, 1)
+
+    def test_shared_store_purchase_never_asks_the_device_to_pair_again(self):
+        # Break caught: the local flow gains an extra Trezor prompt because
+        # the runner re-reads the pairing it already shares with the sidecar.
+        runner, _bitrefill, sidecar, store, _events = self.make_runner()
+        intent = runner._intent_from_snapshot(
+            _approved_purchase_snapshot(valid_quote(), {"email": "buyer@example.com"}, ""),
+            NOW,
+        )
+        store.intents[intent.intent_id] = IntentRecord(
+            intent=intent,
+            state=PaymentState.DEVICE_APPROVED,
+            created_at=NOW,
+            approved_at=NOW,
+            approved_pairing_id="pair-1",
+        )
+
+        runner.buy(
+            quote=valid_quote(),
+            recipient={"email": "buyer@example.com"},
+            buyer_email="",
+            now=NOW,
+        )
+
+        self.assertEqual(sidecar.pair_calls, 0)
+
+    def test_a_different_intent_under_a_recorded_id_is_refused(self):
+        # Break caught: a substituted purchase reuses an approval already
+        # recorded for different terms.
+        runner, _bitrefill, _sidecar, store, _events = self.make_runner()
+        intent = runner._intent_from_snapshot(
+            _approved_purchase_snapshot(valid_quote(), {"email": "buyer@example.com"}, ""),
+            NOW,
+        )
+        conflicting = PurchaseIntent(
+            intent_id=intent.intent_id,
+            product_slug="other-gift",
+            package_id=intent.package_id,
+            denomination=intent.denomination,
+            quoted_total_usd_micros=intent.quoted_total_usd_micros,
+            max_payment_usdc_atomic=intent.max_payment_usdc_atomic,
+            recipient_hash=intent.recipient_hash,
+            expires_at=intent.expires_at,
+        )
+        store.intents[intent.intent_id] = IntentRecord(
+            intent=conflicting, state=PaymentState.QUOTED, created_at=NOW
+        )
+
+        with self.assertRaises(SafeError) as raised:
+            runner.buy(
+                quote=valid_quote(),
+                recipient={"email": "buyer@example.com"},
+                buyer_email="",
+                now=NOW,
+            )
+
+        self.assertEqual(raised.exception.code, "intent_conflict")
 
     def test_rejected_intent_never_calls_prepare_purchase(self):
         runner, bitrefill, sidecar, store, events = self.make_runner(approved=False)

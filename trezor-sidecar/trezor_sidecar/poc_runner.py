@@ -490,6 +490,53 @@ class TrezorPocRunner:
                 503,
             ) from None
 
+    def _record_approval(self, intent: PurchaseIntent, approved_at: int) -> None:
+        """Make the runner's own store agree that this intent was approved.
+
+        Locally the sidecar shares this database, so the row is already there
+        and nothing happens. Remotely the approval was recorded on the user's
+        machine instead, and `reserve_purchase_attempt` would refuse an intent
+        it cannot see. This records only what `_verify_approval` just checked.
+
+        It is not the double-payment guard. That stays in the sidecar next to
+        the device, keyed on the invoice, where the VPS cannot reach it.
+        """
+        store = self._store()
+        try:
+            existing = store.get_intent(intent.intent_id)
+        except Exception:
+            raise _safe(
+                "payment_state_unavailable",
+                "Existing payment state could not be checked safely.",
+                503,
+            ) from None
+        if existing is not None and existing.state is PaymentState.DEVICE_APPROVED:
+            return
+        try:
+            # Only reached when the store is not the sidecar's own, so this
+            # never adds a device prompt to the local flow.
+            pairing_id = str(self.sidecar.pair()["pairing"]["pairingId"])
+            store.insert_intent(intent, created_at=approved_at)
+            store.approve_intent(
+                intent.intent_id,
+                approved_at=approved_at,
+                pairing_id=pairing_id,
+            )
+        except SafeError:
+            raise
+        except (KeyError, TypeError, ValueError):
+            raise _safe(
+                "intent_conflict",
+                "Purchase intent conflicts with recorded approval state.",
+                409,
+            ) from None
+        except Exception:
+            raise _safe(
+                "payment_state_unavailable",
+                "Purchase approval could not be recorded safely.",
+                503,
+            ) from None
+
     def _reserve_purchase_attempt(
         self,
         intent_id: str,
@@ -661,6 +708,7 @@ class TrezorPocRunner:
         if self._intent_from_snapshot(snapshot, started_at) != intent:
             raise _safe("intent_conflict", "Purchase intent changed after approval.", 409)
         self.treasury.register_approved_intent(intent)
+        self._record_approval(intent, started_at)
         self._reserve_purchase_attempt(
             intent.intent_id,
             started_at,
