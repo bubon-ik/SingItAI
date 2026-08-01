@@ -160,6 +160,58 @@ class TrezorMcpClientTests(TestCase):
         self.assertEqual(raised.exception.code, "trezor_unavailable")
         self.assertEqual(raised.exception.status, 503)
 
+    def test_decoder_preserves_only_allowlisted_structured_device_cancellation(self):
+        for code in ("device_rejected", "device_cancelled", "action_cancelled"):
+            result = SimpleNamespace(
+                isError=True,
+                structuredContent={"code": code, "message": "device detail canary"},
+                content=[SimpleNamespace(type="text", text="text canary")],
+            )
+            with self.subTest(code=code), self.assertRaises(SafeError) as raised:
+                decode_tool_result(result)
+            self.assertEqual(raised.exception.code, "device_rejected")
+            self.assertEqual(
+                raised.exception.message,
+                "Trezor operation was cancelled.",
+            )
+            self.assertEqual(raised.exception.status, 400)
+            self.assertNotIn("canary", str(raised.exception))
+            self.assertIsNone(raised.exception.__cause__)
+
+    def test_decoder_rejects_unknown_malformed_and_text_only_error_codes(self):
+        cases = (
+            SimpleNamespace(
+                isError=True,
+                structuredContent={"code": "unknown_error", "message": "secret canary"},
+                content=[],
+            ),
+            SimpleNamespace(
+                isError=True,
+                structuredContent={
+                    "code": "device_rejected",
+                    "message": "secret canary",
+                    "detail": "not closed",
+                },
+                content=[],
+            ),
+            SimpleNamespace(
+                isError=True,
+                structuredContent=None,
+                content=[
+                    SimpleNamespace(
+                        type="text",
+                        text='{"code":"device_rejected","message":"secret canary"}',
+                    )
+                ],
+            ),
+        )
+        for result in cases:
+            with self.subTest(result=result), self.assertRaises(SafeError) as raised:
+                decode_tool_result(result)
+            self.assertEqual(raised.exception.code, "trezor_unavailable")
+            self.assertNotIn("canary", str(raised.exception))
+            self.assertIsNone(raised.exception.__cause__)
+
     def test_decoder_rejects_malformed_json_without_disclosing_content(self):
         result = SimpleNamespace(
             isError=False,

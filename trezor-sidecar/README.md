@@ -150,6 +150,15 @@ second invoice. Inspect the existing invoice, the dedicated Base address, and
 start another purchase while any durable payment is unresolved or a completed
 payment lacks its final non-secret purchase-log record.
 
+Immediately before contacting Bitrefill to prepare an invoice, the runner
+creates a non-secret singleton purchase-attempt reservation in the proof
+database. The reservation survives every prepare, binding, completion,
+transport, timeout, and generic failure—even when no invoice response or local
+payment row exists. It is removed only in the same SQLite transaction that
+marks the matching payment complete and writes the required five-field
+purchase log. Never delete or bypass this reservation until the existing
+attempt has been manually reconciled.
+
 ## Automated verification
 
 These commands are safe: the tests inject transports and never use the private

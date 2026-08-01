@@ -453,7 +453,6 @@ class TrezorPocRunner:
         self._clock = clock
         self.treasury = treasury or SidecarTreasuryClient(sidecar=sidecar, clock=clock)
         self.bitrefill.treasury_client = self.treasury
-        self._finalized_invoices: set[str] = set()
 
     def _now(self) -> int:
         value = self._clock()
@@ -472,20 +471,58 @@ class TrezorPocRunner:
 
     def _require_no_unresolved_payment(self) -> None:
         try:
-            unresolved = self._store().get_unresolved_payment()
+            store = self._store()
+            active_attempt = store.has_active_purchase_attempt()
+            unresolved = store.get_unresolved_payment()
         except Exception:
             raise _safe(
                 "payment_state_unavailable",
                 "Existing payment state could not be checked safely.",
                 503,
             ) from None
-        if unresolved is not None:
+        if active_attempt or unresolved is not None:
             raise _safe(
                 "payment_recovery_required",
                 "An earlier payment is unresolved; do not retry purchase. "
                 "Inspect the existing invoice and local state.",
                 409,
             )
+
+    def _reserve_purchase_attempt(self, intent_id: str, created_at: int) -> None:
+        try:
+            self._store().reserve_purchase_attempt(
+                intent_id=intent_id,
+                created_at=created_at,
+            )
+        except ValueError:
+            raise _safe(
+                "payment_recovery_required",
+                "Another purchase attempt or payment is unresolved; do not retry purchase. "
+                "Inspect the existing invoice and local state.",
+                409,
+            ) from None
+        except Exception:
+            raise _safe(
+                "payment_state_unavailable",
+                "Purchase attempt could not be reserved safely.",
+                503,
+            ) from None
+
+    def _bind_purchase_attempt(self, intent_id: str, prepared: Any) -> None:
+        invoice_id = prepared.get("invoiceId") if isinstance(prepared, Mapping) else None
+        try:
+            self._store().bind_purchase_attempt_invoice(
+                intent_id=intent_id,
+                invoice_id=invoice_id,
+                updated_at=self._now(),
+            )
+        except Exception:
+            raise _safe(
+                "payment_recovery_required",
+                "The reserved purchase could not be bound safely; do not retry purchase. "
+                "Inspect the existing invoice and local state.",
+                409,
+            ) from None
 
     def quote(
         self,
@@ -571,8 +608,6 @@ class TrezorPocRunner:
         amount_atomic: str,
         completed_at: int,
     ) -> None:
-        if invoice_id in self._finalized_invoices:
-            return
         payment = payment_receipt.get("payment")
         if not isinstance(payment, dict):
             raise _safe("payment_failed", "Local payment receipt is invalid.", 500)
@@ -581,34 +616,24 @@ class TrezorPocRunner:
         if not isinstance(payment_id, str) or not isinstance(tx_hash, str) or _TX_HASH.fullmatch(tx_hash) is None:
             raise _safe("payment_failed", "Local payment receipt is invalid.", 500)
         store = self._store()
-        durable = store.get_payment(payment_id)
-        if (
-            durable is None
-            or durable.intent_id != intent.intent_id
-            or durable.invoice_id != invoice_id
-            or durable.tx_hash != tx_hash
-        ):
-            raise _safe("payment_failed", "Durable transaction does not match the local receipt.", 500)
-        if durable.state is PaymentState.TX_BROADCAST:
-            durable = store.transition_payment(
+        try:
+            store.finalize_purchase(
                 payment_id=payment_id,
-                expected=PaymentState.TX_BROADCAST,
-                target=PaymentState.COMPLETE,
-                updated_at=max(completed_at, durable.updated_at),
+                intent_id=intent.intent_id,
+                invoice_id=invoice_id,
                 tx_hash=tx_hash,
+                product_slug=intent.product_slug,
+                amount=amount_atomic,
+                payment_method="usdc_base",
+                timestamp=completed_at,
             )
-        elif durable.state is not PaymentState.COMPLETE:
-            raise _safe("payment_failed", "Durable payment is not broadcast.", 500)
-        if durable.tx_hash != tx_hash:
-            raise _safe("payment_failed", "Durable transaction changed during completion.", 500)
-        store.record_purchase(
-            invoice_id,
-            intent.product_slug,
-            amount_atomic,
-            "usdc_base",
-            durable.updated_at,
-        )
-        self._finalized_invoices.add(invoice_id)
+        except Exception:
+            raise _safe(
+                "payment_recovery_required",
+                "Purchase transaction finalization is unresolved; do not retry purchase. "
+                "Inspect the existing invoice and local state.",
+                409,
+            ) from None
 
     def buy(
         self,
@@ -628,6 +653,7 @@ class TrezorPocRunner:
         if self._intent_from_snapshot(snapshot, started_at) != intent:
             raise _safe("intent_conflict", "Purchase intent changed after approval.", 409)
         self.treasury.register_approved_intent(intent)
+        self._reserve_purchase_attempt(intent.intent_id, started_at)
         try:
             prepared = self.bitrefill.prepare_purchase(
                 quote=snapshot.quote_copy(),
@@ -638,6 +664,7 @@ class TrezorPocRunner:
             raise
         except Exception:
             raise _safe("purchase_failed", "Purchase could not be completed safely.") from None
+        self._bind_purchase_attempt(intent.intent_id, prepared)
         self.treasury.bind_prepared(intent.intent_id, prepared)
         try:
             result = self.bitrefill.complete_purchase(

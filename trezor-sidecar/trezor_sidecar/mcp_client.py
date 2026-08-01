@@ -16,6 +16,11 @@ ALLOWED_TOOLS = frozenset({
     "trezor_send_transaction",
     "trezor_push_transaction",
 })
+_CANCELLATION_CODES = frozenset({
+    "device_rejected",
+    "device_cancelled",
+    "action_cancelled",
+})
 
 
 def _unavailable() -> SafeError:
@@ -36,10 +41,25 @@ def _bounded_bytes(value: str, max_bytes: int) -> None:
 def decode_tool_result(result: Any, max_bytes: int = 65536) -> dict[str, Any]:
     """Decode only a bounded mapping result from an MCP tool response."""
     try:
-        if max_bytes < 0 or _field(result, "isError", False):
+        if max_bytes < 0:
             raise _unavailable()
 
         structured = _field(result, "structuredContent")
+        if _field(result, "isError", False):
+            if isinstance(structured, Mapping):
+                encoded = json.dumps(structured, separators=(",", ":"))
+                _bounded_bytes(encoded, max_bytes)
+                if (
+                    set(structured) == {"code", "message"}
+                    and structured.get("code") in _CANCELLATION_CODES
+                    and isinstance(structured.get("message"), str)
+                ):
+                    raise SafeError(
+                        "device_rejected",
+                        "Trezor operation was cancelled.",
+                        400,
+                    )
+            raise _unavailable()
         if isinstance(structured, Mapping):
             encoded = json.dumps(structured, separators=(",", ":"))
             _bounded_bytes(encoded, max_bytes)

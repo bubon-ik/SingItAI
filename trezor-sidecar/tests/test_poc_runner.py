@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from decimal import Decimal
@@ -89,6 +90,8 @@ class FakeStore:
         self.payment = None
         self.transitions = []
         self.records = []
+        self.attempt = None
+        self._lock = threading.Lock()
 
     def get_payment(self, payment_id):
         if self.payment is not None and self.payment.payment_id == payment_id:
@@ -127,6 +130,83 @@ class FakeStore:
         ):
             return None
         return self.payment
+
+    def has_active_purchase_attempt(self):
+        with self._lock:
+            return self.attempt is not None
+
+    def reserve_purchase_attempt(self, *, intent_id, created_at):
+        with self._lock:
+            if self.attempt is not None:
+                raise ValueError("purchase attempt already active")
+            if self.get_unresolved_payment() is not None:
+                raise ValueError("unresolved payment exists")
+            self.attempt = {
+                "intent_id": intent_id,
+                "invoice_id": None,
+                "created_at": created_at,
+                "updated_at": created_at,
+            }
+
+    def bind_purchase_attempt_invoice(self, *, intent_id, invoice_id, updated_at):
+        with self._lock:
+            if self.attempt is None or self.attempt["intent_id"] != intent_id:
+                raise ValueError("purchase attempt mismatch")
+            existing = self.attempt["invoice_id"]
+            if existing is not None and existing != invoice_id:
+                raise ValueError("purchase attempt invoice mismatch")
+            self.attempt["invoice_id"] = invoice_id
+            self.attempt["updated_at"] = updated_at
+
+    def finalize_purchase(self, **arguments):
+        with self._lock:
+            if (
+                self.attempt is None
+                or self.attempt["intent_id"] != arguments["intent_id"]
+                or self.attempt["invoice_id"] != arguments["invoice_id"]
+            ):
+                raise ValueError("purchase attempt mismatch")
+            if (
+                self.payment is None
+                or self.payment.payment_id != arguments["payment_id"]
+                or self.payment.intent_id != arguments["intent_id"]
+                or self.payment.invoice_id != arguments["invoice_id"]
+                or self.payment.tx_hash != arguments["tx_hash"]
+                or self.payment.state not in {
+                    PaymentState.TX_BROADCAST,
+                    PaymentState.COMPLETE,
+                }
+            ):
+                raise ValueError("payment mismatch")
+            if self.payment.state is PaymentState.TX_BROADCAST:
+                transition = {
+                    "payment_id": self.payment.payment_id,
+                    "expected": PaymentState.TX_BROADCAST,
+                    "target": PaymentState.COMPLETE,
+                    "updated_at": max(arguments["timestamp"], self.payment.updated_at),
+                    "tx_hash": self.payment.tx_hash,
+                }
+                self.transitions.append(transition)
+                self.payment = PaymentView(
+                    payment_id=self.payment.payment_id,
+                    intent_id=self.payment.intent_id,
+                    invoice_id=self.payment.invoice_id,
+                    state=PaymentState.COMPLETE,
+                    created_at=self.payment.created_at,
+                    updated_at=transition["updated_at"],
+                    tx_hash=self.payment.tx_hash,
+                )
+            record = (
+                arguments["invoice_id"],
+                arguments["product_slug"],
+                str(arguments["amount"]),
+                arguments["payment_method"],
+                self.payment.updated_at,
+            )
+            if not any(existing[0] == arguments["invoice_id"] for existing in self.records):
+                self.records.append(record)
+            self.attempt = None
+            return self.payment
 
 
 class FakeSidecar:
@@ -910,6 +990,32 @@ class TrezorPocRunnerTests(TestCase):
         )
         return runner, bitrefill, sidecar, store, events
 
+    def assert_fresh_runner_blocked(self, store):
+        events = []
+        sidecar = FakeSidecar(events, store=store)
+        bitrefill = FakeBitrefill(events)
+        runner = TrezorPocRunner(
+            bitrefill=bitrefill,
+            sidecar=sidecar,
+            max_usd="2.00",
+            summary_sink=lambda _summary: events.append("display-summary"),
+            _test_store=store,
+            clock=lambda: NOW,
+        )
+        with self.assertRaises(SafeError) as raised:
+            runner.buy(
+                quote=valid_quote(),
+                recipient={"email": "buyer@example.com"},
+                buyer_email="buyer@example.com",
+                now=NOW,
+            )
+        self.assertEqual(raised.exception.code, "payment_recovery_required")
+        self.assertEqual(events, [])
+        self.assertEqual(sidecar.approve_calls, [])
+        self.assertEqual(bitrefill.prepare_calls, [])
+        self.assertEqual(sidecar.pay_calls, [])
+        return raised.exception
+
     def test_invoice_is_created_only_after_device_approval(self):
         runner, bitrefill, sidecar, store, events = self.make_runner()
         quote = runner.quote(
@@ -1060,6 +1166,155 @@ class TrezorPocRunnerTests(TestCase):
         self.assertEqual(fresh_bitrefill.prepare_calls, [])
         self.assertEqual(fresh_sidecar.pay_calls, [])
 
+    def test_prepare_failure_leaves_guard_without_payment_and_blocks_fresh_runner(self):
+        runner, bitrefill, sidecar, store, events = self.make_runner(
+            prepare_error=RuntimeError("lost prepare response canary")
+        )
+
+        with self.assertRaises(SafeError):
+            runner.buy(
+                quote=valid_quote(),
+                recipient={"email": "buyer@example.com"},
+                buyer_email="buyer@example.com",
+                now=NOW,
+            )
+
+        self.assertIsNone(store.payment)
+        self.assertIsNotNone(store.attempt)
+        self.assertIsNone(store.attempt["invoice_id"])
+        self.assert_fresh_runner_blocked(store)
+
+    def test_prepare_then_bind_failure_keeps_bound_guard_and_blocks_fresh_runner(self):
+        runner, bitrefill, sidecar, store, events = self.make_runner(
+            prepared=valid_prepared(productId="changed-product")
+        )
+
+        with self.assertRaises(SafeError):
+            runner.buy(
+                quote=valid_quote(),
+                recipient={"email": "buyer@example.com"},
+                buyer_email="buyer@example.com",
+                now=NOW,
+            )
+
+        self.assertIsNone(store.payment)
+        self.assertIsNotNone(store.attempt)
+        self.assertEqual(store.attempt["invoice_id"], "invoice-1")
+        self.assert_fresh_runner_blocked(store)
+
+    def test_lost_payment_post_without_payment_row_keeps_guard_for_fresh_runner(self):
+        store = FakeStore()
+
+        class LostPostSidecar(FakeSidecar):
+            def pay_invoice(self, *args, **kwargs):
+                self.events.append("sidecar-pay")
+                self.pay_calls.append({"invoice_id": args[1]})
+                raise SafeError(
+                    "payment_recovery_required",
+                    "Payment submission outcome is unresolved; do not retry purchase.",
+                    409,
+                )
+
+        events = []
+        sidecar = LostPostSidecar(events, store=store)
+        bitrefill = FakeBitrefill(events)
+        runner = TrezorPocRunner(
+            bitrefill=bitrefill,
+            sidecar=sidecar,
+            max_usd="2.00",
+            summary_sink=lambda _summary: events.append("display-summary"),
+            _test_store=store,
+            clock=lambda: NOW,
+        )
+
+        with self.assertRaises(SafeError) as raised:
+            runner.buy(
+                quote=valid_quote(),
+                recipient={"email": "buyer@example.com"},
+                buyer_email="buyer@example.com",
+                now=NOW,
+            )
+
+        self.assertEqual(raised.exception.code, "payment_recovery_required")
+        self.assertIsNone(store.payment)
+        self.assertIsNotNone(store.attempt)
+        self.assertEqual(store.attempt["invoice_id"], "invoice-1")
+        self.assert_fresh_runner_blocked(store)
+
+    def test_two_runner_threads_serialize_before_exactly_one_prepare(self):
+        prepare_started = threading.Event()
+        release_prepare = threading.Event()
+        reservation_rejected = threading.Event()
+        approval_barrier = threading.Barrier(2)
+
+        class RacingStore(FakeStore):
+            def reserve_purchase_attempt(self, **arguments):
+                try:
+                    return super().reserve_purchase_attempt(**arguments)
+                except ValueError:
+                    reservation_rejected.set()
+                    raise
+
+        class BarrierSidecar(FakeSidecar):
+            def approve_intent(self, intent):
+                result = super().approve_intent(intent)
+                approval_barrier.wait(timeout=2)
+                return result
+
+        class BlockingBitrefill(FakeBitrefill):
+            def prepare_purchase(self, **arguments):
+                prepare_started.set()
+                if not release_prepare.wait(timeout=2):
+                    raise AssertionError("race test did not release prepare")
+                return super().prepare_purchase(**arguments)
+
+        store = RacingStore()
+        runners = []
+        bitrefills = []
+        sidecars = []
+        for _ in range(2):
+            bitrefill = BlockingBitrefill([])
+            sidecar = BarrierSidecar([], store=store)
+            runners.append(TrezorPocRunner(
+                bitrefill=bitrefill,
+                sidecar=sidecar,
+                max_usd="2.00",
+                summary_sink=lambda _summary: None,
+                _test_store=store,
+                clock=lambda: NOW,
+            ))
+            bitrefills.append(bitrefill)
+            sidecars.append(sidecar)
+
+        def buy(runner):
+            return runner.buy(
+                quote=valid_quote(),
+                recipient={"email": "buyer@example.com"},
+                buyer_email="buyer@example.com",
+                now=NOW,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(buy, runner) for runner in runners]
+            self.assertTrue(prepare_started.wait(timeout=2))
+            self.assertTrue(reservation_rejected.wait(timeout=2))
+            release_prepare.set()
+            outcomes = []
+            for future in futures:
+                try:
+                    outcomes.append(future.result(timeout=2)["status"])
+                except SafeError as error:
+                    outcomes.append(error.code)
+
+        self.assertEqual(
+            sorted(outcomes),
+            ["complete", "payment_recovery_required"],
+        )
+        self.assertEqual(sum(len(client.prepare_calls) for client in bitrefills), 1)
+        self.assertEqual(sum(len(client.complete_calls) for client in bitrefills), 1)
+        self.assertEqual(sum(len(client.pay_calls) for client in sidecars), 1)
+        self.assertIsNone(store.attempt)
+
     def test_summary_contains_exact_receipt_facts_and_neutral_warning_before_approval(self):
         summaries = []
         store = FakeStore()
@@ -1186,6 +1441,7 @@ class TrezorPocRunnerTests(TestCase):
         self.assertEqual(len(store.transitions), 1)
         self.assertEqual(len(store.records), 1)
         self.assertEqual(len(bitrefill.prepare_calls), 2)
+        self.assertIsNone(store.attempt)
 
     def test_local_transaction_hash_must_match_durable_broadcast_before_completion(self):
         runner, bitrefill, sidecar, store, events = self.make_runner()

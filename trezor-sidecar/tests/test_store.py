@@ -210,6 +210,112 @@ class SidecarStoreTests(TestCase):
         )
         self.assertIsNone(self.store.get_unresolved_payment())
 
+    def test_purchase_attempt_reservation_is_singleton_and_cross_connection_atomic(self):
+        self.approve_intent()
+        stores = (self.store, SidecarStore(self.path))
+
+        def reserve(store):
+            try:
+                store.reserve_purchase_attempt(
+                    intent_id=self.intent.intent_id,
+                    created_at=1_700_000_002,
+                )
+                return "reserved"
+            except ValueError:
+                return "blocked"
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(reserve, stores))
+
+        self.assertEqual(sorted(results), ["blocked", "reserved"])
+        self.assertTrue(self.store.has_active_purchase_attempt())
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute("SELECT * FROM purchase_attempt").fetchone()
+        self.assertEqual(row[0], 1)
+        self.assertEqual(row[1], self.intent.intent_id)
+        self.assertIsNone(row[2])
+
+    def test_reservation_rejects_unresolved_payment_even_without_existing_guard(self):
+        self.approve_intent()
+        self.create_payment()
+
+        with self.assertRaisesRegex(ValueError, "unresolved payment"):
+            self.store.reserve_purchase_attempt(
+                intent_id=self.intent.intent_id,
+                created_at=1_700_000_003,
+            )
+
+        self.assertFalse(self.store.has_active_purchase_attempt())
+
+    def test_atomic_finalize_requires_matching_guard_and_clears_only_on_success(self):
+        self.approve_intent()
+        self.store.reserve_purchase_attempt(
+            intent_id=self.intent.intent_id,
+            created_at=1_700_000_003,
+        )
+        self.store.bind_purchase_attempt_invoice(
+            intent_id=self.intent.intent_id,
+            invoice_id="invoice-1",
+            updated_at=1_700_000_004,
+        )
+        payment = self.create_payment()
+        self.store.transition_payment(
+            payment_id=payment.payment_id,
+            expected=PaymentState.INVOICE_CREATED,
+            target=PaymentState.TX_SIGNED,
+            updated_at=1_700_000_004,
+        )
+        broadcast = self.store.transition_payment(
+            payment_id=payment.payment_id,
+            expected=PaymentState.TX_SIGNED,
+            target=PaymentState.TX_BROADCAST,
+            updated_at=1_700_000_005,
+            tx_hash="0x" + "ab" * 32,
+        )
+        arguments = {
+            "payment_id": payment.payment_id,
+            "intent_id": self.intent.intent_id,
+            "invoice_id": payment.invoice_id,
+            "tx_hash": broadcast.tx_hash,
+            "product_slug": self.intent.product_slug,
+            "amount": "1000000",
+            "payment_method": "usdc_base",
+            "timestamp": 1_700_000_006,
+        }
+
+        for changed in (
+            {"intent_id": "0x" + "33" * 32},
+            {"invoice_id": "wrong-invoice"},
+        ):
+            with self.subTest(changed=changed), self.assertRaisesRegex(
+                ValueError,
+                "purchase attempt",
+            ):
+                self.store.finalize_purchase(**{**arguments, **changed})
+            self.assertTrue(self.store.has_active_purchase_attempt())
+            self.assertEqual(
+                self.store.get_payment(payment.payment_id).state,
+                PaymentState.TX_BROADCAST,
+            )
+
+        completed = self.store.finalize_purchase(**arguments)
+
+        self.assertEqual(completed.state, PaymentState.COMPLETE)
+        self.assertFalse(self.store.has_active_purchase_attempt())
+        self.assertIsNone(self.store.get_unresolved_payment())
+        with sqlite3.connect(self.path) as connection:
+            log = connection.execute(
+                "SELECT invoice_id, product_slug, amount, payment_method, timestamp "
+                "FROM purchase_log WHERE invoice_id = ?",
+                (payment.invoice_id,),
+            ).fetchone()
+        self.assertEqual(
+            log,
+            (payment.invoice_id, "test-gift", "1000000", "usdc_base", 1_700_000_006),
+        )
+
     def test_sqlite_timestamp_range_is_signed_64_bit(self):
         # Break caught: values accepted by models overflow SQLite INTEGER bindings.
         maximum = (1 << 63) - 1
@@ -427,7 +533,13 @@ class SidecarStoreTests(TestCase):
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
         blocked = ("signature", "recipient", "raw", "calldata", "token", "redemption")
         with sqlite3.connect(self.path) as connection:
-            for table in ("pairings", "intents", "payments", "purchase_log"):
+            for table in (
+                "pairings",
+                "intents",
+                "payments",
+                "purchase_attempt",
+                "purchase_log",
+            ):
                 columns = [row[1].lower() for row in connection.execute(f"PRAGMA table_info({table})")]
                 self.assertTrue(columns)
                 for forbidden in blocked:

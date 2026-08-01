@@ -232,6 +232,20 @@ class SidecarStore:
                     tx_hash TEXT CHECK (tx_hash IS NULL OR length(tx_hash) BETWEEN 1 AND 128)
                 );
 
+                CREATE TABLE IF NOT EXISTS purchase_attempt (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    intent_id TEXT NOT NULL UNIQUE CHECK (length(intent_id) = 66)
+                        REFERENCES intents(intent_id),
+                    invoice_id TEXT UNIQUE CHECK (
+                        invoice_id IS NULL
+                        OR length(invoice_id) BETWEEN 1 AND 256
+                    ),
+                    created_at INTEGER NOT NULL CHECK (created_at > 0),
+                    updated_at INTEGER NOT NULL CHECK (
+                        updated_at > 0 AND updated_at >= created_at
+                    )
+                );
+
                 CREATE TABLE IF NOT EXISTS purchase_log (
                     invoice_id TEXT PRIMARY KEY CHECK (length(invoice_id) BETWEEN 1 AND 256)
                         REFERENCES payments(invoice_id),
@@ -608,6 +622,26 @@ class SidecarStore:
             connection.close()
         return None if row is None else self._payment(row)
 
+    @staticmethod
+    def _unresolved_payment_row(connection: sqlite3.Connection) -> sqlite3.Row | None:
+        return connection.execute(
+            """SELECT payments.* FROM payments
+            LEFT JOIN purchase_log
+              ON purchase_log.invoice_id = payments.invoice_id
+            WHERE payments.state NOT IN (?, ?)
+              AND NOT (
+                payments.state = ?
+                AND purchase_log.invoice_id IS NOT NULL
+              )
+            ORDER BY payments.created_at, payments.payment_id
+            LIMIT 1""",
+            (
+                PaymentState.CANCELLED.value,
+                PaymentState.FAILED.value,
+                PaymentState.COMPLETE.value,
+            ),
+        ).fetchone()
+
     def get_unresolved_payment(self) -> PaymentView | None:
         """Return one payment that is unsafe to replace with a new purchase.
 
@@ -617,26 +651,170 @@ class SidecarStore:
         """
         connection = self._connect()
         try:
-            row = connection.execute(
-                """SELECT payments.* FROM payments
-                LEFT JOIN purchase_log
-                  ON purchase_log.invoice_id = payments.invoice_id
-                WHERE payments.state NOT IN (?, ?)
-                  AND NOT (
-                    payments.state = ?
-                    AND purchase_log.invoice_id IS NOT NULL
-                  )
-                ORDER BY payments.created_at, payments.payment_id
-                LIMIT 1""",
-                (
-                    PaymentState.CANCELLED.value,
-                    PaymentState.FAILED.value,
-                    PaymentState.COMPLETE.value,
-                ),
-            ).fetchone()
+            row = self._unresolved_payment_row(connection)
         finally:
             connection.close()
         return None if row is None else self._payment(row)
+
+    def has_active_purchase_attempt(self) -> bool:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT 1 FROM purchase_attempt WHERE singleton = 1"
+            ).fetchone()
+        finally:
+            connection.close()
+        return row is not None
+
+    def reserve_purchase_attempt(self, *, intent_id: str, created_at: int) -> None:
+        intent_id = _text(intent_id, "intent_id", limit=66)
+        if len(intent_id) != 66:
+            raise ValueError("intent_id must be 66 characters")
+        created_at = _timestamp(created_at, "created_at")
+        with self._transaction() as connection:
+            if connection.execute(
+                "SELECT 1 FROM purchase_attempt WHERE singleton = 1"
+            ).fetchone() is not None:
+                raise ValueError("purchase attempt already active")
+            if self._unresolved_payment_row(connection) is not None:
+                raise ValueError("unresolved payment already exists")
+            intent = connection.execute(
+                "SELECT state FROM intents WHERE intent_id = ?",
+                (intent_id,),
+            ).fetchone()
+            if intent is None or intent["state"] != PaymentState.DEVICE_APPROVED.value:
+                raise ValueError("purchase attempt intent is not approved")
+            connection.execute(
+                """INSERT INTO purchase_attempt
+                (singleton, intent_id, invoice_id, created_at, updated_at)
+                VALUES (1, ?, NULL, ?, ?)""",
+                (intent_id, created_at, created_at),
+            )
+
+    def bind_purchase_attempt_invoice(
+        self,
+        *,
+        intent_id: str,
+        invoice_id: str,
+        updated_at: int,
+    ) -> None:
+        intent_id = _text(intent_id, "intent_id", limit=66)
+        invoice_id = _text(invoice_id, "invoice_id")
+        updated_at = _timestamp(updated_at, "updated_at")
+        with self._transaction() as connection:
+            attempt = connection.execute(
+                "SELECT * FROM purchase_attempt WHERE singleton = 1"
+            ).fetchone()
+            if attempt is None or attempt["intent_id"] != intent_id:
+                raise ValueError("purchase attempt does not match intent")
+            if attempt["invoice_id"] not in (None, invoice_id):
+                raise ValueError("purchase attempt does not match invoice")
+            if updated_at < attempt["updated_at"]:
+                raise ValueError("updated_at cannot move backwards")
+            connection.execute(
+                """UPDATE purchase_attempt SET invoice_id = ?, updated_at = ?
+                WHERE singleton = 1 AND intent_id = ?""",
+                (invoice_id, updated_at, intent_id),
+            )
+
+    def finalize_purchase(
+        self,
+        *,
+        payment_id: str,
+        intent_id: str,
+        invoice_id: str,
+        tx_hash: str,
+        product_slug: str,
+        amount: int | str,
+        payment_method: str,
+        timestamp: int,
+    ) -> PaymentView:
+        payment_id = _text(payment_id, "payment_id")
+        intent_id = _text(intent_id, "intent_id", limit=66)
+        invoice_id = _text(invoice_id, "invoice_id")
+        tx_hash = _text(tx_hash, "tx_hash", limit=_TX_HASH_LIMIT)
+        product_slug = _text(product_slug, "product_slug")
+        _, amount_text = _amount(amount, "amount")
+        payment_method = _text(payment_method, "payment_method")
+        timestamp = _timestamp(timestamp, "timestamp")
+        with self._transaction() as connection:
+            attempt = connection.execute(
+                "SELECT * FROM purchase_attempt WHERE singleton = 1"
+            ).fetchone()
+            if (
+                attempt is None
+                or attempt["intent_id"] != intent_id
+                or attempt["invoice_id"] != invoice_id
+            ):
+                raise ValueError("purchase attempt does not match finalization")
+            payment = connection.execute(
+                """SELECT payments.*, intents.product_slug
+                FROM payments JOIN intents ON intents.intent_id = payments.intent_id
+                WHERE payments.payment_id = ?""",
+                (payment_id,),
+            ).fetchone()
+            if (
+                payment is None
+                or payment["intent_id"] != intent_id
+                or payment["invoice_id"] != invoice_id
+                or payment["tx_hash"] != tx_hash
+                or payment["product_slug"] != product_slug
+                or payment["amount_atomic"] != amount_text
+            ):
+                raise ValueError("payment conflicts with purchase finalization")
+            existing = connection.execute(
+                "SELECT * FROM purchase_log WHERE invoice_id = ?",
+                (invoice_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    payment["state"] != PaymentState.COMPLETE.value
+                    or existing["product_slug"] != product_slug
+                    or existing["amount"] != amount_text
+                    or existing["payment_method"] != payment_method
+                ):
+                    raise ValueError("purchase record conflicts with finalization")
+                completed_at = payment["updated_at"]
+            else:
+                if payment["state"] not in {
+                    PaymentState.TX_BROADCAST.value,
+                    PaymentState.COMPLETE.value,
+                }:
+                    raise ValueError("payment is not ready for finalization")
+                completed_at = max(timestamp, payment["updated_at"])
+                connection.execute(
+                    """UPDATE payments SET state = ?, updated_at = ?
+                    WHERE payment_id = ?""",
+                    (PaymentState.COMPLETE.value, completed_at, payment_id),
+                )
+                connection.execute(
+                    """INSERT INTO purchase_log
+                    (invoice_id, product_slug, amount, payment_method, timestamp)
+                    VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        invoice_id,
+                        product_slug,
+                        amount_text,
+                        payment_method,
+                        completed_at,
+                    ),
+                )
+            deleted = connection.execute(
+                """DELETE FROM purchase_attempt
+                WHERE singleton = 1 AND intent_id = ? AND invoice_id = ?""",
+                (intent_id, invoice_id),
+            )
+            if deleted.rowcount != 1:
+                raise ValueError("purchase attempt changed during finalization")
+            return PaymentView(
+                payment_id=payment["payment_id"],
+                intent_id=payment["intent_id"],
+                invoice_id=payment["invoice_id"],
+                state=PaymentState.COMPLETE,
+                created_at=payment["created_at"],
+                updated_at=completed_at,
+                tx_hash=payment["tx_hash"],
+            )
 
     def record_purchase(
         self,
