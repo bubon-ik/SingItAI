@@ -1,4 +1,5 @@
 import ast
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -29,6 +30,57 @@ SIGN402_TREZOR_POC_MAX_USD=1.00
 BITREFILL_API_KEY=replace-with-test-operator-key
 """
 
+EXPECTED_GATEWAY_IMPORT = (
+    "poc_runner.py",
+    "ImportFrom",
+    "sign402_gateway.bitrefill_mcp",
+    "McpBitrefillClient",
+    None,
+)
+
+ARTIFACT_SUFFIXES = frozenset(
+    {".json", ".jsonl", ".log", ".ndjson", ".out", ".trace", ".txt", ".yaml", ".yml"}
+)
+
+CANARIES = (
+    "buyer@example.com",
+    "invoice-access-canary",
+    "REDEMPTION-CANARY",
+    "sidecar-token-canary",
+    "api-key-canary",
+    "signature-canary",
+    "raw-transaction-canary",
+    "payment-link-canary",
+)
+
+
+def _gateway_imports(path: Path, source: str):
+    imports = []
+    tree = ast.parse(source, filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("sign402_gateway"):
+                    imports.append((path.name, "Import", alias.name, None, alias.asname))
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+            "sign402_gateway"
+        ):
+            for alias in node.names:
+                imports.append(
+                    (path.name, "ImportFrom", node.module, alias.name, alias.asname)
+                )
+    return imports
+
+
+def _artifact_canary_hits(root: Path):
+    hits = []
+    for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
+        if path.suffix.lower() not in ARTIFACT_SUFFIXES:
+            continue
+        serialized = path.read_text(encoding="utf-8")
+        hits.extend((path.relative_to(root), canary) for canary in CANARIES if canary in serialized)
+    return hits
+
 
 class IsolationBoundaryTests(unittest.TestCase):
     def test_sidecar_imports_only_the_narrow_bitrefill_gateway_module(self):
@@ -36,20 +88,24 @@ class IsolationBoundaryTests(unittest.TestCase):
         gateway_imports = []
         for path in sorted(PACKAGE.glob("*.py")):
             source = path.read_text(encoding="utf-8")
-            tree = ast.parse(source, filename=str(path))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    gateway_imports.extend(
-                        alias.name for alias in node.names if alias.name.startswith("sign402_gateway")
-                    )
-                elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
-                    "sign402_gateway"
-                ):
-                    gateway_imports.append(node.module or "")
+            gateway_imports.extend(_gateway_imports(path, source))
             for forbidden in FORBIDDEN_IMPORTS:
                 self.assertNotIn(forbidden, source, f"{path.name} crosses boundary via {forbidden}")
 
-        self.assertEqual(gateway_imports, ["sign402_gateway.bitrefill_mcp"])
+        self.assertEqual(gateway_imports, [EXPECTED_GATEWAY_IMPORT])
+
+    def test_gateway_import_shape_guard_distinguishes_aliases_and_extra_symbols(self):
+        # Break caught: a relaxed guard accepts a module alias or a second production symbol.
+        aliased = _gateway_imports(
+            Path("poc_runner.py"),
+            "from sign402_gateway.bitrefill_mcp import McpBitrefillClient as Client\n",
+        )
+        extra = _gateway_imports(
+            Path("poc_runner.py"),
+            "from sign402_gateway.bitrefill_mcp import McpBitrefillClient, Other\n",
+        )
+        self.assertNotEqual(aliased, [EXPECTED_GATEWAY_IMPORT])
+        self.assertNotEqual(extra, [EXPECTED_GATEWAY_IMPORT])
 
     def test_example_environments_are_split_exactly_and_disabled(self):
         # Break caught: credentials or production-enabling defaults cross the process boundary.
@@ -68,6 +124,11 @@ class IsolationBoundaryTests(unittest.TestCase):
         self.assertIn("outside this repository", readme)
         self.assertIn("exact purchase summary", readme)
         self.assertIn("before device approval", readme)
+        self.assertIn(
+            "SIGN402_TREZOR_STATE_PATH=${HOME}/.sign402-trezor-poc/state.db",
+            readme,
+        )
+        self.assertNotIn("an absolute proof-only state path", readme)
 
         safe_section = readme.split(safe_marker, 1)[1].split(live_marker, 1)[0]
         self.assertIn("sign402-trezor-poc pair", safe_section)
@@ -76,20 +137,19 @@ class IsolationBoundaryTests(unittest.TestCase):
 
     def test_serialized_test_artifacts_exclude_secret_and_delivery_canaries(self):
         # Break caught: a generated fixture or captured log persists bearer or delivery value.
-        canaries = (
-            "sidecar-token-canary",
-            "invoice-access-canary",
-            "api-key-canary",
-            "buyer@example.com",
-            "REDEMPTION-CANARY-DO-NOT-STORE",
-        )
-        artifact_paths = []
-        for pattern in ("*.log", "*.json", "*.jsonl"):
-            artifact_paths.extend((ROOT / "tests").rglob(pattern))
-        for path in sorted(set(artifact_paths)):
-            serialized = path.read_text(encoding="utf-8")
-            for canary in canaries:
-                self.assertNotIn(canary, serialized, f"{path} persisted {canary}")
+        self.assertEqual(_artifact_canary_hits(ROOT), [])
+
+    def test_artifact_guard_scans_nested_non_source_artifacts_for_every_real_canary(self):
+        # Break caught: a new artifact directory or a real runner canary escapes the scan.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = root / "nested" / "serialized" / "runner.jsonl"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_text("\n".join(CANARIES), encoding="utf-8")
+            self.assertEqual(
+                {canary for _, canary in _artifact_canary_hits(root)},
+                set(CANARIES),
+            )
 
 
 if __name__ == "__main__":

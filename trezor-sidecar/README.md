@@ -43,8 +43,20 @@ independent random sidecar token and put the same value in both private files.
 Put the Trezor Suite MCP token and a private HTTPS Base RPC URL only in
 `sidecar.env`. Keep the Bitrefill operator key only in `runner.env`. Set
 `SIGN402_TREZOR_POC_ENABLED=1` in each private file only while running this
-proof. Keep `SIGN402_TREZOR_POC_MAX_USD=1.00` for the first manual test and use
-an absolute proof-only state path outside the repository.
+proof. Keep `SIGN402_TREZOR_POC_MAX_USD=1.00` for the first manual test.
+
+In the private `sidecar.env`, replace the example state-path placeholder with
+this exact line:
+
+```bash
+SIGN402_TREZOR_STATE_PATH=${HOME}/.sign402-trezor-poc/state.db
+```
+
+Do not choose another location. Sourcing the private env expands `${HOME}` to
+the current operator's home directory, producing the same
+`~/.sign402-trezor-poc/state.db` path fixed in the runner. The directory and
+database are proof-only and remain outside the repository and all production
+state locations.
 
 Never paste tokens, recipient data, payment links, redemption values, or eSIM
 activation data into a command, log, issue, chat, or repository file.
