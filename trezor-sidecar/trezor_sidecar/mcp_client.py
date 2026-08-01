@@ -168,7 +168,6 @@ class TrezorMcpClient:
 
     def sign_typed_data(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
         return self._invoke("trezor_sign_typed_data", {
-            "coin": "base",
             "path": path,
             "data": data,
         })

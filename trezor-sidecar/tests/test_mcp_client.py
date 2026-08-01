@@ -131,7 +131,6 @@ class TrezorMcpClientTests(TestCase):
 
         self.assertEqual(caller.calls, [
             ("trezor_sign_typed_data", {
-                "coin": "base",
                 "path": "m/44'/60'/0'/0/0",
                 "data": {"domain": {"chainId": 8453}},
             }),
