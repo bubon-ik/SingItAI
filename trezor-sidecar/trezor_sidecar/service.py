@@ -727,7 +727,7 @@ class TrezorSidecarService:
             raise _safe("invalid_request", "Payment ID is invalid.")
         try:
             payment = self.store.get_payment(payment_id)
-        except BaseException:
+        except Exception:
             raise self._reconciliation_error() from None
         if payment is None:
             raise _safe("payment_not_found", "Payment was not found.", 404)

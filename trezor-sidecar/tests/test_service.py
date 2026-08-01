@@ -1400,6 +1400,52 @@ class TrezorSidecarServiceTests(TestCase):
             self.assertEqual(len(trezor.push_transaction_calls), before_pushes)
             self.assertEqual(real_get(payment.payment_id), payment)
 
+    def test_run_payment_read_sanitizer_does_not_swallow_process_control(self):
+        # Break caught: the storage boundary converts KeyboardInterrupt into an API error.
+        service, store, trezor, rpc = self.make_approved_payment_service()
+        payment = service.create_payment(
+            self.valid_payment_request(invoice_id="read-exception-boundary"),
+            "read-exception-boundary-key",
+            1_700_000_000,
+        )
+        real_get = store.get_payment
+
+        with (
+            patch.object(
+                store,
+                "get_payment",
+                side_effect=RuntimeError("canary ordinary exception"),
+            ),
+            self.assertRaises(BaseException) as ordinary,
+        ):
+            service.run_payment(payment.payment_id, now=lambda: 1_700_000_001)
+        self.assertIsInstance(ordinary.exception, SafeError)
+        self.assertEqual(ordinary.exception.code, "reconciliation_required")
+        self.assertEqual(
+            ordinary.exception.message,
+            "Transaction broadcast outcome requires reconciliation.",
+        )
+        self.assertEqual(ordinary.exception.status, 409)
+        self.assertNotIn("canary", str(ordinary.exception))
+        self.assertIsNone(ordinary.exception.__cause__)
+
+        with (
+            patch.object(
+                store,
+                "get_payment",
+                side_effect=KeyboardInterrupt("canary process control"),
+            ),
+            self.assertRaises(BaseException) as process_control,
+        ):
+            service.run_payment(payment.payment_id, now=lambda: 1_700_000_001)
+        self.assertIsInstance(process_control.exception, KeyboardInterrupt)
+        self.assertEqual(str(process_control.exception), "canary process control")
+
+        self.assertEqual(rpc.calls, [])
+        self.assertEqual(trezor.sign_transaction_calls, [])
+        self.assertEqual(trezor.push_transaction_calls, [])
+        self.assertEqual(real_get(payment.payment_id), payment)
+
     def test_orphaned_signed_reconciliation_write_failure_is_fixed_and_never_pushes(self):
         service, store, trezor, _ = self.make_approved_payment_service()
         payment = service.create_payment(
