@@ -30,6 +30,13 @@ SIGN402_TREZOR_POC_MAX_USD=1.00
 BITREFILL_API_KEY=replace-with-test-operator-key
 """
 
+LOCAL_AGENT_ENV_PREFIX = """# This file is for a separate local Hermes test instance only.
+# Keep the real copy outside the repository with mode 0600.
+SIGN402_TREZOR_LOCAL_AGENT_ENABLED=0
+SIGN402_TREZOR_LOCAL_PURCHASES_ENABLED=0
+SIGN402_TREZOR_POC_ENABLED=0
+"""
+
 EXPECTED_GATEWAY_IMPORT = (
     "poc_runner.py",
     "ImportFrom",
@@ -111,6 +118,26 @@ class IsolationBoundaryTests(unittest.TestCase):
         # Break caught: credentials or production-enabling defaults cross the process boundary.
         self.assertEqual((ROOT / ".env.sidecar.example").read_text(encoding="utf-8"), SIDECAR_ENV)
         self.assertEqual((ROOT / ".env.runner.example").read_text(encoding="utf-8"), RUNNER_ENV)
+        local_agent = (ROOT / ".env.local-agent.example").read_text(encoding="utf-8")
+        self.assertTrue(local_agent.startswith(LOCAL_AGENT_ENV_PREFIX))
+        self.assertNotIn("SIGN402_TREZOR_MCP_TOKEN", local_agent)
+        self.assertNotIn("SIGN402_TREZOR_BASE_RPC_URL", local_agent)
+
+    def test_local_agent_plugin_is_separate_and_never_names_production_routes(self):
+        plugin = ROOT / "hermes-local-plugin"
+        manifest = (plugin / "plugin.yaml").read_text(encoding="utf-8")
+        self.assertIn("name: sign402-trezor-local", manifest)
+        combined = "\n".join(
+            path.read_text(encoding="utf-8") for path in sorted(plugin.glob("*.py"))
+        )
+        for forbidden in (
+            "sign402_gateway.server",
+            "ManagedBaseWalletService",
+            "imessage_approvals",
+            "whatsapp_cloud",
+            "/agent/buy-wallet-bitrefill",
+        ):
+            self.assertNotIn(forbidden, combined)
 
     def test_runbook_keeps_no_purchase_steps_before_operator_only_live_steps(self):
         # Break caught: an operator can mistake a live purchase command for a safe smoke test.
@@ -134,6 +161,15 @@ class IsolationBoundaryTests(unittest.TestCase):
         self.assertIn("sign402-trezor-poc pair", safe_section)
         self.assertIn("sign402-trezor-poc intent-test", safe_section)
         self.assertNotIn("sign402-trezor-poc buy", safe_section)
+        local_marker = "## Separate local Hermes instance"
+        self.assertGreater(readme.index(local_marker), readme.index(warning))
+        local_section = readme.split(local_marker, 1)[1]
+        self.assertIn("SIGN402_TREZOR_LOCAL_AGENT_ENABLED=0", local_section)
+        self.assertIn("SIGN402_TREZOR_LOCAL_PURCHASES_ENABLED=0", local_section)
+        self.assertIn("SIGN402_TREZOR_LOCAL_AGENT_HOME", local_section)
+        self.assertIn("never writes to the working `~/.hermes`", local_section)
+        self.assertIn("/trezor_prepare", local_section)
+        self.assertIn("/trezor_confirm", local_section)
 
     def test_serialized_test_artifacts_exclude_secret_and_delivery_canaries(self):
         # Break caught: a generated fixture or captured log persists bearer or delivery value.

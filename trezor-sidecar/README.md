@@ -166,6 +166,87 @@ finalization increments it, so an older overlapping runner cannot begin a new
 invoice after a newer runner has already completed and removed its guard.
 Failures retain the guard and do not advance the generation.
 
+## Separate local Hermes instance
+
+The optional `hermes-local-plugin/` connects one dedicated local Hermes test
+instance to this proof. It is a separate plugin named
+`sign402-trezor-local`; it does not replace or import the working
+`sign402-wallet` plugin and it does not register `/bitrefill`, wallet,
+iMessage, or WhatsApp commands. Never install it into the working Hermes home
+or reuse the production bot process.
+
+Stage the plugin only under a dedicated local-agent home:
+
+```bash
+export SIGN402_TREZOR_LOCAL_AGENT_HOME="$HOME/.sign402-trezor-agent"
+sh scripts/install-local-hermes-plugin.sh
+```
+
+The staging script requires that explicit directory, refuses the current user
+home, and never writes to the working `~/.hermes`. It also does not run a
+Hermes enable or restart command. Point only a separate local Hermes test
+instance at `$SIGN402_TREZOR_LOCAL_AGENT_HOME/.hermes`; keep the working
+instance and its service configuration unchanged.
+
+Install `trezor-sidecar` and the narrow `sign402-gateway` dependency into the
+dedicated local Hermes Python environment as editable packages, using the same
+commands as the one-time setup above. Do not install either package into the
+working Hermes environment. The local plugin imports `trezor_sidecar` only
+from that dedicated interpreter.
+
+Create a private local-agent environment outside the repository:
+
+```bash
+cp .env.local-agent.example \
+  "$HOME/.config/sign402-trezor-poc/local-agent.env"
+chmod 600 "$HOME/.config/sign402-trezor-poc/local-agent.env"
+```
+
+The local-agent environment is the runner side of the split. It receives the
+independent sidecar bearer and the test operator Bitrefill key, but never the
+Trezor MCP token or Base RPC credential. Set exactly one numeric Telegram user
+ID in `SIGN402_TREZOR_LOCAL_AGENT_USER_ID`. If a selected product needs an
+email recipient, set it only in the private
+`SIGN402_TREZOR_LOCAL_BUYER_EMAIL` value; do not send recipient data as command
+arguments.
+
+All three gates remain off by default. Pairing needs the first and third;
+quoting or purchasing additionally needs the separate purchase gate:
+
+```text
+SIGN402_TREZOR_LOCAL_AGENT_ENABLED=0
+SIGN402_TREZOR_LOCAL_PURCHASES_ENABLED=0
+SIGN402_TREZOR_POC_ENABLED=0
+```
+
+Enable them only in the separate local instance while the isolated sidecar is
+running. The plugin exposes only:
+
+```text
+/trezor_pair
+/trezor_prepare <productId> <packageId> <country>
+/trezor_confirm <8-character confirmation code>
+/trezor_cancel
+```
+
+`/trezor_prepare` requests product details and a live quote, then returns the
+exact product, denomination, USD total, maximum Base USDC payment, recipient,
+buyer email, and expiry. It does not create an invoice or payment. Read that
+summary before sending the exact one-time `/trezor_confirm` command.
+
+`/trezor_confirm` consumes the pending quote before continuing, so duplicate
+commands cannot reuse it. It then requires the Trezor purchase-intent approval
+before Bitrefill invoice creation and a second Trezor confirmation for the
+exact Base USDC transaction. A rejection, timeout, changed quote, expired
+summary, unavailable sidecar, or mismatched wallet fails closed without
+falling back to the managed-wallet, iMessage, or WhatsApp paths. After any
+ambiguous invoice or broadcast failure, follow the same no-retry recovery rule
+as the operator-only CLI above.
+
+When the local test is finished, stop only the local sidecar and local Hermes
+test process, then return both flags to `0`. Do not stop or restart the working
+gateway, Hermes, iMessage, or WhatsApp services.
+
 ## Automated verification
 
 These commands are safe: the tests inject transports and never use the private
