@@ -36,7 +36,11 @@ class SidecarStoreTests(TestCase):
 
     def approve_intent(self):
         self.store.insert_intent(self.intent, created_at=1_700_000_000)
-        return self.store.approve_intent(self.intent.intent_id, approved_at=1_700_000_001)
+        return self.store.approve_intent(
+            self.intent.intent_id,
+            approved_at=1_700_000_001,
+            pairing_id="pairing-1",
+        )
 
     def create_payment(self, **changes):
         values = {
@@ -52,8 +56,8 @@ class SidecarStoreTests(TestCase):
         values.update(changes)
         return self.store.create_payment(**values)
 
-    def test_pairing_replacement_requires_explicit_repair(self):
-        # Break caught: replacing the connected device without operator approval.
+    def test_pairing_replacement_requires_explicit_repair_and_new_identity(self):
+        # Break caught: replacing the device without approval or reusing its old identity.
         original = Pairing(
             pairing_id="base",
             address="0x1111111111111111111111111111111111111111",
@@ -61,17 +65,26 @@ class SidecarStoreTests(TestCase):
             created_at=1_700_000_000,
             updated_at=1_700_000_000,
         )
-        replacement = Pairing(
+        reused_identity = Pairing(
             pairing_id="base",
             address="0x2222222222222222222222222222222222222222",
             derivation_path="m/44'/60'/0'/0/0",
             created_at=1_700_000_001,
             updated_at=1_700_000_001,
         )
+        replacement = Pairing(
+            pairing_id="replacement",
+            address=reused_identity.address,
+            derivation_path=reused_identity.derivation_path,
+            created_at=reused_identity.created_at,
+            updated_at=reused_identity.updated_at,
+        )
 
         self.assertEqual(self.store.save_pairing(original), original)
         with self.assertRaisesRegex(ValueError, "different Trezor"):
             self.store.save_pairing(replacement)
+        with self.assertRaisesRegex(ValueError, "new pairing_id"):
+            self.store.save_pairing(reused_identity, allow_repair=True)
 
         self.assertEqual(self.store.save_pairing(replacement, allow_repair=True), replacement)
         self.assertEqual(self.store.get_pairing(), replacement)
@@ -86,7 +99,7 @@ class SidecarStoreTests(TestCase):
             updated_at=20,
         )
         backwards = Pairing(
-            pairing_id="base",
+            pairing_id="backwards",
             address="0x2222222222222222222222222222222222222222",
             derivation_path="m/44'/60'/0'/0/0",
             created_at=10,
@@ -150,7 +163,11 @@ class SidecarStoreTests(TestCase):
             expires_at=maximum,
         )
         inserted = self.store.insert_intent(maximum_intent, created_at=maximum)
-        approved = self.store.approve_intent(maximum_intent.intent_id, approved_at=maximum)
+        approved = self.store.approve_intent(
+            maximum_intent.intent_id,
+            approved_at=maximum,
+            pairing_id="pairing-maximum",
+        )
         payment = self.store.create_payment(
             payment_id="pay-max",
             intent_id=maximum_intent.intent_id,
@@ -171,6 +188,7 @@ class SidecarStoreTests(TestCase):
 
         self.assertEqual(inserted.created_at, maximum)
         self.assertEqual(approved.approved_at, maximum)
+        self.assertEqual(approved.approved_pairing_id, "pairing-maximum")
         self.assertEqual(payment.updated_at, maximum)
         self.assertEqual(self.store.save_pairing(pairing), pairing)
         with self.assertRaisesRegex(ValueError, "expires_at"):
@@ -228,7 +246,11 @@ class SidecarStoreTests(TestCase):
     def test_intent_approval_persists_every_intent_field_after_reopen(self):
         # Break caught: an approved intent loses its commitment or immutable purchase terms.
         inserted = self.store.insert_intent(self.intent, created_at=1_700_000_000)
-        approved = self.store.approve_intent(self.intent.intent_id, approved_at=1_700_000_001)
+        approved = self.store.approve_intent(
+            self.intent.intent_id,
+            approved_at=1_700_000_001,
+            pairing_id="pairing-1",
+        )
         reopened = SidecarStore(self.path).get_intent(self.intent.intent_id)
 
         self.assertEqual(inserted.intent, self.intent)
@@ -236,7 +258,14 @@ class SidecarStoreTests(TestCase):
         self.assertEqual(approved.intent, self.intent)
         self.assertEqual(approved.state, PaymentState.DEVICE_APPROVED)
         self.assertEqual(approved.approved_at, 1_700_000_001)
+        self.assertEqual(approved.approved_pairing_id, "pairing-1")
         self.assertEqual(reopened, approved)
+        with self.assertRaisesRegex(ValueError, "different pairing"):
+            self.store.approve_intent(
+                self.intent.intent_id,
+                approved_at=1_700_000_002,
+                pairing_id="pairing-2",
+            )
 
     def test_intent_id_replay_rejects_changed_purchase_terms(self):
         # Break caught: a reused intent identifier is silently rebound to different terms.
@@ -258,7 +287,11 @@ class SidecarStoreTests(TestCase):
 
         second_intent = self.make_intent(intent_id="0x" + "33" * 32)
         self.store.insert_intent(second_intent, created_at=1_700_000_002)
-        self.store.approve_intent(second_intent.intent_id, approved_at=1_700_000_003)
+        self.store.approve_intent(
+            second_intent.intent_id,
+            approved_at=1_700_000_003,
+            pairing_id="pairing-2",
+        )
         second = self.create_payment(
             payment_id="pay-3",
             intent_id=second_intent.intent_id,
@@ -344,3 +377,31 @@ class SidecarStoreTests(TestCase):
                 self.assertTrue(columns)
                 for forbidden in blocked:
                     self.assertFalse(any(forbidden in column for column in columns))
+
+    def test_missing_approval_pairing_column_fails_closed_with_reset_guidance(self):
+        # Break caught: an old local schema silently treats unbound approvals as current.
+        legacy_path = Path(self.temporary.name) / "legacy.db"
+        connection = sqlite3.connect(legacy_path)
+        try:
+            connection.execute(
+                """CREATE TABLE intents (
+                intent_id TEXT PRIMARY KEY,
+                product_slug TEXT NOT NULL,
+                package_id TEXT NOT NULL,
+                denomination TEXT NOT NULL,
+                quoted_total_usd_micros TEXT NOT NULL,
+                max_payment_usdc_atomic TEXT NOT NULL,
+                commitment TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                approved_at INTEGER
+                )"""
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        os.chmod(legacy_path, 0o600)
+
+        with self.assertRaisesRegex(ValueError, "reset local sidecar state"):
+            SidecarStore(legacy_path)

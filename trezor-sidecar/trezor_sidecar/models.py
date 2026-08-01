@@ -117,6 +117,7 @@ class IntentRecord:
     state: PaymentState
     created_at: int
     approved_at: int | None = None
+    approved_pairing_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.intent, PurchaseIntent):
@@ -129,6 +130,15 @@ class IntentRecord:
                 "approved_at",
                 _positive_int(self.approved_at, "approved_at"),
             )
+        if self.approved_pairing_id is not None:
+            if (
+                not isinstance(self.approved_pairing_id, str)
+                or not self.approved_pairing_id
+                or len(self.approved_pairing_id) > 256
+            ):
+                raise ValueError(
+                    "approved_pairing_id must be a non-empty string of at most 256 characters"
+                )
 
 
 @dataclass(frozen=True)

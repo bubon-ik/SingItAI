@@ -427,7 +427,7 @@ class TrezorSidecarService:
         if (
             intent.state is not PaymentState.DEVICE_APPROVED
             or intent.approved_at is None
-            or intent.approved_at <= pairing.created_at
+            or intent.approved_pairing_id != pairing.pairing_id
         ):
             raise _reapproval_required()
 
@@ -507,7 +507,11 @@ class TrezorSidecarService:
                 )
 
             try:
-                approved = self.store.approve_intent(intent.intent_id, approved_at=now)
+                approved = self.store.approve_intent(
+                    intent.intent_id,
+                    approved_at=now,
+                    pairing_id=pairing.pairing_id,
+                )
             except ValueError:
                 raise _safe(
                     "intent_state_changed",
@@ -534,6 +538,9 @@ class TrezorSidecarService:
         ):
             raise _safe("invalid_request", "Payment idempotency key is invalid.")
         replay = self._payment_replay(request, idempotency_key)
+        if replay is None:
+            self._require_enabled(settings)
+            self._require_fixed_configuration(settings)
         pairing = self.store.get_pairing()
         if pairing is None:
             raise _safe("not_paired", "A Trezor must be paired before payment.", 409)
@@ -546,9 +553,9 @@ class TrezorSidecarService:
         if now < intent.approved_at:
             raise _invalid_clock()
         if replay is not None:
+            if now < replay.created_at:
+                raise _invalid_clock()
             return replay
-        self._require_enabled(settings)
-        self._require_fixed_configuration(settings)
         if pairing.derivation_path != settings.derivation_path:
             raise _safe("pairing_mismatch", "The stored Trezor pairing is invalid.", 409)
         self._validate_fixed_intent(intent.intent)
@@ -706,6 +713,22 @@ class TrezorSidecarService:
             payment = self.store.get_payment(payment_id)
         except (TypeError, ValueError):
             raise _safe("invalid_request", "Payment ID is invalid.") from None
+        if payment is None:
+            raise _safe("payment_not_found", "Payment was not found.", 404)
+        return payment
+
+    def _read_payment_for_run(self, payment_id: str) -> PaymentView:
+        if (
+            not isinstance(payment_id, str)
+            or not payment_id
+            or len(payment_id) > 256
+            or "\x00" in payment_id
+        ):
+            raise _safe("invalid_request", "Payment ID is invalid.")
+        try:
+            payment = self.store.get_payment(payment_id)
+        except BaseException:
+            raise self._reconciliation_error() from None
         if payment is None:
             raise _safe("payment_not_found", "Payment was not found.", 404)
         return payment
@@ -929,7 +952,7 @@ class TrezorSidecarService:
     ) -> PaymentView:
         if not callable(now):
             raise _safe("invalid_request", "Payment clock must be callable.")
-        payment = self.get_payment(payment_id)
+        payment = self._read_payment_for_run(payment_id)
         if payment.state in {
             PaymentState.TX_BROADCAST,
             PaymentState.COMPLETE,
@@ -942,7 +965,7 @@ class TrezorSidecarService:
             if not acquired:
                 raise _safe("device_busy", "Another Trezor approval is active.", 409)
             settings = self._settings_snapshot()
-            payment = self.get_payment(payment_id)
+            payment = self._read_payment_for_run(payment_id)
             if payment.state in {
                 PaymentState.TX_BROADCAST,
                 PaymentState.COMPLETE,

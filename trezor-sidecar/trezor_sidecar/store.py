@@ -204,7 +204,15 @@ class SidecarStore:
                     expires_at INTEGER NOT NULL CHECK (expires_at > 0),
                     state TEXT NOT NULL CHECK (length(state) BETWEEN 1 AND 64),
                     created_at INTEGER NOT NULL CHECK (created_at > 0),
-                    approved_at INTEGER
+                    approved_at INTEGER,
+                    approval_pairing_id TEXT CHECK (
+                        approval_pairing_id IS NULL
+                        OR length(approval_pairing_id) BETWEEN 1 AND 256
+                    ),
+                    CHECK (
+                        (approved_at IS NULL AND approval_pairing_id IS NULL)
+                        OR (approved_at IS NOT NULL AND approval_pairing_id IS NOT NULL)
+                    )
                 );
 
                 CREATE TABLE IF NOT EXISTS payments (
@@ -232,6 +240,13 @@ class SidecarStore:
                 );
                 """
             )
+            intent_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(intents)")
+            }
+            if "approval_pairing_id" not in intent_columns:
+                raise ValueError(
+                    "sidecar state schema is outdated; reset local sidecar state"
+                )
             connection.commit()
         finally:
             connection.close()
@@ -275,6 +290,7 @@ class SidecarStore:
             state=PaymentState(row["state"]),
             created_at=row["created_at"],
             approved_at=row["approved_at"],
+            approved_pairing_id=row["approval_pairing_id"],
         )
 
     @staticmethod
@@ -338,6 +354,8 @@ class SidecarStore:
                 return current
             if not allow_repair:
                 raise ValueError("different Trezor pairing requires explicit repair")
+            if pairing.pairing_id == current.pairing_id:
+                raise ValueError("pairing repair requires a new pairing_id")
             if pairing.updated_at < current.updated_at:
                 raise ValueError("updated_at cannot move backwards")
             connection.execute(
@@ -382,8 +400,9 @@ class SidecarStore:
             connection.execute(
                 """INSERT INTO intents
                 (intent_id, product_slug, package_id, denomination, quoted_total_usd_micros,
-                 max_payment_usdc_atomic, commitment, expires_at, state, created_at, approved_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+                 max_payment_usdc_atomic, commitment, expires_at, state, created_at, approved_at,
+                 approval_pairing_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)""",
                 (
                     intent.intent_id,
                     intent.product_slug,
@@ -399,22 +418,37 @@ class SidecarStore:
             )
             return IntentRecord(intent=intent, state=PaymentState.QUOTED, created_at=created_at)
 
-    def approve_intent(self, intent_id: str, *, approved_at: int) -> IntentRecord:
+    def approve_intent(
+        self,
+        intent_id: str,
+        *,
+        approved_at: int,
+        pairing_id: str,
+    ) -> IntentRecord:
         _text(intent_id, "intent_id", limit=66)
         approved_at = _timestamp(approved_at, "approved_at")
+        pairing_id = _text(pairing_id, "pairing_id")
         with self._transaction() as connection:
             row = connection.execute("SELECT * FROM intents WHERE intent_id = ?", (intent_id,)).fetchone()
             if row is None:
                 raise ValueError("intent not found")
             current = self._intent(row)
             if current.state is PaymentState.DEVICE_APPROVED:
+                if current.approved_pairing_id != pairing_id:
+                    raise ValueError("intent approval belongs to a different pairing")
                 return current
             if current.state is not PaymentState.QUOTED:
                 raise ValueError("intent state changed")
             updated = connection.execute(
-                """UPDATE intents SET state = ?, approved_at = ?
+                """UPDATE intents SET state = ?, approved_at = ?, approval_pairing_id = ?
                 WHERE intent_id = ? AND state = ?""",
-                (PaymentState.DEVICE_APPROVED.value, approved_at, intent_id, PaymentState.QUOTED.value),
+                (
+                    PaymentState.DEVICE_APPROVED.value,
+                    approved_at,
+                    pairing_id,
+                    intent_id,
+                    PaymentState.QUOTED.value,
+                ),
             )
             if updated.rowcount != 1:
                 raise ValueError("intent state changed")
@@ -423,6 +457,7 @@ class SidecarStore:
                 state=PaymentState.DEVICE_APPROVED,
                 created_at=current.created_at,
                 approved_at=approved_at,
+                approved_pairing_id=pairing_id,
             )
 
     def get_intent(self, intent_id: str) -> IntentRecord | None:

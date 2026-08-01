@@ -505,6 +505,48 @@ class TrezorSidecarServiceTests(TestCase):
                 self.assertEqual(raised.exception.code, code)
         self.assertEqual(store.get_payment(first.payment_id), first)
 
+    def test_payment_replay_clock_cannot_precede_durable_creation(self):
+        # Break caught: an idempotent replay accepts a clock older than the recorded payment.
+        service, store, trezor, _ = self.make_approved_payment_service()
+        request = self.valid_payment_request(
+            invoice_id="clocked-replay",
+            expires_at=1_700_001_000,
+        )
+        created = service.create_payment(
+            request,
+            "clocked-replay-key",
+            1_700_000_200,
+        )
+
+        with self.assertRaises(SafeError) as backdated:
+            service.create_payment(
+                request,
+                "clocked-replay-key",
+                1_700_000_150,
+            )
+        boundary = service.create_payment(
+            request,
+            "clocked-replay-key",
+            1_700_000_200,
+        )
+
+        self.assertEqual(backdated.exception.code, "invalid_clock")
+        self.assertEqual(boundary, created)
+        self.assertEqual(store.get_payment(created.payment_id), created)
+        connection = store._connect()
+        try:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM payments WHERE invoice_id = ?",
+                    (request.invoice_id,),
+                ).fetchone()[0],
+                1,
+            )
+        finally:
+            connection.close()
+        self.assertEqual(trezor.sign_transaction_calls, [])
+        self.assertEqual(trezor.push_transaction_calls, [])
+
     def test_payment_creation_rechecks_enabled_fixed_config_and_decimal_cap(self):
         service, store, trezor, rpc = self.make_approved_payment_service()
         for enabled, path, code in (
@@ -551,6 +593,28 @@ class TrezorSidecarServiceTests(TestCase):
                 1_700_000_000,
             )
         self.assertEqual(raised.exception.code, "payment_limit_exceeded")
+
+    def test_new_payment_configuration_errors_precede_missing_pairing(self):
+        # Break caught: deterministic configuration errors are masked by an absent pairing.
+        for enabled, path, code in (
+            (False, FIXED_PATH, "disabled"),
+            (True, "m/44'/60'/0'/0/9", "invalid_configuration"),
+        ):
+            service, _, trezor = self.make_service(
+                enabled=enabled,
+                derivation_path=path,
+                rpc=FakeRpc(),
+            )
+            with self.subTest(code=code), self.assertRaises(SafeError) as raised:
+                service.create_payment(
+                    self.valid_payment_request(invoice_id=f"no-pairing-{code}"),
+                    f"no-pairing-key-{code}",
+                    1_700_000_000,
+                )
+            self.assertEqual(raised.exception.code, code)
+            self.assertEqual(trezor.sign_calls, [])
+            self.assertEqual(trezor.sign_transaction_calls, [])
+            self.assertEqual(trezor.push_transaction_calls, [])
 
     def test_concurrent_identical_payment_creation_returns_one_recorded_view(self):
         service, store, _, _ = self.make_approved_payment_service()
@@ -975,18 +1039,19 @@ class TrezorSidecarServiceTests(TestCase):
         self.assertEqual(len(trezor.sign_transaction_calls), 1)
         self.assertEqual(len(trezor.push_transaction_calls), 1)
 
-    def test_explicit_repair_invalidates_same_second_approvals_and_old_payments(self):
-        ticks = iter((1_699_999_999, 1_700_000_000))
+    def test_explicit_repair_invalidates_approvals_even_with_an_older_repair_clock(self):
+        # Break caught: timestamp-only binding accepts device A after a clock-rollback repair to B.
+        ticks = iter((100, 200))
         service, store, trezor = self.make_service(clock=lambda: next(ticks), rpc=FakeRpc())
         first_pairing = service.pair()
         old_run_intent = self.valid_intent()
         old_create_intent = self.valid_intent(intent_id="0x" + "33" * 32)
-        service.approve_intent(old_run_intent, now=1_700_000_000)
-        service.approve_intent(old_create_intent, now=1_700_000_000)
+        service.approve_intent(old_run_intent, now=300)
+        service.approve_intent(old_create_intent, now=300)
         old_payment = service.create_payment(
             self.valid_payment_request(),
             "old-payment-key",
-            1_700_000_000,
+            300,
         )
         old_approval_calls = len(trezor.sign_calls)
 
@@ -995,10 +1060,10 @@ class TrezorSidecarServiceTests(TestCase):
         trezor.address = replacement.address
         repaired = service.pair(allow_repair=True)
         self.assertNotEqual(repaired.pairing_id, first_pairing.pairing_id)
-        self.assertEqual(repaired.created_at, 1_700_000_000)
+        self.assertEqual(repaired.created_at, 200)
 
         with self.assertRaises(SafeError) as replay_error:
-            service.approve_intent(old_run_intent, now=1_700_000_001)
+            service.approve_intent(old_run_intent, now=301)
         self.assertEqual(replay_error.exception.code, "reapproval_required")
         self.assertEqual(replay_error.exception.status, 409)
         self.assertEqual(len(trezor.sign_calls), old_approval_calls)
@@ -1007,7 +1072,7 @@ class TrezorSidecarServiceTests(TestCase):
             service.create_payment(
                 self.valid_payment_request(),
                 "old-payment-key",
-                1_700_000_001,
+                301,
             )
         self.assertEqual(create_replay_error.exception.code, "reapproval_required")
 
@@ -1018,28 +1083,28 @@ class TrezorSidecarServiceTests(TestCase):
                     invoice_id="old-after-repair",
                 ),
                 "old-after-repair-key",
-                1_700_000_001,
+                301,
             )
         self.assertEqual(create_error.exception.code, "reapproval_required")
 
         with self.assertRaises(SafeError) as run_error:
-            service.run_payment(old_payment.payment_id, now=lambda: 1_700_000_001)
+            service.run_payment(old_payment.payment_id, now=lambda: 301)
         self.assertEqual(run_error.exception.code, "reapproval_required")
         self.assertEqual(store.get_payment(old_payment.payment_id).state, PaymentState.FAILED)
         self.assertEqual(trezor.sign_transaction_calls, [])
         self.assertEqual(trezor.push_transaction_calls, [])
 
         new_intent = self.valid_intent(intent_id="0x" + "44" * 32)
-        service.approve_intent(new_intent, now=1_700_000_001)
+        service.approve_intent(new_intent, now=201)
         new_payment = service.create_payment(
             self.valid_payment_request(
                 intent_id=new_intent.intent_id,
                 invoice_id="new-after-repair",
             ),
             "new-after-repair-key",
-            1_700_000_001,
+            201,
         )
-        completed = service.run_payment(new_payment.payment_id, now=lambda: 1_700_000_002)
+        completed = service.run_payment(new_payment.payment_id, now=lambda: 202)
         self.assertEqual(completed.state, PaymentState.TX_BROADCAST)
         self.assertEqual(len(trezor.sign_transaction_calls), 1)
         self.assertEqual(len(trezor.push_transaction_calls), 1)
@@ -1282,6 +1347,58 @@ class TrezorSidecarServiceTests(TestCase):
             self.assertEqual(len(trezor.push_transaction_calls), before_pushes + 1)
             raw = trezor.push_transaction_calls[-1]
             self.assertNotIn(raw, str(raised.exception))
+
+    def test_run_payment_store_read_failures_are_fixed_safe_before_any_device_work(self):
+        # Break caught: SQLite details escape from either pre-device durable payment read.
+        service, store, trezor, rpc = self.make_approved_payment_service()
+        payments = (
+            service.create_payment(
+                self.valid_payment_request(invoice_id="read-failure-first"),
+                "read-failure-first-key",
+                1_700_000_000,
+            ),
+            self.create_additional_payment(
+                service,
+                ordinal=1,
+                invoice_id="read-failure-second",
+                idempotency_key="read-failure-second-key",
+            ),
+        )
+        real_get = store.get_payment
+
+        for failure_read, payment in enumerate(payments, start=1):
+            reads = 0
+
+            def fail_selected_read(payment_id):
+                nonlocal reads
+                reads += 1
+                if reads == failure_read:
+                    raise sqlite3.OperationalError(f"canary read {failure_read}")
+                return real_get(payment_id)
+
+            before_rpc = len(rpc.calls)
+            before_signs = len(trezor.sign_transaction_calls)
+            before_pushes = len(trezor.push_transaction_calls)
+            with (
+                self.subTest(failure_read=failure_read),
+                patch.object(store, "get_payment", side_effect=fail_selected_read),
+                self.assertRaises(BaseException) as raised,
+            ):
+                service.run_payment(payment.payment_id, now=lambda: 1_700_000_001)
+
+            self.assertIsInstance(raised.exception, SafeError)
+            self.assertEqual(raised.exception.code, "reconciliation_required")
+            self.assertEqual(
+                raised.exception.message,
+                "Transaction broadcast outcome requires reconciliation.",
+            )
+            self.assertEqual(raised.exception.status, 409)
+            self.assertNotIn("canary", str(raised.exception))
+            self.assertIsNone(raised.exception.__cause__)
+            self.assertEqual(len(rpc.calls), before_rpc)
+            self.assertEqual(len(trezor.sign_transaction_calls), before_signs)
+            self.assertEqual(len(trezor.push_transaction_calls), before_pushes)
+            self.assertEqual(real_get(payment.payment_id), payment)
 
     def test_orphaned_signed_reconciliation_write_failure_is_fixed_and_never_pushes(self):
         service, store, trezor, _ = self.make_approved_payment_service()

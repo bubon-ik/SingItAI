@@ -186,6 +186,7 @@ class PurchaseIntentTests(TestCase):
 
         self.assertEqual(record.state, PaymentState.QUOTED)
         self.assertIsNone(record.approved_at)
+        self.assertIsNone(record.approved_pairing_id)
         self.assertEqual(view.state, PaymentState.INVOICE_CREATED)
         self.assertIsNone(view.tx_hash)
         self.assertEqual(
@@ -202,3 +203,28 @@ class PurchaseIntentTests(TestCase):
                 "RECONCILIATION_REQUIRED",
             ],
         )
+
+    def test_intent_approval_pairing_identity_is_bounded(self):
+        # Break caught: an approval cannot be durably tied to one exact pairing identity.
+        intent = self.make_intent()
+        approved = IntentRecord(
+            intent=intent,
+            state=PaymentState.DEVICE_APPROVED,
+            created_at=1_700_000_000,
+            approved_at=1_700_000_001,
+            approved_pairing_id="pairing-a",
+        )
+
+        self.assertEqual(approved.approved_pairing_id, "pairing-a")
+        for invalid in ("", "x" * 257):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError,
+                "approved_pairing_id",
+            ):
+                IntentRecord(
+                    intent=intent,
+                    state=PaymentState.DEVICE_APPROVED,
+                    created_at=1_700_000_000,
+                    approved_at=1_700_000_001,
+                    approved_pairing_id=invalid,
+                )
