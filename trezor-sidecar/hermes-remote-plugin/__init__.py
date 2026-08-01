@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -21,6 +22,14 @@ _TELEGRAM_ONLY = "Trezor commands require an authenticated Telegram message."
 _UNAVAILABLE = "Trezor payment mode is temporarily unavailable."
 _USAGE_PREPARE = "Usage: /trezor_prepare <productId> <packageId> <country>"
 _USAGE_CONFIRM = "Usage: /trezor_confirm <8-character confirmation code>"
+_ACKNOWLEDGED = "Working on it. Confirm on your Trezor when it lights up."
+_SKIP_RESULT = {"action": "skip", "reason": "sign402-trezor-remote-handled"}
+_OPERATIONS = frozenset({"status", "test", "prepare", "confirm", "cancel"})
+# Operations that wait on a physical Trezor confirmation, so the caller is told
+# to look at the device before the worker thread blocks on it.
+_DEVICE_OPERATIONS = frozenset({"status", "test", "confirm"})
+
+_delivery_loop: asyncio.AbstractEventLoop | None = None
 
 class RemoteAgentClientError(ValueError):
     pass
@@ -106,70 +115,171 @@ def _get_controller() -> Any:
     return _controller
 
 
-def handle_pre_gateway_dispatch(*, event: Any, **kwargs: Any) -> None:
-    capture_identity(event=event, **kwargs)
-    return None
-
-
 def _identity_user_id() -> str | None:
     identity = consume_identity()
     return None if identity is None else identity.user_id
 
 
+def _normalize_arguments(operation: str, arguments: list[str]) -> list[str] | str:
+    """Return normalized arguments, or a usage string to send back."""
+    if operation in {"status", "test", "cancel"}:
+        return [] if not arguments else f"Usage: /trezor_{operation}"
+    if operation == "prepare":
+        # Bitrefill package ids legitimately contain spaces, so the middle
+        # tokens are rejoined rather than requiring the operator to quote
+        # them. The first argument is always the product and the last is
+        # always the country.
+        if len(arguments) < 3:
+            return _USAGE_PREPARE
+        return [arguments[0], " ".join(arguments[1:-1]), arguments[-1]]
+    if operation == "confirm":
+        return arguments if len(arguments) == 1 else _USAGE_CONFIRM
+    return _UNAVAILABLE
+
+
+def _execute(operation: str, user_id: str, arguments: list[str]) -> str:
+    """Run one remote-agent operation. Blocking; never raises."""
+    try:
+        controller = _get_controller()
+        if operation == "status":
+            return controller.pair(user_id)
+        if operation == "test":
+            return controller.intent_test(user_id)
+        if operation == "prepare":
+            return controller.prepare(
+                user_id, arguments[0], arguments[1], arguments[2].upper()
+            )
+        if operation == "confirm":
+            return controller.confirm(user_id, arguments[0].upper())
+        if operation == "cancel":
+            return controller.cancel(user_id)
+        return _UNAVAILABLE
+    except RemoteAgentClientError as error:
+        return str(error)
+    except Exception as error:
+        logger.warning(
+            "Remote Trezor plugin failed safely operation=%s error=%s",
+            operation,
+            type(error).__name__,
+        )
+        return _UNAVAILABLE
+
+
+def _default_spawn_worker(worker: Callable[[], None]) -> None:
+    threading.Thread(
+        target=worker, name="sign402-trezor-remote", daemon=True
+    ).start()
+
+
+# Replaced in tests so a request can be driven to completion synchronously.
+_spawn_worker: Callable[[Callable[[], None]], None] = _default_spawn_worker
+
+
+def _platform_name(source: Any) -> str:
+    platform = getattr(source, "platform", None)
+    return str(getattr(platform, "value", platform) or "").strip().lower()
+
+
+def _remember_loop() -> None:
+    """Keep the gateway loop so worker threads can deliver their replies."""
+    global _delivery_loop
+    try:
+        _delivery_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+
+
+def _send(gateway: Any, source: Any, text: str) -> None:
+    if gateway is None:
+        return
+    adapters = getattr(gateway, "adapters", {}) or {}
+    adapter = adapters.get(_platform_name(source)) or adapters.get(
+        getattr(source, "platform", None)
+    )
+    send = getattr(adapter, "send", None)
+    if not callable(send):
+        return
+    chat_id = str(
+        getattr(source, "chat_id", "") or getattr(source, "user_id", "") or ""
+    )
+    if not chat_id:
+        return
+    coroutine = send(chat_id, text)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # Worker thread: hand the send back to the gateway loop when there is
+        # one, so the adapter is only ever touched from its own thread.
+        loop = _delivery_loop
+        if loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(coroutine, loop)
+        else:
+            asyncio.run(coroutine)
+    else:
+        loop.create_task(coroutine)
+
+
+def handle_pre_gateway_dispatch(
+    *, event: Any = None, gateway: Any = None, **kwargs: Any
+) -> dict[str, str] | None:
+    """Own the /trezor_* commands before Hermes' dispatcher is reached.
+
+    Another Sign402 plugin ends this hook with a catch-all skip, so a
+    registered command handler would never run. The work therefore happens
+    here, off the event loop: this hook must not block while the operator
+    reads the Trezor screen, or the whole gateway stalls.
+    """
+    capture_identity(event=event, **kwargs)
+    _remember_loop()
+
+    text = str(getattr(event, "text", "") or "").strip()
+    head, _, raw_args = text.partition(" ")
+    if not head.startswith(("/trezor_", "/trezor-")):
+        return None
+    operation = head[len("/trezor_"):].split("@", 1)[0].strip().lower()
+    operation = operation.replace("-", "_")
+    if operation not in _OPERATIONS:
+        return None
+
+    source = getattr(event, "source", None)
+    user_id = _identity_user_id()
+    if user_id is None:
+        _send(gateway, source, _TELEGRAM_ONLY)
+        return dict(_SKIP_RESULT)
+
+    normalized = _normalize_arguments(operation, raw_args.strip().split())
+    if isinstance(normalized, str):
+        _send(gateway, source, normalized)
+        return dict(_SKIP_RESULT)
+
+    if operation in _DEVICE_OPERATIONS:
+        _send(gateway, source, _ACKNOWLEDGED)
+
+    def worker() -> None:
+        _send(gateway, source, _execute(operation, user_id, normalized))
+
+    _spawn_worker(worker)
+    return dict(_SKIP_RESULT)
+
+
 def _handler(operation: str):
+    """Command handler kept for setups without the Sign402 catch-all hook.
+
+    When that plugin is active this never runs, because its skip result ends
+    dispatch before commands; `handle_pre_gateway_dispatch` handles the same
+    operations there. Both paths share one implementation.
+    """
+
     async def handler(raw_args: str) -> str:
         user_id = _identity_user_id()
         if user_id is None:
             return _TELEGRAM_ONLY
-        arguments = str(raw_args or "").strip().split()
-        if operation in {"status", "test", "cancel"} and arguments:
-            return f"Usage: /trezor_{operation}"
-        if operation == "prepare":
-            # Bitrefill package ids legitimately contain spaces, so the middle
-            # tokens are rejoined rather than requiring the operator to quote
-            # them. The first token is always the product and the last is
-            # always the country.
-            if len(arguments) < 3:
-                return _USAGE_PREPARE
-            arguments = [
-                arguments[0],
-                " ".join(arguments[1:-1]),
-                arguments[-1],
-            ]
-        if operation == "confirm" and len(arguments) != 1:
-            return _USAGE_CONFIRM
-        try:
-            controller = _get_controller()
-            if operation == "status":
-                return await asyncio.to_thread(controller.pair, user_id)
-            if operation == "test":
-                return await asyncio.to_thread(controller.intent_test, user_id)
-            if operation == "prepare":
-                return await asyncio.to_thread(
-                    controller.prepare,
-                    user_id,
-                    arguments[0],
-                    arguments[1],
-                    arguments[2].upper(),
-                )
-            if operation == "confirm":
-                return await asyncio.to_thread(
-                    controller.confirm,
-                    user_id,
-                    arguments[0].upper(),
-                )
-            if operation == "cancel":
-                return await asyncio.to_thread(controller.cancel, user_id)
-            return _UNAVAILABLE
-        except RemoteAgentClientError as error:
-            return str(error)
-        except Exception as error:
-            logger.warning(
-                "Remote Trezor plugin failed safely operation=%s error=%s",
-                operation,
-                type(error).__name__,
-            )
-            return _UNAVAILABLE
+        normalized = _normalize_arguments(
+            operation, str(raw_args or "").strip().split()
+        )
+        if isinstance(normalized, str):
+            return normalized
+        return await asyncio.to_thread(_execute, operation, user_id, normalized)
 
     return handler
 
