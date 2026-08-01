@@ -2,6 +2,7 @@ import http.client
 import json
 import socket
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from decimal import Decimal
@@ -109,7 +110,13 @@ class SidecarHttpTests(TestCase):
             port=0,
         )
         self.service = FakeService()
-        self.server = build_server(self.settings, self.service, clock=lambda: NOW)
+        self.server = build_server(
+            self.settings,
+            self.service,
+            clock=lambda: NOW,
+            _allow_test_port=True,
+            _test_only_connection_timeout=0.15,
+        )
         self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.server_thread.start()
 
@@ -186,7 +193,11 @@ class SidecarHttpTests(TestCase):
         # Break caught: configuration can expose the authenticated API off-machine.
         for host in ("0.0.0.0", "localhost", "::1", "127.0.0.2"):
             with self.subTest(host=host), self.assertRaises(ValueError):
-                build_server(replace(self.settings, host=host), self.service)
+                build_server(
+                    replace(self.settings, host=host),
+                    self.service,
+                    _allow_test_port=True,
+                )
 
     def test_handler_rejects_a_nonloopback_peer_before_routing(self):
         # Break caught: a proxy or future bind change bypasses the peer boundary.
@@ -247,6 +258,23 @@ class SidecarHttpTests(TestCase):
         status, _, _ = self.request("POST", "/v1/pair", headers=headers, body=b"{}")
         self.assertEqual(status, 400)
 
+    def test_pathological_timestamp_digits_are_caller_error_not_clock_error(self):
+        # Break caught: integer conversion failure is misreported as server clock failure.
+        headers = self.valid_headers("huge-timestamp")
+        headers["X-Sign402-Timestamp"] = "9" * 5_000
+        status, _, payload = self.request(
+            "POST", "/v1/pair", headers=headers, body=b"{}"
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(
+            payload,
+            {
+                "ok": False,
+                "code": "invalid_request",
+                "message": "Request authentication metadata is invalid.",
+            },
+        )
+
     def test_unknown_route_never_becomes_generic_mcp_proxy(self):
         # Break caught: caller-controlled tool names become a generic signing proxy.
         status, _, payload = self.request(
@@ -279,6 +307,16 @@ class SidecarHttpTests(TestCase):
                 "code": "method_not_allowed",
                 "message": "Method not allowed.",
             },
+        )
+
+    def test_arbitrary_http_method_on_unknown_path_returns_fixed_json_404(self):
+        # Break caught: an unknown verb makes an unknown route appear registered.
+        request = b"BREW /not-a-route HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+        status, payload = self.raw_request(request)
+        self.assertEqual(status, 404)
+        self.assertEqual(
+            payload,
+            {"ok": False, "code": "not_found", "message": "Route not found."},
         )
 
     def test_request_framing_and_json_are_strict_and_bounded(self):
@@ -335,6 +373,48 @@ class SidecarHttpTests(TestCase):
             self.assertEqual(status, 400)
             self.assertEqual(set(payload), {"ok", "code", "message"})
         self.assertEqual(self.service.pair_calls, [])
+
+    def test_stalled_request_headers_release_connection_within_deadline(self):
+        # Break caught: a local slowloris retains a handler thread indefinitely.
+        started = time.monotonic()
+        with socket.create_connection(self.address, timeout=1) as client:
+            client.settimeout(0.75)
+            client.sendall(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Stalled:")
+            try:
+                while client.recv(8192):
+                    pass
+            except TimeoutError:
+                self.fail("stalled header connection exceeded its deadline")
+        self.assertLess(time.monotonic() - started, 0.75)
+
+    def test_stalled_exact_length_body_returns_fixed_safe_timeout(self):
+        # Break caught: exact-length streaming blocks forever when the caller stops writing.
+        request = (
+            b"POST /v1/pair HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            b"Authorization: Bearer local-secret\r\nContent-Type: application/json\r\n"
+            b"X-Sign402-Timestamp: 1700000000\r\nIdempotency-Key: timeout-key\r\n"
+            b"Content-Length: 10\r\n\r\n{}"
+        )
+        started = time.monotonic()
+        with socket.create_connection(self.address, timeout=1) as client:
+            client.settimeout(0.75)
+            client.sendall(request)
+            response = b""
+            try:
+                while True:
+                    chunk = client.recv(8192)
+                    if not chunk:
+                        break
+                    response += chunk
+            except TimeoutError:
+                self.fail("stalled body connection exceeded its deadline")
+        self.assertLess(time.monotonic() - started, 0.75)
+        head, body = response.split(b"\r\n\r\n", 1)
+        self.assertEqual(int(head.split(b" ", 2)[1]), 408)
+        self.assertEqual(
+            json.loads(body),
+            {"ok": False, "code": "request_timeout", "message": "Request timed out."},
+        )
 
     def test_pair_dto_is_closed_and_bool_typed(self):
         # Break caught: arbitrary transaction fields or integer truthiness reaches pairing.
@@ -473,6 +553,8 @@ class SidecarHttpTests(TestCase):
         )
         self.assertEqual(status, 202)
         self.assertTrue(self.service.run_exited.wait(timeout=1))
+        _, _, health = self.request("GET", "/health")
+        self.assertEqual(health, {"ok": True, "status": "device_unavailable"})
         status, _, _ = self.request(
             "POST",
             "/v1/payments",
@@ -485,7 +567,7 @@ class SidecarHttpTests(TestCase):
     def test_default_worker_clock_is_normalized_for_real_service_contract(self):
         # Break caught: time.time returns float, which the real service rejects before signing.
         service = FakeService()
-        server = build_server(self.settings, service)
+        server = build_server(self.settings, service, _allow_test_port=True)
         request = PaymentRequest(
             intent_id=INTENT_ID,
             invoice_id="invoice-123",
@@ -498,6 +580,7 @@ class SidecarHttpTests(TestCase):
             self.assertTrue(service.run_exited.wait(timeout=1))
             self.assertEqual(len(service.run_clock_values), 1)
             self.assertIs(type(service.run_clock_values[0]), int)
+            self.assertEqual(server.health_status, "ready")
         finally:
             server.server_close()
 
@@ -534,7 +617,12 @@ class SidecarHttpTests(TestCase):
                 return self.payment
 
         service = DistinctPaymentService()
-        server = build_server(self.settings, service, clock=lambda: NOW)
+        server = build_server(
+            self.settings,
+            service,
+            clock=lambda: NOW,
+            _allow_test_port=True,
+        )
         first = PaymentRequest(INTENT_ID, "invoice-1", PAY_TO, 1, NOW + 600)
         second = PaymentRequest(INTENT_ID, "invoice-2", PAY_TO, 1, NOW + 600)
         try:
@@ -611,6 +699,33 @@ class SidecarHttpTests(TestCase):
         self.assertTrue(self.service.run_entered.wait(timeout=1))
         self.assertEqual(self.service.run_calls, ["payment-123"])
 
+    def test_worker_start_failure_leaves_invoice_created_retryable(self):
+        # Break caught: Thread.start failure leaves a stale launch reservation.
+        request = PaymentRequest(
+            intent_id=INTENT_ID,
+            invoice_id="invoice-123",
+            pay_to=PAY_TO,
+            amount_atomic=5_000_000,
+            expires_at=NOW + 600,
+        )
+
+        class StartFailureThread:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                raise RuntimeError("thread start failed")
+
+        with patch("trezor_sidecar.server.threading.Thread", StartFailureThread):
+            with self.assertRaises(SafeError) as raised:
+                self.server.create_and_schedule(request, "retry-start", NOW)
+        self.assertEqual(raised.exception.code, "worker_unavailable")
+
+        payment, _ = self.server.create_and_schedule(request, "retry-start", NOW)
+        self.assertEqual(payment.state, PaymentState.INVOICE_CREATED)
+        self.assertTrue(self.service.run_entered.wait(timeout=1))
+        self.assertEqual(self.service.run_calls, ["payment-123"])
+
     def test_get_payment_requires_bearer_and_payment_id_is_bounded_safe_segment(self):
         # Break caught: unauthenticated status disclosure or path-shaped IDs reach storage.
         status, _, _ = self.request("GET", "/v1/payments/payment-123")
@@ -634,7 +749,7 @@ class SidecarHttpTests(TestCase):
         # Break caught: tokens, addresses, session IDs, or exception details escape in JSON.
         status, _, payload = self.request("GET", "/health")
         self.assertEqual(status, 200)
-        self.assertEqual(payload, {"ok": True, "status": "ready"})
+        self.assertEqual(payload, {"ok": True, "status": "suite_unavailable"})
         serialized = json.dumps(payload)
         for secret in ("local-secret", "mcp-secret", "0x2222", "session"):
             self.assertNotIn(secret, serialized)
@@ -654,6 +769,8 @@ class SidecarHttpTests(TestCase):
                 "message": "Trezor Suite is unavailable.",
             },
         )
+        _, _, health = self.request("GET", "/health")
+        self.assertEqual(health, {"ok": True, "status": "suite_unavailable"})
 
         self.service.failure = RuntimeError("provider response contains local-secret and address")
         status, _, payload = self.request(
@@ -664,6 +781,89 @@ class SidecarHttpTests(TestCase):
             payload,
             {"ok": False, "code": "internal_error", "message": "Request failed safely."},
         )
+        _, _, health = self.request("GET", "/health")
+        self.assertEqual(health, {"ok": True, "status": "device_unavailable"})
+
+    def test_health_changes_only_from_coarse_observed_device_outcomes(self):
+        # Break caught: enabled configuration is treated as runtime readiness.
+        allowed = {"ready", "disabled", "suite_unavailable", "device_unavailable"}
+
+        status, _, _ = self.request(
+            "POST",
+            "/v1/pair",
+            headers=self.valid_headers("health-ready"),
+            body=b"{}",
+        )
+        self.assertEqual(status, 200)
+        _, _, health = self.request("GET", "/health")
+        self.assertEqual(health, {"ok": True, "status": "ready"})
+
+        self.service.failure = SafeError(
+            "device_lock_unavailable",
+            "canary-device-address-session-token",
+            599,
+        )
+        status, headers, payload = self.request(
+            "POST",
+            "/v1/pair",
+            headers=self.valid_headers("health-device"),
+            body=b"{}",
+        )
+        self.assertEqual(status, 503)
+        self.assertEqual(set(payload), {"ok", "code", "message"})
+        _, _, health = self.request("GET", "/health")
+        self.assertEqual(health, {"ok": True, "status": "device_unavailable"})
+
+        self.service.failure = SafeError(
+            "trezor_unavailable",
+            "canary-suite-provider-error-token",
+            418,
+        )
+        status, headers, payload = self.request(
+            "POST",
+            "/v1/pair",
+            headers=self.valid_headers("health-suite"),
+            body=b"{}",
+        )
+        self.assertEqual(status, 503)
+        _, _, health = self.request("GET", "/health")
+        self.assertEqual(health, {"ok": True, "status": "suite_unavailable"})
+
+        for observed in (payload["message"], json.dumps(health), json.dumps(headers)):
+            self.assertNotIn("canary", observed)
+        self.assertIn(health["status"], allowed)
+
+    def test_unknown_and_forged_safe_errors_never_control_http_output(self):
+        # Break caught: an upstream-looking SafeError reflects provider content or status.
+        canary = "canary-provider-error-local-secret-address-session"
+        self.service.failure = SafeError("provider_error", canary, 599)
+        status, headers, payload = self.request(
+            "POST",
+            "/v1/pair",
+            headers=self.valid_headers("unknown-safe-error"),
+            body=b"{}",
+        )
+        self.assertEqual(status, 500)
+        self.assertEqual(
+            payload,
+            {"ok": False, "code": "internal_error", "message": "Request failed safely."},
+        )
+        self.assertEqual(set(payload), {"ok", "code", "message"})
+        self.assertNotIn(canary, json.dumps(headers) + json.dumps(payload))
+
+        self.service.failure = SafeError("payment_not_found", canary, 599)
+        status, headers, payload = self.request(
+            "GET",
+            "/v1/payments/payment-123",
+            headers={"Authorization": "Bearer local-secret"},
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(
+            payload,
+            {"ok": False, "code": "payment_not_found", "message": "Payment was not found."},
+        )
+        self.assertEqual(set(payload), {"ok", "code", "message"})
+        self.assertNotIn(canary, json.dumps(headers) + json.dumps(payload))
 
 
 class DisabledHealthTests(TestCase):
@@ -673,7 +873,12 @@ class DisabledHealthTests(TestCase):
             False, "", "", Decimal("0"), "", Path("unused.db"), port=0
         )
         service = FakeService()
-        server = build_server(settings, service, clock=lambda: NOW)
+        server = build_server(
+            settings,
+            service,
+            clock=lambda: NOW,
+            _allow_test_port=True,
+        )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -687,3 +892,54 @@ class DisabledHealthTests(TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+
+class PortValidationTests(TestCase):
+    def setUp(self):
+        self.service = FakeService()
+        self.settings = SidecarSettings(
+            True,
+            "mcp-token",
+            "api-token",
+            Decimal("1"),
+            "https://rpc.example.invalid",
+            Path("unused.db"),
+            port=8111,
+        )
+
+    def test_production_port_8111_is_accepted_without_test_escape_hatch(self):
+        # Break caught: the fixed production port is accidentally rejected.
+        with patch("trezor_sidecar.server._SidecarHttpServer") as server_type:
+            result = build_server(self.settings, self.service)
+        self.assertIs(result, server_type.return_value)
+
+    def test_alternate_nonzero_port_is_rejected_before_bind(self):
+        # Break caught: configuration exposes the sidecar on an unapproved port.
+        with patch("trezor_sidecar.server._SidecarHttpServer") as server_type:
+            with self.assertRaises(ValueError):
+                build_server(replace(self.settings, port=8112), self.service)
+        server_type.assert_not_called()
+
+    def test_port_zero_requires_explicit_private_test_escape_hatch(self):
+        # Break caught: production callers silently request an arbitrary ephemeral port.
+        with patch("trezor_sidecar.server._SidecarHttpServer") as server_type:
+            with self.assertRaises(ValueError):
+                build_server(replace(self.settings, port=0), self.service)
+            result = build_server(
+                replace(self.settings, port=0),
+                self.service,
+                _allow_test_port=True,
+            )
+        self.assertIs(result, server_type.return_value)
+
+    def test_production_port_cannot_override_fixed_connection_timeout(self):
+        # Break caught: a caller disables or weakens the production socket deadline.
+        with patch("trezor_sidecar.server._SidecarHttpServer") as server_type:
+            with self.assertRaises(ValueError):
+                build_server(
+                    self.settings,
+                    self.service,
+                    _allow_test_port=True,
+                    _test_only_connection_timeout=0.1,
+                )
+        server_type.assert_not_called()
