@@ -16,6 +16,9 @@ from .sidecar_client import SidecarClient
 
 
 _MAX_RESPONSE_BYTES = 65_536
+# Must not exceed the broker's own ceiling in broker_store.create_job, which
+# rejects any job whose lifetime is longer than this.
+_MAX_JOB_SECONDS = 900
 _JOB_ID = re.compile(r"[A-Za-z0-9._:-]{8,128}\Z")
 _ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}\Z")
 _PUBLIC_ERRORS = frozenset(
@@ -188,6 +191,13 @@ class RemoteSidecarClient:
         payload: dict[str, Any],
         expires_at: int,
     ) -> dict[str, Any]:
+        # Two different clocks. The invoice may stay payable for an hour, but
+        # a job is only how long the companion has to reach the device, and the
+        # broker refuses anything longer than _MAX_JOB_SECONDS. Carrying the
+        # invoice expiry into the envelope made every payment job rejected
+        # outright, while intents — which expire in ten minutes — went through.
+        # The payload keeps the real invoice expiry for the sidecar to check.
+        deadline = min(int(expires_at), self._now() + _MAX_JOB_SECONDS)
         created = self._client.request(
             "POST",
             "/v1/internal/jobs",
@@ -196,7 +206,7 @@ class RemoteSidecarClient:
                 "kind": kind,
                 "idempotencyKey": idempotency_key,
                 "payload": payload,
-                "expiresAt": int(expires_at),
+                "expiresAt": deadline,
             },
             expected=(202,),
         )
@@ -204,7 +214,7 @@ class RemoteSidecarClient:
         job_id = job.get("jobId") if isinstance(job, dict) else None
         if not isinstance(job_id, str) or _JOB_ID.fullmatch(job_id) is None:
             raise SafeError("broker_failed", "Trezor companion job is invalid.", 502)
-        while self._now() < int(expires_at):
+        while self._now() < deadline:
             current = self._client.request(
                 "GET", "/v1/internal/jobs/" + quote(job_id), expected=(200,)
             )

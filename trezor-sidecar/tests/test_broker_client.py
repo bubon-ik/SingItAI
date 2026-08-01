@@ -68,6 +68,67 @@ class RemoteSidecarClientTests(TestCase):
         self.assertEqual(payload["payload"]["maxPaymentUsdcAtomic"], 1_000_000)
         self.assertEqual(payload["payload"]["paymentNetwork"], "Base Mainnet")
 
+    def test_long_lived_invoice_still_produces_an_acceptable_job(self):
+        # Break caught: the invoice expiry was used as the job expiry, and the
+        # broker rejects any job lasting over 900s, so every payment failed
+        # with "request failed safely" and no payment job was ever created.
+        payment = {
+            "ok": True,
+            "payment": {
+                "paymentId": "payment-1",
+                "intentId": LOCAL_INTENT_TEST_ID,
+                "invoiceId": "invoice-1",
+                "state": "TX_BROADCAST",
+                "createdAt": NOW,
+                "updatedAt": NOW + 1,
+                "txHash": "0x" + "33" * 32,
+            },
+        }
+        client = self.client(payment)
+        invoice_expiry = NOW + 3600
+
+        client.pay_invoice(
+            LOCAL_INTENT_TEST_ID,
+            "invoice-1",
+            "0x1111111111111111111111111111111111111111",
+            "100000",
+            invoice_expiry,
+            "bitrefill-pay:invoice-1",
+        )
+
+        submitted = client._client.calls[0][2]
+        self.assertLessEqual(submitted["expiresAt"] - NOW, 900)
+        # The sidecar still checks the payment against the real invoice window.
+        self.assertEqual(submitted["payload"]["expiresAt"], invoice_expiry)
+
+    def test_short_invoice_window_is_never_extended(self):
+        # Break caught: clamping turns into padding and a job outlives the
+        # invoice it is paying.
+        payment = {
+            "ok": True,
+            "payment": {
+                "paymentId": "payment-1",
+                "intentId": LOCAL_INTENT_TEST_ID,
+                "invoiceId": "invoice-1",
+                "state": "TX_BROADCAST",
+                "createdAt": NOW,
+                "updatedAt": NOW + 1,
+                "txHash": "0x" + "33" * 32,
+            },
+        }
+        client = self.client(payment)
+
+        client.pay_invoice(
+            LOCAL_INTENT_TEST_ID,
+            "invoice-1",
+            "0x1111111111111111111111111111111111111111",
+            "100000",
+            NOW + 120,
+            "bitrefill-pay:invoice-1",
+        )
+
+        self.assertEqual(client._client.calls[0][2]["expiresAt"], NOW + 120)
+
     def test_payment_job_returns_only_validated_sidecar_receipt(self):
         payment = {
             "ok": True,
