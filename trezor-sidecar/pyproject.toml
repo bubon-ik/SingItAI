@@ -13,3 +13,8 @@ dependencies = [
 [project.scripts]
 sign402-trezor-sidecar = "trezor_sidecar.server:main"
 sign402-trezor-poc = "trezor_sidecar.poc_runner:main"
+sign402-trezor-broker = "trezor_sidecar.broker_server:main"
+sign402-trezor-broker-admin = "trezor_sidecar.broker_admin:main"
+sign402-trezor-companion = "trezor_sidecar.companion:main"
+sign402-trezor-remote-agent = "trezor_sidecar.remote_agent_server:main"
+sign402-trezor-remote-cli = "trezor_sidecar.remote_agent_cli:main"

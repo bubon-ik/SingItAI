@@ -1664,7 +1664,8 @@ class CliTests(TestCase):
             status = main(["intent-test"], env=environment)
         self.assertEqual(status, 0)
         self.assertEqual(len(sidecar.approve_calls), 1)
-        self.assertEqual(sidecar.approve_calls[0].intent_id, LOCAL_INTENT_TEST_ID)
+        self.assertEqual(sidecar.approve_calls[0].product_slug, "local-intent-test")
+        self.assertNotEqual(sidecar.approve_calls[0].intent_id, LOCAL_INTENT_TEST_ID)
         self.assertNotIn("MCP", output.getvalue())
         self.assertNotIn("x402", output.getvalue().lower())
 

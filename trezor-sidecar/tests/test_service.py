@@ -25,7 +25,6 @@ from trezor_sidecar.config import SidecarSettings
 from trezor_sidecar.errors import SafeError
 from trezor_sidecar.intent import build_typed_data
 from trezor_sidecar.models import (
-    LOCAL_INTENT_TEST_ID,
     Pairing,
     PaymentRequest,
     PaymentState,
@@ -434,14 +433,18 @@ class TrezorSidecarServiceTests(TestCase):
     def test_local_intent_test_receipt_can_never_create_a_spendable_payment(self):
         service, store, trezor = self.make_service(rpc=FakeRpc())
         service.pair()
+        test_intent_id = "0x" + "77" * 32
         service.approve_intent(
-            self.valid_intent(intent_id=LOCAL_INTENT_TEST_ID),
+            self.valid_intent(
+                intent_id=test_intent_id,
+                product_slug="local-intent-test",
+            ),
             now=1_700_000_000,
         )
 
         with self.assertRaisesRegex(SafeError, "invalid") as raised:
             service.create_payment(
-                self.valid_payment_request(intent_id=LOCAL_INTENT_TEST_ID),
+                self.valid_payment_request(intent_id=test_intent_id),
                 idempotency_key="pay-local-test",
                 now=1_700_000_000,
             )

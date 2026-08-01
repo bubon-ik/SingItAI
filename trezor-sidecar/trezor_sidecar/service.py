@@ -531,7 +531,14 @@ class TrezorSidecarService:
         now = self._validate_now(now)
         if type(request) is not PaymentRequest:
             raise _safe("invalid_request", "Payment request is invalid.")
-        if request.intent_id == LOCAL_INTENT_TEST_ID:
+        stored_intent = self.store.get_intent(request.intent_id)
+        if (
+            request.intent_id == LOCAL_INTENT_TEST_ID
+            or (
+                stored_intent is not None
+                and stored_intent.intent.product_slug == "local-intent-test"
+            )
+        ):
             raise _safe("invalid_intent", "Purchase intent is invalid.")
         if (
             not isinstance(idempotency_key, str)
@@ -1044,7 +1051,14 @@ class TrezorSidecarService:
                     raise _invalid_clock()
                 updated_at = max(updated_at, timestamp)
                 request = self._payment_request(payment.payment_id)
-                if request.intent_id == LOCAL_INTENT_TEST_ID:
+                stored_intent = self.store.get_intent(request.intent_id)
+                if (
+                    request.intent_id == LOCAL_INTENT_TEST_ID
+                    or (
+                        stored_intent is not None
+                        and stored_intent.intent.product_slug == "local-intent-test"
+                    )
+                ):
                     raise _safe("invalid_intent", "Purchase intent is invalid.")
                 if (
                     request.intent_id != payment.intent_id

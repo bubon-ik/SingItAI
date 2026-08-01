@@ -247,6 +247,102 @@ When the local test is finished, stop only the local sidecar and local Hermes
 test process, then return both flags to `0`. Do not stop or restart the working
 gateway, Hermes, iMessage, or WhatsApp services.
 
+## VPS agent with an outbound companion
+
+The remote proof keeps all existing production routes unchanged. It adds two
+separate loopback services on the VPS:
+
+- `sign402-trezor-broker` on `127.0.0.1:8122` queues tightly scoped device jobs;
+- `sign402-trezor-remote-agent` on `127.0.0.1:8123` owns the opt-in Bitrefill
+  workflow for one allowlisted Telegram user.
+
+The user's computer runs the existing sidecar plus
+`sign402-trezor-companion`. For the first test, use an SSH local forward instead
+of adding a Cloudflare route or exposing a new public port:
+
+```bash
+ssh -N -L 8122:127.0.0.1:8122 hermes@164.68.104.44
+```
+
+This makes the VPS broker available to the local companion at
+`http://127.0.0.1:8122` while leaving the broker loopback-only on both machines.
+The SSH session is temporary and does not restart or reconfigure production.
+
+Install the sidecar package in a separate VPS checkout and virtual environment.
+Do not install it into the working gateway or Hermes environment. Create a
+private VPS environment from `.env.broker.example`, mode `0600`, and keep all
+gates at `0` while validating configuration. The remote purchase service may
+reuse the existing Bitrefill credential through its own private environment;
+that credential is never copied to the companion.
+
+Start the broker and remote agent as separate processes only after setting:
+
+```text
+SIGN402_TREZOR_BROKER_ENABLED=1
+SIGN402_TREZOR_POC_ENABLED=1
+SIGN402_TREZOR_REMOTE_AGENT_ENABLED=1
+SIGN402_TREZOR_REMOTE_PURCHASES_ENABLED=0
+```
+
+With purchases still disabled, create a ten-minute enrollment code on the VPS:
+
+```bash
+.venv/bin/sign402-trezor-broker-admin create-enrollment --user-id TELEGRAM_USER_ID
+```
+
+On the user's computer, keep the local sidecar running, load its private
+sidecar bearer through the environment, and enroll through the SSH forward.
+The command prompts for the one-time code without placing it in shell history:
+
+```bash
+.venv/bin/sign402-trezor-companion enroll \
+  --broker-url http://127.0.0.1:8122
+```
+
+The returned companion bearer is written once to
+`~/.config/sign402-trezor-companion/token` with mode `0600`; it is not printed.
+Then load `.env.companion.example` from a private copy, enable only the companion
+flag, and run:
+
+```bash
+.venv/bin/sign402-trezor-companion run
+```
+
+Before enabling purchases, run the complete VPS-to-device test from the VPS:
+
+```bash
+.venv/bin/sign402-trezor-remote-cli \
+  --user-id TELEGRAM_USER_ID test
+```
+
+The Trezor must show a typed-data request. Approving it returns
+`No Bitrefill order or payment was created.` The test intent has a unique ID and
+the sidecar rejects every payment request bound to its reserved product slug.
+
+Only after that test and all regressions pass, set
+`SIGN402_TREZOR_REMOTE_PURCHASES_ENABLED=1` in the separate remote-agent
+environment. Prepare an exact receipt with `sign402-trezor-remote-cli prepare`.
+Do not run `confirm` until the product, denomination, exact maximum USDC, Base
+network, recipient, and expiration have been shown and explicitly accepted.
+
+The optional `hermes-remote-plugin/` is a thin standard-library client for the
+loopback remote-agent service. It does not import the Trezor package, does not
+receive Bitrefill or broker credentials, and does not replace the existing
+`sign402-wallet` plugin. It registers only:
+
+```text
+/trezor_status
+/trezor_test
+/trezor_prepare <productId> <packageId> <country>
+/trezor_confirm <8-character confirmation code>
+/trezor_cancel
+```
+
+Stage it with all plugin flags disabled. A working Hermes restart is not part
+of the no-purchase broker test. If the plugin is later enabled for the one test
+user, restart Hermes only with the existing readiness and rollback procedure;
+the existing `/bitrefill`, iMessage, and WhatsApp routes remain authoritative.
+
 ## Automated verification
 
 These commands are safe: the tests inject transports and never use the private

@@ -18,6 +18,7 @@ from .poc_runner import (
     PreparedAddressBitrefillClient,
     SidecarTreasuryClient,
     TrezorPocRunner,
+    build_local_test_intent,
     render_exact_summary,
 )
 from .sidecar_client import SidecarClient
@@ -179,6 +180,13 @@ class LocalAgentController:
         if not isinstance(address, str) or re.fullmatch(r"0x[0-9a-fA-F]{40}", address) is None:
             raise _safe("sidecar_invalid_response", "Trezor pairing returned an invalid response.", 502)
         return f"Trezor paired for local Base account {address}."
+
+    def intent_test(self, user_id: str) -> str:
+        self._authorize(user_id)
+        intent = build_local_test_intent(self._now(), self.settings.max_usd)
+        result = self.runner.sidecar.approve_intent(intent)
+        TrezorPocRunner._verify_approval(result, intent)
+        return "Trezor test approved. No Bitrefill order or payment was created."
 
     def prepare(self, user_id: str, product_id: str, package_id: str, country: str) -> str:
         owner = self._authorize(user_id)

@@ -24,7 +24,7 @@ from .base import BASE_USDC_ADDRESS
 from .config import RunnerSettings
 from .errors import SafeError
 from .intent import recipient_hash
-from .models import LOCAL_INTENT_TEST_ID, PaymentState, PurchaseIntent
+from .models import PaymentState, PurchaseIntent
 from .sidecar_client import SidecarClient
 from .store import SidecarStore
 
@@ -430,6 +430,7 @@ class TrezorPocRunner:
         max_usd: str | Decimal,
         summary_sink: Callable[[str], None] = print,
         store: SidecarStore | None = None,
+        state_path: Path | None = None,
         _test_store: Any | None = None,
         clock: Callable[[], int | float] = time.time,
         treasury: SidecarTreasuryClient | None = None,
@@ -444,11 +445,14 @@ class TrezorPocRunner:
         self.summary_sink = summary_sink
         if store is not None and _test_store is not None:
             raise ValueError("runner store overrides conflict")
+        expected_state_path = Path(
+            os.path.abspath(os.fspath(state_path or _PROOF_STATE_PATH))
+        )
         if store is not None and (
-            type(store) is not SidecarStore
-            or store.path != Path(os.path.abspath(os.fspath(_PROOF_STATE_PATH)))
+            type(store) is not SidecarStore or store.path != expected_state_path
         ):
-            raise ValueError("runner store must use the fixed proof state path")
+            raise ValueError("runner store must use the fixed proof state path or explicit isolated state path")
+        self._state_path = expected_state_path
         self._store_override = store if store is not None else _test_store
         self._clock = clock
         self.treasury = treasury or SidecarTreasuryClient(sidecar=sidecar, clock=clock)
@@ -466,7 +470,7 @@ class TrezorPocRunner:
 
     def _store(self) -> Any:
         if self._store_override is None:
-            self._store_override = SidecarStore(_PROOF_STATE_PATH)
+            self._store_override = SidecarStore(self._state_path)
         return self._store_override
 
     def _require_no_unresolved_payment(self) -> int:
@@ -726,7 +730,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _local_test_intent(now: int, max_usd: Decimal) -> PurchaseIntent:
+def build_local_test_intent(now: int, max_usd: Decimal) -> PurchaseIntent:
     recipient_hash = "0x" + hashlib.sha256(b"local-intent-test").hexdigest()
     core = {
         "product": "local-intent-test",
@@ -736,8 +740,11 @@ def _local_test_intent(now: int, max_usd: Decimal) -> PurchaseIntent:
         "recipient": recipient_hash,
         "expires": now + _INTENT_TTL_SECONDS,
     }
+    intent_id = "0x" + hashlib.sha256(
+        json.dumps(core, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     return PurchaseIntent(
-        intent_id=LOCAL_INTENT_TEST_ID,
+        intent_id=intent_id,
         product_slug="local-intent-test",
         package_id="test-only",
         denomination="No purchase",
@@ -764,7 +771,7 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
             return 0
         now = int(time.time())
         if arguments.command == "intent-test":
-            intent = _local_test_intent(now, settings.max_usd)
+            intent = build_local_test_intent(now, settings.max_usd)
             print("Review the fixed local intent test on your Trezor. No purchase or payment will occur.")
             result = sidecar.approve_intent(intent)
             TrezorPocRunner._verify_approval(result, intent)
