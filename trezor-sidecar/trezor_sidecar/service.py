@@ -6,6 +6,7 @@ material to the durable store.
 """
 
 import fcntl
+import logging
 import math
 import os
 import re
@@ -45,6 +46,9 @@ from .models import (
     PurchaseIntent,
 )
 from .store import SidecarStore
+
+
+logger = logging.getLogger(__name__)
 
 
 _ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}\Z")
@@ -1168,6 +1172,12 @@ class TrezorSidecarService:
                     updated_at,
                 )
             except Exception:
+                # The public error is fixed on purpose, but erasing the cause
+                # made every failure here unreadable from the outside.
+                logger.exception(
+                    "Payment pre-push step failed payment_id=%s",
+                    payment.payment_id,
+                )
                 self._raise_pre_push_failure(
                     payment.payment_id,
                     _safe("payment_failed", "Payment signing failed safely.", 500),
