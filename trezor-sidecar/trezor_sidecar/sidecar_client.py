@@ -17,7 +17,11 @@ from .models import PurchaseIntent
 _HOST = "127.0.0.1"
 _PORT = 8111
 _MAX_RESPONSE_BYTES = 65_536
-_TIMEOUT_SECONDS = 5.0
+_FAST_REQUEST_TIMEOUT_SECONDS = 5.0
+_DEVICE_REQUEST_TIMEOUT_SECONDS = 130.0
+_DEVICE_CONFIRMATION_PATHS = frozenset(
+    {"/v1/pair", "/v1/purchase-intents/approve"}
+)
 _IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9._:-]{8,128}\Z")
 _PAYMENT_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 _CODE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
@@ -224,7 +228,12 @@ class SidecarClient:
         headers: dict[str, str],
         body: bytes | None,
     ) -> Any:
-        connection = http.client.HTTPConnection(_HOST, _PORT, timeout=_TIMEOUT_SECONDS)
+        timeout = (
+            _DEVICE_REQUEST_TIMEOUT_SECONDS
+            if path in _DEVICE_CONFIRMATION_PATHS
+            else _FAST_REQUEST_TIMEOUT_SECONDS
+        )
+        connection = http.client.HTTPConnection(_HOST, _PORT, timeout=timeout)
         try:
             connection.request(method, path, body=body, headers=headers)
             response = connection.getresponse()

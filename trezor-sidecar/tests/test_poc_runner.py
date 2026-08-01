@@ -10,7 +10,7 @@ from email.message import Message
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from trezor_sidecar.base import BASE_USDC_ADDRESS
 from trezor_sidecar.errors import SafeError
@@ -423,6 +423,35 @@ def payment_payload(state, *, tx_hash=None):
 
 
 class SidecarClientTests(TestCase):
+    def test_direct_http_timeout_is_long_only_for_device_confirmation_routes(self):
+        cases = {
+            "/v1/pair": 130.0,
+            "/v1/purchase-intents/approve": 130.0,
+            "/v1/payments": 5.0,
+            "/v1/payments/payment-1": 5.0,
+        }
+        for path, expected_timeout in cases.items():
+            with self.subTest(path=path):
+                connection = MagicMock()
+                response_value = FakeHttpResponse(200, b"{}")
+                connection.getresponse.return_value = response_value
+                with patch(
+                    "trezor_sidecar.sidecar_client.http.client.HTTPConnection",
+                    return_value=connection,
+                ) as constructor:
+                    response = SidecarClient._http_request(
+                        "POST" if path != "/v1/payments/payment-1" else "GET",
+                        path,
+                        {},
+                        None,
+                    )
+
+                constructor.assert_called_once_with(
+                    "127.0.0.1", 8111, timeout=expected_timeout
+                )
+                response.close()
+                connection.close.assert_called_once_with()
+
     def test_approve_uses_fixed_loopback_auth_timestamp_idempotency_and_exact_dto(self):
         requester = QueueRequester(
             [response(200, {"ok": True, "intentId": INTENT_ID, "state": "DEVICE_APPROVED"})]
