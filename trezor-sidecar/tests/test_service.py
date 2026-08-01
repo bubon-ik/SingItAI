@@ -191,6 +191,113 @@ def approve_in_process(database, private_key, intent, counter, start, results):
         results.put(("error", type(error).__name__, str(error)))
 
 
+def run_payment_in_process(
+    database,
+    private_key,
+    payment_id,
+    role,
+    transaction_entered,
+    release_transaction,
+    results,
+):
+    account = Account.from_key(private_key)
+
+    class ProcessTrezor:
+        def __init__(self):
+            self.sign_calls = 0
+            self.push_calls = 0
+
+        def sign_base_transaction(self, path, to, data):
+            self.sign_calls += 1
+            if transaction_entered is not None:
+                transaction_entered.set()
+            if release_transaction is not None:
+                release_transaction.wait(timeout=5)
+            transaction = {
+                "type": 2,
+                "chainId": BASE_CHAIN_ID,
+                "nonce": 7,
+                "maxPriorityFeePerGas": 1_000_000,
+                "maxFeePerGas": 2_000_000,
+                "gas": 80_000,
+                "to": to,
+                "value": 0,
+                "data": data,
+                "accessList": [],
+            }
+            signed = Account.sign_transaction(transaction, account.key)
+            return {"payload": {"serializedTx": signed.raw_transaction.to_0x_hex()}}
+
+        def push_base_transaction(self, raw):
+            self.push_calls += 1
+            return {"txid": "0x" + keccak(bytes.fromhex(raw[2:])).hex()}
+
+    class ProcessRpc:
+        def __init__(self):
+            self.calls = 0
+
+        def get_balances(self, address):
+            self.calls += 1
+            return BaseBalances(
+                eth_wei=100_000_000_000_001,
+                usdc_atomic=2_000_000,
+            )
+
+    settings = SidecarSettings(
+        enabled=True,
+        mcp_token="test-mcp-token",
+        api_token="test-api-token",
+        max_usd=Decimal("2"),
+        base_rpc_url="https://base.example.invalid",
+        state_path=Path(database),
+    )
+    trezor = ProcessTrezor()
+    rpc = ProcessRpc()
+    service = TrezorSidecarService(
+        settings,
+        trezor,
+        SidecarStore(Path(database)),
+        rpc=rpc,
+    )
+    try:
+        payment = service.run_payment(payment_id, now=lambda: 1_700_000_001)
+        results.put(
+            (
+                role,
+                "ok",
+                payment.state.value,
+                rpc.calls,
+                trezor.sign_calls,
+                trezor.push_calls,
+            )
+        )
+    except SafeError as error:
+        results.put(
+            (
+                role,
+                "safe",
+                error.code,
+                error.message,
+                error.status,
+                rpc.calls,
+                trezor.sign_calls,
+                trezor.push_calls,
+            )
+        )
+    except Exception as error:
+        results.put(
+            (
+                role,
+                "error",
+                type(error).__name__,
+                str(error),
+                rpc.calls,
+                trezor.sign_calls,
+                trezor.push_calls,
+            )
+        )
+
+
 class TrezorSidecarServiceTests(TestCase):
     def setUp(self):
         self.temporary = TemporaryDirectory()
@@ -205,7 +312,7 @@ class TrezorSidecarServiceTests(TestCase):
         derivation_path=FIXED_PATH,
         trezor=None,
         rpc=None,
-        clock=lambda: 1_700_000_000,
+        clock=lambda: 1_699_999_999,
     ):
         settings = SidecarSettings(
             enabled=enabled,
@@ -709,10 +816,13 @@ class TrezorSidecarServiceTests(TestCase):
                 idempotency_key=f"shape-key-{index}",
             )
             trezor.signed_transaction_result = result
+            before_signs = len(trezor.sign_transaction_calls)
+            before_pushes = len(trezor.push_transaction_calls)
             with self.subTest(index=index), self.assertRaises(SafeError):
                 service.run_payment(payment.payment_id, now=lambda: 1_700_000_001)
             self.assertEqual(store.get_payment(payment.payment_id).state, PaymentState.FAILED)
-            self.assertEqual(trezor.push_transaction_calls, [])
+            self.assertEqual(len(trezor.sign_transaction_calls), before_signs + 1)
+            self.assertEqual(len(trezor.push_transaction_calls), before_pushes)
 
         nested_payment = self.create_additional_payment(
             service,
@@ -756,6 +866,8 @@ class TrezorSidecarServiceTests(TestCase):
                 idempotency_key=f"device-key-{index}",
             )
             trezor.sign_transaction_failure = failure
+            before_signs = len(trezor.sign_transaction_calls)
+            before_pushes = len(trezor.push_transaction_calls)
             with self.subTest(code=code), self.assertRaises(SafeError) as raised:
                 service.run_payment(payment.payment_id, now=lambda: 1_700_000_001)
             self.assertEqual(raised.exception.code, code)
@@ -764,7 +876,8 @@ class TrezorSidecarServiceTests(TestCase):
             self.assertNotIn("canary", str(raised.exception))
             self.assertIsNone(raised.exception.__cause__)
             self.assertEqual(store.get_payment(payment.payment_id).state, PaymentState.FAILED)
-            self.assertEqual(trezor.push_transaction_calls, [])
+            self.assertEqual(len(trezor.sign_transaction_calls), before_signs + 1)
+            self.assertEqual(len(trezor.push_transaction_calls), before_pushes)
 
     def test_expiry_is_rechecked_after_signing_and_before_push(self):
         service, store, trezor, _ = self.make_approved_payment_service()
@@ -810,6 +923,126 @@ class TrezorSidecarServiceTests(TestCase):
         self.assertEqual(store.get_payment(rollback.payment_id).state, PaymentState.FAILED)
         self.assertEqual(len(trezor.sign_transaction_calls), 1)
         self.assertEqual(trezor.push_transaction_calls, [])
+
+    def test_payment_clock_is_bound_to_durable_approval_time_at_create_and_run(self):
+        service, store, trezor, _ = self.make_approved_payment_service()
+        with self.assertRaises(SafeError) as create_error:
+            service.create_payment(
+                self.valid_payment_request(invoice_id="backdated-create"),
+                "backdated-create-key",
+                1_699_999_999,
+            )
+        self.assertEqual(create_error.exception.code, "invalid_clock")
+        self.assertEqual(trezor.sign_transaction_calls, [])
+        self.assertEqual(trezor.push_transaction_calls, [])
+
+        backdated_intent = self.valid_intent(intent_id="0x" + "66" * 32)
+        service.approve_intent(backdated_intent, now=1_700_000_001)
+        backdated_request = self.valid_payment_request(
+            intent_id=backdated_intent.intent_id,
+            invoice_id="backdated-run",
+        )
+        backdated = store.create_payment(
+            payment_id="backdated-run-payment",
+            intent_id=backdated_request.intent_id,
+            invoice_id=backdated_request.invoice_id,
+            idempotency_key="backdated-run-key",
+            pay_to=backdated_request.pay_to,
+            amount_atomic=backdated_request.amount_atomic,
+            expires_at=backdated_request.expires_at,
+            created_at=1_700_000_000,
+        )
+        with self.assertRaises(SafeError) as run_error:
+            service.run_payment(backdated.payment_id, now=lambda: 1_700_000_000)
+        self.assertEqual(run_error.exception.code, "invalid_clock")
+        self.assertEqual(store.get_payment(backdated.payment_id).state, PaymentState.FAILED)
+        self.assertEqual(trezor.sign_transaction_calls, [])
+        self.assertEqual(trezor.push_transaction_calls, [])
+
+        boundary_intent = self.valid_intent(intent_id="0x" + "67" * 32)
+        service.approve_intent(boundary_intent, now=1_700_000_001)
+        boundary_request = self.valid_payment_request(
+            intent_id=boundary_intent.intent_id,
+            invoice_id="approval-boundary",
+        )
+        boundary = service.create_payment(
+            boundary_request,
+            "approval-boundary-key",
+            1_700_000_001,
+        )
+        completed = service.run_payment(boundary.payment_id, now=lambda: 1_700_000_001)
+        self.assertEqual(completed.state, PaymentState.TX_BROADCAST)
+        self.assertEqual(len(trezor.sign_transaction_calls), 1)
+        self.assertEqual(len(trezor.push_transaction_calls), 1)
+
+    def test_explicit_repair_invalidates_same_second_approvals_and_old_payments(self):
+        ticks = iter((1_699_999_999, 1_700_000_000))
+        service, store, trezor = self.make_service(clock=lambda: next(ticks), rpc=FakeRpc())
+        first_pairing = service.pair()
+        old_run_intent = self.valid_intent()
+        old_create_intent = self.valid_intent(intent_id="0x" + "33" * 32)
+        service.approve_intent(old_run_intent, now=1_700_000_000)
+        service.approve_intent(old_create_intent, now=1_700_000_000)
+        old_payment = service.create_payment(
+            self.valid_payment_request(),
+            "old-payment-key",
+            1_700_000_000,
+        )
+        old_approval_calls = len(trezor.sign_calls)
+
+        replacement = Account.create()
+        trezor.account = replacement
+        trezor.address = replacement.address
+        repaired = service.pair(allow_repair=True)
+        self.assertNotEqual(repaired.pairing_id, first_pairing.pairing_id)
+        self.assertEqual(repaired.created_at, 1_700_000_000)
+
+        with self.assertRaises(SafeError) as replay_error:
+            service.approve_intent(old_run_intent, now=1_700_000_001)
+        self.assertEqual(replay_error.exception.code, "reapproval_required")
+        self.assertEqual(replay_error.exception.status, 409)
+        self.assertEqual(len(trezor.sign_calls), old_approval_calls)
+
+        with self.assertRaises(SafeError) as create_replay_error:
+            service.create_payment(
+                self.valid_payment_request(),
+                "old-payment-key",
+                1_700_000_001,
+            )
+        self.assertEqual(create_replay_error.exception.code, "reapproval_required")
+
+        with self.assertRaises(SafeError) as create_error:
+            service.create_payment(
+                self.valid_payment_request(
+                    intent_id=old_create_intent.intent_id,
+                    invoice_id="old-after-repair",
+                ),
+                "old-after-repair-key",
+                1_700_000_001,
+            )
+        self.assertEqual(create_error.exception.code, "reapproval_required")
+
+        with self.assertRaises(SafeError) as run_error:
+            service.run_payment(old_payment.payment_id, now=lambda: 1_700_000_001)
+        self.assertEqual(run_error.exception.code, "reapproval_required")
+        self.assertEqual(store.get_payment(old_payment.payment_id).state, PaymentState.FAILED)
+        self.assertEqual(trezor.sign_transaction_calls, [])
+        self.assertEqual(trezor.push_transaction_calls, [])
+
+        new_intent = self.valid_intent(intent_id="0x" + "44" * 32)
+        service.approve_intent(new_intent, now=1_700_000_001)
+        new_payment = service.create_payment(
+            self.valid_payment_request(
+                intent_id=new_intent.intent_id,
+                invoice_id="new-after-repair",
+            ),
+            "new-after-repair-key",
+            1_700_000_001,
+        )
+        completed = service.run_payment(new_payment.payment_id, now=lambda: 1_700_000_002)
+        self.assertEqual(completed.state, PaymentState.TX_BROADCAST)
+        self.assertEqual(len(trezor.sign_transaction_calls), 1)
+        self.assertEqual(len(trezor.push_transaction_calls), 1)
 
     def test_every_post_push_exception_or_ambiguous_hash_requires_reconciliation(self):
         service, store, trezor, _ = self.make_approved_payment_service()
@@ -986,6 +1219,107 @@ class TrezorSidecarServiceTests(TestCase):
         self.assertEqual(len(trezor.sign_transaction_calls), 2)
         self.assertEqual(len(trezor.push_transaction_calls), 2)
 
+    def test_post_push_reconciliation_storage_failures_are_always_fixed_and_safe(self):
+        service, store, trezor, _ = self.make_approved_payment_service()
+        real_get = store.get_payment
+        real_transition = store.transition_payment
+
+        for index, failure_point in enumerate(
+            ("initial_read", "write", "refetch", "broadcast_and_reconciliation"),
+            start=1,
+        ):
+            payment = self.create_additional_payment(
+                service,
+                ordinal=index,
+                invoice_id=f"reconcile-{failure_point}",
+                idempotency_key=f"reconcile-key-{failure_point}",
+            )
+            reads = 0
+            reconciliation_write_attempted = False
+
+            def failing_get(payment_id):
+                nonlocal reads
+                reads += 1
+                if failure_point == "initial_read" and reads == 4:
+                    raise RuntimeError("canary reconciliation initial read")
+                if failure_point == "refetch" and reconciliation_write_attempted:
+                    raise RuntimeError("canary reconciliation refetch")
+                return real_get(payment_id)
+
+            def failing_transition(**arguments):
+                nonlocal reconciliation_write_attempted
+                if arguments["target"] is PaymentState.TX_BROADCAST:
+                    raise RuntimeError("canary broadcast transition")
+                if arguments["target"] is PaymentState.RECONCILIATION_REQUIRED:
+                    reconciliation_write_attempted = True
+                    if failure_point in {
+                        "write",
+                        "refetch",
+                        "broadcast_and_reconciliation",
+                    }:
+                        raise RuntimeError("canary reconciliation transition")
+                return real_transition(**arguments)
+
+            before_signs = len(trezor.sign_transaction_calls)
+            before_pushes = len(trezor.push_transaction_calls)
+            with (
+                patch.object(store, "get_payment", side_effect=failing_get),
+                patch.object(store, "transition_payment", side_effect=failing_transition),
+                self.subTest(failure_point=failure_point),
+                self.assertRaises(SafeError) as raised,
+            ):
+                service.run_payment(payment.payment_id, now=lambda: 1_700_000_001)
+
+            self.assertEqual(raised.exception.code, "reconciliation_required")
+            self.assertEqual(
+                raised.exception.message,
+                "Transaction broadcast outcome requires reconciliation.",
+            )
+            self.assertEqual(raised.exception.status, 409)
+            self.assertNotIn("canary", str(raised.exception))
+            self.assertIsNone(raised.exception.__cause__)
+            self.assertEqual(len(trezor.sign_transaction_calls), before_signs + 1)
+            self.assertEqual(len(trezor.push_transaction_calls), before_pushes + 1)
+            raw = trezor.push_transaction_calls[-1]
+            self.assertNotIn(raw, str(raised.exception))
+
+    def test_orphaned_signed_reconciliation_write_failure_is_fixed_and_never_pushes(self):
+        service, store, trezor, _ = self.make_approved_payment_service()
+        payment = service.create_payment(
+            self.valid_payment_request(invoice_id="orphaned-write-failure"),
+            "orphaned-write-failure-key",
+            1_700_000_000,
+        )
+        store.transition_payment(
+            payment_id=payment.payment_id,
+            expected=PaymentState.INVOICE_CREATED,
+            target=PaymentState.TX_SIGNED,
+            updated_at=1_700_000_001,
+        )
+        real_transition = store.transition_payment
+
+        def reject_reconciliation(**arguments):
+            if arguments["target"] is PaymentState.RECONCILIATION_REQUIRED:
+                raise RuntimeError("canary orphan reconciliation")
+            return real_transition(**arguments)
+
+        with (
+            patch.object(store, "transition_payment", side_effect=reject_reconciliation),
+            self.assertRaises(SafeError) as raised,
+        ):
+            service.run_payment(payment.payment_id, now=lambda: 1_700_000_002)
+
+        self.assertEqual(raised.exception.code, "reconciliation_required")
+        self.assertEqual(
+            raised.exception.message,
+            "Transaction broadcast outcome requires reconciliation.",
+        )
+        self.assertEqual(raised.exception.status, 409)
+        self.assertNotIn("canary", str(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertEqual(trezor.sign_transaction_calls, [])
+        self.assertEqual(trezor.push_transaction_calls, [])
+
     def test_missing_state_during_failure_classification_is_not_reported_as_failed(self):
         service, store, trezor, rpc = self.make_approved_payment_service()
         payment = service.create_payment(
@@ -1000,7 +1334,7 @@ class TrezorSidecarServiceTests(TestCase):
         def disappear_during_classification(payment_id):
             nonlocal reads
             reads += 1
-            if reads == 2:
+            if reads == 3:
                 return None
             return real_get_payment(payment_id)
 
@@ -1129,6 +1463,146 @@ class TrezorSidecarServiceTests(TestCase):
         self.assertEqual(store.get_payment(second_payment.payment_id).state, PaymentState.INVOICE_CREATED)
         self.assertEqual(len(trezor.sign_transaction_calls), 1)
         self.assertEqual(len(trezor.push_transaction_calls), 1)
+
+    def test_terminal_payment_replays_while_an_unrelated_device_job_is_active(self):
+        service, store, trezor, _ = self.make_approved_payment_service()
+        terminal_payment = self.create_additional_payment(
+            service,
+            ordinal=1,
+            invoice_id="terminal-during-active",
+            idempotency_key="terminal-during-active-key",
+        )
+        terminal = store.transition_payment(
+            payment_id=terminal_payment.payment_id,
+            expected=PaymentState.INVOICE_CREATED,
+            target=PaymentState.FAILED,
+            updated_at=1_700_000_001,
+        )
+        active_payment = self.create_additional_payment(
+            service,
+            ordinal=2,
+            invoice_id="active-during-terminal-replay",
+            idempotency_key="active-during-terminal-replay-key",
+        )
+        trezor.transaction_entered = threading.Event()
+        trezor.release_transaction = threading.Event()
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            active = pool.submit(
+                service.run_payment,
+                active_payment.payment_id,
+                lambda: 1_700_000_002,
+            )
+            self.assertTrue(trezor.transaction_entered.wait(timeout=2))
+            replay = service.run_payment(
+                terminal.payment_id,
+                now=lambda: 1_700_000_002,
+            )
+            trezor.release_transaction.set()
+            completed = active.result(timeout=2)
+
+        self.assertEqual(replay, terminal)
+        self.assertEqual(completed.state, PaymentState.TX_BROADCAST)
+        self.assertEqual(len(trezor.sign_transaction_calls), 1)
+        self.assertEqual(len(trezor.push_transaction_calls), 1)
+
+    def test_forked_payment_jobs_share_the_process_lock_and_loser_does_no_work(self):
+        account = Account.create()
+        service, store, _ = self.make_service(
+            trezor=FakeTrezor(account),
+            rpc=FakeRpc(),
+        )
+        service.pair()
+        service.approve_intent(self.valid_intent(), now=1_700_000_000)
+        winner_payment = service.create_payment(
+            self.valid_payment_request(invoice_id="forked-winner"),
+            "forked-winner-key",
+            1_700_000_000,
+        )
+        loser_payment = self.create_additional_payment(
+            service,
+            ordinal=1,
+            invoice_id="forked-loser",
+            idempotency_key="forked-loser-key",
+        )
+
+        context = get_context("fork")
+        entered = context.Event()
+        release = context.Event()
+        results = context.Queue()
+        winner = context.Process(
+            target=run_payment_in_process,
+            args=(
+                self.database,
+                account.key,
+                winner_payment.payment_id,
+                "winner",
+                entered,
+                release,
+                results,
+            ),
+        )
+        loser = context.Process(
+            target=run_payment_in_process,
+            args=(
+                self.database,
+                account.key,
+                loser_payment.payment_id,
+                "loser",
+                None,
+                None,
+                results,
+            ),
+        )
+
+        winner.start()
+        loser_started = False
+        try:
+            self.assertTrue(entered.wait(timeout=3))
+            loser.start()
+            loser_started = True
+            loser.join(timeout=5)
+        finally:
+            release.set()
+            winner.join(timeout=5)
+            if winner.is_alive():
+                winner.terminate()
+                winner.join(timeout=2)
+            if loser_started and loser.is_alive():
+                loser.terminate()
+                loser.join(timeout=2)
+
+        self.assertEqual(winner.exitcode, 0)
+        self.assertEqual(loser.exitcode, 0)
+        outputs = {
+            output[0]: output
+            for output in (results.get(timeout=2), results.get(timeout=2))
+        }
+        self.assertEqual(
+            outputs["winner"],
+            ("winner", "ok", PaymentState.TX_BROADCAST.value, 1, 1, 1),
+        )
+        self.assertEqual(
+            outputs["loser"],
+            (
+                "loser",
+                "safe",
+                "device_busy",
+                "Another Trezor approval is active.",
+                409,
+                0,
+                0,
+                0,
+            ),
+        )
+        self.assertEqual(
+            store.get_payment(winner_payment.payment_id).state,
+            PaymentState.TX_BROADCAST,
+        )
+        self.assertEqual(
+            store.get_payment(loser_payment.payment_id).state,
+            PaymentState.INVOICE_CREATED,
+        )
 
     def test_pairing_uses_only_fixed_path_and_refuses_silent_device_change(self):
         service, store, trezor = self.make_service()

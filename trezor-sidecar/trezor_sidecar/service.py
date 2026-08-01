@@ -35,7 +35,14 @@ from .config import SidecarSettings
 from .errors import SafeError
 from .intent import build_typed_data, recover_intent_signer
 from .mcp_client import TrezorMcpClient
-from .models import Pairing, PaymentRequest, PaymentState, PaymentView, PurchaseIntent
+from .models import (
+    IntentRecord,
+    Pairing,
+    PaymentRequest,
+    PaymentState,
+    PaymentView,
+    PurchaseIntent,
+)
 from .store import SidecarStore
 
 
@@ -79,6 +86,14 @@ def _device_lock_unavailable() -> SafeError:
 
 def _invalid_signature() -> SafeError:
     return _safe("invalid_signature", "Trezor did not return a valid approval signature.")
+
+
+def _reapproval_required() -> SafeError:
+    return _safe(
+        "reapproval_required",
+        "Purchase intent must be reapproved for the current Trezor pairing.",
+        409,
+    )
 
 
 def _normalize_address(value: Any) -> str:
@@ -404,6 +419,18 @@ class TrezorSidecarService:
             raise _safe("intent_state_changed", "Purchase intent state does not allow approval.", 409)
         return existing
 
+    @staticmethod
+    def _require_current_approval(
+        intent: IntentRecord,
+        pairing: Pairing,
+    ) -> None:
+        if (
+            intent.state is not PaymentState.DEVICE_APPROVED
+            or intent.approved_at is None
+            or intent.approved_at <= pairing.created_at
+        ):
+            raise _reapproval_required()
+
     def _insert_intent(self, intent: PurchaseIntent, now: int):
         try:
             return self.store.insert_intent(intent, created_at=now)
@@ -461,7 +488,10 @@ class TrezorSidecarService:
             self._validate_fixed_intent(intent)
             existing = self._existing_intent(intent)
             if existing is not None and existing.state is PaymentState.DEVICE_APPROVED:
+                self._require_current_approval(existing, pairing)
                 return existing.intent
+            if now <= pairing.created_at:
+                raise _reapproval_required()
             self._validate_intent(settings, intent, now)
             self._insert_intent(intent, now)
 
@@ -504,13 +534,23 @@ class TrezorSidecarService:
         ):
             raise _safe("invalid_request", "Payment idempotency key is invalid.")
         replay = self._payment_replay(request, idempotency_key)
+        pairing = self.store.get_pairing()
+        if pairing is None:
+            raise _safe("not_paired", "A Trezor must be paired before payment.", 409)
+        if pairing.derivation_path != EVM_DERIVATION_PATH:
+            raise _safe("pairing_mismatch", "The stored Trezor pairing is invalid.", 409)
+        intent = self.store.get_intent(request.intent_id)
+        if intent is None or intent.state is not PaymentState.DEVICE_APPROVED:
+            raise _safe("intent_not_approved", "Purchase intent is not approved.", 409)
+        self._require_current_approval(intent, pairing)
+        if now < intent.approved_at:
+            raise _invalid_clock()
         if replay is not None:
             return replay
         self._require_enabled(settings)
         self._require_fixed_configuration(settings)
-        intent = self.store.get_intent(request.intent_id)
-        if intent is None or intent.state is not PaymentState.DEVICE_APPROVED:
-            raise _safe("intent_not_approved", "Purchase intent is not approved.", 409)
+        if pairing.derivation_path != settings.derivation_path:
+            raise _safe("pairing_mismatch", "The stored Trezor pairing is invalid.", 409)
         self._validate_fixed_intent(intent.intent)
         if intent.intent.expires_at <= now:
             raise _safe("intent_expired", "Purchase intent has expired.")
@@ -836,9 +876,16 @@ class TrezorSidecarService:
         updated_at: int,
         tx_hash: str | None = None,
     ) -> PaymentView:
-        current = self.get_payment(payment_id)
+        try:
+            current = self.store.get_payment(payment_id)
+        except BaseException:
+            raise self._reconciliation_error() from None
+        if current is None:
+            raise self._reconciliation_error() from None
         if current.state is PaymentState.RECONCILIATION_REQUIRED:
-            return current
+            if tx_hash is None or current.tx_hash == tx_hash:
+                return current
+            raise self._reconciliation_error() from None
         if (
             current.state is PaymentState.TX_BROADCAST
             and tx_hash is not None
@@ -846,11 +893,7 @@ class TrezorSidecarService:
         ):
             return current
         if current.state is not PaymentState.TX_SIGNED:
-            raise _safe(
-                "payment_state_changed",
-                "Payment state could not be classified safely.",
-                409,
-            )
+            raise self._reconciliation_error() from None
         try:
             return self.store.transition_payment(
                 payment_id=payment_id,
@@ -859,15 +902,25 @@ class TrezorSidecarService:
                 updated_at=max(updated_at, current.updated_at),
                 tx_hash=tx_hash,
             )
-        except Exception:
-            refreshed = self.get_payment(payment_id)
-            if refreshed.state is PaymentState.RECONCILIATION_REQUIRED:
+        except BaseException:
+            try:
+                refreshed = self.store.get_payment(payment_id)
+            except BaseException:
+                raise self._reconciliation_error() from None
+            if refreshed is None:
+                raise self._reconciliation_error() from None
+            if (
+                refreshed.state is PaymentState.RECONCILIATION_REQUIRED
+                and (tx_hash is None or refreshed.tx_hash == tx_hash)
+            ):
                 return refreshed
-            raise _safe(
-                "payment_state_changed",
-                "Payment state could not be classified safely.",
-                409,
-            ) from None
+            if (
+                refreshed.state is PaymentState.TX_BROADCAST
+                and tx_hash is not None
+                and refreshed.tx_hash == tx_hash
+            ):
+                return refreshed
+            raise self._reconciliation_error() from None
 
     def run_payment(
         self,
@@ -876,6 +929,15 @@ class TrezorSidecarService:
     ) -> PaymentView:
         if not callable(now):
             raise _safe("invalid_request", "Payment clock must be callable.")
+        payment = self.get_payment(payment_id)
+        if payment.state in {
+            PaymentState.TX_BROADCAST,
+            PaymentState.COMPLETE,
+            PaymentState.CANCELLED,
+            PaymentState.FAILED,
+            PaymentState.RECONCILIATION_REQUIRED,
+        }:
+            return payment
         with self._device_guard(blocking=False) as acquired:
             if not acquired:
                 raise _safe("device_busy", "Another Trezor approval is active.", 409)
@@ -933,6 +995,12 @@ class TrezorSidecarService:
                         409,
                     )
                 intent = intent_record.intent
+                self._require_current_approval(intent_record, pairing)
+                if (
+                    timestamp < intent_record.approved_at
+                    or timestamp < pairing.created_at
+                ):
+                    raise _invalid_clock()
                 self._validate_fixed_intent(intent)
                 self._validate_payment_limits(settings, request, intent)
                 self._require_fresh_payment(request, intent, timestamp)
