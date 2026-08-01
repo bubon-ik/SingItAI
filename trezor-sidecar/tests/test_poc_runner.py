@@ -91,6 +91,8 @@ class FakeStore:
         self.transitions = []
         self.records = []
         self.attempt = None
+        self.generation = 0
+        self.reserved_generations = []
         self._lock = threading.Lock()
 
     def get_payment(self, payment_id):
@@ -135,12 +137,30 @@ class FakeStore:
         with self._lock:
             return self.attempt is not None
 
-    def reserve_purchase_attempt(self, *, intent_id, created_at):
+    def purchase_generation_if_clear(self):
+        with self._lock:
+            if self.attempt is not None or self.get_unresolved_payment() is not None:
+                raise ValueError("purchase state is not clear")
+            return self.generation
+
+    def reserve_purchase_attempt(
+        self,
+        *,
+        intent_id,
+        created_at,
+        expected_generation=None,
+    ):
         with self._lock:
             if self.attempt is not None:
                 raise ValueError("purchase attempt already active")
             if self.get_unresolved_payment() is not None:
                 raise ValueError("unresolved payment exists")
+            if (
+                expected_generation is not None
+                and expected_generation != self.generation
+            ):
+                raise ValueError("purchase generation changed")
+            self.reserved_generations.append(expected_generation)
             self.attempt = {
                 "intent_id": intent_id,
                 "invoice_id": None,
@@ -206,6 +226,7 @@ class FakeStore:
             if not any(existing[0] == arguments["invoice_id"] for existing in self.records):
                 self.records.append(record)
             self.attempt = None
+            self.generation += 1
             return self.payment
 
 
@@ -1159,7 +1180,8 @@ class TrezorPocRunnerTests(TestCase):
         self.assertEqual(blocked.exception.code, "payment_recovery_required")
         self.assertEqual(
             blocked.exception.message,
-            "An earlier payment is unresolved; do not retry purchase. Inspect the existing invoice and local state.",
+            "An earlier purchase attempt or payment is unresolved; do not retry purchase. "
+            "Inspect the existing invoice and local state.",
         )
         self.assertEqual(events, [])
         self.assertEqual(fresh_sidecar.approve_calls, [])
@@ -1314,6 +1336,80 @@ class TrezorPocRunnerTests(TestCase):
         self.assertEqual(sum(len(client.complete_calls) for client in bitrefills), 1)
         self.assertEqual(sum(len(client.pay_calls) for client in sidecars), 1)
         self.assertIsNone(store.attempt)
+
+    def test_stale_runner_cannot_reserve_after_newer_runner_finishes(self):
+        stale_approval_started = threading.Event()
+        release_stale_approval = threading.Event()
+        store = FakeStore()
+
+        class PausedApprovalSidecar(FakeSidecar):
+            def approve_intent(self, intent):
+                result = super().approve_intent(intent)
+                stale_approval_started.set()
+                if not release_stale_approval.wait(timeout=2):
+                    raise AssertionError("stale approval was not released")
+                return result
+
+        stale_bitrefill = FakeBitrefill([])
+        stale_sidecar = PausedApprovalSidecar([], store=store)
+        stale = TrezorPocRunner(
+            bitrefill=stale_bitrefill,
+            sidecar=stale_sidecar,
+            max_usd="2.00",
+            summary_sink=lambda _summary: None,
+            _test_store=store,
+            clock=lambda: NOW,
+        )
+
+        def buy(runner):
+            return runner.buy(
+                quote=valid_quote(),
+                recipient={"email": "buyer@example.com"},
+                buyer_email="buyer@example.com",
+                now=NOW,
+            )
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            stale_future = executor.submit(buy, stale)
+            self.assertTrue(stale_approval_started.wait(timeout=2))
+
+            newer_bitrefill = FakeBitrefill([])
+            newer_sidecar = FakeSidecar([], store=store)
+            newer = TrezorPocRunner(
+                bitrefill=newer_bitrefill,
+                sidecar=newer_sidecar,
+                max_usd="2.00",
+                summary_sink=lambda _summary: None,
+                _test_store=store,
+                clock=lambda: NOW,
+            )
+            self.assertEqual(buy(newer)["status"], "complete")
+            self.assertEqual(store.generation, 1)
+            self.assertIsNone(store.attempt)
+
+            release_stale_approval.set()
+            with self.assertRaises(SafeError) as stale_error:
+                stale_future.result(timeout=2)
+
+        self.assertEqual(stale_error.exception.code, "payment_recovery_required")
+        self.assertEqual(stale_bitrefill.prepare_calls, [])
+        self.assertEqual(stale_sidecar.pay_calls, [])
+
+        fresh_bitrefill = FakeBitrefill([])
+        fresh_sidecar = FakeSidecar([], store=store)
+        fresh = TrezorPocRunner(
+            bitrefill=fresh_bitrefill,
+            sidecar=fresh_sidecar,
+            max_usd="2.00",
+            summary_sink=lambda _summary: None,
+            _test_store=store,
+            clock=lambda: NOW,
+        )
+        self.assertEqual(buy(fresh)["status"], "complete")
+        self.assertEqual(store.generation, 2)
+        self.assertEqual(len(fresh_bitrefill.prepare_calls), 1)
+        self.assertEqual(len(fresh_sidecar.pay_calls), 1)
+        self.assertEqual(store.reserved_generations, [0, 1])
 
     def test_summary_contains_exact_receipt_facts_and_neutral_warning_before_approval(self):
         summaries = []

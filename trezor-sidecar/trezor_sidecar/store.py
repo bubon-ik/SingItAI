@@ -54,6 +54,16 @@ def _timestamp(value: object, name: str) -> int:
     return value
 
 
+def _generation(value: object, name: str = "generation") -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= _SQLITE_INT_MAX
+    ):
+        raise ValueError(f"{name} must be a non-negative signed SQLite integer")
+    return value
+
+
 def _amount(value: object, name: str) -> tuple[int, str]:
     if isinstance(value, bool):
         raise ValueError(f"{name} must be a positive integer")
@@ -246,6 +256,16 @@ class SidecarStore:
                     )
                 );
 
+                CREATE TABLE IF NOT EXISTS purchase_generation (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    generation INTEGER NOT NULL CHECK (
+                        generation BETWEEN 0 AND 9223372036854775807
+                    )
+                );
+
+                INSERT OR IGNORE INTO purchase_generation
+                    (singleton, generation) VALUES (1, 0);
+
                 CREATE TABLE IF NOT EXISTS purchase_log (
                     invoice_id TEXT PRIMARY KEY CHECK (length(invoice_id) BETWEEN 1 AND 256)
                         REFERENCES payments(invoice_id),
@@ -263,6 +283,17 @@ class SidecarStore:
                 raise ValueError(
                     "sidecar state schema is outdated; reset local sidecar state"
                 )
+            generation_rows = connection.execute(
+                "SELECT singleton, generation FROM purchase_generation"
+            ).fetchall()
+            if (
+                len(generation_rows) != 1
+                or generation_rows[0]["singleton"] != 1
+            ):
+                raise ValueError(
+                    "sidecar purchase generation is invalid; reset local sidecar state"
+                )
+            _generation(generation_rows[0]["generation"])
             connection.commit()
         finally:
             connection.close()
@@ -666,11 +697,43 @@ class SidecarStore:
             connection.close()
         return row is not None
 
-    def reserve_purchase_attempt(self, *, intent_id: str, created_at: int) -> None:
+    def purchase_generation_if_clear(self) -> int:
+        """Read a clear-state generation from one SQLite transaction snapshot."""
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN")
+            row = connection.execute(
+                "SELECT generation FROM purchase_generation WHERE singleton = 1"
+            ).fetchone()
+            if row is None:
+                raise ValueError("purchase generation is unavailable")
+            generation = _generation(row["generation"])
+            if connection.execute(
+                "SELECT 1 FROM purchase_attempt WHERE singleton = 1"
+            ).fetchone() is not None:
+                raise ValueError("purchase attempt already active")
+            if self._unresolved_payment_row(connection) is not None:
+                raise ValueError("unresolved payment already exists")
+            connection.commit()
+            return generation
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def reserve_purchase_attempt(
+        self,
+        *,
+        intent_id: str,
+        created_at: int,
+        expected_generation: int,
+    ) -> None:
         intent_id = _text(intent_id, "intent_id", limit=66)
         if len(intent_id) != 66:
             raise ValueError("intent_id must be 66 characters")
         created_at = _timestamp(created_at, "created_at")
+        expected_generation = _generation(expected_generation, "expected_generation")
         with self._transaction() as connection:
             if connection.execute(
                 "SELECT 1 FROM purchase_attempt WHERE singleton = 1"
@@ -684,6 +747,14 @@ class SidecarStore:
             ).fetchone()
             if intent is None or intent["state"] != PaymentState.DEVICE_APPROVED.value:
                 raise ValueError("purchase attempt intent is not approved")
+            generation = connection.execute(
+                "SELECT generation FROM purchase_generation WHERE singleton = 1"
+            ).fetchone()
+            if generation is None:
+                raise ValueError("purchase generation is unavailable")
+            current_generation = _generation(generation["generation"])
+            if current_generation != expected_generation:
+                raise ValueError("purchase generation changed")
             connection.execute(
                 """INSERT INTO purchase_attempt
                 (singleton, intent_id, invoice_id, created_at, updated_at)
@@ -747,6 +818,14 @@ class SidecarStore:
                 or attempt["invoice_id"] != invoice_id
             ):
                 raise ValueError("purchase attempt does not match finalization")
+            generation_row = connection.execute(
+                "SELECT generation FROM purchase_generation WHERE singleton = 1"
+            ).fetchone()
+            if generation_row is None:
+                raise ValueError("purchase generation is unavailable")
+            generation = _generation(generation_row["generation"])
+            if generation == _SQLITE_INT_MAX:
+                raise ValueError("purchase generation overflow")
             payment = connection.execute(
                 """SELECT payments.*, intents.product_slug
                 FROM payments JOIN intents ON intents.intent_id = payments.intent_id
@@ -806,6 +885,13 @@ class SidecarStore:
             )
             if deleted.rowcount != 1:
                 raise ValueError("purchase attempt changed during finalization")
+            incremented = connection.execute(
+                """UPDATE purchase_generation SET generation = ?
+                WHERE singleton = 1 AND generation = ?""",
+                (generation + 1, generation),
+            )
+            if incremented.rowcount != 1:
+                raise ValueError("purchase generation changed during finalization")
             return PaymentView(
                 payment_id=payment["payment_id"],
                 intent_id=payment["intent_id"],

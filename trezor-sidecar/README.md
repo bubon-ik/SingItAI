@@ -159,6 +159,13 @@ marks the matching payment complete and writes the required five-field
 purchase log. Never delete or bypass this reservation until the existing
 attempt has been manually reconciled.
 
+The initial clear-state check also reads a persistent monotonic purchase
+generation from one SQLite snapshot. Reservation must match that exact
+generation after the summary and device approval. Atomic successful
+finalization increments it, so an older overlapping runner cannot begin a new
+invoice after a newer runner has already completed and removed its guard.
+Failures retain the guard and do not advance the generation.
+
 ## Automated verification
 
 These commands are safe: the tests inject transports and never use the private

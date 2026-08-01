@@ -219,6 +219,7 @@ class SidecarStoreTests(TestCase):
                 store.reserve_purchase_attempt(
                     intent_id=self.intent.intent_id,
                     created_at=1_700_000_002,
+                    expected_generation=0,
                 )
                 return "reserved"
             except ValueError:
@@ -245,15 +246,18 @@ class SidecarStoreTests(TestCase):
             self.store.reserve_purchase_attempt(
                 intent_id=self.intent.intent_id,
                 created_at=1_700_000_003,
+                expected_generation=0,
             )
 
         self.assertFalse(self.store.has_active_purchase_attempt())
 
     def test_atomic_finalize_requires_matching_guard_and_clears_only_on_success(self):
         self.approve_intent()
+        self.assertEqual(self.store.purchase_generation_if_clear(), 0)
         self.store.reserve_purchase_attempt(
             intent_id=self.intent.intent_id,
             created_at=1_700_000_003,
+            expected_generation=0,
         )
         self.store.bind_purchase_attempt_invoice(
             intent_id=self.intent.intent_id,
@@ -299,12 +303,18 @@ class SidecarStoreTests(TestCase):
                 self.store.get_payment(payment.payment_id).state,
                 PaymentState.TX_BROADCAST,
             )
+            with sqlite3.connect(self.path) as connection:
+                generation = connection.execute(
+                    "SELECT generation FROM purchase_generation WHERE singleton = 1"
+                ).fetchone()[0]
+            self.assertEqual(generation, 0)
 
         completed = self.store.finalize_purchase(**arguments)
 
         self.assertEqual(completed.state, PaymentState.COMPLETE)
         self.assertFalse(self.store.has_active_purchase_attempt())
         self.assertIsNone(self.store.get_unresolved_payment())
+        self.assertEqual(self.store.purchase_generation_if_clear(), 1)
         with sqlite3.connect(self.path) as connection:
             log = connection.execute(
                 "SELECT invoice_id, product_slug, amount, payment_method, timestamp "
@@ -315,6 +325,90 @@ class SidecarStoreTests(TestCase):
             log,
             (payment.invoice_id, "test-gift", "1000000", "usdc_base", 1_700_000_006),
         )
+
+        second_connection = SidecarStore(self.path)
+        with self.assertRaisesRegex(ValueError, "generation"):
+            second_connection.reserve_purchase_attempt(
+                intent_id=self.intent.intent_id,
+                created_at=1_700_000_007,
+                expected_generation=0,
+            )
+        second_connection.reserve_purchase_attempt(
+            intent_id=self.intent.intent_id,
+            created_at=1_700_000_007,
+            expected_generation=1,
+        )
+        self.assertTrue(self.store.has_active_purchase_attempt())
+
+    def test_generation_bounds_and_finalize_overflow_fail_closed(self):
+        self.approve_intent()
+        signed_max = (1 << 63) - 1
+        for invalid in (True, -1, signed_max + 1):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError,
+                "generation",
+            ):
+                self.store.reserve_purchase_attempt(
+                    intent_id=self.intent.intent_id,
+                    created_at=1_700_000_003,
+                    expected_generation=invalid,
+                )
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "UPDATE purchase_generation SET generation = ? WHERE singleton = 1",
+                (signed_max,),
+            )
+            connection.commit()
+        self.assertEqual(self.store.purchase_generation_if_clear(), signed_max)
+        self.store.reserve_purchase_attempt(
+            intent_id=self.intent.intent_id,
+            created_at=1_700_000_003,
+            expected_generation=signed_max,
+        )
+        self.store.bind_purchase_attempt_invoice(
+            intent_id=self.intent.intent_id,
+            invoice_id="invoice-1",
+            updated_at=1_700_000_004,
+        )
+        payment = self.create_payment()
+        self.store.transition_payment(
+            payment_id=payment.payment_id,
+            expected=PaymentState.INVOICE_CREATED,
+            target=PaymentState.TX_SIGNED,
+            updated_at=1_700_000_004,
+        )
+        broadcast = self.store.transition_payment(
+            payment_id=payment.payment_id,
+            expected=PaymentState.TX_SIGNED,
+            target=PaymentState.TX_BROADCAST,
+            updated_at=1_700_000_005,
+            tx_hash="0x" + "ab" * 32,
+        )
+
+        with self.assertRaisesRegex(ValueError, "overflow"):
+            self.store.finalize_purchase(
+                payment_id=payment.payment_id,
+                intent_id=self.intent.intent_id,
+                invoice_id=payment.invoice_id,
+                tx_hash=broadcast.tx_hash,
+                product_slug=self.intent.product_slug,
+                amount="1000000",
+                payment_method="usdc_base",
+                timestamp=1_700_000_006,
+            )
+
+        self.assertTrue(self.store.has_active_purchase_attempt())
+        self.assertEqual(
+            self.store.get_payment(payment.payment_id).state,
+            PaymentState.TX_BROADCAST,
+        )
+        with sqlite3.connect(self.path) as connection:
+            generation = connection.execute(
+                "SELECT generation FROM purchase_generation WHERE singleton = 1"
+            ).fetchone()[0]
+            log_count = connection.execute("SELECT COUNT(*) FROM purchase_log").fetchone()[0]
+        self.assertEqual(generation, signed_max)
+        self.assertEqual(log_count, 0)
 
     def test_sqlite_timestamp_range_is_signed_64_bit(self):
         # Break caught: values accepted by models overflow SQLite INTEGER bindings.
@@ -538,6 +632,7 @@ class SidecarStoreTests(TestCase):
                 "intents",
                 "payments",
                 "purchase_attempt",
+                "purchase_generation",
                 "purchase_log",
             ):
                 columns = [row[1].lower() for row in connection.execute(f"PRAGMA table_info({table})")]

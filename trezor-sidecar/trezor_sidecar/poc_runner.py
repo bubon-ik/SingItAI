@@ -469,30 +469,34 @@ class TrezorPocRunner:
             self._store_override = SidecarStore(_PROOF_STATE_PATH)
         return self._store_override
 
-    def _require_no_unresolved_payment(self) -> None:
+    def _require_no_unresolved_payment(self) -> int:
         try:
-            store = self._store()
-            active_attempt = store.has_active_purchase_attempt()
-            unresolved = store.get_unresolved_payment()
+            return self._store().purchase_generation_if_clear()
+        except ValueError:
+            raise _safe(
+                "payment_recovery_required",
+                "An earlier purchase attempt or payment is unresolved; do not retry purchase. "
+                "Inspect the existing invoice and local state.",
+                409,
+            ) from None
         except Exception:
             raise _safe(
                 "payment_state_unavailable",
                 "Existing payment state could not be checked safely.",
                 503,
             ) from None
-        if active_attempt or unresolved is not None:
-            raise _safe(
-                "payment_recovery_required",
-                "An earlier payment is unresolved; do not retry purchase. "
-                "Inspect the existing invoice and local state.",
-                409,
-            )
 
-    def _reserve_purchase_attempt(self, intent_id: str, created_at: int) -> None:
+    def _reserve_purchase_attempt(
+        self,
+        intent_id: str,
+        created_at: int,
+        expected_generation: int,
+    ) -> None:
         try:
             self._store().reserve_purchase_attempt(
                 intent_id=intent_id,
                 created_at=created_at,
+                expected_generation=expected_generation,
             )
         except ValueError:
             raise _safe(
@@ -643,7 +647,7 @@ class TrezorPocRunner:
         buyer_email: str = "",
         now: int | None = None,
     ) -> dict[str, Any]:
-        self._require_no_unresolved_payment()
+        expected_generation = self._require_no_unresolved_payment()
         snapshot = _approved_purchase_snapshot(quote, recipient, buyer_email)
         started_at = self._now() if now is None else _timestamp(now)
         intent = self._intent_from_snapshot(snapshot, started_at)
@@ -653,7 +657,11 @@ class TrezorPocRunner:
         if self._intent_from_snapshot(snapshot, started_at) != intent:
             raise _safe("intent_conflict", "Purchase intent changed after approval.", 409)
         self.treasury.register_approved_intent(intent)
-        self._reserve_purchase_attempt(intent.intent_id, started_at)
+        self._reserve_purchase_attempt(
+            intent.intent_id,
+            started_at,
+            expected_generation,
+        )
         try:
             prepared = self.bitrefill.prepare_purchase(
                 quote=snapshot.quote_copy(),
