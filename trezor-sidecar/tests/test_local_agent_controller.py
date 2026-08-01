@@ -200,6 +200,30 @@ class LocalAgentControllerTests(TestCase):
         self.assertIn("Recipient email: buyer@example.com", summary)
         self.assertIn("/trezor_confirm A1B2C3D4", summary)
 
+    def test_prepare_accepts_real_bitrefill_ids_with_separators_and_spaces(self):
+        # Break caught: the selector only allowed slugs, so every genuine
+        # catalog id — "alza-czech-republic<&>100", "…<&>1GB, 7 Days" —
+        # was rejected as invalid before a quote was ever requested.
+        for package_id in (
+            "alza-czech-republic<&>100",
+            "bitrefill-esim-usa<&>1GB, 7 Days",
+            "mobile-legends-international<&>Mobile Legends 11 Diamonds",
+        ):
+            with self.subTest(package_id=package_id):
+                controller, runner, _details = self.make_controller()
+                controller.prepare("12345", "alza-czech-republic", package_id, "CZ")
+                self.assertEqual(runner.quote_calls[0][1], package_id)
+
+    def test_prepare_still_rejects_control_characters_and_overlong_ids(self):
+        # Break caught: widening the selector lets a newline into a summary
+        # line or an unbounded id into stored state.
+        controller, runner, _details = self.make_controller()
+        for package_id in ("bad\nid", "bad\tid", "\x7f", "x" * 129, ""):
+            with self.subTest(package_id=package_id):
+                with self.assertRaises(SafeError):
+                    controller.prepare("12345", "test-gift", package_id, "US")
+        self.assertEqual(runner.quote_calls, [])
+
     def test_confirmation_code_is_required_and_purchase_is_single_use(self):
         controller, runner, _details = self.make_controller()
         controller.prepare("12345", "test-gift", "1", "US")

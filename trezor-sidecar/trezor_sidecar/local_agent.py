@@ -24,7 +24,12 @@ from .poc_runner import (
 from .sidecar_client import SidecarClient
 
 
-_SELECTOR = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
+# Real Bitrefill catalog ids are not slugs: they carry a "<&>" separator and
+# often spaces, as in "alza-czech-republic<&>100" or "…<&>1GB, 7 Days".
+# Printable ASCII is therefore the constraint, not an alphanumeric subset.
+# Control characters stay rejected so an id cannot smuggle newlines into a
+# summary line or a log record.
+_SELECTOR = re.compile(r"[ -~]{1,128}\Z")
 _COUNTRY = re.compile(r"[A-Z]{2}\Z")
 _CONFIRMATION = re.compile(r"[A-F0-9]{8}\Z")
 _EMAIL = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+\Z")
