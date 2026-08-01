@@ -33,7 +33,7 @@ from .base import (
 )
 from .config import SidecarSettings
 from .errors import SafeError
-from .intent import build_typed_data, recover_intent_signer
+from .intent import build_intent_message, recover_intent_signer
 from .mcp_client import TrezorMcpClient
 from .models import (
     IntentRecord,
@@ -443,9 +443,9 @@ class TrezorSidecarService:
 
     def _signature(self, settings: SidecarSettings, intent: PurchaseIntent) -> str:
         try:
-            result = self.trezor.sign_typed_data(
+            result = self.trezor.sign_message(
                 settings.derivation_path,
-                build_typed_data(intent),
+                build_intent_message(intent),
             )
         except SafeError as error:
             if error.code in {"device_rejected", "device_cancelled", "action_cancelled"}:

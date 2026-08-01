@@ -127,21 +127,23 @@ class TrezorMcpClientTests(TestCase):
         self.assertEqual(arguments["value"], "0")
         self.assertIs(arguments["broadcast"], False)
 
-    def test_typed_data_and_push_use_only_allowed_tool_shapes(self):
+    def test_message_and_push_use_only_allowed_tool_shapes(self):
         caller = RecordingCaller({"ok": True})
         client = TrezorMcpClient(caller)
 
-        client.sign_typed_data("m/44'/60'/0'/0/0", {"domain": {"chainId": 8453}})
+        client.sign_message("m/44'/60'/0'/0/0", "Sign402 purchase\nItem: 100")
         client.push_base_transaction("0x02aa")
 
         self.assertEqual(caller.calls, [
-            ("trezor_sign_typed_data", {
+            ("trezor_sign_message", {
+                "coin": "base",
                 "path": "m/44'/60'/0'/0/0",
-                "data": {"domain": {"chainId": 8453}},
+                "message": "Sign402 purchase\nItem: 100",
             }),
             ("trezor_push_transaction", {"coin": "base", "tx": "0x02aa"}),
         ])
         self.assertFalse(hasattr(client, "call"))
+        self.assertFalse(hasattr(client, "sign_typed_data"))
 
     def test_decoder_returns_mapping_structured_content(self):
         result = SimpleNamespace(isError=False, structuredContent={"address": "0x1"})
@@ -253,9 +255,16 @@ class TrezorMcpClientTests(TestCase):
         caller = McpToolCaller("canary-secret")
 
         self.assertEqual(caller._allowed_tools, ALLOWED_TOOLS)
-        self.assertNotIn("trezor_sign_message", caller._allowed_tools)
         with self.assertRaisesRegex(SafeError, "Trezor Suite is unavailable."):
-            caller("trezor_sign_message", {"coin": "base"})
+            caller("trezor_get_public_key", {"coin": "base"})
+
+    def test_typed_data_signing_is_not_reachable_from_the_service(self):
+        # Break caught: intents drift back to EIP-712, which a Safe 3 signs
+        # blind, so the buyer no longer sees what they are paying for.
+        self.assertNotIn("trezor_sign_typed_data", ALLOWED_TOOLS)
+        self.assertIn("trezor_sign_message", ALLOWED_TOOLS)
+        with self.assertRaisesRegex(SafeError, "Trezor Suite is unavailable."):
+            McpToolCaller("canary-secret")("trezor_sign_typed_data", {})
 
     def test_caller_override_admits_only_its_own_tools(self):
         # Break caught: a narrow override silently keeps the default set too.

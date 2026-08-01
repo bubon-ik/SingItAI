@@ -3,10 +3,10 @@ from math import inf, nan
 from unittest import TestCase
 
 from eth_account import Account
-from eth_account.messages import encode_typed_data
+from eth_account.messages import encode_defunct
 
 from trezor_sidecar.intent import (
-    build_typed_data,
+    build_intent_message,
     recipient_hash,
     recover_intent_signer,
 )
@@ -35,33 +35,30 @@ class PurchaseIntentTests(TestCase):
         values.update(changes)
         return PurchaseIntent(**values)
 
-    def test_typed_data_is_bound_to_base_and_exact_purchase(self):
-        typed = build_typed_data(self.make_intent())
+    def test_message_shows_the_purchase_in_readable_lines(self):
+        # Break caught: intents drift back to a format a Safe 3 signs blind,
+        # so the buyer approves without seeing what they are paying for.
+        message = build_intent_message(self.make_intent())
+        lines = message.splitlines()
 
-        self.assertEqual(
-            typed["domain"],
-            {"name": "SingIt Trezor Purchase", "version": "1", "chainId": 8453},
-        )
-        self.assertEqual(typed["primaryType"], "PurchaseIntent")
-        self.assertEqual(
-            typed["types"]["PurchaseIntent"],
-            [
-                {"name": "intentId", "type": "bytes32"},
-                {"name": "productSlug", "type": "string"},
-                {"name": "packageId", "type": "string"},
-                {"name": "denomination", "type": "string"},
-                {"name": "quotedTotalUsdMicros", "type": "uint256"},
-                {"name": "maxPaymentUsdcAtomic", "type": "uint256"},
-                {"name": "paymentAsset", "type": "string"},
-                {"name": "paymentNetwork", "type": "string"},
-                {"name": "recipientHash", "type": "bytes32"},
-                {"name": "expiresAt", "type": "uint64"},
-            ],
-        )
-        self.assertEqual(typed["message"]["paymentAsset"], "USDC")
-        self.assertEqual(typed["message"]["paymentNetwork"], "Base Mainnet")
-        self.assertEqual(typed["message"]["quotedTotalUsdMicros"], 27_000_000)
-        self.assertEqual(typed["message"]["maxPaymentUsdcAtomic"], 27_100_000)
+        self.assertEqual(lines[0], "Sign402 purchase")
+        self.assertEqual(lines[1], "Product: amazon-de")
+        self.assertEqual(lines[2], "Item: 25 EUR")
+        self.assertEqual(lines[3], "Price: 27.000000 USD")
+        self.assertEqual(lines[4], "Max pay: 27.100000 USDC")
+        self.assertEqual(lines[5], "Asset: USDC on Base Mainnet")
+        # The readable lines come first: the device is paged a few lines at a
+        # time, so hashes must not push the amounts off the first screens.
+        self.assertTrue(all("0x" not in line for line in lines[:6]))
+        self.assertIn("Intent: 0x" + "11" * 32, lines)
+        self.assertIn("Expires: 1800000000", lines)
+
+    def test_message_is_plain_ascii_the_device_can_render(self):
+        # Break caught: a non-ASCII field turns the screen into mojibake.
+        message = build_intent_message(self.make_intent())
+
+        self.assertTrue(message.isascii())
+        self.assertNotIn("\t", message)
 
     def test_recipient_hash_is_order_independent_and_does_not_return_values(self):
         left = recipient_hash({"email": "buyer@example.com", "country": "DE"})
@@ -75,19 +72,37 @@ class PurchaseIntentTests(TestCase):
         account = Account.create()
         intent = self.make_intent()
         signature = account.sign_message(
-            encode_typed_data(full_message=build_typed_data(intent))
+            encode_defunct(text=build_intent_message(intent))
         ).signature.hex()
 
         self.assertEqual(recover_intent_signer(intent, signature), account.address)
 
-    def test_typed_data_callers_cannot_mutate_a_later_signature_contract(self):
-        first = build_typed_data(self.make_intent())
-        first["domain"]["chainId"] = 1
-        first["types"]["PurchaseIntent"][0]["type"] = "string"
+    def test_every_field_change_invalidates_the_signature(self):
+        # Break caught: a field the buyer read on screen is not actually bound
+        # by the signature, so it can be swapped after approval.
+        account = Account.create()
+        intent = self.make_intent()
+        signature = account.sign_message(
+            encode_defunct(text=build_intent_message(intent))
+        ).signature.hex()
 
-        later = build_typed_data(self.make_intent())
-        self.assertEqual(later["domain"]["chainId"], 8453)
-        self.assertEqual(later["types"]["PurchaseIntent"][0]["type"], "bytes32")
+        changes = (
+            {"product_slug": "amazon-us"},
+            {"denomination": "50 EUR"},
+            {"quoted_total_usd_micros": 27_000_001},
+            {"max_payment_usdc_atomic": 27_100_001},
+            {"package_id": "50"},
+            {"recipient_hash": "0x" + "33" * 32},
+            {"intent_id": "0x" + "44" * 32},
+            {"expires_at": 1_800_000_001},
+        )
+        for change in changes:
+            with self.subTest(change=change):
+                tampered = self.make_intent(**change)
+                self.assertNotEqual(
+                    recover_intent_signer(tampered, signature),
+                    account.address,
+                )
 
     def test_rejects_invalid_bytes32_values(self):
         with self.assertRaisesRegex(ValueError, "intent_id"):

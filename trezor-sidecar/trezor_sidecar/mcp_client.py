@@ -12,7 +12,11 @@ _UNAVAILABLE_MESSAGE = "Trezor Suite is unavailable."
 
 ALLOWED_TOOLS = frozenset({
     "trezor_get_address",
-    "trezor_sign_typed_data",
+    # Purchase intents are signed as readable text, not EIP-712: a Safe 3
+    # renders a message but shows only the domain for typed data, so typed
+    # data cannot carry informed consent. trezor_sign_typed_data is therefore
+    # not reachable from this service at all.
+    "trezor_sign_message",
     "trezor_send_transaction",
     "trezor_push_transaction",
 })
@@ -174,10 +178,11 @@ class TrezorMcpClient:
             "showOnTrezor": True,
         })
 
-    def sign_typed_data(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
-        return self._invoke("trezor_sign_typed_data", {
+    def sign_message(self, path: str, message: str) -> dict[str, Any]:
+        return self._invoke("trezor_sign_message", {
+            "coin": "base",
             "path": path,
-            "data": data,
+            "message": message,
         })
 
     def sign_base_transaction(

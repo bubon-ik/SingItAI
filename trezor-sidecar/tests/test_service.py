@@ -11,7 +11,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from eth_account import Account
-from eth_account.messages import encode_typed_data
+from eth_account.messages import encode_defunct
 from eth_utils import keccak
 
 import trezor_sidecar.service as service_module
@@ -23,7 +23,7 @@ from trezor_sidecar.base import (
 )
 from trezor_sidecar.config import SidecarSettings
 from trezor_sidecar.errors import SafeError
-from trezor_sidecar.intent import build_typed_data
+from trezor_sidecar.intent import build_intent_message
 from trezor_sidecar.models import (
     Pairing,
     PaymentRequest,
@@ -68,8 +68,8 @@ class FakeTrezor:
             return self.address_result
         return {"address": self.address}
 
-    def sign_typed_data(self, path, data):
-        self.sign_calls.append((path, data))
+    def sign_message(self, path, message):
+        self.sign_calls.append((path, message))
         if self.sign_entered is not None:
             self.sign_entered.set()
         if self.release_sign is not None:
@@ -79,7 +79,7 @@ class FakeTrezor:
         if self.signature_result is not None:
             return self.signature_result
         signature = self.account.sign_message(
-            encode_typed_data(full_message=data)
+            encode_defunct(text=message)
         ).signature.hex()
         return {"signature": signature}
 
@@ -162,12 +162,12 @@ def approve_in_process(database, private_key, intent, counter, start, results):
     account = Account.from_key(private_key)
 
     class ProcessTrezor:
-        def sign_typed_data(self, path, data):
+        def sign_message(self, path, message):
             with counter.get_lock():
                 counter.value += 1
             time.sleep(0.2)
             return {"signature": account.sign_message(
-                encode_typed_data(full_message=data)
+                encode_defunct(text=message)
             ).signature.hex()}
 
     settings = SidecarSettings(
@@ -2016,10 +2016,11 @@ class TrezorSidecarServiceTests(TestCase):
         self.assertEqual(record.state, PaymentState.DEVICE_APPROVED)
         self.assertEqual(record.approved_at, 1_700_000_000)
         self.assertEqual(trezor.sign_calls[0][0], FIXED_PATH)
-        self.assertEqual(trezor.sign_calls[0][1], build_typed_data(intent))
-        self.assertEqual(trezor.sign_calls[0][1]["domain"]["chainId"], 8453)
-        self.assertEqual(trezor.sign_calls[0][1]["message"]["paymentAsset"], "USDC")
-        self.assertEqual(trezor.sign_calls[0][1]["message"]["paymentNetwork"], "Base Mainnet")
+        signed_text = trezor.sign_calls[0][1]
+        self.assertEqual(signed_text, build_intent_message(intent))
+        # The device is sent readable text, not a structure it would hide.
+        self.assertIn("Asset: USDC on Base Mainnet", signed_text)
+        self.assertIn(f"Max pay: {intent.max_payment_usdc_atomic / 10**6:.6f} USDC", signed_text)
 
     def test_missing_pair_expiry_cap_and_changed_replay_fail_before_signing(self):
         service, store, trezor = self.make_service(max_usd=Decimal("2.0000001"))
@@ -2122,7 +2123,7 @@ class TrezorSidecarServiceTests(TestCase):
             with self.subTest(nested=nested):
                 intent = self.valid_intent(intent_id="0x" + ("33" if nested else "44") * 32)
                 signature = account.sign_message(
-                    encode_typed_data(full_message=build_typed_data(intent))
+                    encode_defunct(text=build_intent_message(intent))
                 ).signature.hex()
                 trezor.signature_result = (
                     {"payload": {"signature": "0x" + signature}}
@@ -2153,7 +2154,7 @@ class TrezorSidecarServiceTests(TestCase):
         intent = self.valid_intent()
         other = Account.create()
         trezor.signature_result = {"signature": other.sign_message(
-            encode_typed_data(full_message=build_typed_data(intent))
+            encode_defunct(text=build_intent_message(intent))
         ).signature.hex()}
 
         with self.assertRaisesRegex(SafeError, "paired Trezor") as raised:
@@ -2203,7 +2204,7 @@ class TrezorSidecarServiceTests(TestCase):
         service.pair()
         intent = self.valid_intent()
         signature = trezor.account.sign_message(
-            encode_typed_data(full_message=build_typed_data(intent))
+            encode_defunct(text=build_intent_message(intent))
         ).signature.hex()
         trezor.signature_result = {
             "signature": signature,

@@ -5,36 +5,15 @@ from collections.abc import Mapping
 from typing import Any
 
 from eth_account import Account
-from eth_account.messages import encode_typed_data
+from eth_account.messages import encode_defunct
 
 from .models import PurchaseIntent
 
 
-_DOMAIN = {
-    "name": "SingIt Trezor Purchase",
-    "version": "1",
-    "chainId": 8453,
-}
-
-_TYPES = {
-    "EIP712Domain": [
-        {"name": "name", "type": "string"},
-        {"name": "version", "type": "string"},
-        {"name": "chainId", "type": "uint256"},
-    ],
-    "PurchaseIntent": [
-        {"name": "intentId", "type": "bytes32"},
-        {"name": "productSlug", "type": "string"},
-        {"name": "packageId", "type": "string"},
-        {"name": "denomination", "type": "string"},
-        {"name": "quotedTotalUsdMicros", "type": "uint256"},
-        {"name": "maxPaymentUsdcAtomic", "type": "uint256"},
-        {"name": "paymentAsset", "type": "string"},
-        {"name": "paymentNetwork", "type": "string"},
-        {"name": "recipientHash", "type": "bytes32"},
-        {"name": "expiresAt", "type": "uint64"},
-    ],
-}
+_MESSAGE_HEADER = "Sign402 purchase"
+# Both USD micros and USDC atomic units carry six decimals, so a fixed six
+# places is exact for either and never rounds a commitment away.
+_DECIMALS = 6
 
 
 def _canonical_recipient_value(value: Any, depth: int = 0) -> Any:
@@ -72,33 +51,46 @@ def recipient_hash(recipient: Mapping[str, Any]) -> str:
     return "0x" + hashlib.sha256(payload).hexdigest()
 
 
-def build_typed_data(intent: PurchaseIntent) -> dict[str, Any]:
+def _fixed(units: int) -> str:
+    if type(units) is not int or units < 0:
+        raise ValueError("amount must be a non-negative integer")
+    scale = 10**_DECIMALS
+    return f"{units // scale}.{units % scale:0{_DECIMALS}d}"
+
+
+def build_intent_message(intent: PurchaseIntent) -> str:
+    """Build the exact text the buyer approves on the Trezor screen.
+
+    A Safe 3 signing EIP-712 through Trezor Suite MCP shows only the domain
+    and the account, so the buyer cannot see what they are paying for. A
+    plain message renders its text, so the commitment is carried as readable
+    lines instead.
+
+    The human-meaningful lines come first, before the hashes, because the
+    device is paged through a few lines at a time. The text is canonical:
+    verification rebuilds it byte for byte, so changing any field invalidates
+    the signature.
+    """
     if not isinstance(intent, PurchaseIntent):
         raise ValueError("intent must be a PurchaseIntent")
-    return {
-        "types": {
-            type_name: [dict(field) for field in type_fields]
-            for type_name, type_fields in _TYPES.items()
-        },
-        "primaryType": "PurchaseIntent",
-        "domain": dict(_DOMAIN),
-        "message": {
-            "intentId": intent.intent_id,
-            "productSlug": intent.product_slug,
-            "packageId": intent.package_id,
-            "denomination": intent.denomination,
-            "quotedTotalUsdMicros": intent.quoted_total_usd_micros,
-            "maxPaymentUsdcAtomic": intent.max_payment_usdc_atomic,
-            "paymentAsset": intent.payment_asset,
-            "paymentNetwork": intent.payment_network,
-            "recipientHash": intent.recipient_hash,
-            "expiresAt": intent.expires_at,
-        },
-    }
+    return "\n".join(
+        (
+            _MESSAGE_HEADER,
+            f"Product: {intent.product_slug}",
+            f"Item: {intent.denomination}",
+            f"Price: {_fixed(intent.quoted_total_usd_micros)} USD",
+            f"Max pay: {_fixed(intent.max_payment_usdc_atomic)} USDC",
+            f"Asset: {intent.payment_asset} on {intent.payment_network}",
+            f"Package: {intent.package_id}",
+            f"Recipient: {intent.recipient_hash}",
+            f"Intent: {intent.intent_id}",
+            f"Expires: {intent.expires_at}",
+        )
+    )
 
 
 def recover_intent_signer(intent: PurchaseIntent, signature: str) -> str:
     if not isinstance(signature, str) or not signature:
         raise ValueError("signature must be a non-empty string")
-    signable_message = encode_typed_data(full_message=build_typed_data(intent))
+    signable_message = encode_defunct(text=build_intent_message(intent))
     return Account.recover_message(signable_message, signature=signature)
