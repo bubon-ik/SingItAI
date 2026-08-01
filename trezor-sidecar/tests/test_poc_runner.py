@@ -115,6 +115,19 @@ class FakeStore:
             (invoice_id, product_slug, str(amount), payment_method, timestamp)
         )
 
+    def get_unresolved_payment(self):
+        if self.payment is None or self.payment.state in {
+            PaymentState.CANCELLED,
+            PaymentState.FAILED,
+        }:
+            return None
+        if (
+            self.payment.state is PaymentState.COMPLETE
+            and any(record[0] == self.payment.invoice_id for record in self.records)
+        ):
+            return None
+        return self.payment
+
 
 class FakeSidecar:
     def __init__(self, events=None, *, approved=True, store=None, tx_hash=TX_HASH):
@@ -521,6 +534,140 @@ class SidecarClientTests(TestCase):
             )
         self.assertEqual([call[0] for call in requester.calls].count("POST"), 1)
 
+    def test_default_poll_window_covers_long_worker_without_real_sleep(self):
+        requester = QueueRequester(
+            [response(202, payment_payload("INVOICE_CREATED"))]
+            + [response(200, payment_payload("TX_SIGNED")) for _ in range(119)]
+            + [response(200, payment_payload("TX_BROADCAST", tx_hash=TX_HASH))]
+        )
+        sleeps = []
+        client = SidecarClient(
+            token="token",
+            requester=requester,
+            clock=lambda: NOW,
+            sleeper=sleeps.append,
+        )
+
+        result = client.pay_invoice(
+            INTENT_ID,
+            "invoice-1",
+            PAY_TO,
+            1_000_000,
+            NOW + 300,
+            "bitrefill-pay:invoice-1",
+        )
+
+        self.assertEqual(result["payment"]["state"], "TX_BROADCAST")
+        self.assertEqual([call[0] for call in requester.calls].count("POST"), 1)
+        self.assertEqual([call[0] for call in requester.calls].count("GET"), 120)
+        self.assertEqual(sleeps, [5.0] * 119)
+
+    def test_poll_retries_only_transport_unavailability_without_resubmitting_post(self):
+        class TransportQueue(QueueRequester):
+            def __call__(self, method, path, headers, body):
+                self.calls.append((method, path, dict(headers), body))
+                value = self.responses.pop(0)
+                if isinstance(value, BaseException):
+                    raise value
+                return value
+
+        requester = TransportQueue([
+            response(202, payment_payload("INVOICE_CREATED")),
+            TimeoutError("transport canary"),
+            response(200, payment_payload("TX_BROADCAST", tx_hash=TX_HASH)),
+        ])
+        client = SidecarClient(
+            token="token",
+            requester=requester,
+            clock=lambda: NOW,
+            sleeper=lambda _: None,
+            poll_attempts=2,
+            poll_interval_seconds=0,
+        )
+
+        result = client.pay_invoice(
+            INTENT_ID,
+            "invoice-1",
+            PAY_TO,
+            1_000_000,
+            NOW + 300,
+            "bitrefill-pay:invoice-1",
+        )
+
+        self.assertEqual(result["payment"]["state"], "TX_BROADCAST")
+        self.assertEqual([call[0] for call in requester.calls], ["POST", "GET", "GET"])
+
+    def test_lost_payment_post_response_is_labelled_recovery_required(self):
+        class FailingPost:
+            def __init__(self):
+                self.calls = []
+
+            def __call__(self, method, path, headers, body):
+                self.calls.append((method, path, dict(headers), body))
+                raise TimeoutError("ambiguous post canary")
+
+        requester = FailingPost()
+        client = SidecarClient(token="token", requester=requester, clock=lambda: NOW)
+
+        with self.assertRaises(SafeError) as raised:
+            client.pay_invoice(
+                INTENT_ID,
+                "invoice-1",
+                PAY_TO,
+                1_000_000,
+                NOW + 300,
+                "bitrefill-pay:invoice-1",
+            )
+
+        self.assertEqual(raised.exception.code, "payment_recovery_required")
+        self.assertIn("do not retry", raised.exception.message)
+        self.assertNotIn("canary", str(raised.exception))
+        self.assertEqual([call[0] for call in requester.calls], ["POST"])
+
+    def test_poll_does_not_retry_invalid_response_as_transport_unavailability(self):
+        requester = QueueRequester([
+            response(202, payment_payload("INVOICE_CREATED")),
+            FakeHttpResponse(200, b'[]'),
+            response(200, payment_payload("TX_BROADCAST", tx_hash=TX_HASH)),
+        ])
+        client = SidecarClient(
+            token="token",
+            requester=requester,
+            clock=lambda: NOW,
+            sleeper=lambda _: None,
+            poll_attempts=2,
+            poll_interval_seconds=0,
+        )
+
+        with self.assertRaises(SafeError) as raised:
+            client.pay_invoice(
+                INTENT_ID,
+                "invoice-1",
+                PAY_TO,
+                1_000_000,
+                NOW + 300,
+                "bitrefill-pay:invoice-1",
+            )
+
+        self.assertEqual(raised.exception.code, "sidecar_invalid_response")
+        self.assertEqual([call[0] for call in requester.calls], ["POST", "GET"])
+
+    def test_zero_destination_is_rejected_before_sidecar_post(self):
+        requester = QueueRequester([])
+        client = SidecarClient(token="token", requester=requester, clock=lambda: NOW)
+
+        with self.assertRaisesRegex(SafeError, "invalid"):
+            client.pay_invoice(
+                INTENT_ID,
+                "invoice-1",
+                "0x" + "00" * 20,
+                1_000_000,
+                NOW + 300,
+                "bitrefill-pay:invoice-1",
+            )
+
+        self.assertEqual(requester.calls, [])
+
 
 class PreparedAddressBridgeTests(TestCase):
     def make_client(self, *, call_tool=lambda *_args, **_kwargs: {}):
@@ -575,7 +722,7 @@ class PreparedAddressBridgeTests(TestCase):
             fallback=fallback,
         )
         self.assertEqual(snapshot["paymentAddress"], PAY_TO)
-        for invalid in ("", "0x1234", "x" * 43):
+        for invalid in ("", "0x1234", "x" * 43, "0x" + "00" * 20):
             with self.subTest(invalid=invalid):
                 with self.assertRaisesRegex(ValueError, "payment address"):
                     client._validated_invoice_snapshot(
@@ -819,6 +966,7 @@ class TrezorPocRunnerTests(TestCase):
         for prepared in (
             valid_prepared(paymentAmount="2.01"),
             valid_prepared(expiresAtEpoch=NOW),
+            valid_prepared(paymentAddress="0x" + "00" * 20),
         ):
             runner, bitrefill, sidecar, store, _ = self.make_runner(prepared=prepared)
             with self.subTest(prepared=prepared), self.assertRaises(SafeError):
@@ -831,6 +979,86 @@ class TrezorPocRunnerTests(TestCase):
             self.assertEqual(bitrefill.complete_calls, [])
             self.assertEqual(sidecar.pay_calls, [])
             self.assertEqual(store.records, [])
+
+    def test_unresolved_worker_timeout_blocks_fresh_runner_before_any_new_action(self):
+        events = []
+        store = FakeStore()
+
+        class TimeoutSidecar(FakeSidecar):
+            def pay_invoice(
+                self,
+                intent_id,
+                invoice_id,
+                pay_to,
+                amount_atomic,
+                expires_at,
+                idempotency_key,
+            ):
+                self.events.append("sidecar-pay")
+                self.pay_calls.append({"invoice_id": invoice_id})
+                store.payment = PaymentView(
+                    payment_id="payment-unresolved",
+                    intent_id=intent_id,
+                    invoice_id=invoice_id,
+                    state=PaymentState.INVOICE_CREATED,
+                    created_at=NOW,
+                    updated_at=NOW,
+                )
+                raise SafeError(
+                    "payment_recovery_required",
+                    "An earlier payment may still be running; do not retry purchase.",
+                    409,
+                )
+
+        first_sidecar = TimeoutSidecar(events, store=store)
+        first_bitrefill = FakeBitrefill(events)
+        first = TrezorPocRunner(
+            bitrefill=first_bitrefill,
+            sidecar=first_sidecar,
+            max_usd="2.00",
+            summary_sink=lambda _summary: events.append("display-summary"),
+            _test_store=store,
+            clock=lambda: NOW,
+        )
+        with self.assertRaises(SafeError) as first_error:
+            first.buy(
+                quote=valid_quote(),
+                recipient={"email": "buyer@example.com"},
+                buyer_email="buyer@example.com",
+                now=NOW,
+            )
+        self.assertEqual(first_error.exception.code, "payment_recovery_required")
+        self.assertIsNotNone(store.get_unresolved_payment())
+
+        events.clear()
+        fresh_sidecar = FakeSidecar(events, store=store)
+        fresh_bitrefill = FakeBitrefill(events)
+        fresh = TrezorPocRunner(
+            bitrefill=fresh_bitrefill,
+            sidecar=fresh_sidecar,
+            max_usd="2.00",
+            summary_sink=lambda _summary: events.append("display-summary"),
+            _test_store=store,
+            clock=lambda: NOW,
+        )
+
+        with self.assertRaises(SafeError) as blocked:
+            fresh.buy(
+                quote=valid_quote(),
+                recipient={"email": "buyer@example.com"},
+                buyer_email="buyer@example.com",
+                now=NOW,
+            )
+
+        self.assertEqual(blocked.exception.code, "payment_recovery_required")
+        self.assertEqual(
+            blocked.exception.message,
+            "An earlier payment is unresolved; do not retry purchase. Inspect the existing invoice and local state.",
+        )
+        self.assertEqual(events, [])
+        self.assertEqual(fresh_sidecar.approve_calls, [])
+        self.assertEqual(fresh_bitrefill.prepare_calls, [])
+        self.assertEqual(fresh_sidecar.pay_calls, [])
 
     def test_summary_contains_exact_receipt_facts_and_neutral_warning_before_approval(self):
         summaries = []

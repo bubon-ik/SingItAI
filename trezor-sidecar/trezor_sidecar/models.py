@@ -51,9 +51,12 @@ def _address(value: object, name: str) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{name} must be an EVM address")
     try:
-        return to_checksum_address(value)
+        normalized = to_checksum_address(value)
     except (TypeError, ValueError) as error:
         raise ValueError(f"{name} must be an EVM address") from error
+    if int(normalized[2:], 16) == 0:
+        raise ValueError(f"{name} must be a non-zero EVM address")
+    return normalized
 
 
 def _state(value: object, name: str = "state") -> PaymentState:

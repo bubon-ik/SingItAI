@@ -44,7 +44,10 @@ def _invalid_transaction() -> SafeError:
 def _address_bytes(value: Any) -> bytes:
     if not isinstance(value, str) or _HEX_ADDRESS.fullmatch(value) is None:
         raise ValueError("Invalid EVM address.")
-    return bytes.fromhex(value[2:])
+    decoded = bytes.fromhex(value[2:])
+    if decoded == b"\x00" * 20:
+        raise ValueError("Invalid EVM address.")
+    return decoded
 
 
 def _uint256(value: Any) -> int:

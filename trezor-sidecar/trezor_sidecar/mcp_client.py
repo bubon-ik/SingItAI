@@ -93,7 +93,9 @@ class McpToolCaller:
 
         headers = {"Authorization": f"Bearer {self._token}"}
         async with httpx.AsyncClient(
-            headers=headers, timeout=self.timeout_seconds
+            headers=headers,
+            timeout=self.timeout_seconds,
+            trust_env=False,
         ) as http_client:
             async with streamable_http_client(
                 _MCP_URL, http_client=http_client

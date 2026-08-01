@@ -107,6 +107,8 @@ class SidecarStore:
             raise ValueError("state database must be owned by the current user")
         if stat.S_IMODE(info.st_mode) != 0o600:
             raise ValueError("state database must have mode 0600")
+        if info.st_nlink != 1:
+            raise ValueError("state database must not have a hard link")
 
     def _state_directory_fd(self) -> int:
         """Open the final state directory without traversing a symlink.
@@ -602,6 +604,36 @@ class SidecarStore:
         connection = self._connect()
         try:
             row = connection.execute("SELECT * FROM payments WHERE payment_id = ?", (payment_id,)).fetchone()
+        finally:
+            connection.close()
+        return None if row is None else self._payment(row)
+
+    def get_unresolved_payment(self) -> PaymentView | None:
+        """Return one payment that is unsafe to replace with a new purchase.
+
+        A completed payment is finalized only after its minimal purchase-log
+        record exists. Cancellation and a persisted pre-broadcast failure are
+        the only states safe to leave behind before starting a new purchase.
+        """
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """SELECT payments.* FROM payments
+                LEFT JOIN purchase_log
+                  ON purchase_log.invoice_id = payments.invoice_id
+                WHERE payments.state NOT IN (?, ?)
+                  AND NOT (
+                    payments.state = ?
+                    AND purchase_log.invoice_id IS NOT NULL
+                  )
+                ORDER BY payments.created_at, payments.payment_id
+                LIMIT 1""",
+                (
+                    PaymentState.CANCELLED.value,
+                    PaymentState.FAILED.value,
+                    PaymentState.COMPLETE.value,
+                ),
+            ).fetchone()
         finally:
             connection.close()
         return None if row is None else self._payment(row)

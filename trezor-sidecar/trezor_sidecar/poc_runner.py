@@ -80,7 +80,12 @@ def _atomic(value: Decimal, name: str) -> int:
 
 
 def _payment_address(value: Any) -> str:
-    if not isinstance(value, str) or len(value) != 42 or _ADDRESS.fullmatch(value) is None:
+    if (
+        not isinstance(value, str)
+        or len(value) != 42
+        or _ADDRESS.fullmatch(value) is None
+        or int(value[2:], 16) == 0
+    ):
         raise ValueError("Bitrefill payment address is invalid")
     return value
 
@@ -465,6 +470,23 @@ class TrezorPocRunner:
             self._store_override = SidecarStore(_PROOF_STATE_PATH)
         return self._store_override
 
+    def _require_no_unresolved_payment(self) -> None:
+        try:
+            unresolved = self._store().get_unresolved_payment()
+        except Exception:
+            raise _safe(
+                "payment_state_unavailable",
+                "Existing payment state could not be checked safely.",
+                503,
+            ) from None
+        if unresolved is not None:
+            raise _safe(
+                "payment_recovery_required",
+                "An earlier payment is unresolved; do not retry purchase. "
+                "Inspect the existing invoice and local state.",
+                409,
+            )
+
     def quote(
         self,
         *,
@@ -596,6 +618,7 @@ class TrezorPocRunner:
         buyer_email: str = "",
         now: int | None = None,
     ) -> dict[str, Any]:
+        self._require_no_unresolved_payment()
         snapshot = _approved_purchase_snapshot(quote, recipient, buyer_email)
         started_at = self._now() if now is None else _timestamp(now)
         intent = self._intent_from_snapshot(snapshot, started_at)

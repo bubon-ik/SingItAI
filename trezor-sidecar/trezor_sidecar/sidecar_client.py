@@ -142,6 +142,20 @@ def _amount_atomic(value: Any) -> int:
     return numeric
 
 
+def _payment_address(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or _ADDRESS.fullmatch(value) is None
+        or int(value[2:], 16) == 0
+    ):
+        raise SafeError("invalid_request", "Payment request is invalid.")
+    return value
+
+
+def _payment_recovery_required(message: str) -> SafeError:
+    return SafeError("payment_recovery_required", message, 409)
+
+
 class SidecarClient:
     """Authenticated client fixed to ``127.0.0.1:8111``.
 
@@ -157,8 +171,8 @@ class SidecarClient:
         requester: Callable[[str, str, dict[str, str], bytes | None], Any] | None = None,
         clock: Callable[[], int | float] = time.time,
         sleeper: Callable[[float], None] = time.sleep,
-        poll_attempts: int = 20,
-        poll_interval_seconds: float = 0.25,
+        poll_attempts: int = 120,
+        poll_interval_seconds: float = 5.0,
     ):
         if (
             not isinstance(token, str)
@@ -483,19 +497,28 @@ class SidecarClient:
         idempotency_key: str,
     ) -> dict[str, Any]:
         canonical_amount = _amount_atomic(amount_atomic)
-        result = self._request(
-            "POST",
-            "/v1/payments",
-            idempotency_key=idempotency_key,
-            payload={
-                "intentId": intent_id,
-                "invoiceId": invoice_id,
-                "payTo": pay_to,
-                "amountAtomic": canonical_amount,
-                "expiresAt": expires_at,
-            },
-            expected_status=202,
-        )
+        canonical_pay_to = _payment_address(pay_to)
+        try:
+            result = self._request(
+                "POST",
+                "/v1/payments",
+                idempotency_key=idempotency_key,
+                payload={
+                    "intentId": intent_id,
+                    "invoiceId": invoice_id,
+                    "payTo": canonical_pay_to,
+                    "amountAtomic": canonical_amount,
+                    "expiresAt": expires_at,
+                },
+                expected_status=202,
+            )
+        except SafeError as error:
+            if error.code in {"sidecar_unavailable", "sidecar_invalid_response"}:
+                raise _payment_recovery_required(
+                    "Payment submission outcome is unresolved; do not retry purchase. "
+                    "Inspect the existing invoice and local state."
+                ) from None
+            raise
         result = self._payment_response(result, intent_id=intent_id, invoice_id=invoice_id)
         payment_id = result["payment"]["paymentId"]
         state = result["payment"]["state"]
@@ -504,13 +527,20 @@ class SidecarClient:
         if state in _TERMINAL_FAILURES:
             self._raise_terminal(state)
         for attempt in range(self._poll_attempts):
-            polled = self._request(
-                "GET",
-                "/v1/payments/" + payment_id,
-                idempotency_key=idempotency_key,
-                payload=None,
-                expected_status=200,
-            )
+            try:
+                polled = self._request(
+                    "GET",
+                    "/v1/payments/" + payment_id,
+                    idempotency_key=idempotency_key,
+                    payload=None,
+                    expected_status=200,
+                )
+            except SafeError as error:
+                if error.code != "sidecar_unavailable":
+                    raise
+                if attempt < self._poll_attempts - 1 and self._poll_interval_seconds:
+                    self._sleeper(self._poll_interval_seconds)
+                continue
             polled = self._payment_response(
                 polled,
                 intent_id=intent_id,
@@ -524,7 +554,10 @@ class SidecarClient:
                 self._raise_terminal(state)
             if attempt < self._poll_attempts - 1 and self._poll_interval_seconds:
                 self._sleeper(self._poll_interval_seconds)
-        raise SafeError("payment_timeout", "Trezor payment polling timed out.", 504)
+        raise _payment_recovery_required(
+            "Trezor payment polling timed out and payment status is unresolved; "
+            "do not retry purchase. Inspect the existing invoice and local state."
+        )
 
     @staticmethod
     def _raise_terminal(state: str) -> None:

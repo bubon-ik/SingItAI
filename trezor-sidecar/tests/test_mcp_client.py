@@ -220,6 +220,7 @@ class TrezorMcpClientTests(TestCase):
         self.assertEqual(
             transport.http_clients[0]["headers"], {"Authorization": "Bearer canary-secret"}
         )
+        self.assertIs(transport.http_clients[0]["trust_env"], False)
 
     def test_caller_skips_tool_call_when_no_discovery_page_has_required_tool(self):
         transport = FakeMcpTransport(

@@ -142,9 +142,13 @@ message conversation for this proof.
    `SIGN402_TREZOR_POC_ENABLED=0`, and retain only the non-secret purchase record
    (invoice ID, product slug, amount, `usdc_base`, and timestamp).
 
-Failures are fail-closed. If a broadcast outcome is reported as ambiguous or
-requiring reconciliation, do not retry the purchase or create another invoice;
-inspect the dedicated address and existing invoice manually first.
+Failures are fail-closed. After the command may have created an invoice or
+started a payment, **never rerun `buy` after any timeout, generic failure,
+ambiguous broadcast, or reconciliation warning**. A retry could create a
+second invoice. Inspect the existing invoice, the dedicated Base address, and
+`~/.sign402-trezor-poc/state.db` manually first. The runner also refuses to
+start another purchase while any durable payment is unresolved or a completed
+payment lacks its final non-secret purchase-log record.
 
 ## Automated verification
 

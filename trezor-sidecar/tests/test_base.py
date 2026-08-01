@@ -350,6 +350,7 @@ class BaseTransactionTests(TestCase):
     def test_calldata_rejects_invalid_types_addresses_and_uint256(self):
         for address, amount in (
             ("0x1234", AMOUNT),
+            ("0x" + "00" * 20, AMOUNT),
             (RECIPIENT, True),
             (RECIPIENT, -1),
             (RECIPIENT, 1 << 256),

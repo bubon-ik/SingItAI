@@ -168,6 +168,25 @@ class PurchaseIntentTests(TestCase):
                 expires_at=1_800_000_000,
             )
 
+    def test_zero_address_is_rejected_at_every_model_address_boundary(self):
+        zero = "0x" + "00" * 20
+        with self.assertRaisesRegex(ValueError, "pay_to"):
+            PaymentRequest(
+                intent_id="0x" + "11" * 32,
+                invoice_id="invoice-1",
+                pay_to=zero,
+                amount_atomic=1,
+                expires_at=1_800_000_000,
+            )
+        with self.assertRaisesRegex(ValueError, "address"):
+            Pairing(
+                pairing_id="pair-1",
+                address=zero,
+                derivation_path="m/44'/60'/0'/0/0",
+                created_at=1_700_000_000,
+                updated_at=1_700_000_000,
+            )
+
     def test_all_payment_states_and_records_are_available(self):
         intent = self.make_intent()
         record = IntentRecord(

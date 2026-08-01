@@ -925,7 +925,7 @@ class TrezorSidecarServiceTests(TestCase):
         completed = service.run_payment(nested_payment.payment_id, now=lambda: 1_700_000_001)
         self.assertEqual(completed.state, PaymentState.TX_BROADCAST)
 
-    def test_device_rejection_timeout_and_unexpected_signing_failure_are_safe_and_failed(self):
+    def test_device_rejection_is_cancelled_but_other_signing_failures_are_failed(self):
         service, store, trezor, _ = self.make_approved_payment_service()
         failures = (
             (
@@ -964,7 +964,12 @@ class TrezorSidecarServiceTests(TestCase):
             self.assertEqual(raised.exception.status, status)
             self.assertNotIn("canary", str(raised.exception))
             self.assertIsNone(raised.exception.__cause__)
-            self.assertEqual(store.get_payment(payment.payment_id).state, PaymentState.FAILED)
+            expected_state = (
+                PaymentState.CANCELLED
+                if code == "device_rejected"
+                else PaymentState.FAILED
+            )
+            self.assertEqual(store.get_payment(payment.payment_id).state, expected_state)
             self.assertEqual(len(trezor.sign_transaction_calls), before_signs + 1)
             self.assertEqual(len(trezor.push_transaction_calls), before_pushes)
 

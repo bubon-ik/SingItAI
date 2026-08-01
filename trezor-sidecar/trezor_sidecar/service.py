@@ -888,6 +888,56 @@ class TrezorSidecarService:
         self._fail_payment(payment_id, updated_at)
         raise error from None
 
+    def _raise_cancelled_payment(
+        self,
+        payment_id: str,
+        error: SafeError,
+        updated_at: int,
+    ) -> None:
+        """Persist the sole legal cancellation edge and preserve rejection."""
+        try:
+            current = self.store.get_payment(payment_id)
+        except Exception:
+            raise _safe(
+                "payment_state_unavailable",
+                "Payment cancellation state could not be recorded safely.",
+                503,
+            ) from None
+        if current is None:
+            raise _safe(
+                "payment_state_unavailable",
+                "Payment cancellation state could not be recorded safely.",
+                503,
+            )
+        if current.state is PaymentState.CANCELLED:
+            raise error from None
+        if current.state is not PaymentState.INVOICE_CREATED:
+            raise _safe(
+                "payment_state_changed",
+                "Payment state changed while recording cancellation.",
+                409,
+            )
+        try:
+            self.store.transition_payment(
+                payment_id=payment_id,
+                expected=PaymentState.INVOICE_CREATED,
+                target=PaymentState.CANCELLED,
+                updated_at=max(updated_at, current.updated_at),
+            )
+        except Exception:
+            try:
+                refreshed = self.store.get_payment(payment_id)
+            except Exception:
+                refreshed = None
+            if refreshed is not None and refreshed.state is PaymentState.CANCELLED:
+                raise error from None
+            raise _safe(
+                "payment_state_unavailable",
+                "Payment cancellation state could not be recorded safely.",
+                503,
+            ) from None
+        raise error from None
+
     @staticmethod
     def _reconciliation_error() -> SafeError:
         return _safe(
@@ -1092,6 +1142,12 @@ class TrezorSidecarService:
                     push_timestamp,
                 )
             except SafeError as error:
+                if error.code == "device_rejected":
+                    self._raise_cancelled_payment(
+                        payment.payment_id,
+                        error,
+                        updated_at,
+                    )
                 self._raise_pre_push_failure(
                     payment.payment_id,
                     error,

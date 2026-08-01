@@ -155,6 +155,61 @@ class SidecarStoreTests(TestCase):
         with sqlite3.connect(target) as connection:
             self.assertEqual(connection.execute("SELECT value FROM sentinel").fetchone()[0], "keep")
 
+    def test_rejects_hard_linked_database(self):
+        linked = Path(self.temporary.name) / "linked-state.db"
+        os.link(self.path, linked)
+
+        with self.assertRaisesRegex(ValueError, "hard link"):
+            SidecarStore(self.path)
+
+    def test_unresolved_payment_query_blocks_every_non_safe_terminal_state(self):
+        self.approve_intent()
+        payment = self.create_payment()
+        unresolved = (
+            PaymentState.INVOICE_CREATED,
+            PaymentState.TX_SIGNED,
+            PaymentState.TX_BROADCAST,
+            PaymentState.RECONCILIATION_REQUIRED,
+            PaymentState.COMPLETE,
+        )
+        connection = sqlite3.connect(self.path)
+        try:
+            for state in unresolved:
+                with self.subTest(state=state):
+                    connection.execute(
+                        "UPDATE payments SET state = ? WHERE payment_id = ?",
+                        (state.value, payment.payment_id),
+                    )
+                    connection.commit()
+                    found = self.store.get_unresolved_payment()
+                    self.assertIsNotNone(found)
+                    self.assertEqual(found.payment_id, payment.payment_id)
+                    self.assertEqual(found.state, state)
+            for state in (PaymentState.CANCELLED, PaymentState.FAILED):
+                with self.subTest(state=state):
+                    connection.execute(
+                        "UPDATE payments SET state = ? WHERE payment_id = ?",
+                        (state.value, payment.payment_id),
+                    )
+                    connection.commit()
+                    self.assertIsNone(self.store.get_unresolved_payment())
+            connection.execute(
+                "UPDATE payments SET state = ? WHERE payment_id = ?",
+                (PaymentState.COMPLETE.value, payment.payment_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        self.store.record_purchase(
+            payment.invoice_id,
+            self.intent.product_slug,
+            "1000000",
+            "usdc_base",
+            payment.updated_at,
+        )
+        self.assertIsNone(self.store.get_unresolved_payment())
+
     def test_sqlite_timestamp_range_is_signed_64_bit(self):
         # Break caught: values accepted by models overflow SQLite INTEGER bindings.
         maximum = (1 << 63) - 1
