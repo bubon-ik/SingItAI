@@ -25,6 +25,7 @@ from trezor_sidecar.config import SidecarSettings
 from trezor_sidecar.errors import SafeError
 from trezor_sidecar.intent import build_typed_data
 from trezor_sidecar.models import (
+    LOCAL_INTENT_TEST_ID,
     Pairing,
     PaymentRequest,
     PaymentState,
@@ -429,6 +430,30 @@ class TrezorSidecarServiceTests(TestCase):
         finally:
             connection.close()
         self.assertNotIn(trezor.push_transaction_calls[0], persisted)
+
+    def test_local_intent_test_receipt_can_never_create_a_spendable_payment(self):
+        service, store, trezor = self.make_service(rpc=FakeRpc())
+        service.pair()
+        service.approve_intent(
+            self.valid_intent(intent_id=LOCAL_INTENT_TEST_ID),
+            now=1_700_000_000,
+        )
+
+        with self.assertRaisesRegex(SafeError, "invalid") as raised:
+            service.create_payment(
+                self.valid_payment_request(intent_id=LOCAL_INTENT_TEST_ID),
+                idempotency_key="pay-local-test",
+                now=1_700_000_000,
+            )
+
+        self.assertEqual(raised.exception.code, "invalid_intent")
+        self.assertEqual(trezor.sign_transaction_calls, [])
+        self.assertEqual(trezor.push_transaction_calls, [])
+        connection = store._connect()
+        try:
+            self.assertEqual(connection.execute("SELECT count(*) FROM payments").fetchone()[0], 0)
+        finally:
+            connection.close()
 
     def test_payment_creation_validates_request_limits_expiry_and_replays_strictly(self):
         service, store, _, _ = self.make_approved_payment_service()

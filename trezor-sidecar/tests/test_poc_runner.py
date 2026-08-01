@@ -1,15 +1,19 @@
 import io
 import json
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from decimal import Decimal
 from email.message import Message
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
 from trezor_sidecar.base import BASE_USDC_ADDRESS
 from trezor_sidecar.errors import SafeError
-from trezor_sidecar.models import PaymentState, PaymentView, PurchaseIntent
+from trezor_sidecar.models import LOCAL_INTENT_TEST_ID, PaymentState, PaymentView, PurchaseIntent
 from trezor_sidecar.poc_runner import (
     PreparedAddressBitrefillClient,
     SidecarTreasuryClient,
@@ -18,6 +22,7 @@ from trezor_sidecar.poc_runner import (
     main,
 )
 from trezor_sidecar.sidecar_client import SidecarClient
+from trezor_sidecar.store import SidecarStore
 from sign402_gateway.bitrefill_mcp import McpBitrefillClient
 
 
@@ -270,6 +275,11 @@ class FakeHttpResponse:
         return None
 
 
+class FailingReadHttpResponse(FakeHttpResponse):
+    def read(self, amount=-1):
+        raise TimeoutError("response-secret-canary")
+
+
 class QueueRequester:
     def __init__(self, responses):
         self.responses = list(responses)
@@ -355,6 +365,50 @@ class SidecarClientTests(TestCase):
         with self.assertRaisesRegex(SafeError, "cancelled") as safe_error:
             SidecarClient(token="token", requester=QueueRequester([safe]), clock=lambda: NOW).approve_intent(valid_intent())
         self.assertNotIn("secret-canary", str(safe_error.exception))
+
+    def test_all_direct_server_boundary_errors_have_fixed_public_messages(self):
+        cases = {
+            "forbidden": "Loopback access is required.",
+            "internal_error": "Request failed safely.",
+            "invalid_json": "Request body must be one JSON object.",
+            "method_not_allowed": "Method not allowed.",
+            "not_found": "Route not found.",
+            "request_timeout": "Request timed out.",
+            "request_too_large": "Request body is too large.",
+            "stale_request": "Request timestamp is outside the allowed window.",
+            "unauthorized": "Authentication failed.",
+        }
+        for code, expected in cases.items():
+            with self.subTest(code=code):
+                requester = QueueRequester(
+                    [response(400, {"ok": False, "code": code, "message": "body-secret-canary"})]
+                )
+                with self.assertRaises(SafeError) as raised:
+                    SidecarClient(token="token", requester=requester, clock=lambda: NOW).approve_intent(valid_intent())
+                self.assertEqual(raised.exception.message, expected)
+                self.assertNotIn("body-secret-canary", str(raised.exception))
+
+    def test_response_read_exception_becomes_fixed_safe_error_without_cause(self):
+        client = SidecarClient(
+            token="token",
+            requester=QueueRequester([FailingReadHttpResponse(200)]),
+            clock=lambda: NOW,
+        )
+        with self.assertRaises(SafeError) as raised:
+            client.approve_intent(valid_intent())
+        self.assertEqual(raised.exception.code, "sidecar_unavailable")
+        self.assertNotIn("response-secret-canary", str(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+
+    def test_direct_digit_string_amount_is_canonicalized_to_json_integer(self):
+        requester = QueueRequester(
+            [response(202, payment_payload("TX_BROADCAST", tx_hash=TX_HASH))]
+        )
+        client = SidecarClient(token="token", requester=requester, clock=lambda: NOW)
+        client.pay_invoice(
+            INTENT_ID, "invoice-1", PAY_TO, "1000000", NOW + 300, "bitrefill-pay:invoice-1"
+        )
+        self.assertIs(type(json.loads(requester.calls[0][3])["amountAtomic"]), int)
 
     def test_payment_polls_boundedly_and_returns_only_exact_broadcast_receipt(self):
         requester = QueueRequester(
@@ -624,6 +678,50 @@ class TreasuryAdapterTests(TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(self.sidecar.pay_calls), 1)
 
+    def test_concurrent_exact_transfers_issue_exactly_one_sidecar_post(self):
+        with ThreadPoolExecutor(max_workers=8) as workers:
+            results = list(workers.map(lambda _index: self.transfer(), range(16)))
+
+        self.assertTrue(all(result == results[0] for result in results))
+        self.assertEqual(len(self.sidecar.pay_calls), 1)
+
+    def test_concurrent_exact_binding_is_idempotent_but_conflicts_fail(self):
+        treasury = SidecarTreasuryClient(sidecar=self.sidecar, clock=lambda: NOW)
+        treasury.register_approved_intent(valid_intent())
+        with ThreadPoolExecutor(max_workers=8) as workers:
+            list(workers.map(lambda _index: treasury.bind_prepared(INTENT_ID, valid_prepared()), range(16)))
+
+        with self.assertRaisesRegex(SafeError, "conflicts"):
+            treasury.bind_prepared(INTENT_ID, valid_prepared(paymentAddress=OTHER_PAY_TO))
+
+    def test_terminal_sidecar_error_is_replayed_without_second_payment(self):
+        expected = SafeError(
+            "reconciliation_required",
+            "Transaction reconciliation is required; payment was not resubmitted.",
+            409,
+        )
+
+        def fail(*_args, **_kwargs):
+            self.sidecar.pay_calls.append("invoked")
+            raise expected
+
+        self.sidecar.pay_invoice = fail
+        observed = []
+        for _index in range(2):
+            with self.assertRaises(SafeError) as raised:
+                self.transfer()
+            observed.append((raised.exception.code, raised.exception.message, raised.exception.status))
+
+        self.assertEqual(observed, [(expected.code, expected.message, expected.status)] * 2)
+        self.assertEqual(self.sidecar.pay_calls, ["invoked"])
+
+    def test_validation_error_is_not_terminally_cached(self):
+        with self.assertRaises(SafeError):
+            self.transfer(token_address=OTHER_PAY_TO)
+        result = self.transfer()
+        self.assertEqual(result["txId"], TX_HASH)
+        self.assertEqual(len(self.sidecar.pay_calls), 1)
+
     def test_bind_rejects_expired_or_above_intent_max_before_payment(self):
         for prepared in (
             valid_prepared(expiresAtEpoch=NOW),
@@ -660,7 +758,7 @@ class TrezorPocRunnerTests(TestCase):
             sidecar=sidecar,
             max_usd="2.00",
             summary_sink=lambda _summary: events.append("display-summary"),
-            store=store,
+            _test_store=store,
             clock=lambda: NOW,
         )
         return runner, bitrefill, sidecar, store, events
@@ -743,7 +841,7 @@ class TrezorPocRunnerTests(TestCase):
             sidecar=sidecar,
             max_usd="2.00",
             summary_sink=summaries.append,
-            store=store,
+            _test_store=store,
             clock=lambda: NOW,
         )
         with self.assertRaises(SafeError):
@@ -756,10 +854,84 @@ class TrezorPocRunnerTests(TestCase):
         rendered = summaries[0]
         for fact in (
             "Test Gift", "test-gift", "1 USD", "$1.00", "2.000000 USDC",
-            "Base Mainnet", "buyer@example.com", str(NOW + 600), "non-refundable",
+            "Base Mainnet", "buyer@example.com", str(NOW + 600), "Non-refundable once issued.",
         ):
             self.assertIn(fact, rendered)
         self.assertEqual(len(sidecar.approve_calls), 1)
+
+    def test_callbacks_cannot_mutate_the_approved_purchase_before_prepare(self):
+        quote = valid_quote()
+        recipient = {"email": "buyer@example.com"}
+        store = FakeStore()
+        bitrefill = FakeBitrefill()
+
+        def mutate_originals(_summary):
+            quote["productId"] = "attacker-product"
+            quote["name"] = "Attacker Product"
+            quote["packageValue"] = "999 USD"
+            quote["priceUsd"] = "999.00"
+            recipient["email"] = "attacker@example.com"
+
+        class MutatingSidecar(FakeSidecar):
+            def approve_intent(self, intent):
+                quote["packageId"] = "attacker-package"
+                recipient["email"] = "second-attacker@example.com"
+                return super().approve_intent(intent)
+
+        sidecar = MutatingSidecar(store=store)
+        runner = TrezorPocRunner(
+            bitrefill=bitrefill,
+            sidecar=sidecar,
+            max_usd="2.00",
+            summary_sink=mutate_originals,
+            _test_store=store,
+            clock=lambda: NOW,
+        )
+
+        runner.buy(
+            quote=quote,
+            recipient=recipient,
+            buyer_email="buyer@example.com",
+            now=NOW,
+        )
+
+        prepared_quote, prepared_recipient, prepared_buyer = bitrefill.prepare_calls[0]
+        self.assertEqual(prepared_quote, valid_quote())
+        self.assertEqual(prepared_recipient, {"email": "buyer@example.com"})
+        self.assertEqual(prepared_buyer, "buyer@example.com")
+        self.assertEqual(bitrefill.complete_calls[0][0], valid_quote())
+
+    def test_buyer_email_is_committed_and_reserved_recipient_key_is_rejected(self):
+        runner, bitrefill, sidecar, _store, _events = self.make_runner()
+        first = runner.build_intent(
+            valid_quote(), {"email": "buyer@example.com"}, NOW, buyer_email="buyer@example.com"
+        )
+        second = runner.build_intent(
+            valid_quote(), {"email": "buyer@example.com"}, NOW, buyer_email="other@example.com"
+        )
+        self.assertNotEqual(first.recipient_hash, second.recipient_hash)
+        with self.assertRaisesRegex(SafeError, "Recipient fields"):
+            runner.buy(
+                quote=valid_quote(requiredRecipientFields=["__sign402_buyer_email__"]),
+                recipient={"__sign402_buyer_email__": "collision"},
+                buyer_email="buyer@example.com",
+                now=NOW,
+            )
+        self.assertEqual(sidecar.approve_calls, [])
+        self.assertEqual(bitrefill.prepare_calls, [])
+
+    def test_public_store_override_rejects_nonfixed_sidecar_store(self):
+        with TemporaryDirectory() as temporary:
+            parent = Path(temporary) / "state"
+            parent.mkdir(mode=0o700)
+            store = SidecarStore(parent / "other.db")
+            with self.assertRaisesRegex(ValueError, "fixed proof state path"):
+                TrezorPocRunner(
+                    bitrefill=FakeBitrefill(),
+                    sidecar=FakeSidecar(),
+                    max_usd="2.00",
+                    store=store,
+                )
 
     def test_quote_is_read_only_and_intent_contains_only_recipient_hash(self):
         runner, bitrefill, sidecar, store, events = self.make_runner()
@@ -878,9 +1050,12 @@ class CliTests(TestCase):
             patch("trezor_sidecar.poc_runner.time.time", return_value=NOW),
             redirect_stdout(output),
         ):
-            status = main(["intent-test"], env=self.enabled_env())
+            environment = self.enabled_env()
+            environment.pop("BITREFILL_API_KEY")
+            status = main(["intent-test"], env=environment)
         self.assertEqual(status, 0)
         self.assertEqual(len(sidecar.approve_calls), 1)
+        self.assertEqual(sidecar.approve_calls[0].intent_id, LOCAL_INTENT_TEST_ID)
         self.assertNotIn("MCP", output.getvalue())
         self.assertNotIn("x402", output.getvalue().lower())
 
@@ -894,7 +1069,9 @@ class CliTests(TestCase):
             ),
             redirect_stdout(io.StringIO()),
         ):
-            status = main(["pair"], env=self.enabled_env())
+            environment = self.enabled_env()
+            environment.pop("BITREFILL_API_KEY")
+            status = main(["pair"], env=environment)
         self.assertEqual(status, 0)
         self.assertEqual(sidecar.pair_calls, 1)
 
@@ -932,5 +1109,10 @@ class CliTests(TestCase):
         self.assertIn("Test Gift", rendered)
         self.assertIn("Invoice: invoice-1", rendered)
         self.assertIn("REDEMPTION-CANARY", rendered)
+        self.assertGreater(
+            rendered.rindex("Non-refundable once issued."),
+            rendered.index("REDEMPTION-CANARY"),
+        )
+        self.assertIn("Keep redemption details safe.", rendered)
         self.assertNotIn("MCP", rendered)
         self.assertNotIn("x402", rendered.lower())

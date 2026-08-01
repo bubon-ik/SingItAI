@@ -43,6 +43,7 @@ _PUBLIC_MESSAGES = {
     "device_rejected": "Trezor operation was cancelled.",
     "device_timeout": "Trezor operation timed out.",
     "disabled": "Trezor proof mode is disabled.",
+    "forbidden": "Loopback access is required.",
     "insufficient_eth": "The paired Base account has insufficient ETH for gas.",
     "insufficient_usdc": "The paired Base account has insufficient USDC.",
     "intent_conflict": "Purchase intent conflicts with existing state.",
@@ -53,11 +54,15 @@ _PUBLIC_MESSAGES = {
     "invalid_clock": "The sidecar clock is invalid.",
     "invalid_configuration": "The sidecar configuration is invalid.",
     "invalid_intent": "Purchase intent is invalid.",
+    "invalid_json": "Request body must be one JSON object.",
     "invalid_request": "Request is invalid.",
     "invalid_signature": "Trezor returned an invalid approval signature.",
     "invalid_signed_transaction": "Trezor returned an invalid signed transaction.",
+    "internal_error": "Request failed safely.",
     "invoice_expired": "Payment invoice has expired.",
+    "method_not_allowed": "Method not allowed.",
     "not_paired": "A Trezor must be paired first.",
+    "not_found": "Route not found.",
     "pairing_failed": "Trezor pairing could not be saved.",
     "pairing_mismatch": "Trezor pairing does not match.",
     "payment_conflict": "Payment conflicts with existing state.",
@@ -69,8 +74,12 @@ _PUBLIC_MESSAGES = {
     "payment_state_unavailable": "Payment state could not be recorded safely.",
     "reapproval_required": "Purchase intent must be reapproved.",
     "reconciliation_required": "Transaction reconciliation is required.",
+    "request_timeout": "Request timed out.",
+    "request_too_large": "Request body is too large.",
     "signer_mismatch": "Purchase approval signer does not match.",
+    "stale_request": "Request timestamp is outside the allowed window.",
     "trezor_unavailable": "Trezor Suite is unavailable.",
+    "unauthorized": "Authentication failed.",
     "worker_unavailable": "Payment worker is unavailable.",
 }
 
@@ -119,6 +128,18 @@ def _positive_int(value: Any) -> int:
     if type(value) is not int or not 0 < value <= (1 << 63) - 1:
         raise ValueError("invalid integer")
     return value
+
+
+def _amount_atomic(value: Any) -> int:
+    if type(value) is int:
+        numeric = value
+    elif type(value) is str and value.isascii() and value.isdecimal():
+        numeric = int(value)
+    else:
+        raise SafeError("invalid_request", "Payment request is invalid.")
+    if not 0 < numeric <= (1 << 256) - 1:
+        raise SafeError("invalid_request", "Payment request is invalid.")
+    return numeric
 
 
 class SidecarClient:
@@ -324,6 +345,10 @@ class SidecarClient:
             raise _unavailable() from None
         try:
             status, decoded = self._read_response(response)
+        except SafeError:
+            raise
+        except Exception:
+            raise _unavailable() from None
         finally:
             try:
                 response.close()
@@ -457,6 +482,7 @@ class SidecarClient:
         expires_at: int,
         idempotency_key: str,
     ) -> dict[str, Any]:
+        canonical_amount = _amount_atomic(amount_atomic)
         result = self._request(
             "POST",
             "/v1/payments",
@@ -465,7 +491,7 @@ class SidecarClient:
                 "intentId": intent_id,
                 "invoiceId": invoice_id,
                 "payTo": pay_to,
-                "amountAtomic": amount_atomic,
+                "amountAtomic": canonical_amount,
                 "expiresAt": expires_at,
             },
             expected_status=202,

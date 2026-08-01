@@ -37,6 +37,7 @@ from .intent import build_typed_data, recover_intent_signer
 from .mcp_client import TrezorMcpClient
 from .models import (
     IntentRecord,
+    LOCAL_INTENT_TEST_ID,
     Pairing,
     PaymentRequest,
     PaymentState,
@@ -530,6 +531,8 @@ class TrezorSidecarService:
         now = self._validate_now(now)
         if type(request) is not PaymentRequest:
             raise _safe("invalid_request", "Payment request is invalid.")
+        if request.intent_id == LOCAL_INTENT_TEST_ID:
+            raise _safe("invalid_intent", "Purchase intent is invalid.")
         if (
             not isinstance(idempotency_key, str)
             or not idempotency_key
@@ -991,6 +994,8 @@ class TrezorSidecarService:
                     raise _invalid_clock()
                 updated_at = max(updated_at, timestamp)
                 request = self._payment_request(payment.payment_id)
+                if request.intent_id == LOCAL_INTENT_TEST_ID:
+                    raise _safe("invalid_intent", "Purchase intent is invalid.")
                 if (
                     request.intent_id != payment.intent_id
                     or request.invoice_id != payment.invoice_id

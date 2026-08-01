@@ -24,7 +24,7 @@ from .base import BASE_USDC_ADDRESS
 from .config import RunnerSettings
 from .errors import SafeError
 from .intent import recipient_hash
-from .models import PaymentState, PurchaseIntent
+from .models import LOCAL_INTENT_TEST_ID, PaymentState, PurchaseIntent
 from .sidecar_client import SidecarClient
 from .store import SidecarStore
 
@@ -35,6 +35,21 @@ _INTENT_TTL_SECONDS = 600
 _ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}\Z")
 _TX_HASH = re.compile(r"0x[0-9a-fA-F]{64}\Z")
 _INVOICE_ID = re.compile(r"[A-Za-z0-9._:-]{1,110}\Z")
+_BUYER_EMAIL_COMMITMENT_KEY = "__sign402_buyer_email__"
+_QUOTE_FIELDS = frozenset(
+    {
+        "productId",
+        "name",
+        "productType",
+        "packageId",
+        "packageValue",
+        "country",
+        "currency",
+        "priceUsd",
+        "recipientType",
+        "requiredRecipientFields",
+    }
+)
 
 
 def _safe(code: str, message: str, status: int = 400) -> SafeError:
@@ -68,6 +83,93 @@ def _payment_address(value: Any) -> str:
     if not isinstance(value, str) or len(value) != 42 or _ADDRESS.fullmatch(value) is None:
         raise ValueError("Bitrefill payment address is invalid")
     return value
+
+
+def _snapshot_text(value: Any, name: str, *, allow_empty: bool = False) -> str:
+    if (
+        type(value) is not str
+        or (not value and not allow_empty)
+        or len(value) > 512
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise _safe("invalid_request", f"{name} is invalid.")
+    return value
+
+
+@dataclass(frozen=True)
+class _ApprovedPurchase:
+    quote_items: tuple[tuple[str, str], ...]
+    required_recipient_fields: tuple[str, ...]
+    recipient_items: tuple[tuple[str, str], ...]
+    buyer_email: str
+
+    def quote_copy(self) -> dict[str, Any]:
+        result: dict[str, Any] = dict(self.quote_items)
+        result["requiredRecipientFields"] = list(self.required_recipient_fields)
+        return result
+
+    def recipient_copy(self) -> dict[str, str]:
+        return dict(self.recipient_items)
+
+    def committed_recipient_copy(self) -> dict[str, str]:
+        result = self.recipient_copy()
+        result[_BUYER_EMAIL_COMMITMENT_KEY] = self.buyer_email
+        return result
+
+
+def _approved_purchase_snapshot(
+    quote: Any,
+    recipient: Any,
+    buyer_email: Any,
+) -> _ApprovedPurchase:
+    try:
+        quote_copy = deepcopy(quote)
+        recipient_copy = deepcopy(recipient)
+        buyer_copy = deepcopy(buyer_email)
+    except Exception:
+        raise _safe("invalid_request", "Purchase details are invalid.") from None
+    if type(quote_copy) is not dict or set(quote_copy) != _QUOTE_FIELDS:
+        raise _safe("invalid_request", "Product quote is invalid.")
+    if type(recipient_copy) is not dict:
+        raise _safe("invalid_request", "Recipient fields are invalid.")
+    buyer = _snapshot_text(buyer_copy, "Buyer email", allow_empty=True)
+    required = quote_copy["requiredRecipientFields"]
+    if type(required) is not list or len(required) > 32:
+        raise _safe("invalid_request", "Recipient fields are invalid.")
+    required_fields = tuple(
+        _snapshot_text(field, "Recipient field") for field in required
+    )
+    if len(set(required_fields)) != len(required_fields):
+        raise _safe("invalid_request", "Recipient fields are invalid.")
+    if _BUYER_EMAIL_COMMITMENT_KEY in required_fields or _BUYER_EMAIL_COMMITMENT_KEY in recipient_copy:
+        raise _safe("invalid_request", "Recipient fields are invalid.")
+    if set(recipient_copy) != set(required_fields):
+        raise _safe("invalid_request", "Recipient fields are invalid.")
+    recipient_items = tuple(
+        sorted(
+            (
+                _snapshot_text(key, "Recipient field"),
+                _snapshot_text(value, "Recipient value"),
+            )
+            for key, value in recipient_copy.items()
+        )
+    )
+    quote_items = tuple(
+        sorted(
+            (
+                key,
+                _snapshot_text(value, "Product quote field"),
+            )
+            for key, value in quote_copy.items()
+            if key != "requiredRecipientFields"
+        )
+    )
+    return _ApprovedPurchase(
+        quote_items=quote_items,
+        required_recipient_fields=required_fields,
+        recipient_items=recipient_items,
+        buyer_email=buyer,
+    )
 
 
 class PreparedAddressBitrefillClient(McpBitrefillClient):
@@ -122,7 +224,8 @@ class SidecarTreasuryClient:
         self._bindings: dict[str, _PreparedBinding] = {}
         self._results: dict[str, dict[str, str]] = {}
         self._payment_receipts: dict[str, dict[str, Any]] = {}
-        self._lock = threading.Lock()
+        self._terminal_errors: dict[str, tuple[str, str, int]] = {}
+        self._lock = threading.RLock()
 
     def __repr__(self) -> str:
         return "SidecarTreasuryClient(sidecar='<redacted>')"
@@ -142,56 +245,58 @@ class SidecarTreasuryClient:
     def register_approved_intent(self, intent: PurchaseIntent) -> None:
         if type(intent) is not PurchaseIntent:
             raise _safe("invalid_intent", "Purchase intent is invalid.")
-        existing = self._approved.get(intent.intent_id)
-        if existing is not None and existing != intent:
-            raise _safe("intent_conflict", "Purchase intent conflicts with approved state.", 409)
-        self._approved[intent.intent_id] = intent
+        with self._lock:
+            existing = self._approved.get(intent.intent_id)
+            if existing is not None and existing != intent:
+                raise _safe("intent_conflict", "Purchase intent conflicts with approved state.", 409)
+            self._approved[intent.intent_id] = intent
 
     def bind_prepared(self, intent_id: str, prepared: Mapping[str, Any]) -> None:
         if not isinstance(prepared, Mapping):
             raise _safe("invoice_invalid", "Prepared invoice is invalid.")
-        intent = self._approved.get(intent_id)
-        if intent is None:
-            raise _safe("intent_not_approved", "Purchase intent is not approved.", 409)
-        now = self._now()
-        if intent.expires_at <= now:
-            raise _safe("intent_expired", "Purchase intent has expired.")
-        invoice_id = prepared.get("invoiceId")
-        if not isinstance(invoice_id, str) or _INVOICE_ID.fullmatch(invoice_id) is None:
-            raise _safe("invoice_invalid", "Prepared invoice ID is invalid.")
-        if str(prepared.get("productId", "")) != intent.product_slug:
-            raise _safe("invoice_invalid", "Prepared invoice product changed.")
-        if str(prepared.get("packageValue", "")) != intent.denomination:
-            raise _safe("invoice_invalid", "Prepared invoice denomination changed.")
-        if str(prepared.get("paymentMethod", "")).lower() != "usdc_base":
-            raise _safe("invoice_invalid", "Prepared invoice payment method changed.")
-        if str(prepared.get("paymentAsset", "")).upper() != "USDC":
-            raise _safe("invoice_invalid", "Prepared invoice asset is not USDC.")
-        if str(prepared.get("paymentNetwork", "")).lower() != "base":
-            raise _safe("invoice_invalid", "Prepared invoice network is not Base.")
-        try:
-            address = _payment_address(prepared.get("paymentAddress"))
-        except ValueError:
-            raise _safe("invoice_invalid", "Prepared invoice payment address is invalid.") from None
-        amount_atomic = _atomic(_decimal(prepared.get("paymentAmount"), "Invoice amount"), "Invoice amount")
-        if amount_atomic > intent.max_payment_usdc_atomic:
-            raise _safe("payment_limit_exceeded", "Invoice exceeds the approved maximum.")
-        expires_at = prepared.get("expiresAtEpoch")
-        if type(expires_at) is not int or not 0 < expires_at <= (1 << 63) - 1:
-            raise _safe("invoice_invalid", "Prepared invoice expiration is invalid.")
-        if expires_at <= now:
-            raise _safe("invoice_expired", "Prepared invoice has expired.")
-        binding = _PreparedBinding(
-            intent_id=intent_id,
-            invoice_id=invoice_id,
-            expires_at=expires_at,
-            payment_address=address,
-            amount_atomic=str(amount_atomic),
-        )
-        existing = self._bindings.get(invoice_id)
-        if existing is not None and existing != binding:
-            raise _safe("payment_conflict", "Prepared invoice conflicts with existing state.", 409)
-        self._bindings[invoice_id] = binding
+        with self._lock:
+            intent = self._approved.get(intent_id)
+            if intent is None:
+                raise _safe("intent_not_approved", "Purchase intent is not approved.", 409)
+            now = self._now()
+            if intent.expires_at <= now:
+                raise _safe("intent_expired", "Purchase intent has expired.")
+            invoice_id = prepared.get("invoiceId")
+            if not isinstance(invoice_id, str) or _INVOICE_ID.fullmatch(invoice_id) is None:
+                raise _safe("invoice_invalid", "Prepared invoice ID is invalid.")
+            if str(prepared.get("productId", "")) != intent.product_slug:
+                raise _safe("invoice_invalid", "Prepared invoice product changed.")
+            if str(prepared.get("packageValue", "")) != intent.denomination:
+                raise _safe("invoice_invalid", "Prepared invoice denomination changed.")
+            if str(prepared.get("paymentMethod", "")).lower() != "usdc_base":
+                raise _safe("invoice_invalid", "Prepared invoice payment method changed.")
+            if str(prepared.get("paymentAsset", "")).upper() != "USDC":
+                raise _safe("invoice_invalid", "Prepared invoice asset is not USDC.")
+            if str(prepared.get("paymentNetwork", "")).lower() != "base":
+                raise _safe("invoice_invalid", "Prepared invoice network is not Base.")
+            try:
+                address = _payment_address(prepared.get("paymentAddress"))
+            except ValueError:
+                raise _safe("invoice_invalid", "Prepared invoice payment address is invalid.") from None
+            amount_atomic = _atomic(_decimal(prepared.get("paymentAmount"), "Invoice amount"), "Invoice amount")
+            if amount_atomic > intent.max_payment_usdc_atomic:
+                raise _safe("payment_limit_exceeded", "Invoice exceeds the approved maximum.")
+            expires_at = prepared.get("expiresAtEpoch")
+            if type(expires_at) is not int or not 0 < expires_at <= (1 << 63) - 1:
+                raise _safe("invoice_invalid", "Prepared invoice expiration is invalid.")
+            if expires_at <= now:
+                raise _safe("invoice_expired", "Prepared invoice has expired.")
+            binding = _PreparedBinding(
+                intent_id=intent_id,
+                invoice_id=invoice_id,
+                expires_at=expires_at,
+                payment_address=address,
+                amount_atomic=str(amount_atomic),
+            )
+            existing = self._bindings.get(invoice_id)
+            if existing is not None and existing != binding:
+                raise _safe("payment_conflict", "Prepared invoice conflicts with existing state.", 409)
+            self._bindings[invoice_id] = binding
 
     def transfer_token_exact(
         self,
@@ -206,37 +311,49 @@ class SidecarTreasuryClient:
             if isinstance(idempotency_key, str) and idempotency_key.startswith("bitrefill-pay:")
             else ""
         )
-        binding = self._bindings.get(invoice_id)
-        if binding is None:
-            raise _safe("payment_conflict", "Payment is not bound to a prepared invoice.", 409)
-        if not isinstance(token_address, str) or token_address.casefold() != BASE_USDC_ADDRESS.casefold():
-            raise _safe("payment_conflict", "Payment token is not Base USDC.", 409)
-        if chain != "base":
-            raise _safe("payment_conflict", "Payment network is not Base.", 409)
-        if idempotency_key != f"bitrefill-pay:{binding.invoice_id}":
-            raise _safe("payment_conflict", "Payment idempotency key is invalid.", 409)
-        if not isinstance(to_address, str) or to_address.casefold() != binding.payment_address.casefold():
-            raise _safe("payment_conflict", "Payment address changed after invoice preparation.", 409)
-        if isinstance(amount_atomic, bool) or str(amount_atomic) != binding.amount_atomic:
-            raise _safe("payment_conflict", "Payment amount changed after invoice preparation.", 409)
-        now = self._now()
-        intent = self._approved.get(binding.intent_id)
-        if intent is None or intent.expires_at <= now:
-            raise _safe("intent_expired", "Purchase intent has expired.")
-        if binding.expires_at <= now:
-            raise _safe("invoice_expired", "Prepared invoice has expired.")
         with self._lock:
+            binding = self._bindings.get(invoice_id)
+            if binding is None:
+                raise _safe("payment_conflict", "Payment is not bound to a prepared invoice.", 409)
+            if not isinstance(token_address, str) or token_address.casefold() != BASE_USDC_ADDRESS.casefold():
+                raise _safe("payment_conflict", "Payment token is not Base USDC.", 409)
+            if chain != "base":
+                raise _safe("payment_conflict", "Payment network is not Base.", 409)
+            if idempotency_key != f"bitrefill-pay:{binding.invoice_id}":
+                raise _safe("payment_conflict", "Payment idempotency key is invalid.", 409)
+            if not isinstance(to_address, str) or to_address.casefold() != binding.payment_address.casefold():
+                raise _safe("payment_conflict", "Payment address changed after invoice preparation.", 409)
+            if isinstance(amount_atomic, bool) or str(amount_atomic) != binding.amount_atomic:
+                raise _safe("payment_conflict", "Payment amount changed after invoice preparation.", 409)
+            now = self._now()
+            intent = self._approved.get(binding.intent_id)
+            if intent is None or intent.expires_at <= now:
+                raise _safe("intent_expired", "Purchase intent has expired.")
+            if binding.expires_at <= now:
+                raise _safe("invoice_expired", "Prepared invoice has expired.")
             cached = self._results.get(invoice_id)
             if cached is not None:
                 return dict(cached)
-            sidecar_result = self._sidecar.pay_invoice(
-                binding.intent_id,
-                binding.invoice_id,
-                binding.payment_address,
-                int(binding.amount_atomic),
-                binding.expires_at,
-                idempotency_key,
-            )
+            terminal = self._terminal_errors.get(invoice_id)
+            if terminal is not None:
+                raise SafeError(*terminal)
+            try:
+                sidecar_result = self._sidecar.pay_invoice(
+                    binding.intent_id,
+                    binding.invoice_id,
+                    binding.payment_address,
+                    int(binding.amount_atomic),
+                    binding.expires_at,
+                    idempotency_key,
+                )
+            except SafeError as error:
+                terminal = (error.code, error.message, error.status)
+                self._terminal_errors[invoice_id] = terminal
+                raise SafeError(*terminal) from None
+            except Exception:
+                terminal = ("payment_failed", "Local payment did not complete safely.", 500)
+                self._terminal_errors[invoice_id] = terminal
+                raise SafeError(*terminal) from None
             payment = sidecar_result.get("payment") if isinstance(sidecar_result, dict) else None
             if (
                 not isinstance(payment, dict)
@@ -260,19 +377,27 @@ class SidecarTreasuryClient:
             return dict(result)
 
     def payment_receipt(self, invoice_id: str) -> dict[str, Any] | None:
-        value = self._payment_receipts.get(invoice_id)
-        return deepcopy(value) if value is not None else None
+        with self._lock:
+            value = self._payment_receipts.get(invoice_id)
+            return deepcopy(value) if value is not None else None
 
 
 def render_exact_summary(
     quote: Mapping[str, Any],
     recipient: Mapping[str, Any],
     intent: PurchaseIntent,
+    buyer_email: str = "",
 ) -> str:
-    quoted = _decimal(quote.get("priceUsd"), "Quoted total")
+    snapshot = _approved_purchase_snapshot(quote, recipient, buyer_email)
+    return _render_approved_summary(snapshot, intent)
+
+
+def _render_approved_summary(snapshot: _ApprovedPurchase, intent: PurchaseIntent) -> str:
+    quote = snapshot.quote_copy()
+    quoted = _decimal(quote["priceUsd"], "Quoted total")
     max_usdc = Decimal(intent.max_payment_usdc_atomic) / _USDC_ATOMIC
     recipient_lines = [
-        f"Recipient {field}: {recipient[field]}" for field in sorted(recipient)
+        f"Recipient {field}: {value}" for field, value in snapshot.recipient_items
     ] or ["Recipient: none"]
     return "\n".join(
         [
@@ -283,8 +408,9 @@ def render_exact_summary(
             f"Maximum payment: {format(max_usdc, '.6f')} USDC",
             "Payment method: USDC on Base Mainnet",
             *recipient_lines,
+            f"Buyer email: {snapshot.buyer_email}",
             f"Approval expires at epoch second: {intent.expires_at}",
-            "Digital purchases are generally non-refundable after payment.",
+            "Non-refundable once issued.",
             "Confirm these exact details on your Trezor to continue.",
         ]
     )
@@ -298,7 +424,8 @@ class TrezorPocRunner:
         sidecar: Any,
         max_usd: str | Decimal,
         summary_sink: Callable[[str], None] = print,
-        store: Any | None = None,
+        store: SidecarStore | None = None,
+        _test_store: Any | None = None,
         clock: Callable[[], int | float] = time.time,
         treasury: SidecarTreasuryClient | None = None,
     ):
@@ -310,7 +437,14 @@ class TrezorPocRunner:
         self.sidecar = sidecar
         self.max_usd = maximum
         self.summary_sink = summary_sink
-        self._store_override = store
+        if store is not None and _test_store is not None:
+            raise ValueError("runner store overrides conflict")
+        if store is not None and (
+            type(store) is not SidecarStore
+            or store.path != Path(os.path.abspath(os.fspath(_PROOF_STATE_PATH)))
+        ):
+            raise ValueError("runner store must use the fixed proof state path")
+        self._store_override = store if store is not None else _test_store
         self._clock = clock
         self.treasury = treasury or SidecarTreasuryClient(sidecar=sidecar, clock=clock)
         self.bitrefill.treasury_client = self.treasury
@@ -354,19 +488,26 @@ class TrezorPocRunner:
         quote: dict[str, Any],
         recipient: dict[str, Any],
         now: int,
+        *,
+        buyer_email: str = "",
     ) -> PurchaseIntent:
+        snapshot = _approved_purchase_snapshot(quote, recipient, buyer_email)
+        return self._intent_from_snapshot(snapshot, now)
+
+    def _intent_from_snapshot(self, snapshot: _ApprovedPurchase, now: int) -> PurchaseIntent:
         now = _timestamp(now)
-        quoted = _decimal(quote.get("priceUsd"), "Quoted total")
+        quote = snapshot.quote_copy()
+        quoted = _decimal(quote["priceUsd"], "Quoted total")
         if quoted > self.max_usd:
             raise _safe("intent_limit_exceeded", "Quoted total exceeds the proof maximum.")
         try:
-            committed_recipient_hash = recipient_hash(recipient)
+            committed_recipient_hash = recipient_hash(snapshot.committed_recipient_copy())
         except (TypeError, ValueError):
             raise _safe("invalid_request", "Recipient fields are invalid.") from None
         core = {
-            "productSlug": str(quote.get("productId") or ""),
-            "packageId": str(quote.get("packageId") or ""),
-            "denomination": str(quote.get("packageValue") or ""),
+            "productSlug": quote["productId"],
+            "packageId": quote["packageId"],
+            "denomination": quote["packageValue"],
             "quotedTotalUsdMicros": _atomic(quoted, "Quoted total"),
             "maxPaymentUsdcAtomic": _atomic(self.max_usd, "Maximum payment"),
             "recipientHash": committed_recipient_hash,
@@ -455,17 +596,20 @@ class TrezorPocRunner:
         buyer_email: str = "",
         now: int | None = None,
     ) -> dict[str, Any]:
+        snapshot = _approved_purchase_snapshot(quote, recipient, buyer_email)
         started_at = self._now() if now is None else _timestamp(now)
-        intent = self.build_intent(quote, recipient, started_at)
-        self.summary_sink(render_exact_summary(quote, recipient, intent))
+        intent = self._intent_from_snapshot(snapshot, started_at)
+        self.summary_sink(_render_approved_summary(snapshot, intent))
         approved = self.sidecar.approve_intent(intent)
         self._verify_approval(approved, intent)
+        if self._intent_from_snapshot(snapshot, started_at) != intent:
+            raise _safe("intent_conflict", "Purchase intent changed after approval.", 409)
         self.treasury.register_approved_intent(intent)
         try:
             prepared = self.bitrefill.prepare_purchase(
-                quote=quote,
-                recipient=dict(recipient),
-                buyer_email=buyer_email,
+                quote=snapshot.quote_copy(),
+                recipient=snapshot.recipient_copy(),
+                buyer_email=snapshot.buyer_email,
             )
         except SafeError:
             raise
@@ -474,7 +618,7 @@ class TrezorPocRunner:
         self.treasury.bind_prepared(intent.intent_id, prepared)
         try:
             result = self.bitrefill.complete_purchase(
-                quote=quote,
+                quote=snapshot.quote_copy(),
                 prepared=prepared,
                 checkpoint_callback=lambda _checkpoint: None,
                 invoice_access_token=str(prepared.get("invoiceAccessToken") or ""),
@@ -534,11 +678,8 @@ def _local_test_intent(now: int, max_usd: Decimal) -> PurchaseIntent:
         "recipient": recipient_hash,
         "expires": now + _INTENT_TTL_SECONDS,
     }
-    intent_id = "0x" + hashlib.sha256(
-        json.dumps(core, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
     return PurchaseIntent(
-        intent_id=intent_id,
+        intent_id=LOCAL_INTENT_TEST_ID,
         product_slug="local-intent-test",
         package_id="test-only",
         denomination="No purchase",
@@ -552,7 +693,10 @@ def _local_test_intent(now: int, max_usd: Decimal) -> PurchaseIntent:
 def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = None) -> int:
     arguments = build_parser().parse_args(list(argv) if argv is not None else None)
     try:
-        settings = RunnerSettings.from_env(os.environ if env is None else env)
+        environment = dict(os.environ if env is None else env)
+        if arguments.command != "buy":
+            environment.setdefault("BITREFILL_API_KEY", "unused-local-command")
+        settings = RunnerSettings.from_env(environment)
         if not settings.enabled:
             raise _safe("disabled", "Trezor proof mode is disabled.", 503)
         sidecar = SidecarClient(token=settings.sidecar_token)
@@ -612,6 +756,7 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
                 "Redemption: "
                 + json.dumps(redemption.get("value"), ensure_ascii=True, separators=(",", ":"))
             )
+            print("Non-refundable once issued. Keep redemption details safe.")
         return 0
     except SafeError as error:
         print(f"Error: {error.message}", file=sys.stderr)

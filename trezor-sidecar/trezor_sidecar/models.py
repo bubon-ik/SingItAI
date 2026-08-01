@@ -7,6 +7,7 @@ from eth_utils import to_checksum_address
 _BYTES32_HEX_LENGTH = 66
 _UINT64_MAX = (1 << 64) - 1
 _UINT256_MAX = (1 << 256) - 1
+LOCAL_INTENT_TEST_ID = "0x" + "00" * 31 + "01"
 
 
 class PaymentState(str, Enum):
