@@ -124,8 +124,18 @@ def _handler(operation: str):
         arguments = str(raw_args or "").strip().split()
         if operation in {"status", "test", "cancel"} and arguments:
             return f"Usage: /trezor_{operation}"
-        if operation == "prepare" and len(arguments) != 3:
-            return _USAGE_PREPARE
+        if operation == "prepare":
+            # Bitrefill package ids legitimately contain spaces, so the middle
+            # tokens are rejoined rather than requiring the operator to quote
+            # them. The first token is always the product and the last is
+            # always the country.
+            if len(arguments) < 3:
+                return _USAGE_PREPARE
+            arguments = [
+                arguments[0],
+                " ".join(arguments[1:-1]),
+                arguments[-1],
+            ]
         if operation == "confirm" and len(arguments) != 1:
             return _USAGE_CONFIRM
         try:
