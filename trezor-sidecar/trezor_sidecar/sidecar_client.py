@@ -402,6 +402,11 @@ class SidecarClient:
             if payment["state"] in {"TX_BROADCAST", "COMPLETE"}:
                 if not isinstance(tx_hash, str) or _TX_HASH.fullmatch(tx_hash) is None:
                     raise ValueError
+            elif payment["state"] == "RECONCILIATION_REQUIRED":
+                if tx_hash is not None and (
+                    not isinstance(tx_hash, str) or _TX_HASH.fullmatch(tx_hash) is None
+                ):
+                    raise ValueError
             elif tx_hash is not None:
                 raise ValueError
         except (KeyError, TypeError, ValueError):

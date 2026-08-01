@@ -386,17 +386,64 @@ class SidecarClientTests(TestCase):
         requester = QueueRequester(
             [
                 response(202, payment_payload("INVOICE_CREATED")),
-                response(200, payment_payload("RECONCILIATION_REQUIRED")),
+                response(
+                    200,
+                    payment_payload("RECONCILIATION_REQUIRED", tx_hash=TX_HASH),
+                ),
             ]
         )
         client = SidecarClient(token="token", requester=requester, clock=lambda: NOW)
 
-        with self.assertRaisesRegex(SafeError, "reconciliation"):
+        with self.assertRaisesRegex(SafeError, "reconciliation") as raised:
+            client.pay_invoice(
+                INTENT_ID, "invoice-1", PAY_TO, 1_000_000, NOW + 300, "bitrefill-pay:invoice-1"
+            )
+
+        self.assertEqual(raised.exception.code, "reconciliation_required")
+        self.assertNotIn(TX_HASH, str(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertEqual([call[0] for call in requester.calls], ["POST", "GET"])
+        self.assertEqual([call[0] for call in requester.calls].count("POST"), 1)
+
+    def test_reconciliation_rejects_malformed_transaction_hash(self):
+        requester = QueueRequester(
+            [
+                response(202, payment_payload("INVOICE_CREATED")),
+                response(
+                    200,
+                    payment_payload("RECONCILIATION_REQUIRED", tx_hash="0x1234"),
+                ),
+            ]
+        )
+        client = SidecarClient(token="token", requester=requester, clock=lambda: NOW)
+
+        with self.assertRaisesRegex(SafeError, "invalid response"):
             client.pay_invoice(
                 INTENT_ID, "invoice-1", PAY_TO, 1_000_000, NOW + 300, "bitrefill-pay:invoice-1"
             )
 
         self.assertEqual([call[0] for call in requester.calls], ["POST", "GET"])
+
+    def test_prebroadcast_and_failed_states_forbid_transaction_hash(self):
+        for state in ("INVOICE_CREATED", "TX_SIGNED", "CANCELLED", "FAILED"):
+            requester = QueueRequester(
+                [response(202, payment_payload(state, tx_hash=TX_HASH))]
+            )
+            client = SidecarClient(token="token", requester=requester, clock=lambda: NOW)
+
+            with self.subTest(state=state), self.assertRaisesRegex(
+                SafeError, "invalid response"
+            ):
+                client.pay_invoice(
+                    INTENT_ID,
+                    "invoice-1",
+                    PAY_TO,
+                    1_000_000,
+                    NOW + 300,
+                    "bitrefill-pay:invoice-1",
+                )
+
+            self.assertEqual([call[0] for call in requester.calls], ["POST"])
 
     def test_poll_timeout_is_bounded_and_never_resubmits(self):
         requester = QueueRequester(
