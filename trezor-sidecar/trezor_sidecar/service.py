@@ -896,6 +896,14 @@ class TrezorSidecarService:
         error: SafeError,
         updated_at: int,
     ) -> None:
+        # The caller only ever learns that the payment reached FAILED, because
+        # the client polls for state rather than reading this error. Without
+        # this line the reason is lost at the process boundary.
+        logger.warning(
+            "Payment failed before broadcast payment_id=%s code=%s",
+            payment_id,
+            error.code,
+        )
         self._fail_payment(payment_id, updated_at)
         raise error from None
 
