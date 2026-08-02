@@ -666,21 +666,29 @@ class TrezorSidecarService:
                 "invalid_signed_transaction",
                 "Trezor did not return a valid signed transaction.",
             )
+        # Trezor Suite MCP returns the signed transaction at the top level,
+        # beside r/s/v — verified against a live Safe 3. The nested shapes are
+        # kept because the tool's response is undocumented and has no stated
+        # stability, so a Suite update may move it. Exactly one source must be
+        # present: two would mean guessing which one was really signed.
         payload = result.get("payload")
-        if not isinstance(payload, Mapping) or "serializedTx" in result:
+        candidates = []
+        if isinstance(result.get("serializedTx"), str):
+            candidates.append(result["serializedTx"])
+        if isinstance(payload, Mapping):
+            if isinstance(payload.get("serializedTx"), str):
+                candidates.append(payload["serializedTx"])
+            signed = payload.get("signed")
+            if isinstance(signed, Mapping) and isinstance(
+                signed.get("serializedTx"), str
+            ):
+                candidates.append(signed["serializedTx"])
+        if len(candidates) != 1:
             raise _safe(
                 "invalid_signed_transaction",
                 "Trezor did not return a valid signed transaction.",
             )
-        direct = "serializedTx" in payload
-        signed = payload.get("signed")
-        nested = isinstance(signed, Mapping) and "serializedTx" in signed
-        if direct == nested:
-            raise _safe(
-                "invalid_signed_transaction",
-                "Trezor did not return a valid signed transaction.",
-            )
-        raw = payload["serializedTx"] if direct else signed["serializedTx"]
+        raw = candidates[0]
         if not isinstance(raw, str) or _RAW_TRANSACTION.fullmatch(raw) is None:
             raise _safe(
                 "invalid_signed_transaction",

@@ -96,12 +96,35 @@ def preview(env: Mapping[str, str] | None = None) -> dict[str, object]:
         calldata,
     )
 
-    # Never print or persist the signed transaction itself.
-    signed = result.get("serializedTx") or result.get("signedTransaction")
     print("Signed on device. Not broadcast.")
-    print(f"  signed payload present: {bool(signed)}")
-    print(f"  response fields: {sorted(result)}")
+    print()
+    print("Response shape (keys and value types only — never the signature):")
+    _describe(result)
     return result
+
+
+def _describe(value: object, indent: str = "  ") -> None:
+    """Print the structure of a device response without any of its values.
+
+    The parser in service.py expects one exact nesting, guessed from
+    documentation that never specified it. This shows the real shape so the
+    parser can match it, while keeping the signed transaction out of the
+    terminal: a serialized transaction is spendable if it escapes.
+    """
+    if isinstance(value, Mapping):
+        for key in sorted(value):
+            item = value[key]
+            if isinstance(item, Mapping):
+                print(f"{indent}{key}: object")
+                _describe(item, indent + "  ")
+            elif isinstance(item, str):
+                print(f"{indent}{key}: string({len(item)} chars)")
+            elif isinstance(item, list):
+                print(f"{indent}{key}: list({len(item)})")
+            else:
+                print(f"{indent}{key}: {type(item).__name__}")
+    else:
+        print(f"{indent}{type(value).__name__}")
 
 
 def main(argv: list[str] | None = None) -> int:

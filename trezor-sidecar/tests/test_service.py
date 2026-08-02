@@ -116,7 +116,13 @@ class FakeTrezor:
         transaction.update(self.transaction_updates)
         account = self.transaction_account or self.account
         signed = Account.sign_transaction(transaction, account.key)
-        return {"payload": {"serializedTx": signed.raw_transaction.to_0x_hex()}}
+        # The live Suite MCP shape: top level, beside r/s/v.
+        return {
+            "serializedTx": signed.raw_transaction.to_0x_hex(),
+            "r": hex(signed.r),
+            "s": hex(signed.s),
+            "v": hex(signed.v),
+        }
 
     def push_base_transaction(self, tx):
         self.push_transaction_calls.append(tx)
@@ -226,7 +232,12 @@ def run_payment_in_process(
                 "accessList": [],
             }
             signed = Account.sign_transaction(transaction, account.key)
-            return {"payload": {"serializedTx": signed.raw_transaction.to_0x_hex()}}
+            return {
+                "serializedTx": signed.raw_transaction.to_0x_hex(),
+                "r": hex(signed.r),
+                "s": hex(signed.s),
+                "v": hex(signed.v),
+            }
 
         def push_base_transaction(self, raw):
             self.push_calls += 1
@@ -882,6 +893,23 @@ class TrezorSidecarServiceTests(TestCase):
             self.assertEqual(len(trezor.sign_transaction_calls), index)
             self.assertEqual(trezor.push_transaction_calls, [])
 
+    def test_live_suite_response_shape_is_accepted(self):
+        # Break caught: the parser was written against a guessed response and
+        # explicitly rejected the one Trezor Suite actually returns, so every
+        # payment died at "invalid_signed_transaction" after the device had
+        # already signed it. Shape confirmed against a live Safe 3.
+        service, store, trezor, _ = self.make_approved_payment_service()
+        payment = self.create_additional_payment(
+            service, ordinal=0, invoice_id="live-shape", idempotency_key="live-shape-key"
+        )
+
+        service.run_payment(payment.payment_id, now=lambda: 1_700_000_001)
+
+        self.assertEqual(
+            store.get_payment(payment.payment_id).state, PaymentState.TX_BROADCAST
+        )
+        self.assertEqual(len(trezor.push_transaction_calls), 1)
+
     def test_signing_result_accepts_one_closed_path_and_rejects_every_other_shape(self):
         service, store, trezor, _ = self.make_approved_payment_service()
         valid_raw = trezor.sign_base_transaction(
@@ -891,10 +919,11 @@ class TrezorSidecarServiceTests(TestCase):
                 self.valid_payment_request().pay_to,
                 self.valid_payment_request().amount_atomic,
             ),
-        )["payload"]["serializedTx"]
+        )["serializedTx"]
         trezor.sign_transaction_calls.clear()
         invalid_results = (
-            {"serializedTx": valid_raw},
+            # Two sources: which one was actually signed is a guess.
+            {"serializedTx": valid_raw, "payload": {"serializedTx": valid_raw}},
             {"payload": {"serializedTx": valid_raw, "signed": {"serializedTx": valid_raw}}},
             {"payload": {"signed": {"serializedTx": "0x123"}}},
             {"payload": {"serializedTx": 123}},
