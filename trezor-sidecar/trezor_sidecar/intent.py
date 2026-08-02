@@ -10,7 +10,7 @@ from eth_account.messages import encode_defunct
 from .models import PurchaseIntent
 
 
-_MESSAGE_HEADER = "Sign402 purchase"
+_MESSAGE_HEADER = "SingIt purchase"
 # Both USD micros and USDC atomic units carry six decimals, so a fixed six
 # places is exact for either and never rounds a commitment away.
 _DECIMALS = 6

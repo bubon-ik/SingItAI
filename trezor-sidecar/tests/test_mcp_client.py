@@ -131,14 +131,14 @@ class TrezorMcpClientTests(TestCase):
         caller = RecordingCaller({"ok": True})
         client = TrezorMcpClient(caller)
 
-        client.sign_message("m/44'/60'/0'/0/0", "Sign402 purchase\nItem: 100")
+        client.sign_message("m/44'/60'/0'/0/0", "SingIt purchase\nItem: 100")
         client.push_base_transaction("0x02aa")
 
         self.assertEqual(caller.calls, [
             ("trezor_sign_message", {
                 "coin": "base",
                 "path": "m/44'/60'/0'/0/0",
-                "message": "Sign402 purchase\nItem: 100",
+                "message": "SingIt purchase\nItem: 100",
             }),
             ("trezor_push_transaction", {"coin": "base", "tx": "0x02aa"}),
         ])

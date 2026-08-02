@@ -41,7 +41,7 @@ class PurchaseIntentTests(TestCase):
         message = build_intent_message(self.make_intent())
         lines = message.splitlines()
 
-        self.assertEqual(lines[0], "Sign402 purchase")
+        self.assertEqual(lines[0], "SingIt purchase")
         self.assertEqual(lines[1], "Product: amazon-de")
         self.assertEqual(lines[2], "Item: 25 EUR")
         self.assertEqual(lines[3], "Price: 27.000000 USD")

@@ -30,7 +30,7 @@ from .mcp_client import McpToolCaller
 
 PREVIEW_MESSAGE = "\n".join(
     (
-        "Sign402 purchase",
+        "SingIt purchase",
         "ALZA.CZ - 100 CZK",
         "Pay up to 4.76 USDC on Base",
         "Expires in 10 minutes",
