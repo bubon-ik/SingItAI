@@ -100,6 +100,7 @@ class FakeStore:
         self.attempt = None
         self.generation = 0
         self.reserved_generations = []
+        self.created_payments = []
         self._lock = threading.Lock()
         # Locally the sidecar shares this database and the approved intent is
         # already here. Remotely it was recorded on the user's machine, so
@@ -108,6 +109,20 @@ class FakeStore:
 
     def get_intent(self, intent_id):
         return self.intents.get(intent_id)
+
+    def create_payment(self, **arguments):
+        # Mirrors the real store: a runner that does not share the sidecar's
+        # database has to record the executed payment before finalizing it.
+        self.created_payments.append(arguments)
+        self.payment = PaymentView(
+            payment_id=arguments["payment_id"],
+            intent_id=arguments["intent_id"],
+            invoice_id=arguments["invoice_id"],
+            state=PaymentState.INVOICE_CREATED,
+            created_at=arguments.get("created_at") or NOW,
+            updated_at=arguments.get("created_at") or NOW,
+        )
+        return self.payment
 
     def insert_intent(self, intent, *, created_at):
         existing = self.intents.get(intent.intent_id)
@@ -1132,6 +1147,34 @@ class TrezorPocRunnerTests(TestCase):
         self.assertEqual(len(sidecar.pay_calls), 1)
         self.assertEqual(result["status"], "complete")
         self.assertEqual(store.records, [("invoice-1", "test-gift", "1000000", "usdc_base", NOW + 1)])
+
+    def test_remote_payment_is_recorded_so_finalization_returns_the_receipt(self):
+        # Break caught: on a VPS the payment lives in the user's sidecar
+        # database, so finalize_purchase found nothing to finalize. The money
+        # moved and the card shipped, but the buyer got "finalization is
+        # unresolved" instead of the receipt carrying the redemption code.
+        runner, _bitrefill, sidecar, store, _events = self.make_runner()
+
+        class RemoteOnlySidecar(type(sidecar)):
+            """Executes the payment without touching the runner's store."""
+
+            def pay_invoice(self, *args, **kwargs):
+                self.store = None
+                return super().pay_invoice(*args, **kwargs)
+
+        runner.sidecar = RemoteOnlySidecar(_events, store=None)
+        runner.treasury._sidecar = runner.sidecar
+
+        result = runner.buy(
+            quote=valid_quote(),
+            recipient={"email": "buyer@example.com"},
+            buyer_email="buyer@example.com",
+            now=NOW,
+        )
+
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(len(store.created_payments), 1)
+        self.assertEqual(store.records[0][0], "invoice-1")
 
     def test_remote_approval_is_recorded_so_the_purchase_can_be_reserved(self):
         # Break caught: on a VPS the approval lives in the user's sidecar

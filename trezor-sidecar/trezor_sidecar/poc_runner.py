@@ -386,6 +386,20 @@ class SidecarTreasuryClient:
             value = self._payment_receipts.get(invoice_id)
             return deepcopy(value) if value is not None else None
 
+    def payment_binding(self, invoice_id: str) -> dict[str, Any] | None:
+        """Terms this invoice was bound to, for a runner that did not store them."""
+        with self._lock:
+            binding = self._bindings.get(invoice_id)
+            if binding is None:
+                return None
+            return {
+                "intentId": binding.intent_id,
+                "invoiceId": binding.invoice_id,
+                "payTo": binding.payment_address,
+                "amountAtomic": binding.amount_atomic,
+                "expiresAt": binding.expires_at,
+            }
+
 
 def render_exact_summary(
     quote: Mapping[str, Any],
@@ -654,6 +668,70 @@ class TrezorPocRunner:
         ):
             raise _safe("device_rejected", "Trezor operation was cancelled.")
 
+    def _record_payment(
+        self,
+        store: Any,
+        payment_id: str,
+        invoice_id: str,
+        intent: PurchaseIntent,
+        tx_hash: str,
+    ) -> None:
+        """Mirror a payment the sidecar executed into the runner's own store.
+
+        Locally the sidecar shares this database and the row is already here.
+        Remotely the payment was recorded on the user's machine, so
+        `finalize_purchase` found nothing to finalize and every completed
+        purchase ended as "finalization is unresolved" — the money had moved
+        and the card had shipped, but the receipt with the redemption code was
+        never returned.
+
+        Only mirrors what the sidecar already reported and this runner already
+        verified against the broadcast transaction.
+        """
+        try:
+            if store.get_payment(payment_id) is not None:
+                return
+        except Exception:
+            raise _safe(
+                "payment_state_unavailable",
+                "Existing payment state could not be checked safely.",
+                503,
+            ) from None
+        binding = self.treasury.payment_binding(invoice_id)
+        if not isinstance(binding, dict):
+            raise _safe("payment_failed", "Local payment receipt is invalid.", 500)
+        try:
+            store.create_payment(
+                payment_id=payment_id,
+                intent_id=intent.intent_id,
+                invoice_id=invoice_id,
+                idempotency_key=f"bitrefill-pay:{invoice_id}",
+                pay_to=binding["payTo"],
+                amount_atomic=binding["amountAtomic"],
+                expires_at=binding["expiresAt"],
+            )
+            store.transition_payment(
+                payment_id=payment_id,
+                expected=PaymentState.INVOICE_CREATED,
+                target=PaymentState.TX_SIGNED,
+                updated_at=self._now(),
+            )
+            store.transition_payment(
+                payment_id=payment_id,
+                expected=PaymentState.TX_SIGNED,
+                target=PaymentState.TX_BROADCAST,
+                updated_at=self._now(),
+                tx_hash=tx_hash,
+            )
+        except SafeError:
+            raise
+        except Exception:
+            raise _safe(
+                "payment_state_unavailable",
+                "Executed payment could not be recorded safely.",
+                503,
+            ) from None
+
     def _finalize(
         self,
         *,
@@ -671,6 +749,7 @@ class TrezorPocRunner:
         if not isinstance(payment_id, str) or not isinstance(tx_hash, str) or _TX_HASH.fullmatch(tx_hash) is None:
             raise _safe("payment_failed", "Local payment receipt is invalid.", 500)
         store = self._store()
+        self._record_payment(store, payment_id, invoice_id, intent, tx_hash)
         try:
             store.finalize_purchase(
                 payment_id=payment_id,
