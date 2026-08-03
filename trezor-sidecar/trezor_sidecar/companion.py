@@ -19,6 +19,9 @@ from .sidecar_client import SidecarClient
 
 
 _DEFAULT_TOKEN_PATH = Path("~/.config/sign402-trezor-companion/token").expanduser()
+# Ceiling for reconnect backoff: long enough to stop hammering a dead
+# tunnel, short enough that a returning link is picked up quickly.
+_MAX_BACKOFF_SECONDS = 30.0
 _JOB_ID = re.compile(r"[A-Za-z0-9._:-]{8,128}\Z")
 _INTENT_FIELDS = {
     "intentId",
@@ -127,10 +130,23 @@ class CompanionWorker:
             result = self._execute(job)
             self.broker.complete(job_id, result)
         except SafeError as error:
-            self.broker.fail(job_id, error.code)
+            self._report_failure(job_id, error.code)
         except Exception:
-            self.broker.fail(job_id, "companion_failed")
+            self._report_failure(job_id, "companion_failed")
         return True
+
+    def _report_failure(self, job_id: str, code: str) -> None:
+        """Tell the broker a job failed, and survive not being able to.
+
+        The connection is a tunnel that drops. Letting that error escape
+        killed the worker outright, so a blip on the wire ended the link to
+        the device until someone restarted it by hand. The job expires on the
+        broker anyway if this never lands.
+        """
+        try:
+            self.broker.fail(job_id, code)
+        except Exception:
+            return
 
     def _execute(self, job: dict[str, Any]) -> dict[str, Any]:
         payload = job.get("payload")
@@ -231,15 +247,34 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
         if arguments.command == "once":
             worker.run_once()
             return 0
+        # The broker is reached over a tunnel that drops. A worker that exits
+        # on the first unreachable poll leaves the device silently
+        # disconnected until a human notices, so keep polling and back off
+        # instead. Only a deliberate interrupt ends the loop.
+        backoff = settings.poll_seconds
         while True:
-            if not worker.run_once():
+            try:
+                busy = worker.run_once()
+            except SafeError as error:
+                print(f"Retrying: {error.message}", file=sys.stderr)
+                time.sleep(min(backoff, _MAX_BACKOFF_SECONDS))
+                backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
+                continue
+            except Exception:
+                print("Retrying after an unexpected worker error.", file=sys.stderr)
+                time.sleep(min(backoff, _MAX_BACKOFF_SECONDS))
+                backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
+                continue
+            backoff = settings.poll_seconds
+            if not busy:
                 time.sleep(settings.poll_seconds)
     except KeyboardInterrupt:
         return 0
     except SafeError as error:
         print(f"Error: {error.message}", file=sys.stderr)
         return 1
-    except Exception as error:
-        print(f"Error: {error}", file=sys.stderr)
+    except Exception:
+        # The text of an unexpected error can carry a URL or a credential.
+        print("Error: Trezor companion stopped safely.", file=sys.stderr)
         return 1
     return 0

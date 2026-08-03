@@ -120,6 +120,25 @@ class CompanionWorkerTests(TestCase):
         self.assertEqual(sidecar.intents, [])
         self.assertEqual(sidecar.payments, [])
 
+    def test_worker_survives_a_broker_that_cannot_take_the_failure_report(self):
+        # Break caught: the tunnel drops while reporting a failure, the error
+        # escapes run_once, and the worker exits — the device goes silently
+        # offline until someone restarts it by hand. Seen twice on real runs.
+        class RejectingSidecar(FakeSidecar):
+            def approve_intent(self, intent):
+                raise SafeError("device_rejected", "cancelled", 400)
+
+        class UnreachableBroker(FakeBroker):
+            def fail(self, job_id, error_code):
+                raise OSError("connection reset by peer")
+
+        broker = UnreachableBroker(intent_job())
+        worker = CompanionWorker(
+            broker=broker, sidecar=RejectingSidecar(), clock=lambda: NOW
+        )
+
+        self.assertIs(worker.run_once(), True)
+
     def test_safe_local_failure_is_reported_by_code_only(self):
         class RejectingSidecar(FakeSidecar):
             def approve_intent(self, intent):
