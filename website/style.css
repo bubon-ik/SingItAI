@@ -458,13 +458,16 @@ h1 em, h2 em { font-style: normal; color: var(--accent); }
 .cta .shell { position: relative; }
 .cta h2 { font-size: clamp(2.4rem, 5vw, 4.4rem); line-height: 1.06; max-width: 18ch; margin: 0 auto 26px; }
 .cta p { font-size: 17px; color: var(--text-soft); max-width: 52ch; margin: 0 auto 44px; }
+.cta p.cta-secondary { font-size: 15px; margin: 26px auto 0; }
+.cta p.cta-secondary a { color: var(--accent); text-decoration: none; }
+.cta p.cta-secondary a:hover { text-decoration: underline; }
 
 /* ---------- footer ---------- */
 .footer { border-top: 1px solid var(--hairline); padding: 38px 0; }
 .footer-inner { display: flex; align-items: center; gap: 32px; flex-wrap: wrap; }
 .brand-footer { font-size: 18px; }
 .brand-footer .mark { width: 26px; height: 26px; }
-.footer-links { display: flex; gap: 24px; margin-left: auto; }
+.footer-links { display: flex; gap: 24px; margin-left: auto; flex-wrap: wrap; }
 .footer-links a { color: var(--text-soft); font-size: 14px; text-decoration: none; transition: color 0.4s var(--ease-lux); }
 .footer-links a:hover { color: var(--text); }
 .footer-fine { font-size: 13px; color: var(--text-faint); }
