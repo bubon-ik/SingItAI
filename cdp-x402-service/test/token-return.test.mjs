@@ -56,6 +56,70 @@ test("token return sends the exact atomic amount and waits for success", async (
 });
 
 
+test("an attribution suffix is appended without changing the transfer", async () => {
+  const sent = [];
+  const account = {
+    address: "0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+    sendTransaction: async (request) => {
+      sent.push(request);
+      return { transactionHash: HASH };
+    },
+  };
+  const publicClient = {
+    waitForTransactionReceipt: async () => ({ status: "success" }),
+  };
+  const suffix = `0x${"8021".repeat(4)}`;
+
+  await returnErc20({
+    account,
+    publicClient,
+    token: TOKEN,
+    to: RECIPIENT,
+    amountAtomic: "1",
+    network: "base",
+    idempotencyKey: "bitrefill-return:quote_1",
+    dataSuffix: suffix,
+  });
+
+  const data = sent[0].transaction.data;
+  assert.ok(data.endsWith(suffix.slice(2)));
+  const decoded = decodeFunctionData({ abi: erc20Abi, data });
+  assert.equal(decoded.functionName, "transfer");
+  assert.equal(decoded.args[0], RECIPIENT);
+  assert.equal(decoded.args[1], 1n);
+});
+
+
+test("a malformed attribution suffix is dropped, not sent", async () => {
+  const sent = [];
+  const account = {
+    address: "0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",
+    sendTransaction: async (request) => {
+      sent.push(request);
+      return { transactionHash: HASH };
+    },
+  };
+  const publicClient = {
+    waitForTransactionReceipt: async () => ({ status: "success" }),
+  };
+
+  for (const bad of ["not-hex", "0x123", "", null, 42]) {
+    sent.length = 0;
+    await returnErc20({
+      account,
+      publicClient,
+      token: TOKEN,
+      to: RECIPIENT,
+      amountAtomic: "1",
+      network: "base",
+      idempotencyKey: "bitrefill-return:quote_1",
+      dataSuffix: bad,
+    });
+    assert.equal(sent[0].transaction.data.length, 138);
+  }
+});
+
+
 test("token return never reports success for a reverted receipt", async () => {
   const account = {
     address: "0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd",

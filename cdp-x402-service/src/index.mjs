@@ -311,6 +311,7 @@ async function transferTokenFromCdpWallet(options) {
     amountAtomic: requiredOption(options, "amount-atomic"),
     network: networkName(chain),
     idempotencyKey: requiredOption(options, "idempotency-key"),
+    dataSuffix: await loadBuilderCodeDataSuffix(),
   });
 }
 
