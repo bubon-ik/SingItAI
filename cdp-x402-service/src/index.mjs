@@ -28,6 +28,38 @@ dotenv.config();
 const BASE_MAINNET_CAIP2 = "eip155:8453";
 const DEFAULT_ACCOUNT_NAME = "sign402-mainnet-buyer";
 
+// Base Builder Code attribution (ERC-8021). The suffix is appended to calldata;
+// contracts ignore it and offchain indexers extract it, so onchain activity is
+// attributed to this app in base.dev. Costs 16 gas per non-zero byte.
+// Set SIGN402_BASE_BUILDER_CODE to the code from base.dev > Settings > Builder Code.
+// Unset means no suffix and unchanged behaviour.
+let builderCodeDataSuffix;
+
+async function loadBuilderCodeDataSuffix() {
+  if (builderCodeDataSuffix !== undefined) {
+    return builderCodeDataSuffix;
+  }
+  const code = (process.env.SIGN402_BASE_BUILDER_CODE || "").trim();
+  if (!code) {
+    builderCodeDataSuffix = null;
+    return builderCodeDataSuffix;
+  }
+  try {
+    const { Attribution } = await import("ox/erc8021");
+    builderCodeDataSuffix = Attribution.toDataSuffix({ codes: [code] });
+  } catch (error) {
+    // Attribution is a reporting nicety. It must never block a payment.
+    console.error(`builder code attribution disabled: ${error.message}`);
+    builderCodeDataSuffix = null;
+  }
+  return builderCodeDataSuffix;
+}
+
+async function walletClientOptions(base) {
+  const dataSuffix = await loadBuilderCodeDataSuffix();
+  return dataSuffix ? { ...base, dataSuffix } : base;
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   const options = parseArgs(args);
@@ -54,7 +86,10 @@ async function main() {
       expectedReceiver: requiredOption(options, "expected-receiver"),
       expectedAsset: requiredOption(options, "expected-asset"),
     };
-    const result = await buyPaidResourceWithPrivateKey(url, caps);
+    const result = await buyPaidResourceWithPrivateKey(url, caps, {
+      method: options.method || "GET",
+      body: options["body-json"] ? JSON.parse(options["body-json"]) : null,
+    });
     writeJson(result);
     return;
   }
@@ -139,14 +174,23 @@ async function buyPaidResource(url) {
   return buyPaidResourceWithSigner(url, cdpAccount);
 }
 
-async function buyPaidResourceWithPrivateKey(url, caps = {}) {
+async function buyPaidResourceWithPrivateKey(url, caps = {}, request = {}) {
   const privateKey = requiredEnv("SIGN402_EVM_PRIVATE_KEY");
   const account = privateKeyToAccount(privateKey);
   // Spending a user's wallet always runs through the approval guard.
-  return buyPaidResourceWithSigner(url, account, caps, { enforceCaps: true });
+  return buyPaidResourceWithSigner(url, account, caps, {
+    enforceCaps: true,
+    method: request.method || "GET",
+    body: request.body ?? null,
+  });
 }
 
-async function buyPaidResourceWithSigner(url, signer, caps = {}, { enforceCaps = false } = {}) {
+async function buyPaidResourceWithSigner(
+  url,
+  signer,
+  caps = {},
+  { enforceCaps = false, method = "GET", body = null } = {},
+) {
   const config = {
     schemes: [
       {
@@ -163,10 +207,18 @@ async function buyPaidResourceWithSigner(url, signer, caps = {}, { enforceCaps =
   }
   const fetchWithPayment = wrapFetchWithPaymentFromConfig(fetch, config);
 
-  const response = await fetchWithPayment(url, {
-    method: "GET",
+  // Venice's top-up is a POST, so the method and body are not fixed here.
+  // The wrapper still runs the whole 402 -> pay -> retry cycle, and the caps
+  // selector above refuses to sign for an unexpected merchant.
+  const requestInit = {
+    method,
     headers: { Accept: "application/json" },
-  });
+  };
+  if (body !== null && body !== undefined) {
+    requestInit.headers["Content-Type"] = "application/json";
+    requestInit.body = typeof body === "string" ? body : JSON.stringify(body);
+  }
+  const response = await fetchWithPayment(url, requestInit);
   const bodyText = await response.text();
   const paymentResponse = paymentSettleResponse(response);
 
@@ -328,11 +380,13 @@ async function transferTokenFromUserWallet(options) {
   const chain = viemChain(options.chain || "base");
   const rpcUrl = process.env.SIGN402_BASE_RPC_URL || process.env.BASE_RPC_URL || chain.rpcUrls.default.http[0];
   const transport = http(rpcUrl);
-  const walletClient = createWalletClient({
-    account,
-    chain,
-    transport,
-  });
+  const walletClient = createWalletClient(
+    await walletClientOptions({
+      account,
+      chain,
+      transport,
+    }),
+  );
   const publicClient = basePublicClient(options.chain);
 
   const transactionHash = await walletClient.writeContract({
@@ -365,11 +419,13 @@ async function transferNativeFromUserWallet(options) {
   const value = humanTokenAmountToAtomic(requiredOption(options, "amount"), 18);
   const chain = viemChain(options.chain || "base");
   const rpcUrl = process.env.SIGN402_BASE_RPC_URL || process.env.BASE_RPC_URL || chain.rpcUrls.default.http[0];
-  const walletClient = createWalletClient({
-    account,
-    chain,
-    transport: http(rpcUrl),
-  });
+  const walletClient = createWalletClient(
+    await walletClientOptions({
+      account,
+      chain,
+      transport: http(rpcUrl),
+    }),
+  );
   const publicClient = basePublicClient(options.chain);
 
   const transactionHash = await walletClient.sendTransaction({ to, value });

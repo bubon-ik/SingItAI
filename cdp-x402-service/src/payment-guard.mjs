@@ -34,7 +34,13 @@ export function makePaymentRequirementsSelector(caps = {}, { requireAll = false 
     for (const requirement of list) {
       if (wantReceiver && String(requirement.payTo).toLowerCase() !== wantReceiver) continue;
       if (wantAsset && String(requirement.asset).toLowerCase() !== wantAsset) continue;
-      if (maxCap !== null && BigInt(requirement.maxAmountRequired) > maxCap) continue;
+      // x402 v1 calls this maxAmountRequired; v2 (what Venice serves) calls
+      // it amount. Reading only one of them silently skips the cap check.
+      const required = requirement.amount ?? requirement.maxAmountRequired;
+      if (maxCap !== null) {
+        if (required === undefined || required === null) continue;
+        if (BigInt(required) > maxCap) continue;
+      }
       return requirement;
     }
     throw new Error(
