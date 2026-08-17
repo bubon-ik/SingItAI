@@ -11,7 +11,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -101,13 +101,31 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "llm_buy", "description": "Buy Bankr LLM credits"},
     {"command": "llm_credits", "description": "Show Bankr LLM credits"},
 )
+# Ordered by what people open the bot to do. Buying is the product; the wallet,
+# the approval channel and the limits are housekeeping that only matters once a
+# purchase is in progress. Labels must stay in sync with
+# _TELEGRAM_BUTTON_COMMANDS below, which is keyed on the lowercased label.
+# Grouped by intent: what you can spend on, where your money is, settings.
+# Everything that is housekeeping — approvals, withdrawals, receipts, agent
+# credits — lives one level down, inside Wallet.
 _TELEGRAM_MAIN_MENU_BUTTONS = (
-    ("Wallet", "Balance"),
-    ("Connect iMessage", "Connect WhatsApp"),
-    ("Limits",),
-    ("Withdraw",),
-    ("Buy Bitrefill", "Buy LLM Credits"),
-    ("Last Purchase", "Help"),
+    ("🎁 Buy Gift Cards", "💰 Balance"),
+    ("👛 Wallet", "⚙️ Limits"),
+    ("❓ Help",),
+)
+_TELEGRAM_MAIN_MENU_WITH_CHAT = (
+    ("💬 Talk to AI", "🎁 Buy Gift Cards"),
+    ("💰 Balance", "👛 Wallet"),
+    ("⚙️ Limits", "❓ Help"),
+)
+# "Talk to AI" is this bot answering, paid per message. "AI Credits" tops up
+# the user's own Bankr agent. They are different products, so they never share
+# a screen and no longer share a word.
+_WALLET_MENU_BUTTONS = (
+    ("🤖 AI Credits", "💸 Withdraw"),
+    ("🧾 Last Purchase",),
+    ("📱 Connect iMessage", "📱 Connect WhatsApp"),
+    ("Back",),
 )
 _TELEGRAM_BUTTON_COMMANDS = {
     "wallet": "wallet",
@@ -118,6 +136,13 @@ _TELEGRAM_BUTTON_COMMANDS = {
     "withdraw": "withdraw",
     "buy bitrefill": "bitrefill",
     "buy llm credits": "llm-buy",
+    "chat": "chat",
+    # New labels. The old ones above stay: Telegram keeps a client's keyboard
+    # until the bot sends a new one, so a user who has not been handed the
+    # regrouped menu is still pressing the previous buttons.
+    "talk to ai": "chat",
+    "buy gift cards": "bitrefill",
+    "ai credits": "llm-buy",
     "last purchase": "last-purchase",
     "help": "help",
 }
@@ -210,6 +235,14 @@ _photon_api_opener: Callable[..., object] = urlopen
 _background_runner: Callable[[Callable[[], None]], None]
 _sleep: Callable[[float], None] = time.sleep
 _BITREFILL_USER_COUNTRIES: dict[str, str] = {}
+_TELEGRAM_CHAT_BUTTON = "Chat"
+_TELEGRAM_CHAT_EXIT_BUTTON = "Stop chat"
+_TELEGRAM_CHAT_BUTTONS = ((_TELEGRAM_CHAT_EXIT_BUTTON,),)
+# Bounded like the other per-user maps: a public bot must not grow state
+# without limit.
+_CHAT_MODE_USERS: dict[str, dict] = {}
+_CHAT_WARNING_THRESHOLD = 0.8
+
 _BITREFILL_SESSIONS: dict[str, dict] = {}
 _WITHDRAW_SESSIONS: dict[str, dict] = {}
 _IMESSAGE_CONNECT_SESSIONS: dict[str, dict] = {}
@@ -472,21 +505,17 @@ def _start_text(wallet_address: str, *, support_id: str = "") -> str:
         if support
         else ""
     )
+    # Two actions and nothing else. Everything a new user needs to set up —
+    # funding, spending limits, the approval channel — is asked for by the
+    # action that actually needs it, not demanded up front by a checklist.
     return (
         "<b>SingIt</b> — gift cards, eSIMs and mobile top-ups in 180+ countries, "
         "paid with crypto.\n\n"
-        "Nothing moves until you approve it on your phone.\n\n"
+        "<b>Buy Bitrefill</b> — browse the catalogue and pay from your wallet.\n"
+        "<b>Chat</b> — ask an AI anything. The first few messages are free.\n\n"
         "<b>Your Base wallet</b>\n"
         f"<code>{address}</code>\n"
-        "Tap to copy. Add ETH for gas, and USDC or SINGIT to pay with.\n\n"
-        "<b>Before your first purchase</b>\n"
-        "1. <b>Wallet</b> — fund the address above.\n"
-        "2. <b>Connect WhatsApp</b> or <b>Connect iMessage</b> — approvals go to "
-        "your phone. Spending stays off until one is linked.\n"
-        "3. <b>Limits</b> — cap how much can be spent per day.\n\n"
-        "<b>Then just ask</b>\n"
-        "Send something like <code>buy amazon 25 usd</code>, or use the buttons "
-        "below. <b>Balance</b> shows what you hold, /help lists every command."
+        "Tap to copy. Add ETH for gas, and USDC or SINGIT to pay with."
         f"{support_block}"
     )
 
@@ -720,9 +749,17 @@ def _imessage_phone_prompt(*, channel: str = "imessage") -> str:
         if channel_label == "iMessage"
         else ""
     )
+    # Lead with what the user gets, not with what we require. Both channels get
+    # the same wording: Android users have no iMessage, so ranking them would
+    # read as "you picked the worse one".
     return (
+        f"Approvals arrive on {channel_label}, separate from Telegram.\n"
+        "That way someone who takes over your Telegram account still cannot "
+        "spend your money — the approval never reaches them.\n\n"
         f"Send your {channel_label} phone number in international format.\n"
-        "Example: +12025550123"
+        "Example: +12025550123\n"
+        "The number is not verified and is never shared. It is only used to "
+        "send you approvals."
         f"{extra}"
         f"{assignment_note}"
         f"{target}"
@@ -876,6 +913,25 @@ def _handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
 
     capture_gateway_identity(event=event, **kwargs)
     source = getattr(event, "source", None)
+
+    # Chat mode runs before button and command dispatch: while it is on, the
+    # user is talking to a model, not to the menu.
+    budget_result = _handle_telegram_chat_budget_choice(
+        event=event,
+        source=source,
+        gateway=gateway,
+    )
+    if budget_result:
+        return budget_result
+
+    chat_result = _handle_telegram_chat_message(
+        event=event,
+        source=source,
+        gateway=gateway,
+    )
+    if chat_result:
+        return chat_result
+
     telegram_command = _telegram_public_command(event, source)
     if telegram_command:
         return _handle_telegram_public_command_request(
@@ -972,6 +1028,407 @@ def _handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
     # This shared Photon/iMessage line is an approval channel, not a public
     # Hermes conversation surface. Never let arbitrary iMessage text reach the
     # general agent and consume its tools or model credits.
+    return dict(_SKIP_RESULT)
+
+
+def _ai_chat_enabled() -> bool:
+    """Chat ships disabled. With the flag unset the bot behaves exactly as before."""
+    return str(
+        os.environ.get("SIGN402_AI_CHAT_ENABLED", "") or ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _in_chat_mode(user_id: str) -> bool:
+    return str(user_id) in _CHAT_MODE_USERS
+
+
+def _enter_chat_mode(user_id: str) -> None:
+    user_key = str(user_id)
+    if (
+        user_key not in _CHAT_MODE_USERS
+        and len(_CHAT_MODE_USERS) >= _TELEGRAM_OPERATION_MAX_USERS
+    ):
+        # Drop the oldest entry rather than refuse: chat mode is recoverable
+        # state, and the evicted user simply gets the main menu back.
+        _CHAT_MODE_USERS.pop(next(iter(_CHAT_MODE_USERS)), None)
+    _CHAT_MODE_USERS[user_key] = {"warned": False}
+
+
+def _leave_chat_mode(user_id: str) -> None:
+    _CHAT_MODE_USERS.pop(str(user_id), None)
+
+
+def _telegram_chat_reply_markup() -> dict:
+    return _reply_keyboard(
+        _TELEGRAM_CHAT_BUTTONS, placeholder="Ask anything, or stop the chat"
+    )
+
+
+def _usd_from_atomic(atomic, *, rounding=ROUND_DOWN) -> str:
+    """Format atomic USDC for the user.
+
+    Rounds down by default so a remaining balance is never overstated: showing
+    "$5.00 left" when $4.997 remains would promise money that is not there.
+    """
+    try:
+        value = Decimal(str(int(atomic))) / Decimal(1_000_000)
+    except (TypeError, ValueError, InvalidOperation):
+        return "$0.00"
+    # Sub-cent costs are the normal case here, so keep enough precision to
+    # avoid showing every message as "$0.00".
+    quantum = Decimal("0.001") if value < Decimal("0.01") else Decimal("0.01")
+    return f"${value.quantize(quantum, rounding=rounding)}"
+
+
+def _chat_budget_block(client, identity) -> str:
+    """The chat money, appended to the wallet balance.
+
+    Two separate figures on purpose: credit already paid for and still held at
+    the provider, and how much more may be spent today. A lookup failure adds
+    nothing rather than replacing the balance the user actually asked for.
+    """
+    if not _ai_chat_enabled():
+        return ""
+    try:
+        status = client.execute_chat(
+            "start",
+            identity,
+            user_access_token=_user_access_token(client, identity),
+        )
+    except Exception:
+        return ""
+    if not isinstance(status, dict) or not status.get("ok"):
+        return ""
+
+    lines = ["", "", "AI chat"]
+    free = status.get("freeMessagesRemaining")
+    if isinstance(free, int) and free > 0:
+        lines.append(f"- Free messages left: {free}")
+    if status.get("hasPolicy"):
+        lines.append(f"- Credit left: ${status.get('outstandingUsdc', '0.00')}")
+        lines.append(
+            f"- Spendable today: ${status.get('remainingWindowUsdc', '0.00')}"
+            f" of ${status.get('dailyCapUsdc', '0.00')}"
+        )
+    else:
+        lines.append("- No daily budget approved yet.")
+    if status.get("paused"):
+        lines.append("- Chat is paused until you approve it again.")
+    return "\n".join(lines) + "\n"
+
+
+def _chat_answer_text(user_id: str, result: dict) -> str:
+    """Answer plus the footer: what this message cost and what is left today."""
+    text = str(result.get("text", "") or "").strip()
+    cost = _usd_from_atomic(result.get("costAtomic", 0), rounding=ROUND_HALF_UP)
+    remaining_atomic = result.get("remainingWindowAtomic")
+    if remaining_atomic is None:
+        return text
+    remaining = _usd_from_atomic(remaining_atomic)
+    footer = f"{cost} · {remaining} left today"
+
+    warning = ""
+    cap = result.get("dailyCapAtomic")
+    state = _CHAT_MODE_USERS.get(str(user_id))
+    if cap and state is not None and not state.get("warned"):
+        try:
+            spent = int(cap) - int(remaining_atomic)
+            if int(cap) > 0 and spent / int(cap) >= _CHAT_WARNING_THRESHOLD:
+                state["warned"] = True
+                warning = (
+                    f"\n\nYou've used {_usd_from_atomic(spent)} of today's "
+                    f"{_usd_from_atomic(cap)}."
+                )
+        except (TypeError, ValueError, ZeroDivisionError):
+            warning = ""
+
+    return f"{text}\n\n{footer}{warning}"
+
+
+def _chat_start_text(result: dict) -> str:
+    """The message shown on entering chat mode.
+
+    Says what it costs in the user's terms: free messages first, then a daily
+    limit they approve once. None of the plumbing vocabulary appears.
+    """
+    free = int(result.get("freeMessagesRemaining") or 0)
+    cap = str(result.get("dailyCapUsdc") or "").strip()
+    if free > 0:
+        opening = (
+            f"Ask me anything. Your first {free} messages are free — "
+            "no wallet, no setup."
+        )
+    elif result.get("hasPolicy"):
+        opening = f"Ask me anything. Your daily limit is ${cap}." if cap else "Ask me anything."
+    else:
+        opening = (
+            "Your free messages are used up. To keep going you approve one "
+            f"daily limit{f' of ${cap}' if cap else ''} — once, not per message."
+        )
+    return f"{opening}\n\nTap Stop chat when you're done."
+
+
+# The smallest workable budget is one prefund chunk: a smaller daily cap would
+# be approved and then never fund a top-up. $1/day, which the design sketched,
+# is not offered for exactly that reason.
+_CHAT_BUDGET_CHOICES = (
+    ("$5 / day", 5_000_000),
+    ("$10 / day", 10_000_000),
+    ("$20 / day", 20_000_000),
+)
+_CHAT_BUDGET_DAYS = 30
+_CHAT_FREE_BUTTON = "Use free messages"
+_CHAT_BUDGET_BUTTONS = (
+    tuple(label for label, _ in _CHAT_BUDGET_CHOICES),
+    (_CHAT_FREE_BUTTON,),
+    ("Back",),
+)
+_CHAT_BUDGET_PENDING: dict[str, bool] = {}
+
+
+def _telegram_chat_budget_reply_markup() -> dict:
+    return _reply_keyboard(
+        _CHAT_BUDGET_BUTTONS, placeholder="Pick a daily budget"
+    )
+
+
+def _chat_budget_offer_text(status: dict) -> str:
+    free = status.get("freeMessagesRemaining")
+    lines = ["AI chat without an account and without logs."]
+    if isinstance(free, int) and free > 0:
+        lines.append(f"You have {free} free messages to try it.")
+    lines += [
+        "",
+        "For more, approve one daily budget. After that you chat without "
+        "confirming every message, until the budget or the approval runs out.",
+        "",
+        # Spelled out, not only on the keyboard: some clients do not render a
+        # reply keyboard, and the amounts are the whole decision.
+        "Daily budget: " + " · ".join(label for label, _ in _CHAT_BUDGET_CHOICES),
+        "",
+        "The approval arrives on your linked phone channel, not here.",
+    ]
+    return "\n".join(lines)
+
+
+def _handle_telegram_chat_entry(*, identity, source, gateway) -> bool:
+    """Enter chat mode, or offer a budget first. False when the feature is off."""
+    if not _ai_chat_enabled():
+        return False
+    client = _client_factory()
+    try:
+        result = client.execute_chat(
+            "start",
+            identity,
+            user_access_token=_user_access_token(client, identity),
+        )
+    except Exception:
+        _send_fixed_reply(
+            gateway,
+            source,
+            "Chat is unavailable right now. Try again in a moment.",
+            reply_markup=_telegram_main_menu_reply_markup(),
+        )
+        return True
+
+    status = result if isinstance(result, dict) else {}
+    if not status.get("hasPolicy"):
+        # Nothing is approved yet, so paid messages would be refused. Offer the
+        # budget instead of letting the user walk into a refusal.
+        _remember_chat_budget_pending(str(identity.user_id))
+        _send_fixed_reply(
+            gateway,
+            source,
+            _chat_budget_offer_text(status),
+            reply_markup=_telegram_chat_budget_reply_markup(),
+        )
+        return True
+
+    _enter_chat_mode(str(identity.user_id))
+    _send_fixed_reply(
+        gateway,
+        source,
+        _chat_start_text(status),
+        reply_markup=_telegram_chat_reply_markup(),
+    )
+    return True
+
+
+def _remember_chat_budget_pending(user_id: str) -> None:
+    if (
+        user_id not in _CHAT_BUDGET_PENDING
+        and len(_CHAT_BUDGET_PENDING) >= _TELEGRAM_OPERATION_MAX_USERS
+    ):
+        _CHAT_BUDGET_PENDING.pop(next(iter(_CHAT_BUDGET_PENDING)), None)
+    _CHAT_BUDGET_PENDING[user_id] = True
+
+
+def _handle_telegram_chat_budget_choice(*, event, source, gateway):
+    """Read a budget choice from the offer screen."""
+    if not _ai_chat_enabled() or not _is_telegram_source(source):
+        return None
+    identity = _identity_from_telegram_source(source)
+    if identity is None:
+        return None
+    user_id = str(identity.user_id)
+    if not _CHAT_BUDGET_PENDING.get(user_id):
+        return None
+
+    text = str(getattr(event, "text", "") or "").strip()
+    normalized = _normalize_button_text(text)
+    if normalized == "back":
+        _CHAT_BUDGET_PENDING.pop(user_id, None)
+        _send_fixed_reply(
+            gateway, source, "Cancelled.",
+            reply_markup=_telegram_main_menu_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+
+    if normalized == _normalize_button_text(_CHAT_FREE_BUTTON):
+        _CHAT_BUDGET_PENDING.pop(user_id, None)
+        _enter_chat_mode(user_id)
+        _send_fixed_reply(
+            gateway, source,
+            "Go ahead — your free messages are on the house.",
+            reply_markup=_telegram_chat_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+
+    chosen = next(
+        (
+            atomic
+            for label, atomic in _CHAT_BUDGET_CHOICES
+            if _normalize_button_text(label) == normalized
+        ),
+        None,
+    )
+    if chosen is None:
+        return None
+
+    _CHAT_BUDGET_PENDING.pop(user_id, None)
+    client = _client_factory()
+    try:
+        result = client.execute_chat(
+            "approve-policy",
+            identity,
+            payload={"dailyCapAtomic": chosen, "days": _CHAT_BUDGET_DAYS},
+            user_access_token=_user_access_token(client, identity),
+        )
+    except Exception:
+        _send_fixed_reply(
+            gateway, source,
+            "The approval could not be sent. Nothing was charged.",
+            reply_markup=_telegram_main_menu_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+
+    if not isinstance(result, dict) or not result.get("ok"):
+        # Declined or refused: no budget, no chat, no money moved.
+        _send_fixed_reply(
+            gateway, source,
+            str((result or {}).get("telegramText") or "The budget was not approved."),
+            reply_markup=_telegram_main_menu_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+
+    _enter_chat_mode(user_id)
+    _send_fixed_reply(
+        gateway, source,
+        str(result.get("telegramText") or "Approved.") + "\n\nGo ahead.",
+        reply_markup=_telegram_chat_reply_markup(),
+    )
+    return dict(_SKIP_RESULT)
+
+
+def _handle_telegram_chat_message(*, event, source, gateway):
+    """Route text to Venice while the user is in chat mode.
+
+    This runs before button and command dispatch, so ordinary words like
+    "balance" reach the model instead of the command parser. The exit button is
+    the one thing still read as a command.
+    """
+    if not _ai_chat_enabled() or not _is_telegram_source(source):
+        return None
+    identity = _identity_from_telegram_source(source)
+    if identity is None:
+        return None
+    user_id = str(identity.user_id)
+    if not _in_chat_mode(user_id):
+        return None
+
+    text = str(getattr(event, "text", "") or "").strip()
+    if not text:
+        return None
+
+    client = _client_factory()
+
+    normalized = _normalize_button_text(text)
+    if normalized in {
+        _normalize_button_text(_TELEGRAM_CHAT_EXIT_BUTTON),
+        "back",
+    }:
+        _leave_chat_mode(user_id)
+        try:
+            client.execute_chat(
+                "end",
+                identity,
+                user_access_token=_user_access_token(client, identity),
+            )
+        except Exception:
+            # Leaving is a local decision; a gateway hiccup must not trap the
+            # user in a mode they asked to leave.
+            pass
+        _send_fixed_reply(
+            gateway,
+            source,
+            "Chat ended.",
+            reply_markup=_telegram_main_menu_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+
+    try:
+        result = client.execute_chat(
+            "message",
+            identity,
+            payload={"text": text},
+            user_access_token=_user_access_token(client, identity),
+        )
+    except Exception:
+        _send_fixed_reply(
+            gateway,
+            source,
+            "The chat is unavailable right now. Try again in a moment.",
+            reply_markup=_telegram_chat_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+
+    if not isinstance(result, dict) or not result.get("ok"):
+        message = str(
+            (result or {}).get("telegramText", "")
+            or "The chat could not answer that."
+        )
+        # A merchant change is not a transient refusal: it needs a fresh
+        # approval, so put the user back on the main menu.
+        if str((result or {}).get("state", "")) == "MERCHANT_CHANGED":
+            _leave_chat_mode(user_id)
+            _send_fixed_reply(
+                gateway,
+                source,
+                message,
+                reply_markup=_telegram_main_menu_reply_markup(),
+            )
+            return dict(_SKIP_RESULT)
+        _send_fixed_reply(
+            gateway, source, message, reply_markup=_telegram_chat_reply_markup()
+        )
+        return dict(_SKIP_RESULT)
+
+    _send_fixed_reply(
+        gateway,
+        source,
+        _chat_answer_text(user_id, result),
+        reply_markup=_telegram_chat_reply_markup(),
+    )
     return dict(_SKIP_RESULT)
 
 
@@ -1245,6 +1702,8 @@ def _telegram_public_command_result(
             identity,
             user_access_token=_user_access_token(client, identity),
         )
+        if command == "balance":
+            text = f"{text}{_chat_budget_block(client, identity)}"
     elif command in {"email", "forget-email"}:
         text = _buyer_email_text(client, identity, command, args)
     elif command in {"limits", "set-limits"}:
@@ -1337,9 +1796,14 @@ def _telegram_public_command_result(
         raise ValueError("unsupported Telegram background command")
     # Coerce non-strings, but keep _HtmlText intact: a bare str() would drop the
     # marker and the buyer would see raw tags.
-    return (
-        text if isinstance(text, str) else str(text)
-    ), _telegram_main_menu_reply_markup()
+    # Wallet is a drawer, not a leaf: the approvals, withdrawal, receipt and
+    # agent-credit entries moved inside it, so opening it must show them.
+    markup = (
+        _telegram_wallet_menu_reply_markup()
+        if command == "wallet"
+        else _telegram_main_menu_reply_markup()
+    )
+    return (text if isinstance(text, str) else str(text)), markup
 
 
 def _handle_telegram_public_command_request(*, command: str, args: str = "", source, gateway):
@@ -1347,6 +1811,12 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
     if identity is None:
         _send_fixed_reply(gateway, source, _TELEGRAM_ONLY_MESSAGE)
         return dict(_SKIP_RESULT)
+    if command == "chat":
+        if _handle_telegram_chat_entry(
+            identity=identity, source=source, gateway=gateway
+        ):
+            return dict(_SKIP_RESULT)
+        # Flag off: fall through so the bot answers exactly as it does today.
     if command == "help" or (command == "bitrefill" and not str(args or "").strip()):
         _invalidate_telegram_operation(str(identity.user_id))
     if command in _TELEGRAM_PUBLIC_COMMAND_STARTED_MESSAGES:
@@ -3519,8 +3989,27 @@ def _send_telegram_reply_direct(
         return False
 
 
+def _telegram_main_menu_buttons() -> tuple[tuple[str, ...], ...]:
+    """The main menu, plus Chat when the feature is on.
+
+    Gated so the flag-off menu stays byte-for-byte what it is today: a button
+    leading to a disabled feature is worse than no button.
+    """
+    if not _ai_chat_enabled():
+        return _TELEGRAM_MAIN_MENU_BUTTONS
+    return _TELEGRAM_MAIN_MENU_WITH_CHAT
+
+
+def _telegram_wallet_menu_reply_markup() -> dict:
+    return _reply_keyboard(
+        _WALLET_MENU_BUTTONS, placeholder="Your wallet and approvals"
+    )
+
+
 def _telegram_main_menu_reply_markup() -> dict:
-    return _reply_keyboard(_TELEGRAM_MAIN_MENU_BUTTONS, placeholder="Choose a Sign402 action")
+    return _reply_keyboard(
+        _telegram_main_menu_buttons(), placeholder="Choose a Sign402 action"
+    )
 
 
 def _reply_keyboard(
@@ -3751,13 +4240,21 @@ def _telegram_public_command(event, source) -> str | None:
         "llm-terms",
         "llm-code",
         "llm-credits",
+        "chat",
     }:
         return normalized
     return None
 
 
 def _normalize_button_text(text: str) -> str:
-    return re.sub(r"\s+", " ", str(text or "").strip().lower().replace("_", " "))
+    """Fold a button label to its command key.
+
+    Leading pictographs are stripped so "👛 Wallet" and "Wallet" resolve
+    identically: the labels gained emoji, and a user's cached keyboard did not.
+    """
+    cleaned = str(text or "").strip()
+    cleaned = re.sub(r"^[^\w/+]+", "", cleaned, flags=re.UNICODE).strip()
+    return re.sub(r"\s+", " ", cleaned.lower().replace("_", " "))
 
 
 def _canonical_button_text(text: str) -> str:

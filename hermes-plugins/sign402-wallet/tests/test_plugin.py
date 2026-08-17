@@ -676,9 +676,11 @@ class WelcomeScreenTests(unittest.TestCase):
         # "a small amount only" reads as a warning that the wallet is unsafe.
         self.assertNotIn("small amount", self.text)
 
-    def test_it_names_both_approval_channels(self):
-        self.assertIn("WhatsApp", self.text)
-        self.assertIn("iMessage", self.text)
+    def test_it_does_not_demand_an_approval_channel_up_front(self):
+        # Task 5 moved this to the first action that moves money: a new user
+        # can chat and browse without ever being asked for a phone number.
+        self.assertNotIn("WhatsApp", self.text)
+        self.assertNotIn("iMessage", self.text)
 
     def test_it_says_what_the_support_id_is_for(self):
         self.assertIn("1045618308", self.text)
@@ -1563,10 +1565,11 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertIn("SingIt", text)
         self.assertIn("0xabc", text)
         self.assertIn("Support ID: 1045618308", text)
-        self.assertIn("1. Wallet", text)
-        self.assertIn("2. Connect WhatsApp or Connect iMessage", text)
-        self.assertIn("your phone", text)
-        self.assertIn("3. Limits", text)
+        # Task 5 replaced the onboarding checklist with the two actions a new
+        # user can take without setting anything up first.
+        self.assertIn("Buy Bitrefill", text)
+        self.assertIn("Chat", text)
+        self.assertNotIn("Connect WhatsApp", text)
         self.assertEqual(client.calls, [])
         self.assertEqual(client.create_wallet_calls, ["1045618308"])
 
@@ -1735,12 +1738,8 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertEqual(
             reply_markup["keyboard"],
             [
-                [{"text": "Wallet"}, {"text": "Balance"}],
-                [{"text": "Connect iMessage"}, {"text": "Connect WhatsApp"}],
-                [{"text": "Limits"}],
-                [{"text": "Withdraw"}],
-                [{"text": "Buy Bitrefill"}, {"text": "Buy LLM Credits"}],
-                [{"text": "Last Purchase"}, {"text": "Help"}],
+                [{"text": label} for label in row]
+                for row in plugin._telegram_main_menu_buttons()
             ],
         )
 
@@ -4147,3 +4146,949 @@ class BuyerEmailDispatchTests(unittest.TestCase):
             plugin._telegram_command_args(event),
             "buyer@example.com",
         )
+
+
+class ChatModeTests(unittest.TestCase):
+    """Task 4: while a user is in chat mode, text bypasses the command parser."""
+
+    def make(self, *, chat_result=None, chat_error=None):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.chat_calls = []
+        client.chat_error = chat_error
+        client.chat_result = chat_result or {
+            "ok": True,
+            "text": "an answer",
+            "costAtomic": 3_000,
+            "remainingWindowAtomic": 4_997_000,
+            "prefunded": False,
+        }
+
+        def execute_chat(operation, identity, *, payload=None, user_access_token):
+            client.chat_calls.append(
+                {
+                    "operation": operation,
+                    "user_id": identity.user_id,
+                    "payload": dict(payload or {}),
+                }
+            )
+            if client.chat_error:
+                raise client.chat_error
+            return client.chat_result
+
+        client.execute_chat = execute_chat
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+        return plugin, context, client, gateway
+
+    def dispatch(self, plugin, context, gateway, text, user_id="1045618308", env=None):
+        environment = {
+            "SIGN402_TELEGRAM_SIGN402_ONLY": "1",
+            "SIGN402_TELEGRAM_ALLOWED_USERS": "*",
+            "SIGN402_AI_CHAT_ENABLED": "1",
+        }
+        environment.update(env or {})
+        with patch.dict(plugin.os.environ, environment):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(text, user_id, platform="telegram", chat_id="c1"),
+                gateway=gateway,
+            )
+
+    # -- interception ----------------------------------------------------
+
+    def test_text_in_chat_mode_goes_to_gateway_not_command_parser(self):
+        plugin, context, client, gateway = self.make()
+        plugin._enter_chat_mode("1045618308")
+
+        self.dispatch(plugin, context, gateway, "balance")
+
+        self.assertEqual(client.chat_calls[-1]["operation"], "message")
+        self.assertEqual(client.chat_calls[-1]["payload"]["text"], "balance")
+        # The balance command must not have run.
+        self.assertEqual(client.calls, [])
+
+    def test_flag_off_never_intercepts_even_with_chat_mode_set(self):
+        # The hard constraint: with SIGN402_AI_CHAT_ENABLED unset the bot must
+        # behave exactly as it does today, whatever stale state exists.
+        plugin, context, client, gateway = self.make()
+        plugin._enter_chat_mode("1045618308")
+
+        self.dispatch(
+            plugin,
+            context,
+            gateway,
+            "balance",
+            env={"SIGN402_AI_CHAT_ENABLED": ""},
+        )
+
+        # "balance" is a menu button label, so with the flag off it must reach
+        # the command parser exactly as it does today.
+        self.assertEqual(client.chat_calls, [])
+        self.assertEqual([call[0] for call in client.calls], ["balance"])
+
+    def test_flag_off_falls_back_to_the_menu_for_unknown_text(self):
+        plugin, context, client, gateway = self.make()
+        plugin._enter_chat_mode("1045618308")
+
+        self.dispatch(
+            plugin,
+            context,
+            gateway,
+            "hello, what can you do?",
+            env={"SIGN402_AI_CHAT_ENABLED": ""},
+        )
+
+        self.assertEqual(client.chat_calls, [])
+        self.assertIn(
+            "Use the Sign402 menu", gateway.adapters["telegram"].sent[0][1]
+        )
+
+    def test_flag_off_leaves_the_command_parser_in_charge(self):
+        plugin, context, client, gateway = self.make()
+        plugin._enter_chat_mode("1045618308")
+
+        self.dispatch(
+            plugin,
+            context,
+            gateway,
+            "/balance",
+            env={"SIGN402_AI_CHAT_ENABLED": ""},
+        )
+
+        self.assertEqual(client.chat_calls, [])
+        self.assertEqual([call[0] for call in client.calls], ["balance"])
+
+    def test_text_outside_chat_mode_is_unchanged(self):
+        plugin, context, client, gateway = self.make()
+
+        self.dispatch(plugin, context, gateway, "hello, what can you do?")
+
+        self.assertEqual(client.chat_calls, [])
+
+    def test_exit_button_leaves_chat_mode_and_restores_main_menu(self):
+        plugin, context, client, gateway = self.make()
+        plugin._enter_chat_mode("1045618308")
+
+        # The fake adapter drops reply markup, so read the keyboard off the
+        # real Telegram send path instead.
+        requests = []
+
+        def opener(request, timeout):
+            requests.append(request)
+            return FakeTelegramResponse()
+
+        plugin._telegram_api_opener = opener
+
+        self.dispatch(
+            plugin,
+            context,
+            gateway,
+            plugin._TELEGRAM_CHAT_EXIT_BUTTON,
+            env={"TELEGRAM_BOT_TOKEN": "telegram-token"},
+        )
+
+        self.assertFalse(plugin._in_chat_mode("1045618308"))
+        payload = parse_qs(requests[-1].data.decode("utf-8"))
+        keyboard = json.loads(payload["reply_markup"][0])["keyboard"]
+        with patch.dict(plugin.os.environ, {"SIGN402_AI_CHAT_ENABLED": "1"}):
+            expected = [
+                [{"text": label} for label in row]
+                for row in plugin._telegram_main_menu_buttons()
+            ]
+        self.assertEqual(keyboard, expected)
+        # Leaving chat lands back on the full menu, Talk to AI included.
+        self.assertIn("Talk to AI", keyboard[0][0]["text"])
+
+    def test_chat_mode_keyboard_is_a_single_stop_button(self):
+        plugin, _context, _client, _gateway = self.make()
+        keyboard = plugin._telegram_chat_reply_markup()["keyboard"]
+        self.assertEqual(keyboard, [[{"text": "Stop chat"}]])
+
+    def test_leaving_chat_mode_tells_the_gateway(self):
+        plugin, context, client, gateway = self.make()
+        plugin._enter_chat_mode("1045618308")
+
+        self.dispatch(plugin, context, gateway, plugin._TELEGRAM_CHAT_EXIT_BUTTON)
+
+        self.assertEqual(client.chat_calls[-1]["operation"], "end")
+
+    def test_chat_mode_is_per_user(self):
+        plugin, context, client, gateway = self.make()
+        plugin._enter_chat_mode("1045618308")
+
+        self.dispatch(plugin, context, gateway, "balance", user_id="999")
+
+        # 999 is not in chat mode, so their text runs the balance command. That
+        # command now reads the chat budget, so assert on what must NOT happen:
+        # the text was never sent to the model as a message.
+        self.assertNotIn(
+            "message", [call["operation"] for call in client.chat_calls]
+        )
+
+    def test_chat_mode_state_is_bounded(self):
+        plugin, _context, _client, _gateway = self.make()
+        for index in range(plugin._TELEGRAM_OPERATION_MAX_USERS + 50):
+            plugin._enter_chat_mode(str(index))
+        self.assertLessEqual(
+            len(plugin._CHAT_MODE_USERS), plugin._TELEGRAM_OPERATION_MAX_USERS
+        )
+
+    # -- the pre-dispatch hook (Step 4) ----------------------------------
+
+    def test_sign402_only_mode_still_returns_the_menu_outside_chat_mode(self):
+        plugin, context, client, gateway = self.make()
+
+        self.dispatch(plugin, context, gateway, "hello, what can you do?")
+
+        text = gateway.adapters["telegram"].sent[0][1]
+        self.assertIn("Use the Sign402 menu", text)
+
+    def test_sign402_only_mode_does_not_swallow_text_in_chat_mode(self):
+        plugin, context, client, gateway = self.make()
+        plugin._enter_chat_mode("1045618308")
+
+        self.dispatch(plugin, context, gateway, "hello, what can you do?")
+
+        self.assertEqual(client.chat_calls[-1]["operation"], "message")
+        sent = "\n".join(entry[1] for entry in gateway.adapters["telegram"].sent)
+        self.assertNotIn("Use the Sign402 menu", sent)
+
+    # -- footer (Step 3) -------------------------------------------------
+
+    def test_answer_carries_cost_and_remaining_budget(self):
+        plugin, context, client, gateway = self.make()
+        plugin._enter_chat_mode("1045618308")
+
+        self.dispatch(plugin, context, gateway, "hi")
+
+        text = gateway.adapters["telegram"].sent[-1][1]
+        self.assertIn("an answer", text)
+        self.assertIn("$0.003", text)
+        self.assertIn("$4.99", text)
+
+    def test_the_eighty_percent_warning_appears_once_per_window(self):
+        plugin, context, client, gateway = self.make(
+            chat_result={
+                "ok": True,
+                "text": "an answer",
+                "costAtomic": 3_000,
+                # $1.00 left of a $5.00 cap: 80% spent.
+                "remainingWindowAtomic": 1_000_000,
+                "dailyCapAtomic": 5_000_000,
+                "prefunded": False,
+            }
+        )
+        plugin._enter_chat_mode("1045618308")
+
+        self.dispatch(plugin, context, gateway, "one")
+        self.dispatch(plugin, context, gateway, "two")
+
+        warnings = [
+            entry
+            for entry in gateway.adapters["telegram"].sent
+            if "You've used" in entry[1]
+        ]
+        self.assertEqual(len(warnings), 1)
+
+    def test_no_warning_below_the_threshold(self):
+        plugin, context, client, gateway = self.make()
+        plugin._enter_chat_mode("1045618308")
+
+        self.dispatch(plugin, context, gateway, "hi")
+
+        sent = "\n".join(entry[1] for entry in gateway.adapters["telegram"].sent)
+        self.assertNotIn("You've used", sent)
+
+    # -- refusals --------------------------------------------------------
+
+    def test_a_refusal_is_shown_and_keeps_the_user_in_chat_mode(self):
+        plugin, context, client, gateway = self.make(
+            chat_result={
+                "ok": False,
+                "state": "WINDOW_EXHAUSTED",
+                "telegramText": "Today's budget is spent. It resets at 00:00 UTC.",
+            }
+        )
+        plugin._enter_chat_mode("1045618308")
+
+        self.dispatch(plugin, context, gateway, "hi")
+
+        text = gateway.adapters["telegram"].sent[-1][1]
+        self.assertIn("00:00 UTC", text)
+        self.assertTrue(plugin._in_chat_mode("1045618308"))
+
+    def test_merchant_changed_drops_the_user_out_of_chat_mode(self):
+        plugin, context, client, gateway = self.make(
+            chat_result={
+                "ok": False,
+                "state": "MERCHANT_CHANGED",
+                "telegramText": "Venice AI changed its payout details.",
+            }
+        )
+        plugin._enter_chat_mode("1045618308")
+
+        self.dispatch(plugin, context, gateway, "hi")
+
+        self.assertFalse(plugin._in_chat_mode("1045618308"))
+
+    # -- the words the user must never see -------------------------------
+
+    def test_the_plumbing_vocabulary_never_reaches_the_user(self):
+        plugin, context, client, gateway = self.make()
+        plugin._enter_chat_mode("1045618308")
+
+        self.dispatch(plugin, context, gateway, "hi")
+
+        sent = "\n".join(entry[1] for entry in gateway.adapters["telegram"].sent).lower()
+        for word in ("x402", "facilitator", "settlement", "prefund"):
+            self.assertNotIn(word, sent)
+
+
+class DeferredApprovalChannelGateTests(unittest.TestCase):
+    """Task 5: the channel prompt belongs to the first action that moves money."""
+
+    def test_start_shows_two_actions_and_nothing_else(self):
+        plugin = load_plugin()
+        text = plugin._start_text("0xabc", support_id="1045618308")
+
+        # No onboarding checklist, and no approval-channel demand up front.
+        self.assertNotIn("Connect WhatsApp", text)
+        self.assertNotIn("Connect iMessage", text)
+        self.assertNotIn("Spending stays off", text)
+        self.assertNotIn("Before your first purchase", text)
+
+    def test_start_names_the_two_things_a_new_user_can_do(self):
+        plugin = load_plugin()
+        text = plugin._html_to_plain(plugin._start_text("0xabc"))
+
+        self.assertIn("Buy Bitrefill", text)
+        self.assertIn("Chat", text)
+
+    def test_the_channel_status_line_lives_in_the_wallet_view(self):
+        # The gateway already writes it into the wallet text; /start must not
+        # duplicate it.
+        plugin = load_plugin()
+        self.assertNotIn("approval", plugin._start_text("0xabc").lower())
+
+    def test_free_messages_need_no_approval_channel_or_wallet(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.chat_calls = []
+
+        def execute_chat(operation, identity, *, payload=None, user_access_token):
+            client.chat_calls.append(operation)
+            return {
+                "ok": True,
+                "text": "an answer",
+                "costAtomic": 0,
+                "remainingWindowAtomic": 5_000_000,
+            }
+
+        client.execute_chat = execute_chat
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+        plugin._enter_chat_mode("1045618308")
+
+        with patch.dict(
+            plugin.os.environ,
+            {
+                "SIGN402_TELEGRAM_SIGN402_ONLY": "1",
+                "SIGN402_TELEGRAM_ALLOWED_USERS": "*",
+                "SIGN402_AI_CHAT_ENABLED": "1",
+            },
+        ):
+            context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent("hi", "1045618308", platform="telegram"),
+                gateway=gateway,
+            )
+
+        # No approval-channel round trip was needed to answer.
+        self.assertEqual(client.chat_calls, ["message"])
+        self.assertEqual(client.approval_calls, [])
+        self.assertEqual(client.imessage_calls, [])
+
+    def test_catalog_browsing_needs_no_approval_channel(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        with patch.dict(
+            plugin.os.environ,
+            {
+                "SIGN402_TELEGRAM_SIGN402_ONLY": "1",
+                "SIGN402_TELEGRAM_ALLOWED_USERS": "*",
+            },
+        ):
+            context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent("Buy Bitrefill", "1045618308", platform="telegram"),
+                gateway=gateway,
+            )
+
+        self.assertEqual(client.approval_calls, [])
+        self.assertEqual(client.imessage_calls, [])
+
+
+class ApprovalChannelPromptCopyTests(unittest.TestCase):
+    """Task 5 Step 3: the prompt explains the benefit, not the requirement."""
+
+    def prompt(self, plugin, channel):
+        with patch.dict(plugin.os.environ, {}, clear=False):
+            return plugin._imessage_phone_prompt(channel=channel)
+
+    def test_the_prompt_explains_why_a_separate_channel_protects_the_user(self):
+        plugin = load_plugin()
+        text = self.prompt(plugin, "imessage").lower()
+
+        self.assertIn("separate", text)
+        self.assertIn("telegram", text)
+
+    def test_the_prompt_says_the_number_is_not_verified_and_not_shared(self):
+        plugin = load_plugin()
+        text = self.prompt(plugin, "imessage").lower()
+
+        self.assertIn("not verified", text)
+        self.assertIn("never shared", text)
+
+    def test_both_channels_get_the_same_promise(self):
+        plugin = load_plugin()
+        imessage = self.prompt(plugin, "imessage").lower()
+        whatsapp = self.prompt(plugin, "whatsapp").lower()
+
+        for phrase in ("separate", "not verified", "never shared"):
+            self.assertIn(phrase, imessage)
+            self.assertIn(phrase, whatsapp)
+
+    def test_whatsapp_is_never_described_as_second_best(self):
+        # Android users have no iMessage; the copy must not rank the channels.
+        plugin = load_plugin()
+        whatsapp = self.prompt(plugin, "whatsapp").lower()
+
+        for phrase in ("instead", "alternative", "if you do not have imessage"):
+            self.assertNotIn(phrase, whatsapp)
+
+    def test_the_prompt_still_asks_for_the_number_in_international_format(self):
+        plugin = load_plugin()
+        text = self.prompt(plugin, "whatsapp")
+
+        self.assertIn("+1", text)
+        self.assertIn("WhatsApp", text)
+
+
+class ChatMenuButtonTests(unittest.TestCase):
+    """The chat entry point. /start advertises it, so it must exist."""
+
+    def markup(self, plugin, flag):
+        with patch.dict(plugin.os.environ, {"SIGN402_AI_CHAT_ENABLED": flag}):
+            return plugin._telegram_main_menu_reply_markup()
+
+    def test_the_menu_is_byte_for_byte_unchanged_with_the_flag_off(self):
+        plugin = load_plugin()
+        expected = [
+            [{"text": label} for label in row]
+            for row in plugin._TELEGRAM_MAIN_MENU_BUTTONS
+        ]
+        self.assertEqual(self.markup(plugin, "")["keyboard"], expected)
+
+    def test_the_chat_button_appears_only_with_the_flag_on(self):
+        plugin = load_plugin()
+        off = json.dumps(self.markup(plugin, ""))
+        on = json.dumps(self.markup(plugin, "1"))
+
+        self.assertNotIn("Talk to AI", off)
+        self.assertIn("Talk to AI", on)
+
+    def test_the_chat_button_maps_to_a_command(self):
+        plugin = load_plugin()
+        self.assertEqual(
+            plugin._TELEGRAM_BUTTON_COMMANDS.get("chat"), "chat"
+        )
+
+    def test_pressing_chat_with_a_budget_enters_chat_mode(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.chat_calls = []
+
+        def execute_chat(operation, identity, *, payload=None, user_access_token):
+            client.chat_calls.append(operation)
+            return {
+                "ok": True,
+                "freeMessagesRemaining": 5,
+                # An approved budget already exists, so pressing the button
+                # goes straight in. Without one the bot offers a budget first,
+                # which PolicyApprovalFlowTests covers.
+                "hasPolicy": True,
+                "dailyCapUsdc": "5.00",
+            }
+
+        client.execute_chat = execute_chat
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        with patch.dict(
+            plugin.os.environ,
+            {
+                "SIGN402_TELEGRAM_SIGN402_ONLY": "1",
+                "SIGN402_TELEGRAM_ALLOWED_USERS": "*",
+                "SIGN402_AI_CHAT_ENABLED": "1",
+            },
+        ):
+            context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent("Chat", "1045618308", platform="telegram"),
+                gateway=gateway,
+            )
+
+        self.assertTrue(plugin._in_chat_mode("1045618308"))
+        self.assertEqual(client.chat_calls, ["start"])
+
+    def test_the_opening_message_states_the_free_allowance(self):
+        plugin = load_plugin()
+        text = plugin._chat_start_text(
+            {"freeMessagesRemaining": 5, "hasPolicy": False, "dailyCapUsdc": "5.00"}
+        )
+        self.assertIn("5", text)
+        self.assertIn("free", text.lower())
+        for word in ("x402", "prefund", "settlement", "facilitator"):
+            self.assertNotIn(word, text.lower())
+
+    def test_pressing_chat_with_the_flag_off_is_not_a_chat(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.chat_calls = []
+        client.execute_chat = lambda *a, **k: client.chat_calls.append("x")
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        with patch.dict(
+            plugin.os.environ,
+            {
+                "SIGN402_TELEGRAM_SIGN402_ONLY": "1",
+                "SIGN402_TELEGRAM_ALLOWED_USERS": "*",
+                "SIGN402_AI_CHAT_ENABLED": "",
+            },
+        ):
+            context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent("Chat", "1045618308", platform="telegram"),
+                gateway=gateway,
+            )
+
+        self.assertFalse(plugin._in_chat_mode("1045618308"))
+        self.assertEqual(client.chat_calls, [])
+
+
+class RegroupedMenuTests(unittest.TestCase):
+    """The menu now groups by intent instead of listing every command."""
+
+    def enabled(self, plugin):
+        return patch.dict(plugin.os.environ, {"SIGN402_AI_CHAT_ENABLED": "1"})
+
+    def test_the_main_menu_is_six_entries_in_three_rows(self):
+        plugin = load_plugin()
+        with self.enabled(plugin):
+            rows = plugin._telegram_main_menu_buttons()
+
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(len(row) == 2 for row in rows))
+
+    def test_the_main_menu_leads_with_the_two_things_you_can_spend_on(self):
+        plugin = load_plugin()
+        with self.enabled(plugin):
+            first = plugin._telegram_main_menu_buttons()[0]
+
+        self.assertIn("Talk to AI", first[0])
+        self.assertIn("Gift Cards", first[1])
+
+    def test_housekeeping_is_not_on_the_main_menu(self):
+        plugin = load_plugin()
+        with self.enabled(plugin):
+            flat = [label for row in plugin._telegram_main_menu_buttons() for label in row]
+
+        for hidden in ("Connect iMessage", "Connect WhatsApp", "Withdraw", "Last Purchase"):
+            self.assertNotIn(hidden, " ".join(flat))
+
+    def test_the_wallet_submenu_holds_what_moved_off_the_main_menu(self):
+        plugin = load_plugin()
+        flat = " ".join(
+            label for row in plugin._WALLET_MENU_BUTTONS for label in row
+        )
+
+        for moved in ("AI Credits", "Withdraw", "Last Purchase", "Connect iMessage", "Connect WhatsApp"):
+            self.assertIn(moved, flat)
+        self.assertIn("Back", flat)
+
+    def test_talk_to_ai_appears_only_when_chat_is_enabled(self):
+        plugin = load_plugin()
+        with patch.dict(plugin.os.environ, {"SIGN402_AI_CHAT_ENABLED": ""}):
+            flat = " ".join(
+                label for row in plugin._telegram_main_menu_buttons() for label in row
+            )
+        self.assertNotIn("Talk to AI", flat)
+
+    def test_the_two_ai_entries_never_share_a_screen(self):
+        # The whole point of the rename: support should not have to explain
+        # the difference between them side by side.
+        plugin = load_plugin()
+        with self.enabled(plugin):
+            main = " ".join(
+                label for row in plugin._telegram_main_menu_buttons() for label in row
+            )
+        wallet = " ".join(
+            label for row in plugin._WALLET_MENU_BUTTONS for label in row
+        )
+
+        self.assertIn("Talk to AI", main)
+        self.assertNotIn("AI Credits", main)
+        self.assertIn("AI Credits", wallet)
+        self.assertNotIn("Talk to AI", wallet)
+
+
+class CachedKeyboardCompatibilityTests(unittest.TestCase):
+    """Telegram keeps the old keyboard until the bot sends a new one.
+
+    Every label that shipped before must keep resolving, or a user who has not
+    received a fresh keyboard presses a button and nothing happens.
+    """
+
+    OLD_LABELS = {
+        "Wallet": "wallet",
+        "Balance": "balance",
+        "Connect iMessage": "connect-imessage",
+        "Connect WhatsApp": "connect-whatsapp",
+        "Limits": "limits",
+        "Withdraw": "withdraw",
+        "Buy Bitrefill": "bitrefill",
+        "Buy LLM Credits": "llm-buy",
+        "Last Purchase": "last-purchase",
+        "Help": "help",
+    }
+
+    def test_every_previously_shipped_label_still_resolves(self):
+        plugin = load_plugin()
+        for label, command in self.OLD_LABELS.items():
+            with self.subTest(label=label):
+                self.assertEqual(
+                    plugin._TELEGRAM_BUTTON_COMMANDS.get(
+                        plugin._normalize_button_text(label)
+                    ),
+                    command,
+                )
+
+    def test_new_labels_resolve_with_their_emoji(self):
+        plugin = load_plugin()
+        for label, command in (
+            ("💬 Talk to AI", "chat"),
+            ("🎁 Buy Gift Cards", "bitrefill"),
+            ("👛 Wallet", "wallet"),
+            ("💰 Balance", "balance"),
+            ("🤖 AI Credits", "llm-buy"),
+            ("💸 Withdraw", "withdraw"),
+        ):
+            with self.subTest(label=label):
+                self.assertEqual(
+                    plugin._TELEGRAM_BUTTON_COMMANDS.get(
+                        plugin._normalize_button_text(label)
+                    ),
+                    command,
+                )
+
+    def test_an_emoji_prefix_does_not_change_the_command(self):
+        plugin = load_plugin()
+        self.assertEqual(
+            plugin._normalize_button_text("👛 Wallet"),
+            plugin._normalize_button_text("Wallet"),
+        )
+
+
+class WalletSubmenuTests(unittest.TestCase):
+    """Pressing Wallet must actually open the drawer things were moved into."""
+
+    def make(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient(result="Your Base agent wallet:\n0xabc")
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        return plugin, context, client, FakeGateway(adapter_key="telegram")
+
+    def press(self, plugin, context, gateway, text):
+        requests = []
+        plugin._telegram_api_opener = lambda request, timeout: (
+            requests.append(request) or FakeTelegramResponse()
+        )
+        with patch.dict(
+            plugin.os.environ,
+            {
+                "SIGN402_TELEGRAM_ALLOWED_USERS": "*",
+                "SIGN402_TELEGRAM_SIGN402_ONLY": "1",
+                "TELEGRAM_BOT_TOKEN": "telegram-token",
+            },
+        ):
+            context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(text, "1045618308", platform="telegram"),
+                gateway=gateway,
+            )
+        return requests
+
+    def keyboard_of(self, requests):
+        payload = parse_qs(requests[-1].data.decode("utf-8"))
+        return json.loads(payload["reply_markup"][0])["keyboard"]
+
+    def test_pressing_wallet_opens_the_submenu(self):
+        plugin, context, client, gateway = self.make()
+
+        keyboard = self.keyboard_of(self.press(plugin, context, gateway, "👛 Wallet"))
+
+        flat = " ".join(button["text"] for row in keyboard for button in row)
+        self.assertIn("AI Credits", flat)
+        self.assertIn("Withdraw", flat)
+        self.assertIn("Back", flat)
+
+    def test_the_old_wallet_label_opens_it_too(self):
+        plugin, context, client, gateway = self.make()
+
+        keyboard = self.keyboard_of(self.press(plugin, context, gateway, "Wallet"))
+
+        flat = " ".join(button["text"] for row in keyboard for button in row)
+        self.assertIn("AI Credits", flat)
+
+    def test_back_returns_to_the_main_menu(self):
+        plugin, context, client, gateway = self.make()
+        self.press(plugin, context, gateway, "👛 Wallet")
+
+        keyboard = self.keyboard_of(self.press(plugin, context, gateway, "Back"))
+
+        flat = " ".join(button["text"] for row in keyboard for button in row)
+        self.assertIn("Buy Gift Cards", flat)
+        self.assertNotIn("AI Credits", flat)
+
+    def test_the_wallet_text_still_comes_from_the_gateway(self):
+        plugin, context, client, gateway = self.make()
+        self.press(plugin, context, gateway, "👛 Wallet")
+
+        self.assertEqual(client.create_wallet_calls, ["1045618308"])
+
+
+class ChatBudgetViewTests(unittest.TestCase):
+    """Balance must answer "how much is left" for chat too, not just tokens."""
+
+    STATUS = {
+        "ok": True,
+        "freeMessagesRemaining": 3,
+        "hasPolicy": True,
+        "dailyCapUsdc": "5.00",
+        "remainingWindowUsdc": "1.25",
+        "outstandingUsdc": "4.99",
+        "paused": False,
+    }
+
+    def make(self, status=None, chat_on=True):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient(result="Base agent wallet: 0xabc\n\nBalances:\n- USDC: 5")
+        client.chat_calls = []
+
+        def execute_chat(operation, identity, *, payload=None, user_access_token):
+            client.chat_calls.append(operation)
+            return self.STATUS if status is None else status
+
+        client.execute_chat = execute_chat
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+
+        env = {
+            "SIGN402_TELEGRAM_ALLOWED_USERS": "*",
+            "SIGN402_TELEGRAM_SIGN402_ONLY": "1",
+            "SIGN402_AI_CHAT_ENABLED": "1" if chat_on else "",
+        }
+        with patch.dict(plugin.os.environ, env):
+            context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent("💰 Balance", "1045618308", platform="telegram"),
+                gateway=gateway,
+            )
+        return plugin, client, gateway.adapters["telegram"].sent[-1][1]
+
+    def test_balance_shows_credit_left_and_budget_left(self):
+        _plugin, _client, text = self.make()
+
+        self.assertIn("4.99", text)   # credit still loaded at the provider
+        self.assertIn("1.25", text)   # what may still be spent today
+
+    def test_the_two_numbers_are_labelled_differently(self):
+        _plugin, _client, text = self.make()
+
+        lowered = text.lower()
+        self.assertIn("today", lowered)
+        self.assertIn("chat", lowered)
+
+    def test_free_messages_are_shown_while_any_remain(self):
+        _plugin, _client, text = self.make()
+        self.assertIn("3", text)
+
+    def test_wallet_balances_are_still_there(self):
+        _plugin, _client, text = self.make()
+        self.assertIn("USDC", text)
+        self.assertIn("0xabc", text)
+
+    def test_a_paused_chat_says_so(self):
+        status = dict(self.STATUS, paused=True, pauseReason="MERCHANT_CHANGED")
+        _plugin, _client, text = self.make(status=status)
+        self.assertIn("paused", text.lower())
+
+    def test_nothing_is_added_when_chat_is_off(self):
+        _plugin, client, text = self.make(chat_on=False)
+
+        self.assertEqual(client.chat_calls, [])
+        self.assertNotIn("4.99", text)
+        self.assertIn("USDC", text)
+
+    def test_a_chat_lookup_failure_never_hides_the_wallet_balance(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient(result="Base agent wallet: 0xabc\n\nBalances:\n- USDC: 5")
+
+        def boom(operation, identity, *, payload=None, user_access_token):
+            raise RuntimeError("gateway down")
+
+        client.execute_chat = boom
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+        with patch.dict(plugin.os.environ, {
+            "SIGN402_TELEGRAM_ALLOWED_USERS": "*",
+            "SIGN402_TELEGRAM_SIGN402_ONLY": "1",
+            "SIGN402_AI_CHAT_ENABLED": "1",
+        }):
+            context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent("💰 Balance", "1045618308", platform="telegram"),
+                gateway=gateway,
+            )
+
+        text = gateway.adapters["telegram"].sent[-1][1]
+        self.assertIn("USDC", text)
+        self.assertIn("0xabc", text)
+
+
+class PolicyApprovalFlowTests(unittest.TestCase):
+    """Pressing Talk to AI without a budget offers to approve one."""
+
+    def make(self, *, has_policy=False, approve=None, free_left=5):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.chat_calls = []
+
+        def execute_chat(operation, identity, *, payload=None, user_access_token):
+            client.chat_calls.append({"operation": operation, "payload": dict(payload or {})})
+            if operation == "start":
+                return {
+                    "ok": True,
+                    "hasPolicy": has_policy,
+                    "freeMessagesRemaining": free_left,
+                    "dailyCapUsdc": "5.00",
+                    "remainingWindowUsdc": "5.00",
+                    "outstandingUsdc": "0.00",
+                }
+            if operation == "approve-policy":
+                return approve or {
+                    "ok": True,
+                    "approved": True,
+                    "telegramText": "Chat approved: up to $5.00 a day.",
+                }
+            return {"ok": True, "text": "an answer", "costAtomic": 0,
+                    "remainingWindowAtomic": 5_000_000}
+
+        client.execute_chat = execute_chat
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        return plugin, context, client, FakeGateway(adapter_key="telegram")
+
+    def press(self, plugin, context, gateway, text, user_id="1045618308"):
+        with patch.dict(plugin.os.environ, {
+            "SIGN402_TELEGRAM_ALLOWED_USERS": "*",
+            "SIGN402_TELEGRAM_SIGN402_ONLY": "1",
+            "SIGN402_AI_CHAT_ENABLED": "1",
+        }):
+            context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(text, user_id, platform="telegram"),
+                gateway=gateway,
+            )
+        return gateway.adapters["telegram"].sent[-1][1]
+
+    def test_without_a_budget_it_offers_the_choices(self):
+        plugin, context, client, gateway = self.make(has_policy=False)
+
+        text = self.press(plugin, context, gateway, "💬 Talk to AI")
+
+        self.assertIn("$5", text)
+        self.assertIn("$10", text)
+        self.assertIn("$20", text)
+
+    def test_the_offer_never_includes_an_unworkable_budget(self):
+        plugin, context, client, gateway = self.make(has_policy=False)
+
+        text = self.press(plugin, context, gateway, "💬 Talk to AI")
+
+        # $1/day could never fund a $5 top-up.
+        self.assertNotIn("$1 ", text)
+
+    def test_choosing_a_budget_asks_for_approval(self):
+        plugin, context, client, gateway = self.make(has_policy=False)
+        self.press(plugin, context, gateway, "💬 Talk to AI")
+
+        self.press(plugin, context, gateway, "$5 / day")
+
+        approve = [c for c in client.chat_calls if c["operation"] == "approve-policy"]
+        self.assertEqual(len(approve), 1)
+        self.assertEqual(approve[0]["payload"]["dailyCapAtomic"], 5_000_000)
+        self.assertGreater(approve[0]["payload"]["days"], 0)
+
+    def test_an_approved_budget_opens_the_chat(self):
+        plugin, context, client, gateway = self.make(has_policy=False)
+        self.press(plugin, context, gateway, "💬 Talk to AI")
+
+        self.press(plugin, context, gateway, "$5 / day")
+
+        self.assertTrue(plugin._in_chat_mode("1045618308"))
+
+    def test_a_declined_budget_does_not_open_the_chat(self):
+        plugin, context, client, gateway = self.make(
+            has_policy=False,
+            approve={"ok": False, "approved": False, "telegramText": "Not confirmed."},
+        )
+        self.press(plugin, context, gateway, "💬 Talk to AI")
+
+        text = self.press(plugin, context, gateway, "$5 / day")
+
+        self.assertFalse(plugin._in_chat_mode("1045618308"))
+        self.assertIn("Not confirmed", text)
+
+    def test_with_a_budget_it_goes_straight_into_the_chat(self):
+        plugin, context, client, gateway = self.make(has_policy=True)
+
+        self.press(plugin, context, gateway, "💬 Talk to AI")
+
+        self.assertTrue(plugin._in_chat_mode("1045618308"))
+        self.assertEqual(
+            [c["operation"] for c in client.chat_calls if c["operation"] == "approve-policy"],
+            [],
+        )
+
+    def test_free_messages_open_the_chat_without_any_budget(self):
+        plugin, context, client, gateway = self.make(has_policy=False, free_left=5)
+
+        self.press(plugin, context, gateway, "💬 Talk to AI")
+
+        # Offering the budget must not block the free tier: the copy says so.
+        text = gateway.adapters["telegram"].sent[-1][1]
+        self.assertIn("free", text.lower())

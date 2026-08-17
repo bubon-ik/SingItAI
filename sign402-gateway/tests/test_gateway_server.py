@@ -7898,3 +7898,76 @@ class AgentStateStoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UserWalletBaseX402PostTests(unittest.TestCase):
+    """Venice's top-up is a POST; the approved terms must still gate signing."""
+
+    def make_client(self, calls):
+        with tempfile.TemporaryDirectory() as tmp:
+            service_dir = Path(tmp)
+            (service_dir / "src").mkdir()
+            (service_dir / "src" / "index.mjs").write_text("//")
+
+            def runner(command, **kwargs):
+                calls.append(command)
+                return subprocess.CompletedProcess(
+                    command, 0, stdout='{"ok":true}', stderr=""
+                )
+
+            client = UserWalletBaseX402PaymentClient(service_dir, runner=runner)
+            yield client
+
+    def run_client(self, calls, **kwargs):
+        with tempfile.TemporaryDirectory() as tmp:
+            service_dir = Path(tmp)
+            (service_dir / "src").mkdir()
+            (service_dir / "src" / "index.mjs").write_text("//")
+
+            def runner(command, **runner_kwargs):
+                calls.append(command)
+                return subprocess.CompletedProcess(
+                    command, 0, stdout='{"ok":true}', stderr=""
+                )
+
+            client = UserWalletBaseX402PaymentClient(service_dir, runner=runner)
+            return client(
+                "https://api.venice.ai/api/v1/x402/top-up",
+                private_key="0x" + "11" * 32,
+                max_atomic="5000000",
+                expected_receiver="0x2670b922ef37c7df47158725c0cc407b5382293f",
+                expected_asset="0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                **kwargs,
+            )
+
+    def test_a_post_passes_the_method_and_body_through(self):
+        calls = []
+        self.run_client(calls, method="POST", request_body={})
+
+        command = calls[0]
+        self.assertIn("--method", command)
+        self.assertEqual(command[command.index("--method") + 1], "POST")
+        self.assertIn("--body-json", command)
+
+    def test_a_get_stays_exactly_as_before(self):
+        calls = []
+        self.run_client(calls)
+
+        self.assertNotIn("--method", calls[0])
+        self.assertNotIn("--body-json", calls[0])
+
+    def test_a_post_still_refuses_without_approved_terms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service_dir = Path(tmp)
+            (service_dir / "src").mkdir()
+            (service_dir / "src" / "index.mjs").write_text("//")
+            client = UserWalletBaseX402PaymentClient(
+                service_dir, runner=lambda *a, **k: None
+            )
+            with self.assertRaises(ValueError):
+                client(
+                    "https://api.venice.ai/api/v1/x402/top-up",
+                    private_key="0x" + "11" * 32,
+                    method="POST",
+                    request_body={},
+                )

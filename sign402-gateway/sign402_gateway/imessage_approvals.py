@@ -1898,6 +1898,15 @@ def _decision_text(action_type: str, final_status: str) -> str:
         if final_status == "approved":
             return "✅ Payment approved. Your purchase is being processed."
         return "Payment declined. No funds were moved."
+    if action_type == "sign402_chat_policy":
+        if final_status == "approved":
+            # A standing allowance, so say so: this one approval covers every
+            # message until the cap or the expiry, not a single charge.
+            return (
+                "✅ Chat approved. Your daily allowance is active until it "
+                "expires; no further approvals per message."
+            )
+        return "Chat approval declined. No funds were moved."
     if action_type == "sign402_withdrawal":
         if final_status == "approved":
             return "✅ Withdrawal approved. Your transfer is being processed."

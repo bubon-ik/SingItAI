@@ -119,6 +119,12 @@ from .secure_state import (
     atomic_write_private_json,
 )
 from .user_emails import BuyerEmailStore, mask_email
+from .venice_chat import (
+    ChatError,
+    ChatPolicyApprovalService,
+    build_chat_service_from_env,
+    start_payto_watcher,
+)
 from .user_wallets import (
     BASE_NATIVE_ETH_ASSET_ID,
     DEFAULT_USER_WALLET_STORE_PATH,
@@ -479,6 +485,15 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 "/agent/imessage/pending",
                 "/agent/imessage/decision",
             ]
+            if _ai_chat_enabled():
+                endpoints.extend(
+                    [
+                        "/agent/chat/start",
+                        "/agent/chat/message",
+                        "/agent/chat/end",
+                        "/agent/chat/approve-policy",
+                    ]
+                )
             if _test_endpoints_enabled():
                 endpoints.append("/agent/test-imessage-approval")
             if _legacy_payment_executor_enabled():
@@ -584,6 +599,14 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if path == "/agent/get-bitrefill-order":
             self._handle_agent_get_bitrefill_order()
+            return
+        if path in (
+            "/agent/chat/start",
+            "/agent/chat/message",
+            "/agent/chat/end",
+            "/agent/chat/approve-policy",
+        ):
+            self._handle_agent_chat(path)
             return
         if path == "/agent/wallet":
             self._handle_agent_wallet()
@@ -813,6 +836,150 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=503)
         except Exception as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_chat(self, path: str) -> None:
+        """Serve /agent/chat/*.
+
+        Free messages move no money, so a global purchase pause refuses paid
+        messages here rather than at dispatch: pausing the whole route would
+        also take the free tier down with it.
+
+        Prompt text and model output are never logged, and never appear in an
+        error body — an unexpected exception is reported without its message.
+        """
+        if not _ai_chat_enabled():
+            self._send_json({"error": "not_found"}, status=404)
+            return
+        try:
+            payload = self._read_json()
+            telegram_user_id = _require_authenticated_user(self, payload)
+            chat_service = getattr(self.server, "chat_service", None)
+            if chat_service is None:
+                self._send_json(
+                    {"ok": False, "error": "chat is not configured"}, status=503
+                )
+                return
+
+            if path == "/agent/chat/start":
+                self._send_json(chat_service.start(telegram_user_id), status=200)
+                return
+            if path == "/agent/chat/end":
+                self._send_json(chat_service.end(telegram_user_id), status=200)
+                return
+
+            if path == "/agent/chat/approve-policy":
+                self._handle_chat_policy_approval(telegram_user_id, payload)
+                return
+
+            free = bool(payload.get("free"))
+            text = str(payload.get("text", "") or "")
+            if not text:
+                self._send_json(
+                    {"ok": False, "error": "text is required"}, status=400
+                )
+                return
+
+            if not free and self._reject_if_purchases_paused():
+                return
+
+            result = (
+                chat_service.send_free(telegram_user_id, text)
+                if free
+                else chat_service.send(telegram_user_id, text)
+            )
+            if result is None:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "state": "FREE_MESSAGES_SPENT",
+                        "telegramText": "Your free messages are used up.",
+                    },
+                    status=200,
+                )
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "text": result.text,
+                    "costAtomic": result.cost_atomic,
+                    "prefunded": result.prefunded,
+                    "remainingWindowAtomic": result.remaining_window_atomic,
+                    "outstandingAtomic": result.outstanding_atomic,
+                },
+                status=200,
+            )
+        except WalletApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except WalletApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+        except ChatError as exc:
+            self._send_json(
+                {
+                    "ok": False,
+                    "state": exc.state,
+                    "telegramText": str(exc),
+                },
+                status=200,
+            )
+        except Exception:
+            # The message may quote the prompt. Report the failure, not its text.
+            self._send_json(
+                {"ok": False, "error": "chat_failed"},
+                status=400,
+            )
+
+    def _handle_chat_policy_approval(
+        self, telegram_user_id: str, payload: dict[str, Any]
+    ) -> None:
+        """Ask the user to approve a standing daily chat budget."""
+        if self._reject_if_purchases_paused():
+            return
+
+        policy_service = getattr(self.server, "chat_policy_service", None)
+        if policy_service is None:
+            self._send_json(
+                {"ok": False, "error": "chat is not configured"}, status=503
+            )
+            return
+
+        try:
+            cap = int(payload.get("dailyCapAtomic") or 0)
+            days = int(payload.get("days") or 0)
+        except (TypeError, ValueError):
+            cap, days = 0, 0
+
+        # A budget smaller than one top-up can be approved and then never
+        # work, because a whole chunk would never fit inside the daily window.
+        # Refuse it here rather than let the user approve something inert.
+        minimum = _chat_minimum_daily_cap_atomic()
+        if cap < minimum:
+            self._send_json(
+                {
+                    "ok": False,
+                    "state": "CAP_TOO_SMALL",
+                    "telegramText": (
+                        "The smallest workable daily budget is "
+                        f"${Decimal(minimum) / 1000000:.2f}."
+                    ),
+                },
+                status=200,
+            )
+            return
+        if days <= 0:
+            self._send_json(
+                {
+                    "ok": False,
+                    "state": "EXPIRY_REQUIRED",
+                    "telegramText": "A chat budget needs an end date.",
+                },
+                status=200,
+            )
+            return
+
+        result = policy_service.approve(
+            telegram_user_id, daily_cap_atomic=cap, days=days
+        )
+        self._send_json(result, status=200)
 
     def _handle_agent_buyer_email(self) -> None:
         """Read, set, or forget the address a guest invoice delivers to.
@@ -2721,7 +2888,60 @@ def build_server(
             metadata,
         ),
     )
+    server.chat_service = None
+    server.chat_policy_service = None
+    server.payto_watcher = None
+    if _ai_chat_enabled():
+        # Only built when the flag is on: with it unset the server has no chat
+        # service at all and the routes 404.
+        server.chat_service = build_chat_service_from_env(
+            wallet_service=user_wallet_service,
+            settle=lambda requirement, *, user_id: _settle_chat_prefund(
+                server, requirement, telegram_user_id=user_id
+            ),
+            purchases_paused=_purchases_paused,
+        )
+        if server.chat_service is not None:
+            server.chat_policy_service = ChatPolicyApprovalService(
+                store=server.chat_service.store,
+                approval_service=imessage_approval_service,
+                pay_to=server.chat_service.client.config.bound_pay_to,
+                network=server.chat_service.client.config.network,
+                asset=server.chat_service.client.config.asset,
+            )
+            server.payto_watcher = start_payto_watcher(
+                store=server.chat_service.store,
+                bound_pay_to=server.chat_service.client.config.bound_pay_to,
+            )
     return server
+
+
+def _settle_chat_prefund(
+    server, requirement: dict[str, Any], *, telegram_user_id: str
+) -> dict[str, Any]:
+    """Pay one Venice top-up through the Base USDC x402 lane.
+
+    The buyer runs the whole 402 -> pay -> retry cycle against the top-up
+    endpoint itself, so this performs the POST rather than handing a header
+    back. The bound merchant, asset and amount travel with it as approved
+    terms: the node signer refuses to sign for anything else, which is the
+    check that actually protects the funds.
+    """
+    _validate_base_usdc_x402_requirement(requirement)
+
+    private_key = server.user_wallet_service.decrypt_private_key_for_future_signing(
+        telegram_user_id
+    )
+    return server.user_wallet_base_x402_client(
+        str(requirement.get("resource") or "")
+        or "https://api.venice.ai/api/v1/x402/top-up",
+        private_key=private_key,
+        max_atomic=str(requirement.get("amountAtomic") or ""),
+        expected_receiver=str(requirement.get("receiver") or ""),
+        expected_asset=str(requirement.get("asset") or ""),
+        method="POST",
+        request_body={},
+    )
 
 
 def build_payment_executor(payment_executor_dir: Path):
@@ -4073,6 +4293,8 @@ class UserWalletBaseX402PaymentClient:
         max_atomic: str | None = None,
         expected_receiver: str | None = None,
         expected_asset: str | None = None,
+        method: str = "GET",
+        request_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         script = self.service_dir / "src" / "index.mjs"
         if not script.exists():
@@ -4099,6 +4321,12 @@ class UserWalletBaseX402PaymentClient:
         command = ["node", str(script), "buy-user", "--url", resource_url]
         for flag, value in approved_terms.items():
             command += [flag, value]
+        # Venice's top-up is a POST. The approved terms above still gate the
+        # signature, so a body changes what is fetched, never what may be paid.
+        if str(method or "GET").upper() != "GET":
+            command += ["--method", str(method).upper()]
+        if request_body is not None:
+            command += ["--body-json", json.dumps(request_body)]
 
         env = dict(os.environ)
         env["SIGN402_EVM_PRIVATE_KEY"] = str(private_key).strip()
@@ -5568,6 +5796,26 @@ def _legacy_payment_executor_enabled() -> bool:
     return str(
         os.environ.get("SIGN402_ENABLE_LEGACY_PAYMENT_EXECUTOR", "")
     ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _chat_minimum_daily_cap_atomic() -> int:
+    """One prefund chunk. Venice's floor is $5, so a smaller cap is inert."""
+    try:
+        return int(
+            os.environ.get("SIGN402_AI_CHAT_PREFUND_CHUNK_ATOMIC", "") or 5_000_000
+        )
+    except (TypeError, ValueError):
+        return 5_000_000
+
+
+def _ai_chat_enabled() -> bool:
+    """Paid AI chat ships disabled. With the flag unset the routes do not exist."""
+    return str(os.environ.get("SIGN402_AI_CHAT_ENABLED", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _test_endpoints_enabled() -> bool:

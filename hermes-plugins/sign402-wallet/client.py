@@ -69,6 +69,12 @@ _LLM_OPERATION_PATHS = {
     "verify": "/agent/llm-key/verify",
     "credits": "/agent/llm-credits",
 }
+_CHAT_OPERATION_PATHS = {
+    "start": "/agent/chat/start",
+    "message": "/agent/chat/message",
+    "end": "/agent/chat/end",
+    "approve-policy": "/agent/chat/approve-policy",
+}
 _MAX_RESPONSE_BYTES = 64 * 1024
 _NOT_CONFIGURED = "Wallet service is not configured. Please contact the operator."
 _LOCALHOST_REQUIRED = "Wallet service must use a localhost gateway URL."
@@ -468,6 +474,37 @@ class GatewayClient:
             body,
             token=self.api_token,
             operation=f"llm-{operation}",
+            timeout=self.purchase_timeout,
+            user_token=user_token,
+        )
+
+    def execute_chat(
+        self,
+        operation: str,
+        identity: TelegramIdentity,
+        *,
+        payload: Mapping[str, Any] | None = None,
+        user_access_token: str,
+    ) -> dict[str, Any]:
+        """Call an /agent/chat/* route.
+
+        The prompt travels in the request body and is never logged here; the
+        gateway is the only thing that sees it.
+        """
+        path = _CHAT_OPERATION_PATHS.get(operation)
+        if path is None:
+            raise GatewayClientError(_UNSUPPORTED)
+        user_token = str(user_access_token or "").strip()
+        if not user_token:
+            raise GatewayClientError(_AUTH_FAILED)
+
+        body = dict(payload or {})
+        body["telegramUserId"] = identity.user_id
+        return self._post(
+            path,
+            body,
+            token=self.api_token,
+            operation=f"chat-{operation}",
             timeout=self.purchase_timeout,
             user_token=user_token,
         )

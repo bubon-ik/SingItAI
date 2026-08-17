@@ -996,3 +996,86 @@ class GatewayClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChatClientTests(GatewayClientTests):
+    def test_chat_start_posts_to_the_chat_route(self):
+        opener = RecordingOpener(
+            response=FakeResponse(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "freeMessagesRemaining": 5,
+                        "hasPolicy": False,
+                        "dailyCapUsdc": "5.00",
+                    }
+                ).encode("utf-8")
+            )
+        )
+
+        result = self.make_client(opener).execute_chat(
+            "start",
+            TelegramIdentity(user_id="1045618308"),
+            user_access_token="user-token-1",
+        )
+
+        request, _timeout = opener.requests[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8099/agent/chat/start")
+        self.assertEqual(result["freeMessagesRemaining"], 5)
+        self.assertEqual(request.get_header("X-sign402-user-token"), "user-token-1")
+
+    def test_chat_message_sends_the_text(self):
+        opener = RecordingOpener(
+            response=FakeResponse(
+                json.dumps(
+                    {"ok": True, "text": "an answer", "costAtomic": 3000}
+                ).encode("utf-8")
+            )
+        )
+
+        self.make_client(opener).execute_chat(
+            "message",
+            TelegramIdentity(user_id="1045618308"),
+            payload={"text": "hello there"},
+            user_access_token="user-token-1",
+        )
+
+        request, _timeout = opener.requests[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8099/agent/chat/message")
+        self.assertEqual(
+            json.loads(request.data),
+            {"telegramUserId": "1045618308", "text": "hello there"},
+        )
+
+    def test_chat_end_posts_to_the_end_route(self):
+        opener = RecordingOpener(response=FakeResponse(b'{"ok":true}'))
+
+        self.make_client(opener).execute_chat(
+            "end",
+            TelegramIdentity(user_id="1045618308"),
+            user_access_token="user-token-1",
+        )
+
+        request, _timeout = opener.requests[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8099/agent/chat/end")
+
+    def test_chat_requires_a_user_token(self):
+        opener = RecordingOpener(response=FakeResponse(b"{}"))
+        with self.assertRaises(GatewayClientError):
+            self.make_client(opener).execute_chat(
+                "message",
+                TelegramIdentity(user_id="1045618308"),
+                payload={"text": "hi"},
+                user_access_token="",
+            )
+        self.assertEqual(opener.requests, [])
+
+    def test_unknown_chat_operation_is_refused(self):
+        opener = RecordingOpener(response=FakeResponse(b"{}"))
+        with self.assertRaises(GatewayClientError):
+            self.make_client(opener).execute_chat(
+                "nonsense",
+                TelegramIdentity(user_id="1045618308"),
+                user_access_token="user-token-1",
+            )
+        self.assertEqual(opener.requests, [])
