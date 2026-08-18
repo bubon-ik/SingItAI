@@ -5092,3 +5092,76 @@ class PolicyApprovalFlowTests(unittest.TestCase):
         # Offering the budget must not block the free tier: the copy says so.
         text = gateway.adapters["telegram"].sent[-1][1]
         self.assertIn("free", text.lower())
+
+
+class PolicyApprovalRunsOffTheHookTests(unittest.TestCase):
+    """The approval wait must never block pre_gateway_dispatch.
+
+    The gateway blocks up to two minutes waiting for a YES. That YES arrives
+    over WhatsApp, and WhatsApp inbound events go through this very hook — so
+    waiting inline deadlocks: the hook holds the thread that would deliver the
+    decision it is waiting for, and the approval expires.
+    """
+
+    def make(self):
+        plugin = load_plugin()
+        # Hold the background callback instead of running it, so the test can
+        # observe that the hook returned before the work started.
+        self.scheduled = []
+        plugin._background_runner = self.scheduled.append
+
+        context = FakeContext()
+        client = FakeClient()
+        client.chat_calls = []
+
+        def execute_chat(operation, identity, *, payload=None, user_access_token):
+            client.chat_calls.append(operation)
+            if operation == "start":
+                return {"ok": True, "hasPolicy": False, "freeMessagesRemaining": 5}
+            return {"ok": True, "approved": True, "telegramText": "Approved."}
+
+        client.execute_chat = execute_chat
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        return plugin, context, client, FakeGateway(adapter_key="telegram")
+
+    def press(self, plugin, context, gateway, text):
+        with patch.dict(plugin.os.environ, {
+            "SIGN402_TELEGRAM_ALLOWED_USERS": "*",
+            "SIGN402_TELEGRAM_SIGN402_ONLY": "1",
+            "SIGN402_AI_CHAT_ENABLED": "1",
+        }):
+            return context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(text, "1045618308", platform="telegram"),
+                gateway=gateway,
+            )
+
+    def test_choosing_a_budget_returns_before_the_approval_is_requested(self):
+        plugin, context, client, gateway = self.make()
+        self.press(plugin, context, gateway, "💬 Talk to AI")
+
+        self.press(plugin, context, gateway, "$5 / day")
+
+        # The hook is already done, and the approval has not been asked for yet.
+        self.assertNotIn("approve-policy", client.chat_calls)
+        self.assertTrue(self.scheduled, "no background work was scheduled")
+
+    def test_the_approval_happens_once_the_background_work_runs(self):
+        plugin, context, client, gateway = self.make()
+        self.press(plugin, context, gateway, "💬 Talk to AI")
+        self.press(plugin, context, gateway, "$5 / day")
+
+        for callback in list(self.scheduled):  # the background runner fires
+            callback()
+
+        self.assertIn("approve-policy", client.chat_calls)
+        self.assertTrue(plugin._in_chat_mode("1045618308"))
+
+    def test_the_user_is_told_the_approval_is_on_its_way(self):
+        plugin, context, client, gateway = self.make()
+        self.press(plugin, context, gateway, "💬 Talk to AI")
+
+        self.press(plugin, context, gateway, "$5 / day")
+
+        text = gateway.adapters["telegram"].sent[-1][1].lower()
+        self.assertTrue("approve" in text or "phone" in text, text)

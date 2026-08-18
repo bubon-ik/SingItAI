@@ -1306,38 +1306,45 @@ def _handle_telegram_chat_budget_choice(*, event, source, gateway):
         return None
 
     _CHAT_BUDGET_PENDING.pop(user_id, None)
-    client = _client_factory()
-    try:
+
+    # The gateway blocks for up to two minutes waiting for the YES, and that
+    # YES arrives over WhatsApp — which is delivered through this very hook.
+    # Waiting here would hold the thread that has to deliver the decision, so
+    # the approval could never arrive and would always time out. Every other
+    # money action in this plugin runs off the hook for the same reason.
+    def work(_generation: int) -> tuple[str, dict | None]:
+        client = _client_factory()
         result = client.execute_chat(
             "approve-policy",
             identity,
             payload={"dailyCapAtomic": chosen, "days": _CHAT_BUDGET_DAYS},
             user_access_token=_user_access_token(client, identity),
         )
-    except Exception:
-        _send_fixed_reply(
-            gateway, source,
-            "The approval could not be sent. Nothing was charged.",
-            reply_markup=_telegram_main_menu_reply_markup(),
+        if not isinstance(result, dict) or not result.get("ok"):
+            # Declined, timed out or refused: no budget, no chat, no money.
+            return (
+                str(
+                    (result or {}).get("telegramText")
+                    or "The budget was not approved."
+                ),
+                _telegram_main_menu_reply_markup(),
+            )
+        _enter_chat_mode(user_id)
+        return (
+            str(result.get("telegramText") or "Approved.") + "\n\nGo ahead.",
+            _telegram_chat_reply_markup(),
         )
-        return dict(_SKIP_RESULT)
 
-    if not isinstance(result, dict) or not result.get("ok"):
-        # Declined or refused: no budget, no chat, no money moved.
-        _send_fixed_reply(
-            gateway, source,
-            str((result or {}).get("telegramText") or "The budget was not approved."),
-            reply_markup=_telegram_main_menu_reply_markup(),
-        )
-        return dict(_SKIP_RESULT)
-
-    _enter_chat_mode(user_id)
-    _send_fixed_reply(
-        gateway, source,
-        str(result.get("telegramText") or "Approved.") + "\n\nGo ahead.",
-        reply_markup=_telegram_chat_reply_markup(),
+    return _start_telegram_background_operation(
+        identity=identity,
+        action="chat:approve-policy",
+        started_text=(
+            "Approve the daily budget on your phone — it is waiting there now."
+        ),
+        source=source,
+        gateway=gateway,
+        work=work,
     )
-    return dict(_SKIP_RESULT)
 
 
 def _handle_telegram_chat_message(*, event, source, gateway):
