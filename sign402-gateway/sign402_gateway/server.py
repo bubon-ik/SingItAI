@@ -871,7 +871,6 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 self._handle_chat_policy_approval(telegram_user_id, payload)
                 return
 
-            free = bool(payload.get("free"))
             text = str(payload.get("text", "") or "")
             if not text:
                 self._send_json(
@@ -879,24 +878,10 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 )
                 return
 
-            if not free and self._reject_if_purchases_paused():
+            if self._reject_if_purchases_paused():
                 return
 
-            result = (
-                chat_service.send_free(telegram_user_id, text)
-                if free
-                else chat_service.send(telegram_user_id, text)
-            )
-            if result is None:
-                self._send_json(
-                    {
-                        "ok": False,
-                        "state": "FREE_MESSAGES_SPENT",
-                        "telegramText": "Your free messages are used up.",
-                    },
-                    status=200,
-                )
-                return
+            result = chat_service.send(telegram_user_id, text)
             self._send_json(
                 {
                     "ok": True,

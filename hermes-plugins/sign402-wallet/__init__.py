@@ -512,7 +512,7 @@ def _start_text(wallet_address: str, *, support_id: str = "") -> str:
         "<b>SingIt</b> — gift cards, eSIMs and mobile top-ups in 180+ countries, "
         "paid with crypto.\n\n"
         "<b>Buy Bitrefill</b> — browse the catalogue and pay from your wallet.\n"
-        "<b>Chat</b> — ask an AI anything. The first few messages are free.\n\n"
+        "<b>Chat</b> — ask an AI anything, paid from your wallet.\n\n"
         "<b>Your Base wallet</b>\n"
         f"<code>{address}</code>\n"
         "Tap to copy. Add ETH for gas, and USDC or SINGIT to pay with."
@@ -1101,9 +1101,6 @@ def _chat_budget_block(client, identity) -> str:
         return ""
 
     lines = ["", "", "AI chat"]
-    free = status.get("freeMessagesRemaining")
-    if isinstance(free, int) and free > 0:
-        lines.append(f"- Free messages left: {free}")
     if status.get("hasPolicy"):
         lines.append(f"- Credit left: ${status.get('outstandingUsdc', '0.00')}")
         lines.append(
@@ -1148,23 +1145,15 @@ def _chat_answer_text(user_id: str, result: dict) -> str:
 def _chat_start_text(result: dict) -> str:
     """The message shown on entering chat mode.
 
-    Says what it costs in the user's terms: free messages first, then a daily
-    limit they approve once. None of the plumbing vocabulary appears.
+    Says what it costs in the user's terms: a daily limit they approve once.
+    None of the plumbing vocabulary appears.
     """
-    free = int(result.get("freeMessagesRemaining") or 0)
     cap = str(result.get("dailyCapUsdc") or "").strip()
-    if free > 0:
-        opening = (
-            f"Ask me anything. Your first {free} messages are free — "
-            "no wallet, no setup."
-        )
-    elif result.get("hasPolicy"):
-        opening = f"Ask me anything. Your daily limit is ${cap}." if cap else "Ask me anything."
-    else:
-        opening = (
-            "Your free messages are used up. To keep going you approve one "
-            f"daily limit{f' of ${cap}' if cap else ''} — once, not per message."
-        )
+    opening = (
+        f"Ask me anything. Your daily limit is ${cap}."
+        if cap
+        else "Ask me anything."
+    )
     return f"{opening}\n\nTap Stop chat when you're done."
 
 
@@ -1177,10 +1166,8 @@ _CHAT_BUDGET_CHOICES = (
     ("$20 / day", 20_000_000),
 )
 _CHAT_BUDGET_DAYS = 30
-_CHAT_FREE_BUTTON = "Use free messages"
 _CHAT_BUDGET_BUTTONS = (
     tuple(label for label, _ in _CHAT_BUDGET_CHOICES),
-    (_CHAT_FREE_BUTTON,),
     ("Back",),
 )
 _CHAT_BUDGET_PENDING: dict[str, bool] = {}
@@ -1193,13 +1180,10 @@ def _telegram_chat_budget_reply_markup() -> dict:
 
 
 def _chat_budget_offer_text(status: dict) -> str:
-    free = status.get("freeMessagesRemaining")
     lines = ["AI chat without an account and without logs."]
-    if isinstance(free, int) and free > 0:
-        lines.append(f"You have {free} free messages to try it.")
     lines += [
         "",
-        "For more, approve one daily budget. After that you chat without "
+        "Approve one daily budget. After that you chat without "
         "confirming every message, until the budget or the approval runs out.",
         "",
         # Spelled out, not only on the keyboard: some clients do not render a
@@ -1284,15 +1268,6 @@ def _handle_telegram_chat_budget_choice(*, event, source, gateway):
         )
         return dict(_SKIP_RESULT)
 
-    if normalized == _normalize_button_text(_CHAT_FREE_BUTTON):
-        _CHAT_BUDGET_PENDING.pop(user_id, None)
-        _enter_chat_mode(user_id)
-        _send_fixed_reply(
-            gateway, source,
-            "Go ahead — your free messages are on the house.",
-            reply_markup=_telegram_chat_reply_markup(),
-        )
-        return dict(_SKIP_RESULT)
 
     chosen = next(
         (
@@ -1393,29 +1368,13 @@ def _handle_telegram_chat_message(*, event, source, gateway):
         )
         return dict(_SKIP_RESULT)
 
-    # Spend the free allowance before anything paid. The plugin does not track
-    # how many are left: the gateway's store is the only counter, so ask for a
-    # free message first and fall through to the paid path when it reports the
-    # allowance is gone. Keeping the count out of the plugin removes the class
-    # of bug where the two sides disagree about how many remain.
     try:
-        access_token = _user_access_token(client, identity)
         result = client.execute_chat(
             "message",
             identity,
-            payload={"text": text, "free": True},
-            user_access_token=access_token,
+            payload={"text": text},
+            user_access_token=_user_access_token(client, identity),
         )
-        if (
-            isinstance(result, dict)
-            and str(result.get("state", "")) == "FREE_MESSAGES_SPENT"
-        ):
-            result = client.execute_chat(
-                "message",
-                identity,
-                payload={"text": text},
-                user_access_token=access_token,
-            )
     except Exception:
         _send_fixed_reply(
             gateway,

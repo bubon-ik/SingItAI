@@ -381,25 +381,6 @@ class FailureStateTests(VeniceChatTestCase):
                 self.assertFalse(self.store.get_session(user).paused)
 
 
-class FreeMessageTests(VeniceChatTestCase):
-    def test_free_messages_never_settle_and_never_touch_the_window(self):
-        store = self.make_store(free_messages=5)
-        client = self.make_client(store=store)
-        user = self.session_bound_to(BOUND_PAY_TO)
-        for _ in range(5):
-            result = client.send_free(user, "hi", wallet_address=WALLET)
-            self.assertFalse(result.prefunded)
-        self.assertEqual(self.buy_calls, [])
-        self.assertEqual(store.get_session(user).spent_atomic_this_window, 0)
-
-    def test_free_allowance_runs_out(self):
-        store = self.make_store(free_messages=1)
-        client = self.make_client(store=store)
-        user = self.session_bound_to(BOUND_PAY_TO)
-        client.send_free(user, "hi", wallet_address=WALLET)
-        self.assertIsNone(client.send_free(user, "hi", wallet_address=WALLET))
-
-
 class PrivacyTests(VeniceChatTestCase):
     def test_prompt_text_never_reaches_the_store(self):
         client = self.make_client()
@@ -893,7 +874,6 @@ class ChatServiceTests(unittest.TestCase):
         self.store = ChatStore(
             Path(self.tmp.name) / "chat.db",
             now=lambda: DAY_ONE_NOON,
-            free_messages=5,
         )
         self.addCleanup(self.store.close)
         self.signed = []
@@ -920,11 +900,6 @@ class ChatServiceTests(unittest.TestCase):
                 self.sent.append(("paid", user_id, wallet_address))
                 return ChatResultStub(cost=3_000)
 
-            def send_free(self, user_id, prompt, *, wallet_address):
-                if not outer.store.consume_free_message(user_id):
-                    return None
-                self.sent.append(("free", user_id, wallet_address))
-                return ChatResultStub(cost=0)
 
         from dataclasses import dataclass
 
@@ -948,13 +923,12 @@ class ChatServiceTests(unittest.TestCase):
             daily_cap_atomic=5_000_000,
         )
 
-    def test_start_reports_free_messages_policy_and_cap(self):
+    def test_start_reports_the_policy_and_cap(self):
         service = self.make_service()
 
         result = service.start("u1")
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["freeMessagesRemaining"], 5)
         self.assertFalse(result["hasPolicy"])
         self.assertEqual(result["dailyCapAtomic"], 5_000_000)
 
@@ -984,13 +958,6 @@ class ChatServiceTests(unittest.TestCase):
         service.send("u1", "hi")
 
         self.assertEqual(self.client.sent[-1], ("paid", "u1", WALLET))
-
-    def test_free_messages_are_spent_before_paid_ones(self):
-        service = self.make_service()
-
-        for _ in range(5):
-            self.assertEqual(service.send_free("u1", "hi").cost_atomic, 0)
-        self.assertIsNone(service.send_free("u1", "hi"))
 
     def test_a_user_without_a_wallet_is_refused_cleanly(self):
         from sign402_gateway.venice_chat import ChatService, PrefundFailed
@@ -1069,7 +1036,6 @@ class ChatServiceEnvBuilderTests(unittest.TestCase):
         self.assertEqual(config.chunk_atomic, 5_000_000)
         self.assertEqual(config.max_outstanding_atomic, 10_000_000)
         self.assertEqual(config.daily_cap_atomic, 5_000_000)
-        self.assertEqual(service.store.free_messages, 5)
 
     def test_env_overrides_are_honoured(self):
         from sign402_gateway.venice_chat import build_chat_service_from_env
@@ -1079,13 +1045,11 @@ class ChatServiceEnvBuilderTests(unittest.TestCase):
             settle=lambda requirement: {},
             env=self.env(
                 SIGN402_AI_CHAT_DEFAULT_DAILY_CAP_ATOMIC="100000",
-                SIGN402_AI_CHAT_FREE_MESSAGES="2",
             ),
         )
         self.addCleanup(service.store.close)
 
         self.assertEqual(service.client.config.daily_cap_atomic, 100_000)
-        self.assertEqual(service.store.free_messages, 2)
 
 
 class WalletSignerTests(unittest.TestCase):
@@ -1422,15 +1386,6 @@ class ApprovedPolicyIsRequiredTests(VeniceChatTestCase):
         self.assertEqual(self.buy_calls, [])
         self.assertEqual(self.requests, [])
 
-    def test_free_messages_still_work_without_a_policy(self):
-        store = self.make_store(free_messages=5)
-        client = self.make_client(store=store, balance_atomic=500_000)
-
-        result = client.send_free("nobody", "hi", wallet_address=WALLET)
-
-        self.assertIsNotNone(result)
-        self.assertEqual(self.buy_calls, [])
-
     def test_the_binding_checked_is_the_one_the_user_approved(self):
         # The operator's env says one address; this user approved another.
         # The user's approval wins, and the mismatch pauses.
@@ -1461,7 +1416,6 @@ class RemainingBudgetTests(unittest.TestCase):
         self.store = ChatStore(
             Path(self.tmp.name) / "chat.db",
             now=lambda: DAY_ONE_NOON,
-            free_messages=5,
         )
         self.addCleanup(self.store.close)
 
@@ -1514,12 +1468,6 @@ class RemainingBudgetTests(unittest.TestCase):
         self.assertEqual(status["remainingWindowAtomic"], 5_000_000)
         self.assertEqual(status["outstandingAtomic"], 5_000_000)
 
-    def test_free_messages_are_reported(self):
-        self.store.consume_free_message("u1")
-        self.store.consume_free_message("u1")
-
-        self.assertEqual(self.service().start("u1")["freeMessagesRemaining"], 3)
-
     def test_an_approved_cap_beats_the_default_in_the_report(self):
         from sign402_gateway.venice_chat import build_chat_policy
 
@@ -1531,3 +1479,4 @@ class RemainingBudgetTests(unittest.TestCase):
 
         self.assertEqual(status["dailyCapAtomic"], 10_000_000)
         self.assertEqual(status["remainingWindowAtomic"], 10_000_000)
+

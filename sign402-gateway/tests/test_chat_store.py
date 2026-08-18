@@ -85,34 +85,6 @@ class ChatStoreWindowTests(ChatStoreTestCase):
         self.assertEqual(session.outstanding_atomic, 0)
 
 
-class ChatStoreFreeMessageTests(ChatStoreTestCase):
-    def test_free_messages_are_capped_and_do_not_touch_the_window(self):
-        store = self.make_store(":memory:", now=lambda: DAY_ONE_NOON, free_messages=5)
-        for _ in range(5):
-            self.assertTrue(store.consume_free_message("u1"))
-        self.assertFalse(store.consume_free_message("u1"))
-        self.assertEqual(store.get_session("u1").spent_atomic_this_window, 0)
-
-    def test_free_messages_do_not_reset_with_the_window(self):
-        store = self.make_store(":memory:", now=lambda: DAY_ONE_NOON, free_messages=5)
-        for _ in range(5):
-            store.consume_free_message("u1")
-        store.now = lambda: DAY_ONE_NOON + 86_400
-        self.assertFalse(store.consume_free_message("u1"))
-        self.assertEqual(store.get_session("u1").free_remaining, 0)
-
-    def test_free_remaining_is_reported(self):
-        store = self.make_store(":memory:", now=lambda: DAY_ONE_NOON, free_messages=5)
-        self.assertEqual(store.get_session("u1").free_remaining, 5)
-        store.consume_free_message("u1")
-        self.assertEqual(store.get_session("u1").free_remaining, 4)
-
-    def test_zero_free_messages_is_supported(self):
-        store = self.make_store(":memory:", now=lambda: DAY_ONE_NOON, free_messages=0)
-        self.assertFalse(store.consume_free_message("u1"))
-        self.assertEqual(store.get_session("u1").free_remaining, 0)
-
-
 class ChatStorePauseTests(ChatStoreTestCase):
     def test_pause_records_a_reason_and_resume_clears_it(self):
         store = self.make_store(":memory:", now=lambda: DAY_ONE_NOON)

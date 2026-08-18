@@ -119,6 +119,12 @@ class ReconciliationRequired(ChatError):
     state = ChatState.RECONCILIATION_REQUIRED
 
 
+class ProviderOutOfFunds(ChatError):
+    """Venice answered and refused for lack of balance. Retrying cannot help."""
+
+    state = ChatState.PREFUND_FAILED
+
+
 class PolicyExpired(ChatError):
     state = ChatState.EXPIRED
 
@@ -365,7 +371,6 @@ class ChatService:
         remaining = max(0, cap - session.spent_atomic_this_window)
         return {
             "ok": True,
-            "freeMessagesRemaining": session.free_remaining,
             "hasPolicy": bool(session.bound_pay_to),
             "dailyCapAtomic": cap,
             "dailyCapUsdc": _usd_plain(cap),
@@ -385,9 +390,6 @@ class ChatService:
         address = self._wallet_address(user_id)
         return self.client.send(user_id, text, wallet_address=address)
 
-    def send_free(self, user_id: str, text: str):
-        address = self._wallet_address(user_id)
-        return self.client.send_free(user_id, text, wallet_address=address)
 
     def end(self, user_id: str) -> dict[str, Any]:
         # Leaving chat mode is a UI action. It refunds nothing and cancels
@@ -447,8 +449,7 @@ def build_chat_service_from_env(
         Path(
             str(values.get("SIGN402_CHAT_STORE_PATH", "") or "")
             or DEFAULT_CHAT_STORE_PATH
-        ),
-        free_messages=_int_env(values, "SIGN402_AI_CHAT_FREE_MESSAGES", 5),
+        )
     )
     config = VeniceConfig(
         bound_pay_to=pay_to.lower(),
@@ -805,24 +806,6 @@ class VeniceChatClient:
 
     # -- public ----------------------------------------------------------
 
-    def send_free(
-        self, user_id: str, prompt: str, *, wallet_address: str
-    ) -> ChatResult | None:
-        """Spend one free message. Returns None once the allowance is gone.
-
-        Moves no money and touches no spend window.
-        """
-        if not self.store.consume_free_message(user_id):
-            return None
-        text, _ = self._ask(user_id, prompt, wallet_address=wallet_address)
-        session = self.store.get_session(user_id)
-        return ChatResult(
-            text=text,
-            cost_atomic=0,
-            prefunded=False,
-            remaining_window_atomic=self._remaining_window(session),
-            outstanding_atomic=session.outstanding_atomic,
-        )
 
     def send(
         self, user_id: str, prompt: str, *, wallet_address: str
@@ -1071,6 +1054,13 @@ class VeniceChatClient:
                 response.status,
                 _provider_error_code(response),
             )
+            if response.status == 402:
+                # The provider is up and answering; it wants funding. "Try
+                # again" would be false — nothing changes until it is paid.
+                raise ProviderOutOfFunds(
+                    "This chat has no credit yet. Approve a daily budget to "
+                    "top it up."
+                )
             raise ProviderUnavailable(
                 "The AI provider is not responding. Try again in a moment."
             )

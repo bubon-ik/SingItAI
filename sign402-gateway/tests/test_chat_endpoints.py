@@ -281,20 +281,6 @@ class MessageTests(ChatEndpointTestCase):
         self.assertEqual(self.status_of(handler), 503)
         server.chat_service.send.assert_not_called()
 
-    def test_global_pause_still_serves_a_free_message(self):
-        server = self.authenticated(ChatDummyServer())
-        server.chat_service.send_free.return_value = self.make_result(
-            cost_atomic=0
-        )
-        with patch.dict(os.environ, {"SIGN402_PURCHASES_PAUSED": "1"}):
-            handler = self.make_handler(
-                "/agent/chat/message",
-                {"telegramUserId": USER_ID, "text": "hi", "free": True},
-                server=server,
-            )
-        self.assertEqual(self.status_of(handler), 200)
-        self.assertEqual(self.response_json(handler)["costAtomic"], 0)
-
 
 class PrivacyTests(ChatEndpointTestCase):
     def test_prompt_text_and_answer_never_reach_the_logs(self):

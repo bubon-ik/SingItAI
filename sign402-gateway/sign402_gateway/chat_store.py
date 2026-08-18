@@ -1,8 +1,7 @@
 """Per-user chat session state for the Venice AI chat flow.
 
-The store holds four kinds of state per user:
+The store holds three kinds of state per user:
 
-- the free-message allowance, which is spent once and never refills;
 - the UTC daily spend window, whose rollover is computed on read so that
   correctness never depends on a scheduler running;
 - outstanding prefunded credit, which is user funds and must survive a restart;
@@ -28,7 +27,6 @@ from typing import Any, Callable, Iterator
 
 DEFAULT_CHAT_STORE_PATH = Path.home() / ".sign402" / "chat-sessions.db"
 SECONDS_PER_DAY = 86_400
-DEFAULT_FREE_MESSAGES = 5
 
 # A prefund claim is released by its context manager. This timeout only covers
 # the case where the process died between claiming and settling, so a crashed
@@ -49,7 +47,6 @@ class ChatSession:
     window_start: int
     spent_atomic_this_window: int
     outstanding_atomic: int
-    free_remaining: int
     paused: bool
     pause_reason: str
     policy_hash: str
@@ -66,10 +63,8 @@ class ChatStore:
         path: Path | str,
         *,
         now: Callable[[], int] | None = None,
-        free_messages: int = DEFAULT_FREE_MESSAGES,
     ):
         self.now: Callable[[], int] = now or (lambda: int(time.time()))
-        self.free_messages = _non_negative(free_messages, "free_messages")
         self.lock = threading.RLock()
 
         self._in_memory = str(path) == _MEMORY_PATH
@@ -93,29 +88,6 @@ class ChatStore:
                 return self._empty_session(user_id)
             row = self._rolled_over(db, row)
             return self._to_session(row)
-
-    # -- free tier -----------------------------------------------------------
-
-    def consume_free_message(self, user_id: str) -> bool:
-        """Spend one free message. Returns False once the allowance is gone.
-
-        The allowance is a lifetime one, not a daily one: it never refills on
-        window rollover.
-        """
-        user_id = _user_id(user_id)
-        with self.lock, self._database() as db:
-            row = self._ensure_row(db, user_id)
-            if int(row["free_used"]) >= self.free_messages:
-                return False
-            db.execute(
-                """
-                UPDATE chat_sessions
-                SET free_used = free_used + 1, updated_at = ?
-                WHERE user_id = ? AND free_used < ?
-                """,
-                (self.now(), user_id, self.free_messages),
-            )
-            return True
 
     # -- money ---------------------------------------------------------------
 
@@ -351,11 +323,11 @@ class ChatStore:
             """
             INSERT INTO chat_sessions (
                 user_id, window_start, spent_atomic, outstanding_atomic,
-                free_used, paused, pause_reason, policy_hash, bound_pay_to,
+                paused, pause_reason, policy_hash, bound_pay_to,
                 daily_cap_atomic, policy_expires_at, prefund_claimed_at,
                 updated_at
             )
-            VALUES (?, ?, 0, 0, 0, 0, '', '', '', 0, 0, NULL, ?)
+            VALUES (?, ?, 0, 0, 0, '', '', '', 0, 0, NULL, ?)
             """,
             (user_id, _window_start(now), now),
         )
@@ -388,7 +360,6 @@ class ChatStore:
             window_start=_window_start(now),
             spent_atomic_this_window=0,
             outstanding_atomic=0,
-            free_remaining=self.free_messages,
             paused=False,
             pause_reason="",
             policy_hash="",
@@ -403,7 +374,6 @@ class ChatStore:
             window_start=int(row["window_start"]),
             spent_atomic_this_window=int(row["spent_atomic"]),
             outstanding_atomic=int(row["outstanding_atomic"]),
-            free_remaining=max(0, self.free_messages - int(row["free_used"])),
             paused=bool(row["paused"]),
             pause_reason=str(row["pause_reason"] or ""),
             policy_hash=str(row["policy_hash"] or ""),
@@ -423,7 +393,6 @@ class ChatStore:
                     window_start INTEGER NOT NULL,
                     spent_atomic INTEGER NOT NULL DEFAULT 0,
                     outstanding_atomic INTEGER NOT NULL DEFAULT 0,
-                    free_used INTEGER NOT NULL DEFAULT 0,
                     paused INTEGER NOT NULL DEFAULT 0,
                     pause_reason TEXT NOT NULL DEFAULT '',
                     policy_hash TEXT NOT NULL DEFAULT '',

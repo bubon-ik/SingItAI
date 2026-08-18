@@ -4649,16 +4649,6 @@ class ChatMenuButtonTests(unittest.TestCase):
         self.assertTrue(plugin._in_chat_mode("1045618308"))
         self.assertEqual(client.chat_calls, ["start"])
 
-    def test_the_opening_message_states_the_free_allowance(self):
-        plugin = load_plugin()
-        text = plugin._chat_start_text(
-            {"freeMessagesRemaining": 5, "hasPolicy": False, "dailyCapUsdc": "5.00"}
-        )
-        self.assertIn("5", text)
-        self.assertIn("free", text.lower())
-        for word in ("x402", "prefund", "settlement", "facilitator"):
-            self.assertNotIn(word, text.lower())
-
     def test_pressing_chat_with_the_flag_off_is_not_a_chat(self):
         plugin = load_plugin()
         context = FakeContext()
@@ -4931,10 +4921,6 @@ class ChatBudgetViewTests(unittest.TestCase):
         self.assertIn("today", lowered)
         self.assertIn("chat", lowered)
 
-    def test_free_messages_are_shown_while_any_remain(self):
-        _plugin, _client, text = self.make()
-        self.assertIn("3", text)
-
     def test_wallet_balances_are_still_there(self):
         _plugin, _client, text = self.make()
         self.assertIn("USDC", text)
@@ -5083,15 +5069,6 @@ class PolicyApprovalFlowTests(unittest.TestCase):
             [c["operation"] for c in client.chat_calls if c["operation"] == "approve-policy"],
             [],
         )
-
-    def test_free_messages_open_the_chat_without_any_budget(self):
-        plugin, context, client, gateway = self.make(has_policy=False, free_left=5)
-
-        self.press(plugin, context, gateway, "💬 Talk to AI")
-
-        # Offering the budget must not block the free tier: the copy says so.
-        text = gateway.adapters["telegram"].sent[-1][1]
-        self.assertIn("free", text.lower())
 
 
 class PolicyApprovalRunsOffTheHookTests(unittest.TestCase):
