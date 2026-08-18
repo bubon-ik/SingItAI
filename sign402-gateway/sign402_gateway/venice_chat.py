@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import secrets
 import threading
@@ -38,6 +39,32 @@ from .chat_store import (
     ChatStore,
     PrefundClaimUnavailable,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _provider_error_code(response: Any) -> str:
+    """A short, safe identifier for why the provider refused.
+
+    Only a code or a short error string is returned. Provider bodies can echo
+    request content, so nothing longer than a token is ever taken from them.
+    """
+    try:
+        body = response.json() or {}
+    except Exception:
+        return "unparseable"
+    if not isinstance(body, dict):
+        return "unparseable"
+    for key in ("code", "error", "message", "detail"):
+        value = body.get(key)
+        if isinstance(value, str) and value:
+            return value[:60]
+        if isinstance(value, dict):
+            nested = value.get("code") or value.get("message")
+            if isinstance(nested, str) and nested:
+                return nested[:60]
+    return "unknown"
+
 
 VENICE_BASE_URL = "https://api.venice.ai/api/v1"
 USDC_DECIMALS = 6
@@ -1035,6 +1062,15 @@ class VeniceChatClient:
             },
         )
         if response.status != 200:
+            # Status and error code only. A refusal here is either "this wallet
+            # has no prepaid balance" or "the signature was rejected", and
+            # telling those apart without a log means guessing. Prompt text and
+            # model output are never logged.
+            logger.warning(
+                "Venice chat refused: status=%s code=%s",
+                response.status,
+                _provider_error_code(response),
+            )
             raise ProviderUnavailable(
                 "The AI provider is not responding. Try again in a moment."
             )
@@ -1042,6 +1078,10 @@ class VeniceChatClient:
         try:
             text = payload["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
+            logger.warning(
+                "Venice chat returned an unreadable body: status=%s",
+                response.status,
+            )
             raise ProviderUnavailable(
                 "The AI provider returned an unreadable answer."
             ) from None
