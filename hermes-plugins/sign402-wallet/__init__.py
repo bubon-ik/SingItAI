@@ -1386,13 +1386,29 @@ def _handle_telegram_chat_message(*, event, source, gateway):
         )
         return dict(_SKIP_RESULT)
 
+    # Spend the free allowance before anything paid. The plugin does not track
+    # how many are left: the gateway's store is the only counter, so ask for a
+    # free message first and fall through to the paid path when it reports the
+    # allowance is gone. Keeping the count out of the plugin removes the class
+    # of bug where the two sides disagree about how many remain.
     try:
+        access_token = _user_access_token(client, identity)
         result = client.execute_chat(
             "message",
             identity,
-            payload={"text": text},
-            user_access_token=_user_access_token(client, identity),
+            payload={"text": text, "free": True},
+            user_access_token=access_token,
         )
+        if (
+            isinstance(result, dict)
+            and str(result.get("state", "")) == "FREE_MESSAGES_SPENT"
+        ):
+            result = client.execute_chat(
+                "message",
+                identity,
+                payload={"text": text},
+                user_access_token=access_token,
+            )
     except Exception:
         _send_fixed_reply(
             gateway,
