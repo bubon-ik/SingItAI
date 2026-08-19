@@ -2917,7 +2917,11 @@ def _settle_chat_prefund(
     private_key = server.user_wallet_service.decrypt_private_key_for_future_signing(
         telegram_user_id
     )
-    return server.user_wallet_base_x402_client(
+    # The POST-capable client lives inside the user wallet buyer; the buyer
+    # itself runs its own fetch-402-pay-retry loop and refuses a request body,
+    # which the top-up needs.
+    pay = server.user_x402_buyer.base_payment_client
+    return pay(
         str(requirement.get("resource") or "")
         or "https://api.venice.ai/api/v1/x402/top-up",
         private_key=private_key,

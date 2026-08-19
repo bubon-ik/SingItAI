@@ -460,7 +460,12 @@ class SettleChatPrefundTests(unittest.TestCase):
             self.calls.append({"url": url, **kwargs})
             return {"ok": True, "status": 200}
 
-        server.user_wallet_base_x402_client = buyer
+        # Wired where the real server keeps it: inside the user wallet buyer.
+        # Attaching it under an invented name is what hid the first failure.
+        class Buyer:
+            base_payment_client = staticmethod(buyer)
+
+        server.user_x402_buyer = Buyer()
         return server
 
     def settle(self, server, requirement):
@@ -519,3 +524,55 @@ class SettleChatPrefundTests(unittest.TestCase):
         server.user_wallet_service.decrypt_private_key_for_future_signing.assert_called_once_with(
             USER_ID
         )
+
+
+class SettleUsesTheServersRealBuyerTests(unittest.TestCase):
+    """The settle path must reach a buyer the server actually exposes.
+
+    The first payment attempt died on AttributeError because it named an
+    attribute that does not exist. A Mock server hides that: it answers to any
+    name. These use an object that does not.
+    """
+
+    class BareServer:
+        """No Mock. An unknown attribute raises, exactly as in production."""
+
+        def __init__(self, buyer, calls):
+            from unittest.mock import Mock
+
+            self.user_wallet_service = Mock()
+            self.user_wallet_service.decrypt_private_key_for_future_signing.return_value = (
+                "0x" + "11" * 32
+            )
+            self.user_x402_buyer = buyer
+            self.calls = calls
+
+    def test_settling_reaches_the_buyer_without_inventing_an_attribute(self):
+        from sign402_gateway.server import _settle_chat_prefund
+
+        calls = []
+
+        class Buyer:
+            def __init__(self):
+                self.base_payment_client = self._pay
+
+            def _pay(self, url, **kwargs):
+                calls.append({"url": url, **kwargs})
+                return {"ok": True, "status": 200}
+
+        server = self.BareServer(Buyer(), calls)
+
+        result = _settle_chat_prefund(
+            server,
+            {
+                "network": "eip155:8453",
+                "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                "amount": "5000000",
+                "payTo": "0x2670b922ef37c7df47158725c0cc407b5382293f",
+            },
+            telegram_user_id=USER_ID,
+        )
+
+        self.assertTrue(result.get("ok"))
+        self.assertEqual(calls[0]["max_atomic"], "5000000")
+        self.assertEqual(calls[0]["method"], "POST")
