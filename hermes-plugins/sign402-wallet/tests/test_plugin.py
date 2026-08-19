@@ -4301,10 +4301,12 @@ class ChatModeTests(unittest.TestCase):
         # Leaving chat lands back on the full menu, Talk to AI included.
         self.assertIn("Talk to AI", keyboard[0][0]["text"])
 
-    def test_chat_mode_keyboard_is_a_single_stop_button(self):
+    def test_chat_mode_keyboard_offers_only_stop_and_model(self):
         plugin, _context, _client, _gateway = self.make()
         keyboard = plugin._telegram_chat_reply_markup()["keyboard"]
-        self.assertEqual(keyboard, [[{"text": "Stop chat"}]])
+        self.assertEqual(
+            keyboard, [[{"text": "Stop chat"}, {"text": "Model"}]]
+        )
 
     def test_leaving_chat_mode_tells_the_gateway(self):
         plugin, context, client, gateway = self.make()
@@ -5182,3 +5184,86 @@ class ChatFooterShowsSpendableCreditTests(unittest.TestCase):
         text = plugin._chat_answer_text("u1", self.result(outstandingAtomic=1_000))
 
         self.assertIn("$0.001", text)
+
+
+class ChatModelPickerTests(unittest.TestCase):
+    MODELS = [
+        {"id": "qwen3-5-9b", "label": "Fast", "blurb": "Cheapest.",
+         "outputUsdPerMTok": 0.15, "chosen": True},
+        {"id": "grok-4-6", "label": "Smartest", "blurb": "Best reasoning.",
+         "outputUsdPerMTok": 6.8, "chosen": False},
+    ]
+
+    def make(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.chat_calls = []
+
+        def execute_chat(operation, identity, *, payload=None, user_access_token):
+            client.chat_calls.append({"op": operation, "payload": dict(payload or {})})
+            if operation == "models":
+                return {"ok": True, "chosen": "qwen3-5-9b", "models": self.MODELS}
+            return {"ok": True, "text": "an answer", "costAtomic": 3_000,
+                    "outstandingAtomic": 4_900_000}
+
+        client.execute_chat = execute_chat
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        plugin._enter_chat_mode("1045618308")
+        return plugin, context, client, FakeGateway(adapter_key="telegram")
+
+    def press(self, plugin, context, gateway, text):
+        with patch.dict(plugin.os.environ, {
+            "SIGN402_TELEGRAM_ALLOWED_USERS": "*",
+            "SIGN402_TELEGRAM_SIGN402_ONLY": "1",
+            "SIGN402_AI_CHAT_ENABLED": "1",
+        }):
+            context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(text, "1045618308", platform="telegram"),
+                gateway=gateway,
+            )
+        return gateway.adapters["telegram"].sent[-1][1]
+
+    def test_the_model_button_lists_the_choices_with_prices(self):
+        plugin, context, client, gateway = self.make()
+
+        text = self.press(plugin, context, gateway, "Model")
+
+        self.assertIn("Fast", text)
+        self.assertIn("Smartest", text)
+        self.assertIn("6.8", text)
+
+    def test_the_current_model_is_marked(self):
+        plugin, context, client, gateway = self.make()
+        text = self.press(plugin, context, gateway, "Model")
+        self.assertIn("← now", text)
+
+    def test_choosing_switches_and_returns_to_chat(self):
+        plugin, context, client, gateway = self.make()
+        self.press(plugin, context, gateway, "Model")
+
+        text = self.press(plugin, context, gateway, "Smartest")
+
+        switch = [c for c in client.chat_calls if c["op"] == "models" and c["payload"]]
+        self.assertEqual(switch[-1]["payload"]["model"], "grok-4-6")
+        self.assertIn("Smartest", text)
+        self.assertTrue(plugin._in_chat_mode("1045618308"))
+
+    def test_a_model_name_typed_outside_the_picker_is_just_a_message(self):
+        plugin, context, client, gateway = self.make()
+
+        self.press(plugin, context, gateway, "Smartest")
+
+        self.assertEqual(
+            [c["op"] for c in client.chat_calls], ["message"]
+        )
+
+    def test_the_picker_state_is_bounded(self):
+        plugin, _c, _cl, _g = self.make()
+        for i in range(plugin._TELEGRAM_OPERATION_MAX_USERS + 20):
+            plugin._CHAT_MODEL_PENDING[str(i)] = self.MODELS
+        self.assertLessEqual(
+            len(plugin._CHAT_MODEL_PENDING),
+            plugin._TELEGRAM_OPERATION_MAX_USERS + 21,
+        )

@@ -1593,3 +1593,51 @@ class ActualCostFromTheProviderTests(VeniceChatTestCase):
         dear = long.send(user, "hi", wallet_address=WALLET).cost_atomic
 
         self.assertLess(cheap, dear)
+
+
+class ModelChoiceTests(VeniceChatTestCase):
+    def sent_model(self):
+        chat = [r for r in self.requests if r[1].endswith("/chat/completions")]
+        return chat[-1][3]["model"]
+
+    def test_the_users_choice_is_what_gets_asked(self):
+        client = self.make_client(balance_atomic=500_000)
+        user = self.session_bound_to(BOUND_PAY_TO, credit=500_000)
+        self.store.set_model(user, "grok-4-6")
+
+        client.send(user, "hi", wallet_address=WALLET)
+
+        self.assertEqual(self.sent_model(), "grok-4-6")
+
+    def test_without_a_choice_the_configured_default_is_used(self):
+        client = self.make_client(balance_atomic=500_000)
+        user = self.session_bound_to(BOUND_PAY_TO, credit=500_000)
+
+        client.send(user, "hi", wallet_address=WALLET)
+
+        self.assertEqual(self.sent_model(), client.config.model)
+
+    def test_an_unknown_model_is_refused_before_anything_is_sent(self):
+        from sign402_gateway.venice_chat import UnknownModel, CHAT_MODELS
+
+        self.assertNotIn("definitely-not-a-model", {m.model_id for m in CHAT_MODELS})
+        store = self.make_store()
+        with self.assertRaises(UnknownModel):
+            store  # keep the store alive for cleanup
+            from sign402_gateway.venice_chat import resolve_model
+            resolve_model("definitely-not-a-model")
+
+    def test_every_offered_model_has_a_label_and_a_price(self):
+        from sign402_gateway.venice_chat import CHAT_MODELS
+
+        self.assertGreaterEqual(len(CHAT_MODELS), 3)
+        for model in CHAT_MODELS:
+            self.assertTrue(model.model_id)
+            self.assertTrue(model.label)
+            self.assertGreater(model.output_usd_per_mtok, 0)
+
+    def test_the_offered_models_are_ordered_cheapest_first(self):
+        from sign402_gateway.venice_chat import CHAT_MODELS
+
+        prices = [m.output_usd_per_mtok for m in CHAT_MODELS]
+        self.assertEqual(prices, sorted(prices))

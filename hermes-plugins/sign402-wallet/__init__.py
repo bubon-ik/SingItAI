@@ -237,7 +237,10 @@ _sleep: Callable[[float], None] = time.sleep
 _BITREFILL_USER_COUNTRIES: dict[str, str] = {}
 _TELEGRAM_CHAT_BUTTON = "Chat"
 _TELEGRAM_CHAT_EXIT_BUTTON = "Stop chat"
-_TELEGRAM_CHAT_BUTTONS = ((_TELEGRAM_CHAT_EXIT_BUTTON,),)
+_TELEGRAM_CHAT_MODEL_BUTTON = "Model"
+_TELEGRAM_CHAT_BUTTONS = ((_TELEGRAM_CHAT_EXIT_BUTTON, _TELEGRAM_CHAT_MODEL_BUTTON),)
+# Users picking a model are still in chat mode; this marks who is choosing.
+_CHAT_MODEL_PENDING: dict[str, list] = {}
 # Bounded like the other per-user maps: a public bot must not grow state
 # without limit.
 _CHAT_MODE_USERS: dict[str, dict] = {}
@@ -1327,6 +1330,24 @@ def _handle_telegram_chat_budget_choice(*, event, source, gateway):
     )
 
 
+def _chat_model_text(models: list) -> str:
+    """The model list, with the number that actually differs: output price.
+
+    Cheapest to dearest, and the spread is large enough that this is a
+    spending decision. Prices are per million tokens, straight from Venice.
+    """
+    lines = ["Pick a model. The price is what changes.", ""]
+    for model in models:
+        mark = " ← now" if model.get("chosen") else ""
+        lines.append(f"{model['label']}{mark}")
+        lines.append(f"  {model.get('blurb', '')}")
+        lines.append(
+            f"  ${model.get('outputUsdPerMTok')} per million tokens of answer"
+        )
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
 def _handle_telegram_chat_message(*, event, source, gateway):
     """Route text to Venice while the user is in chat mode.
 
@@ -1350,11 +1371,77 @@ def _handle_telegram_chat_message(*, event, source, gateway):
     client = _client_factory()
 
     normalized = _normalize_button_text(text)
+
+    pending = _CHAT_MODEL_PENDING.get(user_id)
+    if pending is not None:
+        chosen = next(
+            (m for m in pending if _normalize_button_text(m["label"]) == normalized),
+            None,
+        )
+        if chosen is not None:
+            _CHAT_MODEL_PENDING.pop(user_id, None)
+            try:
+                client.execute_chat(
+                    "models",
+                    identity,
+                    payload={"model": chosen["id"]},
+                    user_access_token=_user_access_token(client, identity),
+                )
+            except Exception:
+                _send_fixed_reply(
+                    gateway, source, "Could not switch the model. Nothing changed.",
+                    reply_markup=_telegram_chat_reply_markup(),
+                )
+                return dict(_SKIP_RESULT)
+            _send_fixed_reply(
+                gateway, source,
+                f"Switched to {chosen['label']}. Ask away.",
+                reply_markup=_telegram_chat_reply_markup(),
+            )
+            return dict(_SKIP_RESULT)
+        _CHAT_MODEL_PENDING.pop(user_id, None)
+
+    if normalized == _normalize_button_text(_TELEGRAM_CHAT_MODEL_BUTTON):
+        try:
+            result = client.execute_chat(
+                "models",
+                identity,
+                user_access_token=_user_access_token(client, identity),
+            )
+        except Exception:
+            _send_fixed_reply(
+                gateway, source, "Could not load the models. Try again.",
+                reply_markup=_telegram_chat_reply_markup(),
+            )
+            return dict(_SKIP_RESULT)
+        models = (result or {}).get("models") or []
+        if not models:
+            _send_fixed_reply(
+                gateway, source, "No models to choose from right now.",
+                reply_markup=_telegram_chat_reply_markup(),
+            )
+            return dict(_SKIP_RESULT)
+        if (
+            user_id not in _CHAT_MODEL_PENDING
+            and len(_CHAT_MODEL_PENDING) >= _TELEGRAM_OPERATION_MAX_USERS
+        ):
+            _CHAT_MODEL_PENDING.pop(next(iter(_CHAT_MODEL_PENDING)), None)
+        _CHAT_MODEL_PENDING[user_id] = models
+        _send_fixed_reply(
+            gateway, source, _chat_model_text(models),
+            reply_markup=_reply_keyboard(
+                tuple((m["label"],) for m in models) + (("Back",),),
+                placeholder="Pick a model",
+            ),
+        )
+        return dict(_SKIP_RESULT)
+
     if normalized in {
         _normalize_button_text(_TELEGRAM_CHAT_EXIT_BUTTON),
         "back",
     }:
         _leave_chat_mode(user_id)
+        _CHAT_MODEL_PENDING.pop(user_id, None)
         try:
             client.execute_chat(
                 "end",

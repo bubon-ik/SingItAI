@@ -121,6 +121,7 @@ from .secure_state import (
 from .user_emails import BuyerEmailStore, mask_email
 from .venice_chat import (
     ChatError,
+    UnknownModel,
     ChatPolicyApprovalService,
     build_chat_service_from_env,
     start_payto_watcher,
@@ -492,6 +493,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                         "/agent/chat/message",
                         "/agent/chat/end",
                         "/agent/chat/approve-policy",
+                        "/agent/chat/models",
                     ]
                 )
             if _test_endpoints_enabled():
@@ -605,6 +607,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             "/agent/chat/message",
             "/agent/chat/end",
             "/agent/chat/approve-policy",
+            "/agent/chat/models",
         ):
             self._handle_agent_chat(path)
             return
@@ -865,6 +868,22 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 return
             if path == "/agent/chat/end":
                 self._send_json(chat_service.end(telegram_user_id), status=200)
+                return
+
+            if path == "/agent/chat/models":
+                model_id = str(payload.get("model", "") or "").strip()
+                if model_id:
+                    try:
+                        self._send_json(
+                            chat_service.set_model(telegram_user_id, model_id),
+                            status=200,
+                        )
+                    except UnknownModel as exc:
+                        self._send_json(
+                            {"ok": False, "telegramText": str(exc)}, status=200
+                        )
+                    return
+                self._send_json(chat_service.models(telegram_user_id), status=200)
                 return
 
             if path == "/agent/chat/approve-policy":

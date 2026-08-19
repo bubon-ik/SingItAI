@@ -70,7 +70,53 @@ VENICE_BASE_URL = "https://api.venice.ai/api/v1"
 USDC_DECIMALS = 6
 SIWX_HEADER = "X-Sign-In-With-X"
 BALANCE_REMAINING_HEADER = "X-Balance-Remaining"
-DEFAULT_MODEL = "venice-uncensored"
+# The alias `venice-uncensored` is not in Venice's own model list, so the
+# provider decides what it points at and the price can move without notice.
+# Offer explicit ids instead.
+DEFAULT_MODEL = "venice-uncensored-1-2"
+
+
+class UnknownModel(ValueError):
+    """A model that is not on the offered list. Never forwarded."""
+
+
+@dataclass(frozen=True)
+class ChatModel:
+    model_id: str
+    label: str
+    blurb: str
+    input_usd_per_mtok: float
+    output_usd_per_mtok: float
+
+
+# A short, ordered list rather than Venice's 113: the price of the dearest is
+# forty-five times the cheapest, so this is a spending decision, not a taste
+# one. Prices are per million tokens, read from Venice's own model list.
+CHAT_MODELS: tuple[ChatModel, ...] = (
+    ChatModel("qwen3-5-9b", "Fast", "Cheapest. Good for everyday questions.", 0.10, 0.15),
+    ChatModel(
+        "venice-uncensored-1-2",
+        "Uncensored",
+        "Answers without the usual refusals.",
+        0.20,
+        0.90,
+    ),
+    ChatModel(
+        "zai-org-glm-5-2",
+        "Balanced",
+        "Handles long documents and tools.",
+        1.40,
+        4.40,
+    ),
+    ChatModel("grok-4-6", "Smartest", "Best reasoning. Spends fastest.", 2.27, 6.80),
+)
+
+
+def resolve_model(model_id: str) -> ChatModel:
+    for model in CHAT_MODELS:
+        if model.model_id == str(model_id or "").strip():
+            return model
+    raise UnknownModel("that model is not available")
 
 # The floor for deciding whether existing credit is enough to send a message.
 # Venice refuses a chat request below `minimumBalanceUsd`, observed live as
@@ -390,6 +436,30 @@ class ChatService:
         address = self._wallet_address(user_id)
         return self.client.send(user_id, text, wallet_address=address)
 
+
+    def models(self, user_id: str) -> dict[str, Any]:
+        chosen = self.store.get_session(user_id).model or self.client.config.model
+        return {
+            "ok": True,
+            "chosen": chosen,
+            "models": [
+                {
+                    "id": m.model_id,
+                    "label": m.label,
+                    "blurb": m.blurb,
+                    "inputUsdPerMTok": m.input_usd_per_mtok,
+                    "outputUsdPerMTok": m.output_usd_per_mtok,
+                    "chosen": m.model_id == chosen,
+                }
+                for m in CHAT_MODELS
+            ],
+        }
+
+    def set_model(self, user_id: str, model_id: str) -> dict[str, Any]:
+        """Switch models. Costs nothing and never touches the budget."""
+        model = resolve_model(model_id)
+        self.store.set_model(user_id, model.model_id)
+        return {"ok": True, "chosen": model.model_id, "label": model.label}
 
     def end(self, user_id: str) -> dict[str, Any]:
         # Leaving chat mode is a UI action. It refunds nothing and cancels
@@ -1051,7 +1121,9 @@ class VeniceChatClient:
             f"{self.config.base_url}/chat/completions",
             headers=self._auth_headers(wallet_address),
             json_body={
-                "model": self.config.model,
+                "model": (
+                    self.store.get_session(user_id).model or self.config.model
+                ),
                 "messages": [{"role": "user", "content": prompt}],
             },
         )

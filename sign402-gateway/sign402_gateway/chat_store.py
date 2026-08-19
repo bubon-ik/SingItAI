@@ -55,6 +55,7 @@ class ChatSession:
     daily_cap_atomic: int = 0
     policy_expires_at: int = 0
     policy_expired: bool = False
+    model: str = ""
 
 
 class ChatStore:
@@ -268,6 +269,17 @@ class ChatStore:
             )
             return self._to_session(self._row(db, user_id))
 
+    def set_model(self, user_id: str, model: str) -> ChatSession:
+        """Remember which model this user talks to. Moves no money."""
+        user_id = _user_id(user_id)
+        with self.lock, self._database() as db:
+            self._ensure_row(db, user_id)
+            db.execute(
+                "UPDATE chat_sessions SET model = ?, updated_at = ? WHERE user_id = ?",
+                (str(model or "").strip(), self.now(), user_id),
+            )
+            return self._to_session(self._row(db, user_id))
+
     def claimable_credit_atomic(self, user_id: str) -> int:
         """Prefunded-but-unconsumed value. User funds: never written off."""
         return self.get_session(user_id).outstanding_atomic
@@ -345,10 +357,10 @@ class ChatStore:
             INSERT INTO chat_sessions (
                 user_id, window_start, spent_atomic, outstanding_atomic,
                 paused, pause_reason, policy_hash, bound_pay_to,
-                daily_cap_atomic, policy_expires_at, prefund_claimed_at,
-                updated_at
+                daily_cap_atomic, policy_expires_at, model,
+                prefund_claimed_at, updated_at
             )
-            VALUES (?, ?, 0, 0, 0, '', '', '', 0, 0, NULL, ?)
+            VALUES (?, ?, 0, 0, 0, '', '', '', 0, 0, '', NULL, ?)
             """,
             (user_id, _window_start(now), now),
         )
@@ -403,6 +415,7 @@ class ChatStore:
             daily_cap_atomic=int(row["daily_cap_atomic"] or 0),
             policy_expires_at=expires_at,
             policy_expired=bool(expires_at) and self.now() >= expires_at,
+            model=str(row["model"] or ""),
         )
 
     def _init_db(self) -> None:
@@ -420,6 +433,7 @@ class ChatStore:
                     bound_pay_to TEXT NOT NULL DEFAULT '',
                     daily_cap_atomic INTEGER NOT NULL DEFAULT 0,
                     policy_expires_at INTEGER NOT NULL DEFAULT 0,
+                    model TEXT NOT NULL DEFAULT '',
                     prefund_claimed_at INTEGER,
                     updated_at INTEGER NOT NULL
                 )

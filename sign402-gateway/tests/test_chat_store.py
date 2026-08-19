@@ -464,3 +464,34 @@ class ReconcileOutstandingTests(ChatStoreTestCase):
         store.reconcile_outstanding("u1", -5)
 
         self.assertEqual(store.get_session("u1").outstanding_atomic, 0)
+
+
+class ChatModelChoiceTests(ChatStoreTestCase):
+    def test_a_user_without_a_choice_reports_none(self):
+        store = self.make_store(now=lambda: DAY_ONE_NOON)
+        self.assertEqual(store.get_session("u1").model, "")
+
+    def test_a_chosen_model_is_remembered(self):
+        store = self.make_store(now=lambda: DAY_ONE_NOON)
+        store.set_model("u1", "venice-uncensored-1-2")
+        self.assertEqual(store.get_session("u1").model, "venice-uncensored-1-2")
+
+    def test_the_choice_is_per_user(self):
+        store = self.make_store(now=lambda: DAY_ONE_NOON)
+        store.set_model("u1", "grok-4-6")
+        self.assertEqual(store.get_session("u2").model, "")
+
+    def test_it_survives_a_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "chat.db"
+            self.make_store(path, now=lambda: DAY_ONE_NOON).set_model("u1", "qwen3-5-9b")
+            reopened = self.make_store(path, now=lambda: DAY_ONE_NOON)
+            self.assertEqual(reopened.get_session("u1").model, "qwen3-5-9b")
+
+    def test_choosing_a_model_touches_no_money(self):
+        store = self.make_store(now=lambda: DAY_ONE_NOON)
+        store.record_prefund("u1", 5_000_000)
+        store.set_model("u1", "grok-4-6")
+        session = store.get_session("u1")
+        self.assertEqual(session.outstanding_atomic, 5_000_000)
+        self.assertEqual(session.spent_atomic_this_window, 5_000_000)
