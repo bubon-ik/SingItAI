@@ -950,8 +950,17 @@ class VeniceChatClient:
             # 402.
             try:
                 settlement = self.settle(requirement, user_id=user_id)
-            except Exception:
-                # Nothing was recorded, so nothing needs unwinding.
+            except Exception as exc:
+                # Nothing was recorded, so nothing needs unwinding. Log why:
+                # without this the user sees "try again shortly" and the
+                # operator sees an empty journal, which is what happened on the
+                # first live attempt. Type and message only — no prompt text,
+                # no key material.
+                logger.warning(
+                    "Venice top-up failed: %s: %s",
+                    type(exc).__name__,
+                    str(exc)[:200],
+                )
                 raise PrefundFailed(
                     "The top-up did not go through. Try again shortly."
                 ) from None

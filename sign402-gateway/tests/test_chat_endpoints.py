@@ -429,3 +429,93 @@ class ApprovePolicyRouteTests(ChatEndpointTestCase):
             )
         self.assertEqual(self.status_of(handler), 503)
         server.chat_policy_service.approve.assert_not_called()
+
+
+class SettleChatPrefundTests(unittest.TestCase):
+    """The settle boundary must speak the shape a live 402 actually has.
+
+    Venice serves x402 v2: `amount` and `payTo`. Reading only the normalized
+    `amountAtomic`/`receiver` yields empty approved terms, and the buyer then
+    refuses to pay — which is what happened on the first live attempt.
+    """
+
+    VENICE_CHALLENGE = {
+        "scheme": "exact",
+        "network": "eip155:8453",
+        "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        "amount": "5000000",
+        "payTo": "0x2670b922ef37c7df47158725c0cc407b5382293f",
+        "maxTimeoutSeconds": 300,
+        "extra": {"name": "USD Coin", "version": "2"},
+    }
+
+    def make_server(self):
+        server = ChatDummyServer()
+        server.user_wallet_service.decrypt_private_key_for_future_signing.return_value = (
+            "0x" + "11" * 32
+        )
+        self.calls = []
+
+        def buyer(url, **kwargs):
+            self.calls.append({"url": url, **kwargs})
+            return {"ok": True, "status": 200}
+
+        server.user_wallet_base_x402_client = buyer
+        return server
+
+    def settle(self, server, requirement):
+        from sign402_gateway.server import _settle_chat_prefund
+
+        return _settle_chat_prefund(
+            server, requirement, telegram_user_id=USER_ID
+        )
+
+    def test_the_live_v2_challenge_produces_complete_approved_terms(self):
+        server = self.make_server()
+
+        self.settle(server, dict(self.VENICE_CHALLENGE))
+
+        call = self.calls[0]
+        self.assertEqual(call["max_atomic"], "5000000")
+        self.assertEqual(
+            call["expected_receiver"],
+            "0x2670b922ef37c7df47158725c0cc407b5382293f",
+        )
+        self.assertEqual(
+            call["expected_asset"],
+            "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        )
+
+    def test_it_posts_to_the_top_up_endpoint(self):
+        server = self.make_server()
+
+        self.settle(server, dict(self.VENICE_CHALLENGE))
+
+        self.assertEqual(self.calls[0]["method"], "POST")
+        self.assertIn("x402/top-up", self.calls[0]["url"])
+
+    def test_the_normalized_shape_still_works(self):
+        # The gateway's own normalizer emits these names; both must be read.
+        server = self.make_server()
+
+        self.settle(server, {
+            "network": "base-mainnet",
+            "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "amountAtomic": "5000000",
+            "receiver": "0x2670b922ef37c7df47158725c0cc407b5382293f",
+        })
+
+        self.assertEqual(self.calls[0]["max_atomic"], "5000000")
+        self.assertEqual(
+            self.calls[0]["expected_receiver"],
+            "0x2670b922ef37c7df47158725c0cc407b5382293f",
+        )
+
+    def test_it_signs_with_the_paying_users_own_key(self):
+        server = self.make_server()
+
+        self.settle(server, dict(self.VENICE_CHALLENGE))
+
+        server.user_wallet_service.decrypt_private_key_for_future_signing.assert_called_once_with(
+            USER_ID
+        )

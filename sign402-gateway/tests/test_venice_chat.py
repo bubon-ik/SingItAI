@@ -1480,3 +1480,37 @@ class RemainingBudgetTests(unittest.TestCase):
         self.assertEqual(status["dailyCapAtomic"], 10_000_000)
         self.assertEqual(status["remainingWindowAtomic"], 10_000_000)
 
+
+
+class SettlementFailureIsLoggedTests(VeniceChatTestCase):
+    def test_the_reason_reaches_the_log_but_not_the_user(self):
+        import logging
+
+        def failing(payment_requirements, *, user_id):
+            raise ValueError("refusing to pay without approved terms: max-atomic")
+
+        client = self.make_client(settle=failing)
+        user = self.session_bound_to(BOUND_PAY_TO)
+
+        with self.assertLogs("sign402_gateway.venice_chat", level="WARNING") as caught:
+            with self.assertRaises(PrefundFailed) as raised:
+                client.send(user, "hi", wallet_address=WALLET)
+
+        logged = "\n".join(caught.output)
+        self.assertIn("max-atomic", logged)
+        self.assertNotIn("max-atomic", str(raised.exception))
+
+    def test_the_log_never_carries_the_prompt(self):
+        import logging
+
+        def failing(payment_requirements, *, user_id):
+            raise ValueError("boom")
+
+        client = self.make_client(settle=failing)
+        user = self.session_bound_to(BOUND_PAY_TO)
+
+        with self.assertLogs("sign402_gateway.venice_chat", level="WARNING") as caught:
+            with self.assertRaises(PrefundFailed):
+                client.send(user, "my secret prompt", wallet_address=WALLET)
+
+        self.assertNotIn("my secret prompt", "\n".join(caught.output))

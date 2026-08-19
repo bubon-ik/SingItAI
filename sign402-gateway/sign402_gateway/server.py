@@ -2921,8 +2921,16 @@ def _settle_chat_prefund(
         str(requirement.get("resource") or "")
         or "https://api.venice.ai/api/v1/x402/top-up",
         private_key=private_key,
-        max_atomic=str(requirement.get("amountAtomic") or ""),
-        expected_receiver=str(requirement.get("receiver") or ""),
+        # A live 402 is x402 v2 (`amount`, `payTo`); the gateway's own
+        # normalizer emits v1 names. Read both, exactly as
+        # _validate_base_usdc_x402_requirement above already does — reading one
+        # set yields blank approved terms and the buyer refuses to pay.
+        max_atomic=str(
+            requirement.get("amountAtomic") or requirement.get("amount") or ""
+        ),
+        expected_receiver=str(
+            requirement.get("receiver") or requirement.get("payTo") or ""
+        ),
         expected_asset=str(requirement.get("asset") or ""),
         method="POST",
         request_body={},
