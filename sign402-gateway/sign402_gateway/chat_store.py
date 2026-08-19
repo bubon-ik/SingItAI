@@ -247,6 +247,27 @@ class ChatStore:
                 (str(key), str(value), self.now()),
             )
 
+    def reconcile_outstanding(self, user_id: str, atomic: int) -> ChatSession:
+        """Set credit to the balance the provider reports.
+
+        The provider meters the messages, so it is the only party that knows
+        what is left. Our own number is a record of what we paid, and the two
+        drift after any failure. The daily window is ours and is untouched.
+        """
+        user_id = _user_id(user_id)
+        balance = max(0, int(atomic))
+        with self.lock, self._database() as db:
+            self._rolled_over(db, self._ensure_row(db, user_id))
+            db.execute(
+                """
+                UPDATE chat_sessions
+                SET outstanding_atomic = ?, updated_at = ?
+                WHERE user_id = ?
+                """,
+                (balance, self.now(), user_id),
+            )
+            return self._to_session(self._row(db, user_id))
+
     def claimable_credit_atomic(self, user_id: str) -> int:
         """Prefunded-but-unconsumed value. User funds: never written off."""
         return self.get_session(user_id).outstanding_atomic

@@ -1118,11 +1118,16 @@ def _chat_answer_text(user_id: str, result: dict) -> str:
     """Answer plus the footer: what this message cost and what is left today."""
     text = str(result.get("text", "") or "").strip()
     cost = _usd_from_atomic(result.get("costAtomic", 0), rounding=ROUND_HALF_UP)
-    remaining_atomic = result.get("remainingWindowAtomic")
+    # Credit, not the daily window. The window caps top-ups and reads zero for
+    # the rest of the day after one; the credit is what answers messages, and
+    # that is what "left" has to mean to someone mid-conversation.
+    remaining_atomic = result.get("outstandingAtomic")
+    if remaining_atomic is None:
+        remaining_atomic = result.get("remainingWindowAtomic")
     if remaining_atomic is None:
         return text
     remaining = _usd_from_atomic(remaining_atomic)
-    footer = f"{cost} · {remaining} left today"
+    footer = f"{cost} · {remaining} left"
 
     warning = ""
     cap = result.get("dailyCapAtomic")

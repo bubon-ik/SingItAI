@@ -874,7 +874,9 @@ class VeniceChatClient:
             raise
 
         # 4. Debit what Venice actually charged.
-        cost = self._debit_actual_cost(user_id, remaining)
+        cost = self._debit_actual_cost(
+            user_id, remaining, wallet_address=wallet_address
+        )
         session = self.store.get_session(user_id)
         return ChatResult(
             text=text,
@@ -1086,19 +1088,43 @@ class VeniceChatClient:
             ) from None
         return str(text), _header(response, BALANCE_REMAINING_HEADER)
 
-    def _debit_actual_cost(self, user_id: str, remaining: str | None) -> int:
-        session = self.store.get_session(user_id)
+    def _debit_actual_cost(
+        self, user_id: str, remaining: str | None, *, wallet_address: str
+    ) -> int:
+        """Charge what the provider actually charged.
+
+        Venice documents `X-Balance-Remaining` as optional and does not send
+        it, so the balance endpoint is the real source. Estimating instead
+        billed a flat $0.10 a message against a true cost of a fraction of a
+        cent — thirty times high, and the ledger emptied long before the credit
+        did.
+        """
+        before = self.store.get_session(user_id).outstanding_atomic
         reported = _to_atomic(remaining)
         if reported is None:
-            # No header to reconcile against: fall back to the estimate, capped
-            # by the credit actually held so the ledger cannot go negative.
-            cost = min(self.config.estimated_cost_atomic, session.outstanding_atomic)
-        else:
-            cost = max(0, session.outstanding_atomic - reported)
-            cost = min(cost, session.outstanding_atomic)
-        if cost:
-            self.store.debit(user_id, cost)
-        return cost
+            reported = self._provider_balance_atomic(wallet_address)
+        if reported is None:
+            # Both the header and the balance call failed. Charge nothing
+            # rather than invent a number: the next message reconciles.
+            logger.warning("Venice reported no balance; message left unbilled")
+            return 0
+
+        self.store.reconcile_outstanding(user_id, reported)
+        return max(0, before - reported)
+
+    def _provider_balance_atomic(self, wallet_address: str) -> int | None:
+        try:
+            response = self.transport(
+                "GET",
+                f"{self.config.base_url}/x402/balance/{wallet_address}",
+                headers=self._auth_headers(wallet_address),
+            )
+            if response.status != 200:
+                return None
+            data = (response.json() or {}).get("data") or {}
+            return _to_atomic(str(data.get("balanceUsd")))
+        except Exception:
+            return None
 
     # -- sign-in-with-x --------------------------------------------------
 

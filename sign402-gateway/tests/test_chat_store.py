@@ -425,3 +425,42 @@ class ChatRefundTests(ChatStoreTestCase):
             reopened = self.make_store(path, now=lambda: DAY_ONE_NOON)
             self.assertEqual(reopened.claimable_credit_atomic("u1"), 4_997_000)
             self.assertTrue(reopened.get_session("u1").paused)
+
+
+class ReconcileOutstandingTests(ChatStoreTestCase):
+    """The provider knows the balance. We only track the daily window."""
+
+    def test_it_sets_credit_to_what_the_provider_reports(self):
+        store = self.make_store(now=lambda: DAY_ONE_NOON)
+        store.record_prefund("u1", 5_000_000)
+
+        store.reconcile_outstanding("u1", 4_982_000)
+
+        self.assertEqual(store.get_session("u1").outstanding_atomic, 4_982_000)
+
+    def test_it_never_touches_the_daily_window(self):
+        store = self.make_store(now=lambda: DAY_ONE_NOON)
+        store.record_prefund("u1", 5_000_000)
+
+        store.reconcile_outstanding("u1", 1_000)
+
+        self.assertEqual(
+            store.get_session("u1").spent_atomic_this_window, 5_000_000
+        )
+
+    def test_a_provider_balance_above_ours_is_accepted(self):
+        # Someone topped the wallet up elsewhere; the provider is the truth.
+        store = self.make_store(now=lambda: DAY_ONE_NOON)
+        store.record_prefund("u1", 1_000)
+
+        store.reconcile_outstanding("u1", 9_000_000)
+
+        self.assertEqual(store.get_session("u1").outstanding_atomic, 9_000_000)
+
+    def test_a_negative_report_is_floored_at_zero(self):
+        store = self.make_store(now=lambda: DAY_ONE_NOON)
+        store.record_prefund("u1", 1_000)
+
+        store.reconcile_outstanding("u1", -5)
+
+        self.assertEqual(store.get_session("u1").outstanding_atomic, 0)

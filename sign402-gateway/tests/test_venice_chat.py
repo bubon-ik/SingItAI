@@ -1514,3 +1514,82 @@ class SettlementFailureIsLoggedTests(VeniceChatTestCase):
                 client.send(user, "my secret prompt", wallet_address=WALLET)
 
         self.assertNotIn("my secret prompt", "\n".join(caught.output))
+
+
+class ActualCostFromTheProviderTests(VeniceChatTestCase):
+    """Venice does not send X-Balance-Remaining. Ask it for the balance.
+
+    Observed live: every message was billed the fallback estimate, $0.10,
+    while the real cost is a fraction of a cent. Guessing 30x high empties the
+    local ledger long before the credit is actually gone.
+    """
+
+    def make_metered(self, *, start_usd, after_usd, header=None):
+        """A provider that meters, and reports the balance only when asked."""
+        self.balance = {"usd": start_usd}
+        self.after = after_usd
+
+        def transport(method, url, *, headers=None, json_body=None):
+            self.requests.append((method, url, headers or {}, json_body))
+            if "/x402/balance/" in url:
+                return FakeResponse(200, {
+                    "success": True,
+                    "data": {
+                        "canConsume": self.balance["usd"] >= 0.10,
+                        "balanceUsd": self.balance["usd"],
+                    },
+                })
+            if url.endswith("/chat/completions"):
+                self.balance["usd"] = self.after
+                return FakeResponse(200, ANSWER, {} if header is None else header)
+            raise AssertionError(url)
+
+        client = self.make_client()
+        client.transport = transport
+        return client
+
+    def test_the_real_cost_comes_from_the_providers_balance(self):
+        client = self.make_metered(start_usd=5.0, after_usd=4.997)
+        user = self.session_bound_to(BOUND_PAY_TO, credit=5_000_000)
+
+        result = client.send(user, "hi", wallet_address=WALLET)
+
+        # $5.000 -> $4.997 is three tenths of a cent, not the $0.10 estimate.
+        self.assertEqual(result.cost_atomic, 3_000)
+        self.assertEqual(
+            self.store.get_session(user).outstanding_atomic, 4_997_000
+        )
+
+    def test_credit_tracks_the_provider_rather_than_our_arithmetic(self):
+        client = self.make_metered(start_usd=5.0, after_usd=4.982)
+        user = self.session_bound_to(BOUND_PAY_TO, credit=5_000_000)
+
+        client.send(user, "hi", wallet_address=WALLET)
+
+        self.assertEqual(
+            self.store.get_session(user).outstanding_atomic, 4_982_000
+        )
+
+    def test_the_header_is_still_used_when_a_provider_sends_one(self):
+        client = self.make_metered(
+            start_usd=5.0, after_usd=4.0,  # balance endpoint would say $4.00
+            header={"X-Balance-Remaining": "4.990"},
+        )
+        user = self.session_bound_to(BOUND_PAY_TO, credit=5_000_000)
+
+        result = client.send(user, "hi", wallet_address=WALLET)
+
+        # The header is cheaper than another round trip, so it wins.
+        self.assertEqual(result.cost_atomic, 10_000)
+
+    def test_a_long_answer_costs_more_than_a_short_one(self):
+        short = self.make_metered(start_usd=5.0, after_usd=4.998)
+        user = self.session_bound_to(BOUND_PAY_TO, credit=5_000_000)
+        cheap = short.send(user, "hi", wallet_address=WALLET).cost_atomic
+
+        self.setUp()
+        long = self.make_metered(start_usd=5.0, after_usd=4.980)
+        user = self.session_bound_to(BOUND_PAY_TO, credit=5_000_000)
+        dear = long.send(user, "hi", wallet_address=WALLET).cost_atomic
+
+        self.assertLess(cheap, dear)

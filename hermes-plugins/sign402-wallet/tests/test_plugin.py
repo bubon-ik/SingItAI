@@ -5142,3 +5142,43 @@ class PolicyApprovalRunsOffTheHookTests(unittest.TestCase):
 
         text = gateway.adapters["telegram"].sent[-1][1].lower()
         self.assertTrue("approve" in text or "phone" in text, text)
+
+
+class ChatFooterShowsSpendableCreditTests(unittest.TestCase):
+    """Mid-chat the user cares about what they can still spend on messages.
+
+    The daily window governs top-ups, not messages: after one $5 top-up it
+    reads zero for the rest of the day while the credit that actually answers
+    messages is nearly untouched. Showing the window said "$0.000 left today"
+    to someone with $4.90 to spend.
+    """
+
+    def result(self, **kwargs):
+        base = {
+            "ok": True,
+            "text": "an answer",
+            "costAtomic": 3_000,
+            "remainingWindowAtomic": 0,
+            "outstandingAtomic": 4_902_000,
+        }
+        base.update(kwargs)
+        return base
+
+    def test_the_footer_shows_credit_not_the_spent_window(self):
+        plugin = load_plugin()
+        text = plugin._chat_answer_text("u1", self.result())
+
+        self.assertIn("$4.90", text)
+        self.assertNotIn("$0.00 left", text)
+
+    def test_the_cost_of_the_message_is_still_shown(self):
+        plugin = load_plugin()
+        text = plugin._chat_answer_text("u1", self.result())
+
+        self.assertIn("$0.003", text)
+
+    def test_credit_running_out_is_visible(self):
+        plugin = load_plugin()
+        text = plugin._chat_answer_text("u1", self.result(outstandingAtomic=1_000))
+
+        self.assertIn("$0.001", text)
