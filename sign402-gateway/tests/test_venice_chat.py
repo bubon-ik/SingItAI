@@ -6,6 +6,7 @@ from pathlib import Path
 
 from sign402_gateway.chat_store import ChatStore
 from sign402_gateway.venice_chat import (
+    DEFAULT_MODEL,
     ChatState,
     MerchantChanged,
     PrefundFailed,
@@ -892,7 +893,14 @@ class ChatServiceTests(unittest.TestCase):
                 outer.decrypt_calls.append(user_id)
                 return "0x" + "22" * 32
 
+        class FakeConfig:
+            # The real client always carries one; start() reads the default
+            # model from it.
+            model = DEFAULT_MODEL
+
         class FakeClient:
+            config = FakeConfig()
+
             def __init__(self):
                 self.sent = []
 

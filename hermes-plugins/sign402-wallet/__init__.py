@@ -1157,11 +1157,12 @@ def _chat_start_text(result: dict) -> str:
     None of the plumbing vocabulary appears.
     """
     cap = str(result.get("dailyCapUsdc") or "").strip()
-    opening = (
-        f"Ask me anything. Your daily limit is ${cap}."
-        if cap
-        else "Ask me anything."
-    )
+    model = str(result.get("modelLabel") or "").strip()
+    opening = "Ask me anything."
+    if model:
+        opening = f"Ask me anything. You're talking to {model}."
+    if cap:
+        opening += f" Daily limit ${cap}."
     return f"{opening}\n\nTap Stop chat when you're done."
 
 

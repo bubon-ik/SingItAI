@@ -92,23 +92,28 @@ class ChatModel:
 # A short, ordered list rather than Venice's 113: the price of the dearest is
 # forty-five times the cheapest, so this is a spending decision, not a taste
 # one. Prices are per million tokens, read from Venice's own model list.
+# Labels are the models' own names, as Venice reports them. Someone choosing
+# an LLM wants to know it is Grok or GLM; "Smartest" tells them nothing they
+# can look up or compare anywhere else.
 CHAT_MODELS: tuple[ChatModel, ...] = (
-    ChatModel("qwen3-5-9b", "Fast", "Cheapest. Good for everyday questions.", 0.10, 0.15),
+    ChatModel(
+        "qwen3-5-9b", "Qwen 3.5 9B", "Fastest, and the cheapest by far.", 0.10, 0.15
+    ),
     ChatModel(
         "venice-uncensored-1-2",
-        "Uncensored",
-        "Answers without the usual refusals.",
+        "Venice Uncensored 1.2",
+        "Fewest refusals.",
         0.20,
         0.90,
     ),
     ChatModel(
         "zai-org-glm-5-2",
-        "Balanced",
-        "Handles long documents and tools.",
+        "GLM 5.2",
+        "Long documents and tool use.",
         1.40,
         4.40,
     ),
-    ChatModel("grok-4-6", "Smartest", "Best reasoning. Spends fastest.", 2.27, 6.80),
+    ChatModel("grok-4-6", "Grok 4.6", "Best reasoning. Spends fastest.", 2.27, 6.80),
 )
 
 
@@ -395,11 +400,15 @@ class ChatService:
         client: Any,
         wallet_service: Any,
         daily_cap_atomic: int,
+        default_model: str = DEFAULT_MODEL,
     ):
         self.store = store
         self.client = client
         self.wallet_service = wallet_service
         self.daily_cap_atomic = daily_cap_atomic
+        # Held here rather than read off the client: reaching through one
+        # object for another's field is how the settle path broke.
+        self.default_model = default_model
         # Address -> owning user. One address belongs to exactly one user, so
         # caching this is safe; the signer needs it to find the right key.
         # Bounded like every other per-user map here: a public bot must not
@@ -415,11 +424,18 @@ class ChatService:
         # how much more may be paid today. Showing one as the other would
         # misstate what the user can actually do.
         remaining = max(0, cap - session.spent_atomic_this_window)
+        chosen_id = session.model or self.default_model
+        try:
+            chosen_label = resolve_model(chosen_id).label
+        except UnknownModel:
+            chosen_label = chosen_id
         return {
             "ok": True,
             "hasPolicy": bool(session.bound_pay_to),
             "dailyCapAtomic": cap,
             "dailyCapUsdc": _usd_plain(cap),
+            "model": chosen_id,
+            "modelLabel": chosen_label,
             "spentTodayAtomic": session.spent_atomic_this_window,
             "remainingWindowAtomic": remaining,
             "remainingWindowUsdc": _usd_plain(remaining),
@@ -438,7 +454,7 @@ class ChatService:
 
 
     def models(self, user_id: str) -> dict[str, Any]:
-        chosen = self.store.get_session(user_id).model or self.client.config.model
+        chosen = self.store.get_session(user_id).model or self.default_model
         return {
             "ok": True,
             "chosen": chosen,
@@ -548,6 +564,7 @@ def build_chat_service_from_env(
         client=None,
         wallet_service=wallet_service,
         daily_cap_atomic=config.daily_cap_atomic,
+        default_model=config.model,
     )
     service.client = VeniceChatClient(
         store=store,

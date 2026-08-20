@@ -5267,3 +5267,29 @@ class ChatModelPickerTests(unittest.TestCase):
             len(plugin._CHAT_MODEL_PENDING),
             plugin._TELEGRAM_OPERATION_MAX_USERS + 21,
         )
+
+
+class ChatNamesTheModelTests(unittest.TestCase):
+    def test_entering_chat_says_which_model_answers(self):
+        plugin = load_plugin()
+        text = plugin._chat_start_text(
+            {"hasPolicy": True, "dailyCapUsdc": "5.00", "modelLabel": "Grok 4.6"}
+        )
+        self.assertIn("Grok 4.6", text)
+
+    def test_it_still_reads_when_the_model_is_unknown(self):
+        plugin = load_plugin()
+        text = plugin._chat_start_text({"hasPolicy": True, "dailyCapUsdc": "5.00"})
+        self.assertIn("Ask me anything", text)
+
+    def test_the_picker_lists_real_model_names(self):
+        import sys
+        sys.path.insert(0, "../../sign402-gateway")
+        from sign402_gateway.venice_chat import CHAT_MODELS
+
+        labels = [m.label for m in CHAT_MODELS]
+        # Names a user can look up, not adjectives we invented.
+        self.assertIn("Grok 4.6", labels)
+        self.assertIn("GLM 5.2", labels)
+        for adjective in ("Fast", "Smartest", "Balanced"):
+            self.assertNotIn(adjective, labels)
