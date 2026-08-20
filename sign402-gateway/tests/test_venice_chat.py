@@ -1681,3 +1681,175 @@ class ModelListShapeTests(unittest.TestCase):
         resolve_model(DEFAULT_MODEL)
         for model in self.models():
             self.assertNotEqual(model.model_id, "venice-uncensored")
+
+
+class ModelCatalogueTests(unittest.TestCase):
+    """Built from Venice's own model list, not from a list we maintain."""
+
+    SAMPLE = {
+        "data": [
+            {
+                "id": "cheap-1",
+                "model_spec": {
+                    "name": "Cheap One",
+                    "description": "A small fast model. " * 20,
+                    "availableContextTokens": 32000,
+                    "pricing": {"input": {"usd": 0.05}, "output": {"usd": 0.10}},
+                    "capabilities": {},
+                    "traits": [],
+                },
+            },
+            {
+                "id": "sees-1",
+                "model_spec": {
+                    "name": "Sees One",
+                    "description": "Reads pictures.",
+                    "availableContextTokens": 128000,
+                    "pricing": {"input": {"usd": 1.0}, "output": {"usd": 2.0}},
+                    "capabilities": {"supportsVision": True, "optimizedForCode": True},
+                    "traits": ["default_vision"],
+                },
+            },
+            {
+                "id": "dear-1",
+                "model_spec": {
+                    "name": "Dear One",
+                    "description": "Thinks hard.",
+                    "availableContextTokens": 1000000,
+                    "pricing": {"input": {"usd": 4.0}, "output": {"usd": 20.0}},
+                    "capabilities": {"supportsReasoning": True, "supportsE2EE": True},
+                    "traits": ["most_intelligent"],
+                },
+            },
+            {
+                "id": "no-price",
+                "model_spec": {"name": "Free?", "pricing": {}, "capabilities": {}},
+            },
+        ]
+    }
+
+    def catalogue(self, payload=None, fail=False):
+        from sign402_gateway.venice_chat import VeniceModelCatalogue
+
+        self.fetches = 0
+
+        def fetch():
+            self.fetches += 1
+            if fail:
+                raise RuntimeError("model list unavailable")
+            return payload if payload is not None else self.SAMPLE
+
+        return VeniceModelCatalogue(fetch=fetch, now=lambda: 1_000)
+
+    def test_it_lists_every_priced_model(self):
+        models = self.catalogue().models()
+        self.assertEqual({m.model_id for m in models}, {"cheap-1", "sees-1", "dear-1"})
+
+    def test_a_model_without_a_price_is_dropped(self):
+        # We cannot show a cost we do not know, and the daily cap depends on it.
+        self.assertNotIn("no-price", {m.model_id for m in self.catalogue().models()})
+
+    def test_models_are_ordered_cheapest_first(self):
+        prices = [m.output_usd_per_mtok for m in self.catalogue().models()]
+        self.assertEqual(prices, sorted(prices))
+
+    def test_the_blurb_comes_from_venice_not_from_us(self):
+        model = next(m for m in self.catalogue().models() if m.model_id == "sees-1")
+        self.assertIn("Reads pictures", model.blurb)
+
+    def test_a_long_description_is_trimmed_for_a_phone(self):
+        model = next(m for m in self.catalogue().models() if m.model_id == "cheap-1")
+        self.assertLessEqual(len(model.blurb), 160)
+
+    def test_categories_are_derived_from_capabilities(self):
+        catalogue = self.catalogue()
+        names = {c.key for c in catalogue.categories()}
+        self.assertIn("all", names)
+        self.assertIn("vision", names)
+        self.assertIn("code", names)
+
+    def test_a_category_filters(self):
+        catalogue = self.catalogue()
+        ids = {m.model_id for m in catalogue.models(category="vision")}
+        self.assertEqual(ids, {"sees-1"})
+
+    def test_an_empty_category_is_not_offered(self):
+        catalogue = self.catalogue()
+        keys = {c.key for c in catalogue.categories()}
+        # Nothing in the sample supports video.
+        self.assertNotIn("video", keys)
+
+    def test_the_list_is_cached_between_calls(self):
+        catalogue = self.catalogue()
+        catalogue.models()
+        catalogue.models()
+        self.assertEqual(self.fetches, 1)
+
+    def test_the_cache_expires(self):
+        from sign402_gateway.venice_chat import MODEL_CACHE_TTL_SECONDS
+
+        catalogue = self.catalogue()
+        catalogue.models()
+        catalogue.now = lambda: 1_000 + MODEL_CACHE_TTL_SECONDS + 1
+        catalogue.models()
+        self.assertEqual(self.fetches, 2)
+
+    def test_a_failed_fetch_falls_back_to_the_built_in_list(self):
+        from sign402_gateway.venice_chat import CHAT_MODELS
+
+        models = self.catalogue(fail=True).models()
+        self.assertEqual(
+            {m.model_id for m in models}, {m.model_id for m in CHAT_MODELS}
+        )
+
+    def test_a_stale_list_is_preferred_to_no_list(self):
+        catalogue = self.catalogue()
+        catalogue.models()
+        catalogue.fetch = lambda: (_ for _ in ()).throw(RuntimeError("down"))
+        catalogue.now = lambda: 99_999_999
+
+        ids = {m.model_id for m in catalogue.models()}
+
+        self.assertIn("cheap-1", ids)
+
+    def test_resolving_accepts_anything_in_the_live_list(self):
+        catalogue = self.catalogue()
+        self.assertEqual(catalogue.resolve("dear-1").label, "Dear One")
+
+    def test_resolving_still_refuses_an_unknown_id(self):
+        from sign402_gateway.venice_chat import UnknownModel
+
+        with self.assertRaises(UnknownModel):
+            self.catalogue().resolve("not-a-model")
+
+
+class NoHiddenNetworkTests(unittest.TestCase):
+    def test_a_service_without_a_catalogue_never_opens_a_socket(self):
+        import socket
+        from sign402_gateway.venice_chat import ChatService
+
+        class Wallets:
+            def wallet_status(self, user_id):
+                return {"ok": True, "wallet": {"address": WALLET}}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ChatStore(Path(tmp) / "chat.db")
+            self.addCleanup(store.close)
+            service = ChatService(
+                store=store, client=None, wallet_service=Wallets(),
+                daily_cap_atomic=5_000_000,
+            )
+
+            real = socket.socket
+
+            def forbidden(*args, **kwargs):
+                raise AssertionError("a test opened a network connection")
+
+            socket.socket = forbidden
+            try:
+                result = service.models("u1")
+                service.models("u1", category="all")
+            finally:
+                socket.socket = real
+
+        self.assertTrue(result["ok"])

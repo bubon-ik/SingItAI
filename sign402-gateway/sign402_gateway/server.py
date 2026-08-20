@@ -872,6 +872,16 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
 
             if path == "/agent/chat/models":
                 model_id = str(payload.get("model", "") or "").strip()
+                if not model_id:
+                    self._send_json(
+                        chat_service.models(
+                            telegram_user_id,
+                            category=str(payload.get("category", "") or "").strip(),
+                            page=int(payload.get("page") or 0),
+                        ),
+                        status=200,
+                    )
+                    return
                 if model_id:
                     try:
                         self._send_json(
@@ -883,8 +893,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                             {"ok": False, "telegramText": str(exc)}, status=200
                         )
                     return
-                self._send_json(chat_service.models(telegram_user_id), status=200)
-                return
+
 
             if path == "/agent/chat/approve-policy":
                 self._handle_chat_policy_approval(telegram_user_id, payload)

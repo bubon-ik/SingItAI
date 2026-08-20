@@ -5187,11 +5187,21 @@ class ChatFooterShowsSpendableCreditTests(unittest.TestCase):
 
 
 class ChatModelPickerTests(unittest.TestCase):
-    MODELS = [
-        {"id": "qwen3-5-9b", "label": "Fast", "blurb": "Cheapest.",
-         "outputUsdPerMTok": 0.15, "chosen": True},
-        {"id": "grok-4-6", "label": "Smartest", "blurb": "Best reasoning.",
-         "outputUsdPerMTok": 6.8, "chosen": False},
+    """Two screens: what it should be good at, then which model."""
+
+    CATEGORIES = [
+        {"key": "all", "label": "All by price", "count": 113},
+        {"key": "vision", "label": "Reads images", "count": 67},
+    ]
+    PAGE_0 = [
+        {"id": "cheap", "label": "Qwen 2.5 7B", "blurb": "Small and fast.",
+         "outputUsdPerMTok": 0.13, "chosen": True},
+        {"id": "mid", "label": "GLM 5.2", "blurb": "Long documents.",
+         "outputUsdPerMTok": 4.4, "chosen": False},
+    ]
+    PAGE_1 = [
+        {"id": "dear", "label": "Kimi K3", "blurb": "Deepest thinking.",
+         "outputUsdPerMTok": 18.75, "chosen": False},
     ]
 
     def make(self):
@@ -5201,11 +5211,24 @@ class ChatModelPickerTests(unittest.TestCase):
         client.chat_calls = []
 
         def execute_chat(operation, identity, *, payload=None, user_access_token):
-            client.chat_calls.append({"op": operation, "payload": dict(payload or {})})
-            if operation == "models":
-                return {"ok": True, "chosen": "qwen3-5-9b", "models": self.MODELS}
-            return {"ok": True, "text": "an answer", "costAtomic": 3_000,
-                    "outstandingAtomic": 4_900_000}
+            payload = dict(payload or {})
+            client.chat_calls.append({"op": operation, "payload": payload})
+            if operation != "models":
+                return {"ok": True, "text": "an answer", "costAtomic": 3_000,
+                        "outstandingAtomic": 4_900_000}
+            if payload.get("model"):
+                return {"ok": True, "chosen": payload["model"]}
+            if not payload.get("category"):
+                return {"ok": True, "categories": self.CATEGORIES}
+            page = int(payload.get("page") or 0)
+            return {
+                "ok": True,
+                "category": payload["category"],
+                "page": page,
+                "total": 3,
+                "hasMore": page == 0,
+                "models": self.PAGE_0 if page == 0 else self.PAGE_1,
+            }
 
         client.execute_chat = execute_chat
         plugin._client_factory = lambda: client
@@ -5225,49 +5248,79 @@ class ChatModelPickerTests(unittest.TestCase):
             )
         return gateway.adapters["telegram"].sent[-1][1]
 
-    def test_the_model_button_lists_the_choices_with_prices(self):
+    def test_the_model_button_offers_categories_with_counts(self):
         plugin, context, client, gateway = self.make()
 
         text = self.press(plugin, context, gateway, "Model")
 
-        self.assertIn("Fast", text)
-        self.assertIn("Smartest", text)
-        self.assertIn("6.8", text)
+        self.assertIn("All by price", text)
+        self.assertIn("113", text)
+        self.assertIn("Reads images", text)
+
+    def test_a_category_lists_models_with_prices(self):
+        plugin, context, client, gateway = self.make()
+        self.press(plugin, context, gateway, "Model")
+
+        text = self.press(plugin, context, gateway, "All by price")
+
+        self.assertIn("Qwen 2.5 7B", text)
+        self.assertIn("0.13", text)
+        self.assertIn("cheapest first", text)
 
     def test_the_current_model_is_marked(self):
         plugin, context, client, gateway = self.make()
-        text = self.press(plugin, context, gateway, "Model")
+        self.press(plugin, context, gateway, "Model")
+
+        text = self.press(plugin, context, gateway, "All by price")
+
         self.assertIn("← now", text)
+
+    def test_more_pages_through_the_rest(self):
+        plugin, context, client, gateway = self.make()
+        self.press(plugin, context, gateway, "Model")
+        self.press(plugin, context, gateway, "All by price")
+
+        text = self.press(plugin, context, gateway, "More")
+
+        self.assertIn("Kimi K3", text)
+        pages = [c["payload"].get("page") for c in client.chat_calls
+                 if c["op"] == "models" and c["payload"].get("category")]
+        self.assertEqual(pages, [0, 1])
 
     def test_choosing_switches_and_returns_to_chat(self):
         plugin, context, client, gateway = self.make()
         self.press(plugin, context, gateway, "Model")
+        self.press(plugin, context, gateway, "All by price")
 
-        text = self.press(plugin, context, gateway, "Smartest")
+        text = self.press(plugin, context, gateway, "GLM 5.2")
 
-        switch = [c for c in client.chat_calls if c["op"] == "models" and c["payload"]]
-        self.assertEqual(switch[-1]["payload"]["model"], "grok-4-6")
-        self.assertIn("Smartest", text)
+        switch = [c for c in client.chat_calls if c["payload"].get("model")]
+        self.assertEqual(switch[-1]["payload"]["model"], "mid")
+        self.assertIn("GLM 5.2", text)
         self.assertTrue(plugin._in_chat_mode("1045618308"))
 
     def test_a_model_name_typed_outside_the_picker_is_just_a_message(self):
         plugin, context, client, gateway = self.make()
 
-        self.press(plugin, context, gateway, "Smartest")
+        self.press(plugin, context, gateway, "GLM 5.2")
 
-        self.assertEqual(
-            [c["op"] for c in client.chat_calls], ["message"]
-        )
+        self.assertEqual([c["op"] for c in client.chat_calls], ["message"])
+
+    def test_text_that_is_not_a_button_falls_through_to_the_model(self):
+        plugin, context, client, gateway = self.make()
+        self.press(plugin, context, gateway, "Model")
+
+        self.press(plugin, context, gateway, "actually, what is 2+2?")
+
+        self.assertIn("message", [c["op"] for c in client.chat_calls])
 
     def test_the_picker_state_is_bounded(self):
         plugin, _c, _cl, _g = self.make()
         for i in range(plugin._TELEGRAM_OPERATION_MAX_USERS + 20):
-            plugin._CHAT_MODEL_PENDING[str(i)] = self.MODELS
+            plugin._remember_chat_model_pending(str(i), {"models": []})
         self.assertLessEqual(
-            len(plugin._CHAT_MODEL_PENDING),
-            plugin._TELEGRAM_OPERATION_MAX_USERS + 21,
+            len(plugin._CHAT_MODEL_PENDING), plugin._TELEGRAM_OPERATION_MAX_USERS
         )
-
 
 class ChatNamesTheModelTests(unittest.TestCase):
     def test_entering_chat_says_which_model_answers(self):

@@ -1331,6 +1331,150 @@ def _handle_telegram_chat_budget_choice(*, event, source, gateway):
     )
 
 
+
+_CHAT_MODEL_MORE = "More"
+
+
+def _chat_models_request(client, identity, **payload):
+    return client.execute_chat(
+        "models",
+        identity,
+        payload=payload or None,
+        user_access_token=_user_access_token(client, identity),
+    )
+
+
+def _show_chat_model_categories(*, identity, client, source, gateway):
+    """First screen: what you want the model to be good at."""
+    user_id = str(identity.user_id)
+    try:
+        result = _chat_models_request(client, identity)
+    except Exception:
+        _send_fixed_reply(
+            gateway, source, "Could not load the models. Try again.",
+            reply_markup=_telegram_chat_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+
+    categories = (result or {}).get("categories") or []
+    if not categories:
+        _send_fixed_reply(
+            gateway, source, "No models to choose from right now.",
+            reply_markup=_telegram_chat_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+
+    _remember_chat_model_pending(user_id, {"categories": categories})
+    lines = ["What should it be good at?", ""]
+    lines += [f"{c['label']} — {c['count']}" for c in categories]
+    _send_fixed_reply(
+        gateway, source, "\n".join(lines),
+        reply_markup=_reply_keyboard(
+            tuple((c["label"],) for c in categories) + (("Back",),),
+            placeholder="Pick a category",
+        ),
+    )
+    return dict(_SKIP_RESULT)
+
+
+def _show_chat_models(*, identity, client, source, gateway, category, label, page):
+    """Second screen: one page of models, cheapest first."""
+    user_id = str(identity.user_id)
+    try:
+        result = _chat_models_request(client, identity, category=category, page=page)
+    except Exception:
+        _send_fixed_reply(
+            gateway, source, "Could not load the models. Try again.",
+            reply_markup=_telegram_chat_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+
+    models = (result or {}).get("models") or []
+    if not models:
+        _send_fixed_reply(
+            gateway, source, "Nothing here.",
+            reply_markup=_telegram_chat_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+
+    has_more = bool((result or {}).get("hasMore"))
+    _remember_chat_model_pending(user_id, {
+        "models": models, "category": category, "label": label,
+        "page": page, "hasMore": has_more,
+    })
+    total = (result or {}).get("total") or len(models)
+    shown = page * 6 + len(models)
+    header = f"{label} — {shown} of {total}, cheapest first."
+    rows = tuple((m["label"],) for m in models)
+    if has_more:
+        rows += ((_CHAT_MODEL_MORE,),)
+    _send_fixed_reply(
+        gateway, source, header + "\n\n" + _chat_model_text(models),
+        reply_markup=_reply_keyboard(rows + (("Back",),), placeholder="Pick a model"),
+    )
+    return dict(_SKIP_RESULT)
+
+
+def _handle_chat_model_choice(
+    *, identity, client, source, gateway, pending, normalized
+):
+    """Read a tap on either picker screen. None means 'not for me'."""
+    user_id = str(identity.user_id)
+
+    for category in pending.get("categories") or []:
+        if _normalize_button_text(category["label"]) == normalized:
+            return _show_chat_models(
+                identity=identity, client=client, source=source, gateway=gateway,
+                category=category["key"], label=category["label"], page=0,
+            )
+
+    if pending.get("models") and normalized == _normalize_button_text(
+        _CHAT_MODEL_MORE
+    ):
+        return _show_chat_models(
+            identity=identity, client=client, source=source, gateway=gateway,
+            category=pending["category"], label=pending["label"],
+            page=int(pending.get("page") or 0) + 1,
+        )
+
+    chosen = next(
+        (
+            m
+            for m in pending.get("models") or []
+            if _normalize_button_text(m["label"]) == normalized
+        ),
+        None,
+    )
+    if chosen is None:
+        # Not a picker button: fall through and treat it as a message.
+        _CHAT_MODEL_PENDING.pop(user_id, None)
+        return None
+
+    _CHAT_MODEL_PENDING.pop(user_id, None)
+    try:
+        _chat_models_request(client, identity, model=chosen["id"])
+    except Exception:
+        _send_fixed_reply(
+            gateway, source, "Could not switch the model. Nothing changed.",
+            reply_markup=_telegram_chat_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+    _send_fixed_reply(
+        gateway, source, f"Switched to {chosen['label']}. Ask away.",
+        reply_markup=_telegram_chat_reply_markup(),
+    )
+    return dict(_SKIP_RESULT)
+
+
+def _remember_chat_model_pending(user_id: str, state: dict) -> None:
+    if (
+        user_id not in _CHAT_MODEL_PENDING
+        and len(_CHAT_MODEL_PENDING) >= _TELEGRAM_OPERATION_MAX_USERS
+    ):
+        _CHAT_MODEL_PENDING.pop(next(iter(_CHAT_MODEL_PENDING)), None)
+    _CHAT_MODEL_PENDING[user_id] = state
+
+
 def _chat_model_text(models: list) -> str:
     """The model list, with the number that actually differs: output price.
 
@@ -1375,67 +1519,17 @@ def _handle_telegram_chat_message(*, event, source, gateway):
 
     pending = _CHAT_MODEL_PENDING.get(user_id)
     if pending is not None:
-        chosen = next(
-            (m for m in pending if _normalize_button_text(m["label"]) == normalized),
-            None,
+        handled = _handle_chat_model_choice(
+            identity=identity, client=client, source=source, gateway=gateway,
+            pending=pending, normalized=normalized,
         )
-        if chosen is not None:
-            _CHAT_MODEL_PENDING.pop(user_id, None)
-            try:
-                client.execute_chat(
-                    "models",
-                    identity,
-                    payload={"model": chosen["id"]},
-                    user_access_token=_user_access_token(client, identity),
-                )
-            except Exception:
-                _send_fixed_reply(
-                    gateway, source, "Could not switch the model. Nothing changed.",
-                    reply_markup=_telegram_chat_reply_markup(),
-                )
-                return dict(_SKIP_RESULT)
-            _send_fixed_reply(
-                gateway, source,
-                f"Switched to {chosen['label']}. Ask away.",
-                reply_markup=_telegram_chat_reply_markup(),
-            )
-            return dict(_SKIP_RESULT)
-        _CHAT_MODEL_PENDING.pop(user_id, None)
+        if handled is not None:
+            return handled
 
     if normalized == _normalize_button_text(_TELEGRAM_CHAT_MODEL_BUTTON):
-        try:
-            result = client.execute_chat(
-                "models",
-                identity,
-                user_access_token=_user_access_token(client, identity),
-            )
-        except Exception:
-            _send_fixed_reply(
-                gateway, source, "Could not load the models. Try again.",
-                reply_markup=_telegram_chat_reply_markup(),
-            )
-            return dict(_SKIP_RESULT)
-        models = (result or {}).get("models") or []
-        if not models:
-            _send_fixed_reply(
-                gateway, source, "No models to choose from right now.",
-                reply_markup=_telegram_chat_reply_markup(),
-            )
-            return dict(_SKIP_RESULT)
-        if (
-            user_id not in _CHAT_MODEL_PENDING
-            and len(_CHAT_MODEL_PENDING) >= _TELEGRAM_OPERATION_MAX_USERS
-        ):
-            _CHAT_MODEL_PENDING.pop(next(iter(_CHAT_MODEL_PENDING)), None)
-        _CHAT_MODEL_PENDING[user_id] = models
-        _send_fixed_reply(
-            gateway, source, _chat_model_text(models),
-            reply_markup=_reply_keyboard(
-                tuple((m["label"],) for m in models) + (("Back",),),
-                placeholder="Pick a model",
-            ),
+        return _show_chat_model_categories(
+            identity=identity, client=client, source=source, gateway=gateway
         )
-        return dict(_SKIP_RESULT)
 
     if normalized in {
         _normalize_button_text(_TELEGRAM_CHAT_EXIT_BUTTON),

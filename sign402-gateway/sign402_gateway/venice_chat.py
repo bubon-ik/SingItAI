@@ -136,6 +136,145 @@ CHAT_MODELS: tuple[ChatModel, ...] = (
 )
 
 
+MODEL_CACHE_TTL_SECONDS = 6 * 60 * 60
+_MAX_BLURB = 160
+
+
+@dataclass(frozen=True)
+class ModelCategory:
+    key: str
+    label: str
+
+
+# Ordered as they are offered. `all` is always present; the rest appear only
+# when the live list actually contains something for them.
+_CATEGORY_RULES: tuple[tuple[str, str, Callable[[dict], bool]], ...] = (
+    ("all", "All by price", lambda caps: True),
+    ("vision", "Reads images", lambda caps: bool(caps.get("supportsVision"))),
+    ("code", "Writes code", lambda caps: bool(caps.get("optimizedForCode"))),
+    ("reasoning", "Thinks step by step", lambda caps: bool(caps.get("supportsReasoning"))),
+    ("video", "Watches video", lambda caps: bool(caps.get("supportsVideoInput"))),
+    ("audio", "Hears audio", lambda caps: bool(caps.get("supportsAudioInput"))),
+    ("private", "Extra privacy", lambda caps: bool(
+        caps.get("supportsE2EE") or caps.get("supportsTeeAttestation")
+    )),
+)
+
+
+class VeniceModelCatalogue:
+    """Every model Venice sells, described in Venice's own words.
+
+    Maintaining a list of a hundred models by hand goes stale the day the
+    provider adds one, so this reads theirs. A model with no published price
+    is dropped: the daily cap is enforced in money, and a cost we cannot show
+    is a cost the user cannot consent to.
+    """
+
+    def __init__(
+        self,
+        *,
+        fetch: Callable[[], dict[str, Any]],
+        now: Callable[[], int] | None = None,
+    ):
+        self.fetch = fetch
+        self.now = now or (lambda: int(time.time()))
+        self._cached: tuple[ChatModel, ...] | None = None
+        self._cached_at = 0
+        self._caps: dict[str, dict] = {}
+
+    def models(
+        self, *, category: str = "all", page: int = 0, per_page: int = 0
+    ) -> list[ChatModel]:
+        models = [
+            m
+            for m in self._all()
+            if category == "all" or self._matches(m.model_id, category)
+        ]
+        if per_page <= 0:
+            return models
+        start = max(0, page) * per_page
+        return models[start : start + per_page]
+
+    def categories(self) -> list[ModelCategory]:
+        self._all()
+        offered = []
+        for key, label, rule in _CATEGORY_RULES:
+            if key == "all" or any(rule(caps) for caps in self._caps.values()):
+                offered.append(ModelCategory(key, label))
+        return offered
+
+    def resolve(self, model_id: str) -> ChatModel:
+        wanted = str(model_id or "").strip()
+        for model in self._all():
+            if model.model_id == wanted:
+                return model
+        raise UnknownModel("that model is not available")
+
+    # -- internals -------------------------------------------------------
+
+    def _matches(self, model_id: str, category: str) -> bool:
+        rule = next((r for k, _l, r in _CATEGORY_RULES if k == category), None)
+        return bool(rule) and rule(self._caps.get(model_id, {}))
+
+    def _all(self) -> tuple[ChatModel, ...]:
+        fresh = self.now() - self._cached_at < MODEL_CACHE_TTL_SECONDS
+        if self._cached is not None and fresh:
+            return self._cached
+        try:
+            models, caps = _parse_model_list(self.fetch())
+        except Exception:
+            # A stale list beats no list, and the built-in seven beat nothing.
+            if self._cached is not None:
+                return self._cached
+            logger.warning("Venice model list unavailable; using the built-in set")
+            self._caps = {}
+            return CHAT_MODELS
+        if not models:
+            return self._cached or CHAT_MODELS
+        self._cached, self._caps, self._cached_at = models, caps, self.now()
+        return models
+
+
+def _parse_model_list(
+    payload: dict[str, Any],
+) -> tuple[tuple[ChatModel, ...], dict[str, dict]]:
+    entries = (payload or {}).get("data") or []
+    models: list[ChatModel] = []
+    caps: dict[str, dict] = {}
+    for entry in entries:
+        spec = (entry or {}).get("model_spec") or {}
+        pricing = spec.get("pricing") or {}
+        out = (pricing.get("output") or {}).get("usd")
+        inp = (pricing.get("input") or {}).get("usd")
+        if out is None or inp is None:
+            continue
+        model_id = str(entry.get("id") or "").strip()
+        if not model_id:
+            continue
+        models.append(
+            ChatModel(
+                model_id=model_id,
+                label=str(spec.get("name") or model_id),
+                blurb=_trim_blurb(spec.get("description")),
+                input_usd_per_mtok=float(inp),
+                output_usd_per_mtok=float(out),
+            )
+        )
+        caps[model_id] = spec.get("capabilities") or {}
+    models.sort(key=lambda m: m.output_usd_per_mtok)
+    return tuple(models), caps
+
+
+def _trim_blurb(description: Any) -> str:
+    """One sentence, short enough for a phone."""
+    text = " ".join(str(description or "").split())
+    if len(text) <= _MAX_BLURB:
+        return text
+    cut = text[:_MAX_BLURB]
+    stop = max(cut.rfind(". "), cut.rfind("; "))
+    return (cut[: stop + 1] if stop > 60 else cut.rstrip() + "…").strip()
+
+
 def resolve_model(model_id: str) -> ChatModel:
     for model in CHAT_MODELS:
         if model.model_id == str(model_id or "").strip():
@@ -420,6 +559,7 @@ class ChatService:
         wallet_service: Any,
         daily_cap_atomic: int,
         default_model: str = DEFAULT_MODEL,
+        catalogue: Any = None,
     ):
         self.store = store
         self.client = client
@@ -428,6 +568,7 @@ class ChatService:
         # Held here rather than read off the client: reaching through one
         # object for another's field is how the settle path broke.
         self.default_model = default_model
+        self.catalogue = catalogue
         # Address -> owning user. One address belongs to exactly one user, so
         # caching this is safe; the signer needs it to find the right key.
         # Bounded like every other per-user map here: a public bot must not
@@ -445,8 +586,8 @@ class ChatService:
         remaining = max(0, cap - session.spent_atomic_this_window)
         chosen_id = session.model or self.default_model
         try:
-            chosen_label = resolve_model(chosen_id).label
-        except UnknownModel:
+            chosen_label = self._catalogue().resolve(chosen_id).label
+        except (UnknownModel, Exception):
             chosen_label = chosen_id
         return {
             "ok": True,
@@ -472,11 +613,39 @@ class ChatService:
         return self.client.send(user_id, text, wallet_address=address)
 
 
-    def models(self, user_id: str) -> dict[str, Any]:
+    MODELS_PER_PAGE = 6
+
+    def models(
+        self, user_id: str, *, category: str = "", page: int = 0
+    ) -> dict[str, Any]:
+        """The categories, or one page of models inside one of them."""
         chosen = self.store.get_session(user_id).model or self.default_model
+        if not category:
+            return {
+                "ok": True,
+                "chosen": chosen,
+                "categories": [
+                    {
+                        "key": c.key,
+                        "label": c.label,
+                        "count": len(self._catalogue().models(category=c.key)),
+                    }
+                    for c in self._catalogue().categories()
+                ],
+            }
+
+        total = len(self._catalogue().models(category=category))
+        page = max(0, int(page))
+        entries = self._catalogue().models(
+            category=category, page=page, per_page=self.MODELS_PER_PAGE
+        )
         return {
             "ok": True,
             "chosen": chosen,
+            "category": category,
+            "page": page,
+            "total": total,
+            "hasMore": (page + 1) * self.MODELS_PER_PAGE < total,
             "models": [
                 {
                     "id": m.model_id,
@@ -486,15 +655,28 @@ class ChatService:
                     "outputUsdPerMTok": m.output_usd_per_mtok,
                     "chosen": m.model_id == chosen,
                 }
-                for m in CHAT_MODELS
+                for m in entries
             ],
         }
 
     def set_model(self, user_id: str, model_id: str) -> dict[str, Any]:
         """Switch models. Costs nothing and never touches the budget."""
-        model = resolve_model(model_id)
+        model = self._catalogue().resolve(model_id)
         self.store.set_model(user_id, model.model_id)
         return {"ok": True, "chosen": model.model_id, "label": model.label}
+
+    def _catalogue(self):
+        if self.catalogue is None:
+            # No catalogue supplied: serve the built-in set. Reaching for the
+            # network here would give every caller — tests included — a hidden
+            # HTTP dependency it never asked for. build_chat_service_from_env
+            # passes the live one explicitly.
+            self.catalogue = VeniceModelCatalogue(
+                fetch=lambda: (_ for _ in ()).throw(
+                    RuntimeError("no model list configured")
+                )
+            )
+        return self.catalogue
 
     def end(self, user_id: str) -> dict[str, Any]:
         # Leaving chat mode is a UI action. It refunds nothing and cancels
@@ -584,6 +766,7 @@ def build_chat_service_from_env(
         wallet_service=wallet_service,
         daily_cap_atomic=config.daily_cap_atomic,
         default_model=config.model,
+        catalogue=VeniceModelCatalogue(fetch=_fetch_venice_models),
     )
     service.client = VeniceChatClient(
         store=store,
@@ -594,6 +777,16 @@ def build_chat_service_from_env(
         purchases_paused=purchases_paused,
     )
     return service
+
+
+def _fetch_venice_models() -> dict[str, Any]:
+    import urllib.request
+
+    request = urllib.request.Request(
+        f"{VENICE_BASE_URL}/models", headers={"Accept": "application/json"}
+    )
+    with urllib.request.urlopen(request, timeout=25) as response:
+        return json.loads(response.read().decode("utf-8"))
 
 
 def _int_env(values: Mapping[str, str], name: str, default: int) -> int:
