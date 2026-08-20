@@ -495,3 +495,67 @@ class ChatModelChoiceTests(ChatStoreTestCase):
         session = store.get_session("u1")
         self.assertEqual(session.outstanding_atomic, 5_000_000)
         self.assertEqual(session.spent_atomic_this_window, 5_000_000)
+
+
+class SchemaMigrationTests(ChatStoreTestCase):
+    """A database created by an older build must keep working.
+
+    CREATE TABLE IF NOT EXISTS silently does nothing when the table already
+    exists, so every column added after the first deployment is missing on the
+    live database until something adds it. Reading one then raises and the
+    whole chat goes down.
+    """
+
+    OLD_SCHEMA = """
+        CREATE TABLE chat_sessions (
+            user_id TEXT PRIMARY KEY,
+            window_start INTEGER NOT NULL,
+            spent_atomic INTEGER NOT NULL DEFAULT 0,
+            outstanding_atomic INTEGER NOT NULL DEFAULT 0,
+            free_used INTEGER NOT NULL DEFAULT 0,
+            paused INTEGER NOT NULL DEFAULT 0,
+            pause_reason TEXT NOT NULL DEFAULT '',
+            policy_hash TEXT NOT NULL DEFAULT '',
+            bound_pay_to TEXT NOT NULL DEFAULT '',
+            prefund_claimed_at INTEGER,
+            updated_at INTEGER NOT NULL
+        )
+    """
+
+    def old_database(self, tmp):
+        import sqlite3
+
+        path = Path(tmp) / "chat.db"
+        db = sqlite3.connect(path)
+        db.execute(self.OLD_SCHEMA)
+        db.execute(
+            "INSERT INTO chat_sessions (user_id, window_start, outstanding_atomic,"
+            " policy_hash, bound_pay_to, updated_at) VALUES (?,?,?,?,?,?)",
+            ("u1", DAY_ONE_NOON, 4_902_000, "a" * 64, "0xbeef", DAY_ONE_NOON),
+        )
+        db.commit()
+        db.close()
+        return path
+
+    def test_an_older_database_opens_and_reads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(self.old_database(tmp), now=lambda: DAY_ONE_NOON)
+
+            session = store.get_session("u1")
+
+            self.assertEqual(session.outstanding_atomic, 4_902_000)
+            self.assertEqual(session.model, "")
+            self.assertEqual(session.daily_cap_atomic, 0)
+
+    def test_the_new_columns_become_usable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(self.old_database(tmp), now=lambda: DAY_ONE_NOON)
+
+            store.set_model("u1", "grok-4-6")
+
+            self.assertEqual(store.get_session("u1").model, "grok-4-6")
+
+    def test_existing_credit_is_not_disturbed_by_the_migration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(self.old_database(tmp), now=lambda: DAY_ONE_NOON)
+            self.assertEqual(store.claimable_credit_atomic("u1"), 4_902_000)

@@ -448,6 +448,7 @@ class ChatStore:
                 )
                 """
             )
+            self._migrate(db)
 
     def close(self) -> None:
         """Release the in-memory connection. File-backed stores close per call."""
@@ -455,6 +456,27 @@ class ChatStore:
             if self._memory_db is not None:
                 self._memory_db.close()
                 self._memory_db = None
+
+    # Columns added after the first release. CREATE TABLE IF NOT EXISTS does
+    # nothing to a table that already exists, so a live database keeps the
+    # shape it was created with and reading a newer column raises.
+    _ADDED_COLUMNS = (
+        ("daily_cap_atomic", "INTEGER NOT NULL DEFAULT 0"),
+        ("policy_expires_at", "INTEGER NOT NULL DEFAULT 0"),
+        ("model", "TEXT NOT NULL DEFAULT ''"),
+        ("prefund_claimed_at", "INTEGER"),
+    )
+
+    def _migrate(self, db: sqlite3.Connection) -> None:
+        present = {
+            row["name"]
+            for row in db.execute("PRAGMA table_info(chat_sessions)").fetchall()
+        }
+        for name, definition in self._ADDED_COLUMNS:
+            if name not in present:
+                db.execute(
+                    f"ALTER TABLE chat_sessions ADD COLUMN {name} {definition}"
+                )
 
     def _connect(self) -> sqlite3.Connection:
         # The gateway serves requests on threads. File-backed stores get a
