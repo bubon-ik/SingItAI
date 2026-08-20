@@ -20,7 +20,9 @@ TELEGRAM_ALLOWED_USERS=<operator Telegram ID>
 In this mode, unknown Telegram text is handled by the Sign402 plugin and receives
 the wallet menu instead of falling through to the general Hermes LLM chat. This
 prevents public users from spending the operator's LLM credits through ordinary
-chat messages. Do not set `TELEGRAM_ALLOW_ALL_USERS=true` or
+chat messages. The AI Chat feature below is a different thing and does not
+change this: while a user is in chat mode their text reaches a model they pay
+for from their own wallet, and the operator's LLM credits are never touched. Do not set `TELEGRAM_ALLOW_ALL_USERS=true` or
 `GATEWAY_ALLOW_ALL_USERS=true` for public beta.
 
 The Sign402 Telegram policy is deny-by-default: set
@@ -142,15 +144,98 @@ SIGN402_USER_WALLET_CEILING_DAILY_ATOMIC=5000000000
 ```
 
 `/limits 50 1000` means 50 USDC total per transaction and 1,000 USDC total
-per UTC day. Wallet limits include the 2% fee, so a $1,000 product needs a
-1,020 USDC personal transaction limit. The Bitrefill cap is checked before the
-fee, and the lowest applicable limit wins.
+per UTC day. Wallet limits include the 1% service fee (`SERVICE_FEE_BPS = 100`),
+so a $1,000 product needs a 1,010 USDC personal transaction limit; the ceiling
+configured above is 1,020, which leaves headroom. The Bitrefill cap is checked
+before the fee, and the lowest applicable limit wins.
 
 For production configuration verification only, keep
 `SIGN402_PURCHASES_PAUSED=1`; never call a buy or fulfillment endpoint. Do not
 proceed to the separate manual live-purchase smoke flow while purchases are
 paused. To roll back, restore the pre-change environment backup and restart the
 service.
+
+## AI Chat
+
+Ships disabled. With `SIGN402_AI_CHAT_ENABLED` unset the gateway serves no
+`/agent/chat/*` routes, the plugin never intercepts text, and the menu has no
+chat button. Enabling it needs the flag in **two** places — the gateway and the
+bot read different environments, and setting only one leaves either a button
+with no routes or routes with no button.
+
+`/etc/sign402-gateway.env`:
+
+```env
+SIGN402_AI_CHAT_ENABLED=1
+SIGN402_AI_CHAT_MERCHANT_PAYTO=0x2670b922ef37c7df47158725c0cc407b5382293f
+SIGN402_CHAT_STORE_PATH=/home/hermes/.sign402/chat-sessions.db
+```
+
+`~/.hermes/.env`:
+
+```env
+SIGN402_AI_CHAT_ENABLED=1
+```
+
+Set `SIGN402_AI_CHAT_MERCHANT_PAYTO` in the same edit as the flag. The chat
+service refuses to build without it and the gateway then fails to start,
+taking Bitrefill purchases down with it. Verify before restarting:
+
+```bash
+sudo grep AI_CHAT /etc/sign402-gateway.env
+```
+
+### How a user reaches a paid message
+
+1. **Talk to AI** — with no approved budget the bot offers `$5 / $10 / $20` a
+   day and asks for one approval on the linked phone channel. Nothing is
+   charged at this point; the approval only authorises future spending.
+2. **The first paid message** pays a **$5** top-up over x402 on Base, from the
+   user's own wallet, to the address bound at approval time. This is the only
+   payment in the flow.
+3. **Everything after it** draws on that credit at the provider. One top-up is
+   on the order of a thousand messages, and no further transaction is signed
+   until the credit runs out.
+
+### What a user needs before the first paid message
+
+- a linked approval channel (iMessage or WhatsApp) — without it the approval
+  cannot be delivered;
+- **$5 or more in USDC** on their managed wallet. $5 is the provider's floor,
+  not a value we chose, so a smaller daily cap is refused at approval time;
+- **no ETH.** The facilitator submits the transaction and pays the gas. The
+  user signs an EIP-3009 authorisation off-chain and spends nothing on fees.
+
+### Limits and safety
+
+- The daily cap is per user, approved once, and enforced in money. A top-up
+  counts against the window when it is **paid**, not as it is consumed, so a
+  user can never spend more in a day than they approved.
+- A policy has a mandatory expiry; one without it is rejected before it is
+  ever shown.
+- Payment is bound to the merchant's `payTo`, never to a domain. A challenge
+  offering a different address pauses that user's chat and moves no funds.
+- `SIGN402_PURCHASES_PAUSED=1` stops chat settlement along with everything
+  else.
+- Prompts and answers are never logged or stored. The session table has no
+  column that could hold them.
+
+### Known gaps before opening the beta
+
+- A `payTo` change pauses the affected users and records a notice, but sends
+  no Telegram message; they find out when they next write.
+- `RECONCILIATION_REQUIRED` pauses a user and preserves their credit, but
+  there is no operator tool to resolve it.
+- Unspent credit cannot be withdrawn: the provider publishes no such API. It
+  stays spendable with the same merchant. Do not promise refunds.
+
+### Health check with chat enabled
+
+```bash
+curl -sS http://127.0.0.1:8099/health | python3 -c "import json,sys; print([e for e in json.load(sys.stdin)['endpoints'] if 'chat' in e])"
+```
+
+Expected: `start`, `message`, `end`, `approve-policy`, `models`.
 
 ## Authorized Manual Live-Purchase Smoke Flow (Pre-rollout Only)
 
@@ -236,3 +321,18 @@ Then restart:
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 systemctl --user restart hermes-gateway
 ```
+
+To turn AI Chat off without touching anything else, remove its variables from
+both environments and restart both services:
+
+```bash
+sudo sed -i '/AI_CHAT/d' /etc/sign402-gateway.env
+sed -i '/AI_CHAT/d' ~/.hermes/.env
+sudo systemctl restart sign402-gateway
+systemctl --user restart hermes-gateway
+```
+
+The routes disappear, the chat button disappears, and every other command
+behaves as it did before the feature existed. Approved policies and unspent
+credit stay in `chat-sessions.db` and come back if it is re-enabled: disabling
+the feature is not a refund and does not cancel anything the user approved.
