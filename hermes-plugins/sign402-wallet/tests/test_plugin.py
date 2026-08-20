@@ -5221,13 +5221,23 @@ class ChatModelPickerTests(unittest.TestCase):
             if not payload.get("category"):
                 return {"ok": True, "categories": self.CATEGORIES}
             page = int(payload.get("page") or 0)
+            models = self.PAGE_0 if page == 0 else self.PAGE_1
+            # The real backend filters by query; a fake that ignores it would
+            # claim every stray sentence matches a model.
+            query = str(payload.get("query") or "").strip().lower()
+            if query:
+                models = [
+                    m for m in self.PAGE_0 + self.PAGE_1
+                    if query in m["label"].lower() or query in m["id"].lower()
+                ]
             return {
                 "ok": True,
                 "category": payload["category"],
+                "query": query,
                 "page": page,
-                "total": 3,
-                "hasMore": page == 0,
-                "models": self.PAGE_0 if page == 0 else self.PAGE_1,
+                "total": 3 if not query else len(models),
+                "hasMore": page == 0 and not query,
+                "models": models,
             }
 
         client.execute_chat = execute_chat
@@ -5346,3 +5356,124 @@ class ChatNamesTheModelTests(unittest.TestCase):
         self.assertIn("GLM 5.2", labels)
         for adjective in ("Fast", "Smartest", "Balanced"):
             self.assertNotIn(adjective, labels)
+
+
+class ChatModelSearchTests(unittest.TestCase):
+    """Typing beats paging when you already know the name."""
+
+    MATCHES = {
+        "grok": [{"id": "grok-4-6", "label": "Grok 4.6", "blurb": "Reasoning.",
+                  "outputUsdPerMTok": 6.8, "chosen": False}],
+        "qwen": [
+            {"id": "qwen3-5-9b", "label": "Qwen 3.5 9B", "blurb": "Small.",
+             "outputUsdPerMTok": 0.15, "chosen": False},
+            {"id": "qwen-3-8-27b", "label": "Qwen 3.8 27B", "blurb": "Bigger.",
+             "outputUsdPerMTok": 3.2, "chosen": False},
+        ],
+        "llama": [],
+    }
+
+    def make(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        client = FakeClient()
+        client.chat_calls = []
+
+        def execute_chat(operation, identity, *, payload=None, user_access_token):
+            payload = dict(payload or {})
+            client.chat_calls.append({"op": operation, "payload": payload})
+            if operation != "models":
+                return {"ok": True, "text": "an answer", "costAtomic": 3_000,
+                        "outstandingAtomic": 4_900_000}
+            if payload.get("model"):
+                return {"ok": True, "chosen": payload["model"]}
+            query = payload.get("query")
+            if query is not None and query != "":
+                models = self.MATCHES.get(query.strip().lower(), [])
+                return {"ok": True, "query": query, "category": "all", "page": 0,
+                        "total": len(models), "hasMore": False, "models": models}
+            return {"ok": True, "categories": [
+                {"key": "all", "label": "All by price", "count": 113}]}
+
+        client.execute_chat = execute_chat
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        plugin._enter_chat_mode("1045618308")
+        return plugin, context, client, FakeGateway(adapter_key="telegram")
+
+    def press(self, plugin, context, gateway, text):
+        with patch.dict(plugin.os.environ, {
+            "SIGN402_TELEGRAM_ALLOWED_USERS": "*",
+            "SIGN402_TELEGRAM_SIGN402_ONLY": "1",
+            "SIGN402_AI_CHAT_ENABLED": "1",
+        }):
+            context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(text, "1045618308", platform="telegram"),
+                gateway=gateway,
+            )
+        return gateway.adapters["telegram"].sent[-1][1]
+
+    # -- /model from inside the chat --------------------------------------
+
+    def test_slash_model_with_one_match_switches_straight_away(self):
+        plugin, context, client, gateway = self.make()
+
+        text = self.press(plugin, context, gateway, "/model grok")
+
+        switch = [c for c in client.chat_calls if c["payload"].get("model")]
+        self.assertEqual(switch[-1]["payload"]["model"], "grok-4-6")
+        self.assertIn("Grok 4.6", text)
+
+    def test_slash_model_with_several_matches_offers_them(self):
+        plugin, context, client, gateway = self.make()
+
+        text = self.press(plugin, context, gateway, "/model qwen")
+
+        self.assertIn("Qwen 3.5 9B", text)
+        self.assertIn("Qwen 3.8 27B", text)
+        self.assertEqual([c for c in client.chat_calls if c["payload"].get("model")], [])
+
+    def test_slash_model_with_no_match_says_so_and_stays_in_chat(self):
+        plugin, context, client, gateway = self.make()
+
+        text = self.press(plugin, context, gateway, "/model llama")
+
+        self.assertIn("llama", text.lower())
+        self.assertTrue(plugin._in_chat_mode("1045618308"))
+
+    def test_slash_model_without_a_name_opens_the_picker(self):
+        plugin, context, client, gateway = self.make()
+
+        text = self.press(plugin, context, gateway, "/model")
+
+        self.assertIn("All by price", text)
+
+    def test_a_message_that_merely_mentions_model_is_not_a_command(self):
+        plugin, context, client, gateway = self.make()
+
+        self.press(plugin, context, gateway, "which model are you?")
+
+        self.assertEqual([c["op"] for c in client.chat_calls], ["message"])
+
+    # -- typing inside the picker ------------------------------------------
+
+    def test_typing_a_name_in_the_picker_searches(self):
+        plugin, context, client, gateway = self.make()
+        self.press(plugin, context, gateway, "Model")
+
+        text = self.press(plugin, context, gateway, "grok")
+
+        self.assertIn("Grok 4.6", text)
+        queries = [c["payload"].get("query") for c in client.chat_calls
+                   if c["op"] == "models" and c["payload"].get("query")]
+        self.assertEqual(queries, ["grok"])
+
+    def test_a_search_with_one_hit_can_then_be_tapped(self):
+        plugin, context, client, gateway = self.make()
+        self.press(plugin, context, gateway, "Model")
+        self.press(plugin, context, gateway, "grok")
+
+        self.press(plugin, context, gateway, "Grok 4.6")
+
+        switch = [c for c in client.chat_calls if c["payload"].get("model")]
+        self.assertEqual(switch[-1]["payload"]["model"], "grok-4-6")

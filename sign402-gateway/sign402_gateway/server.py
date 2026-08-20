@@ -877,6 +877,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                         chat_service.models(
                             telegram_user_id,
                             category=str(payload.get("category", "") or "").strip(),
+                            query=str(payload.get("query", "") or "").strip(),
                             page=int(payload.get("page") or 0),
                         ),
                         status=200,

@@ -1853,3 +1853,66 @@ class NoHiddenNetworkTests(unittest.TestCase):
                 socket.socket = real
 
         self.assertTrue(result["ok"])
+
+
+class ModelSearchTests(unittest.TestCase):
+    def catalogue(self):
+        from sign402_gateway.venice_chat import VeniceModelCatalogue
+
+        payload = {"data": [
+            {"id": "grok-4-6", "model_spec": {
+                "name": "Grok 4.6", "description": "Reasoning.",
+                "pricing": {"input": {"usd": 2.27}, "output": {"usd": 6.8}},
+                "capabilities": {"supportsReasoning": True}}},
+            {"id": "kimi-k3", "model_spec": {
+                "name": "Kimi K3", "description": "Deep thinking.",
+                "pricing": {"input": {"usd": 3.75}, "output": {"usd": 18.75}},
+                "capabilities": {}}},
+            {"id": "qwen3-5-9b", "model_spec": {
+                "name": "Qwen 3.5 9B", "description": "Small.",
+                "pricing": {"input": {"usd": 0.1}, "output": {"usd": 0.15}},
+                "capabilities": {"supportsVision": True}}},
+            {"id": "qwen-3-8-27b", "model_spec": {
+                "name": "Qwen 3.8 27B", "description": "Bigger.",
+                "pricing": {"input": {"usd": 0.45}, "output": {"usd": 3.2}},
+                "capabilities": {"supportsVision": True}}},
+        ]}
+        return VeniceModelCatalogue(fetch=lambda: payload, now=lambda: 1000)
+
+    def ids(self, **kwargs):
+        return [m.model_id for m in self.catalogue().models(**kwargs)]
+
+    def test_a_name_finds_its_model(self):
+        self.assertEqual(self.ids(query="grok"), ["grok-4-6"])
+
+    def test_search_ignores_case_and_spaces(self):
+        self.assertEqual(self.ids(query="  KIMI  "), ["kimi-k3"])
+
+    def test_a_partial_name_can_match_several(self):
+        self.assertEqual(
+            self.ids(query="qwen"), ["qwen3-5-9b", "qwen-3-8-27b"]
+        )
+
+    def test_matches_stay_cheapest_first(self):
+        prices = [
+            m.output_usd_per_mtok
+            for m in self.catalogue().models(query="qwen")
+        ]
+        self.assertEqual(prices, sorted(prices))
+
+    def test_the_id_is_searchable_too(self):
+        self.assertEqual(self.ids(query="k3"), ["kimi-k3"])
+
+    def test_a_hyphen_or_space_does_not_matter(self):
+        # "grok 4.6" and "grok-4-6" are the same request from a human.
+        self.assertEqual(self.ids(query="grok 4 6"), ["grok-4-6"])
+
+    def test_nothing_matches_returns_nothing(self):
+        self.assertEqual(self.ids(query="llama"), [])
+
+    def test_search_can_be_narrowed_by_category(self):
+        self.assertEqual(
+            self.ids(query="qwen", category="vision"),
+            ["qwen3-5-9b", "qwen-3-8-27b"],
+        )
+        self.assertEqual(self.ids(query="grok", category="vision"), [])

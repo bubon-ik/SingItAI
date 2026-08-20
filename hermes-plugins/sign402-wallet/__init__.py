@@ -1344,6 +1344,61 @@ def _chat_models_request(client, identity, **payload):
     )
 
 
+def _handle_chat_model_command(*, identity, client, source, gateway, query):
+    """`/model grok` — skip the menus when you already know the name."""
+    if not query:
+        return _show_chat_model_categories(
+            identity=identity, client=client, source=source, gateway=gateway
+        )
+    try:
+        result = _chat_models_request(client, identity, category="all", query=query)
+    except Exception:
+        _send_fixed_reply(
+            gateway, source, "Could not look that up. Try again.",
+            reply_markup=_telegram_chat_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+
+    models = (result or {}).get("models") or []
+    if not models:
+        _send_fixed_reply(
+            gateway, source, f"No model matches “{query}”.",
+            reply_markup=_telegram_chat_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+
+    if len(models) == 1:
+        # One hit is an answer, not a menu.
+        chosen = models[0]
+        try:
+            _chat_models_request(client, identity, model=chosen["id"])
+        except Exception:
+            _send_fixed_reply(
+                gateway, source, "Could not switch the model. Nothing changed.",
+                reply_markup=_telegram_chat_reply_markup(),
+            )
+            return dict(_SKIP_RESULT)
+        _send_fixed_reply(
+            gateway, source, f"Switched to {chosen['label']}. Ask away.",
+            reply_markup=_telegram_chat_reply_markup(),
+        )
+        return dict(_SKIP_RESULT)
+
+    _remember_chat_model_pending(str(identity.user_id), {
+        "models": models, "category": "all", "label": "Search",
+        "page": 0, "hasMore": False, "typed": query,
+    })
+    _send_fixed_reply(
+        gateway, source,
+        f"{len(models)} match “{query}”.\n\n" + _chat_model_text(models),
+        reply_markup=_reply_keyboard(
+            tuple((m["label"],) for m in models) + (("Back",),),
+            placeholder="Pick a model",
+        ),
+    )
+    return dict(_SKIP_RESULT)
+
+
 def _show_chat_model_categories(*, identity, client, source, gateway):
     """First screen: what you want the model to be good at."""
     user_id = str(identity.user_id)
@@ -1364,7 +1419,9 @@ def _show_chat_model_categories(*, identity, client, source, gateway):
         )
         return dict(_SKIP_RESULT)
 
-    _remember_chat_model_pending(user_id, {"categories": categories})
+    _remember_chat_model_pending(
+        user_id, {"categories": categories, "raw_text": ""}
+    )
     lines = ["What should it be good at?", ""]
     lines += [f"{c['label']} — {c['count']}" for c in categories]
     _send_fixed_reply(
@@ -1377,11 +1434,16 @@ def _show_chat_model_categories(*, identity, client, source, gateway):
     return dict(_SKIP_RESULT)
 
 
-def _show_chat_models(*, identity, client, source, gateway, category, label, page):
+def _show_chat_models(
+    *, identity, client, source, gateway, category, label, page, query="", result=None
+):
     """Second screen: one page of models, cheapest first."""
     user_id = str(identity.user_id)
     try:
-        result = _chat_models_request(client, identity, category=category, page=page)
+        if result is None:
+            result = _chat_models_request(
+                client, identity, category=category, query=query, page=page
+            )
     except Exception:
         _send_fixed_reply(
             gateway, source, "Could not load the models. Try again.",
@@ -1391,8 +1453,10 @@ def _show_chat_models(*, identity, client, source, gateway, category, label, pag
 
     models = (result or {}).get("models") or []
     if not models:
+        _CHAT_MODEL_PENDING.pop(str(identity.user_id), None)
         _send_fixed_reply(
-            gateway, source, "Nothing here.",
+            gateway, source,
+            f"No model matches “{query}”." if query else "Nothing here.",
             reply_markup=_telegram_chat_reply_markup(),
         )
         return dict(_SKIP_RESULT)
@@ -1400,7 +1464,7 @@ def _show_chat_models(*, identity, client, source, gateway, category, label, pag
     has_more = bool((result or {}).get("hasMore"))
     _remember_chat_model_pending(user_id, {
         "models": models, "category": category, "label": label,
-        "page": page, "hasMore": has_more,
+        "page": page, "hasMore": has_more, "typed": query,
     })
     total = (result or {}).get("total") or len(models)
     shown = page * 6 + len(models)
@@ -1416,7 +1480,7 @@ def _show_chat_models(*, identity, client, source, gateway, category, label, pag
 
 
 def _handle_chat_model_choice(
-    *, identity, client, source, gateway, pending, normalized
+    *, identity, client, source, gateway, pending, normalized, typed=""
 ):
     """Read a tap on either picker screen. None means 'not for me'."""
     user_id = str(identity.user_id)
@@ -1446,7 +1510,28 @@ def _handle_chat_model_choice(
         None,
     )
     if chosen is None:
-        # Not a picker button: fall through and treat it as a message.
+        already_searched = str(pending.get("typed") or "").strip()
+        wanted = str(typed or "").strip()
+        if already_searched or not wanted:
+            # A search already ran and this taps none of its results: stop
+            # guessing and let the words be a message to the model.
+            _CHAT_MODEL_PENDING.pop(user_id, None)
+            return None
+        # Someone typed instead of tapping. In a list of a hundred that is the
+        # faster move, so try it as a search first — but only report a match.
+        # Text that matches nothing was a question, not a mistyped model name,
+        # and answering "no model matches that" would swallow it.
+        try:
+            found = _chat_models_request(
+                client, identity, category="all", query=wanted
+            )
+        except Exception:
+            found = {}
+        if (found or {}).get("models"):
+            return _show_chat_models(
+                identity=identity, client=client, source=source, gateway=gateway,
+                category="all", label="Search", page=0, query=wanted, result=found,
+            )
         _CHAT_MODEL_PENDING.pop(user_id, None)
         return None
 
@@ -1517,11 +1602,21 @@ def _handle_telegram_chat_message(*, event, source, gateway):
 
     normalized = _normalize_button_text(text)
 
+    # `/model` and `/model <name>`: read from the raw text, because the button
+    # normaliser keeps the leading slash.
+    command = text.strip()
+    if command.lower() == "/model" or command.lower().startswith("/model "):
+        _, _, argument = command.partition(" ")
+        return _handle_chat_model_command(
+            identity=identity, client=client, source=source, gateway=gateway,
+            query=argument.strip(),
+        )
+
     pending = _CHAT_MODEL_PENDING.get(user_id)
     if pending is not None:
         handled = _handle_chat_model_choice(
             identity=identity, client=client, source=source, gateway=gateway,
-            pending=pending, normalized=normalized,
+            pending=pending, normalized=normalized, typed=text,
         )
         if handled is not None:
             return handled

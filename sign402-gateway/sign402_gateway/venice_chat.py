@@ -183,13 +183,25 @@ class VeniceModelCatalogue:
         self._caps: dict[str, dict] = {}
 
     def models(
-        self, *, category: str = "all", page: int = 0, per_page: int = 0
+        self,
+        *,
+        category: str = "all",
+        query: str = "",
+        page: int = 0,
+        per_page: int = 0,
     ) -> list[ChatModel]:
         models = [
             m
             for m in self._all()
             if category == "all" or self._matches(m.model_id, category)
         ]
+        needle = _search_key(query)
+        if needle:
+            models = [
+                m
+                for m in models
+                if needle in _search_key(m.label) or needle in _search_key(m.model_id)
+            ]
         if per_page <= 0:
             return models
         start = max(0, page) * per_page
@@ -263,6 +275,17 @@ def _parse_model_list(
         caps[model_id] = spec.get("capabilities") or {}
     models.sort(key=lambda m: m.output_usd_per_mtok)
     return tuple(models), caps
+
+
+def _search_key(text: Any) -> str:
+    """Fold a name for matching.
+
+    People type "grok 4.6" for `grok-4-6`; separators carry no meaning here,
+    so drop them and compare what is left.
+    """
+    return "".join(
+        ch for ch in str(text or "").lower() if ch.isalnum()
+    )
 
 
 def _trim_blurb(description: Any) -> str:
@@ -616,11 +639,11 @@ class ChatService:
     MODELS_PER_PAGE = 6
 
     def models(
-        self, user_id: str, *, category: str = "", page: int = 0
+        self, user_id: str, *, category: str = "", query: str = "", page: int = 0
     ) -> dict[str, Any]:
         """The categories, or one page of models inside one of them."""
         chosen = self.store.get_session(user_id).model or self.default_model
-        if not category:
+        if not category and not query:
             return {
                 "ok": True,
                 "chosen": chosen,
@@ -634,15 +657,20 @@ class ChatService:
                 ],
             }
 
-        total = len(self._catalogue().models(category=category))
+        category = category or "all"
+        total = len(self._catalogue().models(category=category, query=query))
         page = max(0, int(page))
         entries = self._catalogue().models(
-            category=category, page=page, per_page=self.MODELS_PER_PAGE
+            category=category,
+            query=query,
+            page=page,
+            per_page=self.MODELS_PER_PAGE,
         )
         return {
             "ok": True,
             "chosen": chosen,
             "category": category,
+            "query": query,
             "page": page,
             "total": total,
             "hasMore": (page + 1) * self.MODELS_PER_PAGE < total,
