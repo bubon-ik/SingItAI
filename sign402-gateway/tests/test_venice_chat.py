@@ -1649,3 +1649,35 @@ class ModelChoiceTests(VeniceChatTestCase):
 
         prices = [m.output_usd_per_mtok for m in CHAT_MODELS]
         self.assertEqual(prices, sorted(prices))
+
+
+class ModelListShapeTests(unittest.TestCase):
+    """The offered list is Venice's own designations, not our taste."""
+
+    def models(self):
+        from sign402_gateway.venice_chat import CHAT_MODELS
+
+        return CHAT_MODELS
+
+    def test_it_covers_the_jobs_venice_tags(self):
+        blurbs = " ".join(m.blurb.lower() for m in self.models())
+        for job in ("refusals", "images", "tool use", "code", "reasoning"):
+            self.assertIn(job, blurbs)
+
+    def test_the_dearest_is_flagged_as_expensive_in_its_own_blurb(self):
+        dearest = max(self.models(), key=lambda m: m.output_usd_per_mtok)
+        # A model that burns a daily budget 125x faster than the cheapest has
+        # to say so where the user is choosing.
+        self.assertIn("budget", dearest.blurb.lower())
+
+    def test_still_cheapest_first(self):
+        prices = [m.output_usd_per_mtok for m in self.models()]
+        self.assertEqual(prices, sorted(prices))
+
+    def test_the_ids_are_explicit_not_aliases(self):
+        from sign402_gateway.venice_chat import DEFAULT_MODEL, resolve_model
+
+        # An alias lets the provider move what we pay for without telling us.
+        resolve_model(DEFAULT_MODEL)
+        for model in self.models():
+            self.assertNotEqual(model.model_id, "venice-uncensored")

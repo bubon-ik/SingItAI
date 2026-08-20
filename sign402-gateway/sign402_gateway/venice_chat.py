@@ -89,9 +89,11 @@ class ChatModel:
     output_usd_per_mtok: float
 
 
-# A short, ordered list rather than Venice's 113: the price of the dearest is
-# forty-five times the cheapest, so this is a spending decision, not a taste
-# one. Prices are per million tokens, read from Venice's own model list.
+# Seven of Venice's 113, chosen by Venice rather than by us: every model it
+# tags as the default for a job — uncensored, vision, tools, code, reasoning,
+# most intelligent — plus the cheapest one it offers. A curated list is
+# unavoidable on a phone keyboard, so the selection criterion should at least
+# be the provider's own and not our taste. Prices are per million tokens.
 # Labels are the models' own names, as Venice reports them. Someone choosing
 # an LLM wants to know it is Grok or GLM; "Smartest" tells them nothing they
 # can look up or compare anywhere else.
@@ -107,13 +109,30 @@ CHAT_MODELS: tuple[ChatModel, ...] = (
         0.90,
     ),
     ChatModel(
+        "qwen-3-8-27b", "Qwen 3.8 27B", "Reads images.", 0.45, 3.20
+    ),
+    ChatModel(
         "zai-org-glm-5-2",
         "GLM 5.2",
-        "Long documents and tool use.",
+        "Venice's own default. Long documents, tool use.",
         1.40,
         4.40,
     ),
-    ChatModel("grok-4-6", "Grok 4.6", "Best reasoning. Spends fastest.", 2.27, 6.80),
+    ChatModel(
+        "deepseek-v4-pro-0813",
+        "DeepSeek V4 Pro",
+        "Best at code.",
+        1.65,
+        4.95,
+    ),
+    ChatModel("grok-4-6", "Grok 4.6", "Best reasoning.", 2.27, 6.80),
+    ChatModel(
+        "kimi-k3",
+        "Kimi K3",
+        "Deepest thinking. Spends a daily budget fastest.",
+        3.75,
+        18.75,
+    ),
 )
 
 
