@@ -11,6 +11,7 @@ from sign402_gateway.bankr_swap import (
     load_bankr_api_key,
     parse_bankr_swap_quote,
     parse_bankr_transaction_hash,
+    swap_idempotency_key,
 )
 
 
@@ -92,7 +93,8 @@ class BankrSwapTests(unittest.TestCase):
 
         request = urlopen.call_args.args[0]
         self.assertEqual(request.full_url, "https://api.bankr.bot/wallet/swap-quote")
-        self.assertEqual(request.headers["Authorization"], "Bearer secret")
+        self.assertEqual(request.headers["X-api-key"], "secret")
+        self.assertNotIn("Authorization", request.headers)
         body = json.loads(request.data.decode("utf-8"))
         self.assertEqual(body["toToken"], "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
         self.assertEqual(quote["fromAmount"], "100000")
@@ -137,11 +139,44 @@ class BankrSwapTests(unittest.TestCase):
         body = json.loads(swap_request.data.decode("utf-8"))
         self.assertEqual(swap_request.full_url, "https://api.bankr.bot/wallet/swap")
         self.assertEqual(body["minBuyAmount"], "0.084807")
+        self.assertNotIn("idempotencyKey", body)
         self.assertTrue(result["ok"])
         self.assertEqual(
             result["txId"],
             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
+
+    def test_wallet_api_swap_sends_idempotency_key(self):
+        quote_payload = {
+            "from": {"amount": "100000", "formattedAmount": "100000", "symbol": "SINGIT"},
+            "to": {"amount": "89892", "formattedAmount": "0.089892", "symbol": "USDC"},
+            "minBuyAmount": "0.084807",
+        }
+        swap_payload = {"success": True, "hash": "0x" + "a" * 64}
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=[FakeHttpResponse(quote_payload), FakeHttpResponse(swap_payload)],
+        ) as urlopen:
+            client = BankrWalletApiClient(api_key="secret")
+            client.swap(
+                from_token="0xc2c1e0b7C401e6217193732272444D928646eba3",
+                to_token="USDC",
+                amount="100000",
+                chain="base",
+                idempotency_key="9b2f0d4e-1c3a-5e6b-8d7f-0a1b2c3d4e5f",
+            )
+
+        body = json.loads(urlopen.call_args_list[1].args[0].data.decode("utf-8"))
+        self.assertEqual(body["idempotencyKey"], "9b2f0d4e-1c3a-5e6b-8d7f-0a1b2c3d4e5f")
+
+    def test_swap_idempotency_key_is_stable_per_quote(self):
+        first = swap_idempotency_key("quote_abc123")
+        second = swap_idempotency_key("  quote_abc123  ")
+
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, swap_idempotency_key("quote_def456"))
+        self.assertIsNone(swap_idempotency_key(""))
+        self.assertIsNone(swap_idempotency_key(None))
 
     def test_parse_quote_only_output(self):
         quote = parse_bankr_swap_quote(

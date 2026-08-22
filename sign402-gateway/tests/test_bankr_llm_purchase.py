@@ -17,12 +17,15 @@ from urllib.error import HTTPError, URLError
 
 from cryptography.fernet import Fernet
 
+from types import SimpleNamespace
+
 from sign402_gateway.bankr_llm_purchase import (
     BankrIdentityClient,
     BankrLlmError,
     BankrLlmPurchaseService,
     BankrLlmStore,
     build_bankr_llm_purchase_service_from_env,
+    start_bankr_llm_settlement_worker,
 )
 
 
@@ -2450,6 +2453,128 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
         self.assertEqual(reconciled["state"], "COMPLETE")
         self.assertEqual(len(self.bankr.topups), 2)
 
+    def test_background_sweep_settles_a_credited_purchase_without_topping_up(self):
+        result = self.complete_purchase(reconcile_required=True)
+        self.bankr.credits_result = {"credits": "20.00", "currency": "USD"}
+
+        summary = self.service.settle_pending()
+
+        self.assertEqual(summary, {"checked": 1, "settled": 1})
+        loaded = self.store.get_purchase(result["purchaseId"])
+        self.assertEqual(loaded["state"], "COMPLETE")
+        # The sweep must never spend again: the one top-up is the original.
+        self.assertEqual(len(self.bankr.topups), 1)
+
+    def test_background_sweep_leaves_an_uncredited_purchase_alone(self):
+        result = self.complete_purchase(reconcile_required=True)
+        # Balance never grew past the baseline, so the credit did not land.
+        self.bankr.credits_result = {"credits": "10.00", "currency": "USD"}
+
+        summary = self.service.settle_pending()
+
+        self.assertEqual(summary, {"checked": 1, "settled": 0})
+        loaded = self.store.get_purchase(result["purchaseId"])
+        self.assertEqual(loaded["state"], "RECONCILIATION_REQUIRED")
+        self.assertEqual(len(self.bankr.topups), 1)
+
+    def test_reconcile_hands_over_a_key_settled_in_the_background(self):
+        result = self.complete_purchase(reconcile_required=True)
+        self.bankr.credits_result = {"credits": "20.00", "currency": "USD"}
+        self.service.settle_pending()
+
+        delivered = self.service.reconcile(
+            result["purchaseId"],
+            telegram_user_id="123",
+        )
+
+        self.assertEqual(delivered["state"], "COMPLETE")
+        self.assertEqual(delivered["apiKey"], LLM_API_KEY)
+        # The key is handed over once; a repeat call must not reveal it again.
+        repeated = self.service.reconcile(
+            result["purchaseId"],
+            telegram_user_id="123",
+        )
+        self.assertNotIn("apiKey", repeated)
+
+    def test_credits_hands_over_a_key_settled_in_the_background(self):
+        self.complete_purchase(reconcile_required=True)
+        self.bankr.credits_result = {"credits": "20.00", "currency": "USD"}
+        self.service.settle_pending()
+
+        delivered = self.service.credits("123")
+
+        self.assertEqual(delivered["state"], "COMPLETE")
+        self.assertEqual(delivered["apiKey"], LLM_API_KEY)
+        self.assertEqual(delivered["credits"], {"credits": "20.00", "currency": "USD"})
+        self.assertNotIn("apiKey", self.service.credits("123"))
+
+    def test_settled_purchase_is_not_swept_twice(self):
+        self.complete_purchase(reconcile_required=True)
+        self.bankr.credits_result = {"credits": "20.00", "currency": "USD"}
+        self.service.settle_pending()
+
+        summary = self.service.settle_pending()
+
+        self.assertEqual(summary, {"checked": 0, "settled": 0})
+
+    def test_sweep_skips_purchases_older_than_the_window(self):
+        result = self.complete_purchase(reconcile_required=True)
+        self.bankr.credits_result = {"credits": "20.00", "currency": "USD"}
+        with self.store.lock, self.store._database() as db:
+            db.execute(
+                "UPDATE bankr_llm_purchases SET updated_at = ? WHERE purchase_id = ?",
+                (int(time.time()) - 3600, result["purchaseId"]),
+            )
+
+        summary = self.service.settle_pending(max_age_seconds=60)
+
+        self.assertEqual(summary, {"checked": 0, "settled": 0})
+        loaded = self.store.get_purchase(result["purchaseId"])
+        self.assertEqual(loaded["state"], "RECONCILIATION_REQUIRED")
+
+    def test_key_revealed_by_reconcile_is_not_revealed_again(self):
+        result = self.complete_purchase(reconcile_required=True)
+        self.bankr.credits_result = {"credits": "20.00", "currency": "USD"}
+        first = self.service.reconcile(result["purchaseId"], telegram_user_id="123")
+        self.assertEqual(first["apiKey"], LLM_API_KEY)
+
+        repeated = self.service.reconcile(
+            result["purchaseId"],
+            telegram_user_id="123",
+        )
+
+        self.assertNotIn("apiKey", repeated)
+
+    def test_reconciliation_prefers_effective_balance_over_raw_balance(self):
+        result = self.complete_purchase(reconcile_required=True)
+        # Baseline was 10.00. balanceUsd looks credited, but Bankr has not yet
+        # deducted 1.00 of usage, so the top-up has not actually landed.
+        self.bankr.credits_result = {
+            "object": "credit_balance",
+            "balanceUsd": "20.00",
+            "effectiveBalanceUsd": "19.00",
+            "undeductedCostUsd": "1.00",
+        }
+
+        reconciled = self.service.reconcile(result["purchaseId"])
+
+        self.assertEqual(reconciled["state"], "COMPLETE")
+        self.assertEqual(len(self.bankr.topups), 2)
+
+    def test_reconciliation_completes_when_effective_balance_covers_purchase(self):
+        result = self.complete_purchase(reconcile_required=True)
+        self.bankr.credits_result = {
+            "object": "credit_balance",
+            "balanceUsd": "25.00",
+            "effectiveBalanceUsd": "20.00",
+            "undeductedCostUsd": "5.00",
+        }
+
+        reconciled = self.service.reconcile(result["purchaseId"])
+
+        self.assertEqual(reconciled["state"], "COMPLETE")
+        self.assertEqual(len(self.bankr.topups), 1)
+
     def test_reconciliation_without_baseline_uses_absolute_balance(self):
         result = self.complete_purchase(reconcile_required=True)
         self.store.transition(
@@ -2754,6 +2879,121 @@ class BankrLlmPurchasePaymentTests(unittest.TestCase):
             {"telegramUserId": user_id, "metadata": dict(metadata)}
         )
         self.wallet.events.append("enforce_spend")
+
+
+class BankrLlmDeliveryMigrationTests(unittest.TestCase):
+    LEGACY_SCHEMA = """
+        CREATE TABLE bankr_llm_purchases (
+            purchase_id TEXT PRIMARY KEY,
+            telegram_user_id TEXT NOT NULL,
+            email TEXT NOT NULL,
+            amount_usd TEXT NOT NULL,
+            state TEXT NOT NULL,
+            expires_at INTEGER NOT NULL,
+            bankr_wallet_address TEXT NOT NULL DEFAULT '',
+            encrypted_api_key TEXT NOT NULL DEFAULT '',
+            encrypted_llm_api_key TEXT NOT NULL DEFAULT '',
+            api_key_fingerprint TEXT NOT NULL DEFAULT '',
+            approval_request_id TEXT NOT NULL DEFAULT '',
+            source_wallet_address TEXT NOT NULL DEFAULT '',
+            singit_amount_atomic TEXT NOT NULL DEFAULT '',
+            commitment_hash TEXT NOT NULL DEFAULT '',
+            transfer_hash TEXT NOT NULL DEFAULT '',
+            topup_result_json TEXT NOT NULL DEFAULT '',
+            credits_json TEXT NOT NULL DEFAULT '',
+            baseline_credits_usd TEXT NOT NULL DEFAULT '',
+            payment_token_address TEXT NOT NULL DEFAULT '',
+            payment_token_symbol TEXT NOT NULL DEFAULT '',
+            payment_token_decimals TEXT NOT NULL DEFAULT '',
+            error_code TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            otp_attempts TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+    """
+
+    def test_migration_marks_existing_complete_purchases_as_delivered(self):
+        master_key = Fernet.generate_key().decode("ascii")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bankr-llm.db"
+            legacy = sqlite3.connect(path)
+            legacy.execute(self.LEGACY_SCHEMA)
+            legacy.execute(
+                """
+                INSERT INTO bankr_llm_purchases (
+                    purchase_id, telegram_user_id, email, amount_usd, state,
+                    expires_at, transfer_hash, created_at, updated_at
+                )
+                VALUES ('done', '123', 'user@example.com', '10', 'COMPLETE',
+                        1, '0xTRANSFER', 1000, 1234)
+                """
+            )
+            legacy.execute(
+                """
+                INSERT INTO bankr_llm_purchases (
+                    purchase_id, telegram_user_id, email, amount_usd, state,
+                    expires_at, transfer_hash, created_at, updated_at
+                )
+                VALUES ('pending', '456', 'other@example.com', '10',
+                        'RECONCILIATION_REQUIRED', 1, '0xTRANSFER', 1000, 1234)
+                """
+            )
+            legacy.commit()
+            legacy.close()
+
+            store = BankrLlmStore(path, master_key=master_key)
+
+            # A purchase completed before this column existed already handed its
+            # key over, so it must not be offered a second reveal.
+            self.assertEqual(
+                store.get_purchase("done")["apiKeyDeliveredAt"], "1234"
+            )
+            # An unfinished purchase stays eligible for the settlement sweep.
+            self.assertEqual(
+                store.get_purchase("pending")["apiKeyDeliveredAt"], ""
+            )
+            self.assertEqual(
+                store.purchases_awaiting_settlement(), ["pending"]
+            )
+
+
+class BankrLlmSettlementWorkerTests(unittest.TestCase):
+    def test_worker_is_disabled_by_flag(self):
+        service = SimpleNamespace(settle_pending=lambda **kwargs: None)
+
+        thread = start_bankr_llm_settlement_worker(
+            service,
+            env={"SIGN402_BANKR_LLM_AUTO_SETTLE": "0"},
+        )
+
+        self.assertIsNone(thread)
+
+    def test_worker_sweeps_on_its_own_thread(self):
+        swept = threading.Event()
+        calls = []
+
+        def settle_pending(**kwargs):
+            calls.append(kwargs)
+            swept.set()
+            return {"checked": 0, "settled": 0}
+
+        thread = start_bankr_llm_settlement_worker(
+            SimpleNamespace(settle_pending=settle_pending),
+            env={"SIGN402_BANKR_LLM_SETTLE_INTERVAL_SECONDS": "30"},
+        )
+
+        self.assertIsNotNone(thread)
+        self.assertTrue(swept.wait(timeout=5))
+        self.assertTrue(thread.daemon)
+        self.assertEqual(calls[0]["max_age_seconds"], 7 * 24 * 60 * 60)
+
+    def test_worker_rejects_a_non_numeric_interval(self):
+        with self.assertRaises(BankrLlmError):
+            start_bankr_llm_settlement_worker(
+                SimpleNamespace(settle_pending=lambda **kwargs: None),
+                env={"SIGN402_BANKR_LLM_SETTLE_INTERVAL_SECONDS": "soon"},
+            )
 
 
 if __name__ == "__main__":

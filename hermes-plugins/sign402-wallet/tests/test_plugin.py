@@ -3256,6 +3256,31 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertIsNone(plugin._parse_llm_buy_args("10 not-an-email"))
         self.assertIsNone(plugin._parse_llm_buy_args("10 user@example.com bad-token!"))
 
+    def test_llm_credits_reveals_a_key_settled_in_the_background(self):
+        plugin = load_plugin()
+        result = {
+            "state": "COMPLETE",
+            "telegramText": "Bankr LLM purchase complete for $10.",
+            "apiKey": "bk_llm_settled_key",
+        }
+
+        rendered = plugin._llm_result_text(
+            result,
+            reveal_api_key="credits" in plugin._LLM_KEY_REVEALING_OPERATIONS,
+        )
+
+        self.assertIn("bk_llm_settled_key", rendered)
+
+    def test_llm_status_without_a_key_is_unchanged(self):
+        plugin = load_plugin()
+
+        rendered = plugin._llm_result_text(
+            {"state": "AWAITING_OTP", "telegramText": "Verification code sent."},
+            reveal_api_key=True,
+        )
+
+        self.assertEqual(rendered, "Verification code sent.")
+
     def test_llm_buy_accepts_optional_token_symbol(self):
         plugin = load_plugin()
 

@@ -95,11 +95,13 @@ from .bankr_swap import (
     BankrSwapClient,
     BankrWalletApiClient,
     load_bankr_api_key,
+    swap_idempotency_key,
     usdc_balance_from_portfolio,
 )
 from .bankr_llm_purchase import (
     BankrLlmError,
     build_bankr_llm_purchase_service_from_env,
+    start_bankr_llm_settlement_worker,
 )
 from .bitrefill_quote import SERVICE_FEE_BPS
 from .bitrefill_runner import CdpWalletServiceError
@@ -2273,6 +2275,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         # client has to ask for it before it starts a purchase.
         self.buyer_email_required = buyer_email_required
         self.bankr_llm_purchase_service = bankr_llm_purchase_service
+        self.bankr_llm_settlement_worker = None
         self.user_token_transfer_client = user_token_transfer_client
         self.imessage_approval_service = imessage_approval_service
         self.imessage_approval_api_token = imessage_approval_api_token
@@ -2901,6 +2904,12 @@ def build_server(
             purchase,
             metadata,
         ),
+    )
+    # Finishes top-ups whose credit landed after the request that started them
+    # timed out, so a buyer is not left holding RECONCILIATION_REQUIRED.
+    server.bankr_llm_settlement_worker = start_bankr_llm_settlement_worker(
+        server.bankr_llm_purchase_service,
+        env=dict(os.environ),
     )
     server.chat_service = None
     server.chat_policy_service = None
@@ -4200,6 +4209,9 @@ class BankrSingitToUsdcFundingRunner:
             to_token=self.to_token,
             amount=amount,
             chain=self.chain,
+            # One Sign402 quote must never fund more than one swap, so the
+            # idempotency key is derived from the quote id rather than the call.
+            idempotency_key=swap_idempotency_key(quote.get("quoteId")),
         )
         _assert_swap_received_enough_usdc(result, required_usdc=required_usdc)
         return {

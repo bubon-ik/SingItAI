@@ -16,6 +16,7 @@ from unittest.mock import ANY, Mock, patch
 from cryptography.fernet import Fernet
 
 from sign402_gateway.bankr_llm_purchase import BankrLlmError
+from sign402_gateway.bankr_swap import swap_idempotency_key
 from sign402_gateway.bitrefill import TestBitrefillClient
 from sign402_gateway.bitrefill_mcp import McpBitrefillClient
 from sign402_gateway.bitrefill_runner import CdpWalletServiceError
@@ -928,6 +929,7 @@ class GatewayServerTests(unittest.TestCase):
             to_token="USDC",
             amount="25000",
             chain="base",
+            idempotency_key=swap_idempotency_key("quote_1"),
         )
 
     def test_bankr_singit_to_usdc_funding_runner_rejects_underfilled_swap(self):

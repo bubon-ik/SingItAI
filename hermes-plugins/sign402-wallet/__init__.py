@@ -476,7 +476,7 @@ def _build_llm_handler(operation: str):
                 payload=parsed,
                 user_access_token=_user_access_token(client, identity),
             )
-            return _llm_result_text(result, reveal_api_key=operation == "verify")
+            return _llm_result_text(result, reveal_api_key=operation in _LLM_KEY_REVEALING_OPERATIONS)
         except GatewayClientError as exc:
             return exc.user_message
         except Exception as exc:
@@ -2055,7 +2055,10 @@ def _telegram_public_command_result(
             payload=payload,
             user_access_token=_user_access_token(client, identity),
         )
-        text = _llm_result_text(result)
+        text = _llm_result_text(
+            result,
+            reveal_api_key=operation in _LLM_KEY_REVEALING_OPERATIONS,
+        )
     else:
         raise ValueError("unsupported Telegram background command")
     # Coerce non-strings, but keep _HtmlText intact: a bare str() would drop the
@@ -2231,7 +2234,10 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
                 payload=payload,
                 user_access_token=_user_access_token(client, identity),
             )
-            text = _llm_result_text(result)
+            text = _llm_result_text(
+                result,
+                reveal_api_key=operation in _LLM_KEY_REVEALING_OPERATIONS,
+            )
         elif command == "llm-code":
             payload = _llm_operation_payload("verify", args)
             if payload is None:
@@ -3850,7 +3856,7 @@ def _execute_telegram_llm_request(
         _send_fixed_reply(
             gateway,
             source,
-            _llm_result_text(result, reveal_api_key=operation == "verify"),
+            _llm_result_text(result, reveal_api_key=operation in _LLM_KEY_REVEALING_OPERATIONS),
         )
     except GatewayClientError as exc:
         _send_fixed_reply(gateway, source, exc.user_message)
@@ -4672,6 +4678,11 @@ def _llm_usage(operation: str) -> str:
         "verify": _LLM_CODE_USAGE,
         "credits": "Usage: /llm_credits",
     }.get(operation, _UNEXPECTED_ERROR_MESSAGE)
+
+
+# "credits" reveals too: a top-up that finished in the background has a key
+# nobody has collected, and /llm_credits is where its buyer comes looking.
+_LLM_KEY_REVEALING_OPERATIONS = frozenset({"verify", "credits"})
 
 
 def _llm_result_text(

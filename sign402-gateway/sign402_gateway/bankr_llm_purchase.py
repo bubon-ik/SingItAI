@@ -128,6 +128,7 @@ class BankrLlmStore:
         "errorCode": "error_code",
         "errorMessage": "error_message",
         "otpAttempts": "otp_attempts",
+        "apiKeyDeliveredAt": "api_key_delivered_at",
     }
 
     def __init__(self, path: Path, *, master_key: str):
@@ -377,6 +378,61 @@ class BankrLlmStore:
                 f"Stored Bankr {label} key could not be decrypted.",
             ) from exc
 
+    def mark_api_key_delivered(self, purchase_id: str) -> bool:
+        """Claim the single delivery of a completed key.
+
+        Atomic on purpose: two concurrent reconcile calls must not both hand
+        out the key, so the winner is decided by the UPDATE itself.
+        """
+        with self.lock, self._database() as db:
+            result = db.execute(
+                """
+                UPDATE bankr_llm_purchases
+                SET api_key_delivered_at = ?, updated_at = ?
+                WHERE purchase_id = ?
+                  AND state = 'COMPLETE'
+                  AND api_key_delivered_at = ''
+                """,
+                (str(int(time.time())), int(time.time()), str(purchase_id)),
+            )
+            return result.rowcount == 1
+
+    def purchases_awaiting_settlement(
+        self,
+        *,
+        limit: int = 20,
+        updated_after: int | None = None,
+    ) -> list[str]:
+        """Purchases whose SINGIT already moved but whose credit is unconfirmed.
+
+        Only purchases that paid can be settled, so ``transfer_hash`` is
+        required; ``api_key_delivered_at`` excludes the ones already handed to
+        their buyer. ``updated_after`` bounds the sweep so an abandoned
+        purchase is not polled forever.
+        """
+        parameters: list[Any] = []
+        clauses = [
+            "state IN ('RECONCILIATION_REQUIRED', 'TOPPING_UP_BANKR')",
+            "transfer_hash != ''",
+            "api_key_delivered_at = ''",
+        ]
+        if updated_after is not None:
+            clauses.append("updated_at >= ?")
+            parameters.append(int(updated_after))
+        parameters.append(max(1, int(limit)))
+        with self.lock, self._database() as db:
+            rows = db.execute(
+                f"""
+                SELECT purchase_id
+                FROM bankr_llm_purchases
+                WHERE {" AND ".join(clauses)}
+                ORDER BY updated_at ASC
+                LIMIT ?
+                """,
+                parameters,
+            ).fetchall()
+        return [str(row["purchase_id"]) for row in rows]
+
     def transition(
         self,
         purchase_id: str,
@@ -459,6 +515,7 @@ class BankrLlmStore:
                     error_code TEXT NOT NULL DEFAULT '',
                     error_message TEXT NOT NULL DEFAULT '',
                     otp_attempts TEXT NOT NULL DEFAULT '',
+                    api_key_delivered_at TEXT NOT NULL DEFAULT '',
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
                 )
@@ -476,12 +533,24 @@ class BankrLlmStore:
                 "payment_token_symbol",
                 "payment_token_decimals",
                 "encrypted_llm_api_key",
+                "api_key_delivered_at",
             ):
                 if column not in existing_columns:
                     db.execute(
                         f"ALTER TABLE bankr_llm_purchases "
                         f"ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
                     )
+                    if column == "api_key_delivered_at":
+                        # Purchases completed before this column existed already
+                        # handed their key to the buyer; leaving them blank would
+                        # offer a second reveal.
+                        db.execute(
+                            """
+                            UPDATE bankr_llm_purchases
+                            SET api_key_delivered_at = CAST(updated_at AS TEXT)
+                            WHERE state = 'COMPLETE'
+                            """
+                        )
             db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS bankr_llm_users (
@@ -1469,7 +1538,7 @@ class BankrLlmPurchaseService:
             )
         state = str(purchase.get("state") or "")
         if state == "COMPLETE":
-            return self._safe_purchase_response(purchase)
+            return self._deliver_completed_key(purchase)
         if state not in {
             "RECONCILIATION_REQUIRED",
             "TOPPING_UP_BANKR",
@@ -1512,6 +1581,80 @@ class BankrLlmPurchaseService:
             reveal_api_key=True,
         )
 
+    def _deliver_completed_key(
+        self,
+        purchase: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Return the key of a purchase completed without a live caller.
+
+        The background sweep settles purchases when nobody is waiting on an
+        HTTP response, so the key it could not return is handed over at the
+        owner's next reconcile — once.
+        """
+        result = self._safe_purchase_response(purchase)
+        if str(purchase.get("apiKeyDeliveredAt") or "").strip():
+            return result
+        api_key = self.store.decrypt_llm_api_key(purchase)
+        if self.store.mark_api_key_delivered(str(purchase["purchaseId"])):
+            result["apiKey"] = api_key
+        return result
+
+    def settle_if_credited(self, purchase_id: str) -> dict[str, Any]:
+        """Complete a paid purchase whose credit has landed. Never spends.
+
+        The blocking top-up often outlives its HTTP request even though the
+        credit lands moments later. This finishes those purchases on its own,
+        but it will not top up again: spending the buyer's tokens a second time
+        stays behind the explicit reconcile call.
+        """
+        purchase = self._purchase_by_id(purchase_id)
+        state = str(purchase.get("state") or "")
+        if state not in {"RECONCILIATION_REQUIRED", "TOPPING_UP_BANKR"}:
+            return self._safe_purchase_response(purchase)
+        if not purchase.get("transferHash"):
+            return self._safe_purchase_response(purchase)
+        if not purchase.get("apiKeyFingerprint"):
+            return self._safe_purchase_response(purchase)
+
+        credits = self.bankr.credits(
+            api_key=self.store.decrypt_llm_api_key(purchase)
+        )
+        if not self._credits_cover_purchase(credits, purchase):
+            return self._safe_purchase_response(purchase)
+        return self._complete_purchase(
+            purchase,
+            expected_state=state,
+            api_key="",
+            reveal_api_key=False,
+            credits=credits,
+        )
+
+    def settle_pending(
+        self,
+        *,
+        limit: int = 20,
+        max_age_seconds: int | None = None,
+    ) -> dict[str, int]:
+        updated_after = None
+        if max_age_seconds:
+            updated_after = int(time.time()) - int(max_age_seconds)
+        checked = 0
+        settled = 0
+        for purchase_id in self.store.purchases_awaiting_settlement(
+            limit=limit,
+            updated_after=updated_after,
+        ):
+            checked += 1
+            try:
+                result = self.settle_if_credited(purchase_id)
+            except Exception:
+                # A purchase Bankr cannot answer for right now is retried on
+                # the next sweep; one bad purchase must not stop the others.
+                continue
+            if str(result.get("state") or "") == "COMPLETE":
+                settled += 1
+        return {"checked": checked, "settled": settled}
+
     def credits(self, telegram_user_id: str) -> dict[str, Any]:
         user_id = self._require_user_id(telegram_user_id)
         purchase = self.store.get_active_purchase(user_id)
@@ -1526,7 +1669,12 @@ class BankrLlmPurchaseService:
         if not purchase.get("apiKeyFingerprint"):
             return self._safe_purchase_response(purchase)
         credits = self.bankr.credits(api_key=self.store.decrypt_llm_api_key(purchase))
-        result = self._safe_purchase_response(purchase)
+        if str(purchase.get("state") or "") == "COMPLETE":
+            # A purchase the background sweep finished has a key nobody has
+            # collected yet; this is where its buyer comes looking.
+            result = self._deliver_completed_key(purchase)
+        else:
+            result = self._safe_purchase_response(purchase)
         result["credits"] = credits
         return result
 
@@ -1820,6 +1968,11 @@ class BankrLlmPurchaseService:
             "errorCode": "",
             "errorMessage": "",
         }
+        if reveal_api_key:
+            # The caller returns the key to its buyer in this response, so the
+            # single delivery is spent here and a later reconcile must not
+            # repeat it.
+            fields["apiKeyDeliveredAt"] = str(int(time.time()))
         if topup is not None:
             fields["topupResultJson"] = json.dumps(
                 dict(topup),
@@ -2345,13 +2498,20 @@ class BankrLlmPurchaseService:
 
     @staticmethod
     def _credits_usd_balance(credits: Mapping[str, Any]) -> Decimal | None:
+        # ``effectiveBalanceUsd`` is ``balanceUsd`` minus the cost of requests
+        # Bankr has not deducted yet, so it is the balance a top-up must clear.
+        # ``balanceUsd`` stays as the fallback for older response shapes.
+        nested = credits.get("credits")
+        nested_fields = nested if isinstance(nested, Mapping) else {}
         candidates = [
+            credits.get("effectiveBalanceUsd"),
+            nested_fields.get("effectiveBalanceUsd"),
+            # A scalar ``credits`` is the legacy shape; a mapping falls through
+            # to the nested fields below.
             credits.get("credits"),
             credits.get("balanceUsd"),
+            nested_fields.get("balanceUsd"),
         ]
-        nested = credits.get("credits")
-        if isinstance(nested, Mapping):
-            candidates.append(nested.get("balanceUsd"))
         for candidate in candidates:
             if isinstance(candidate, bool) or candidate is None:
                 continue
@@ -2493,6 +2653,69 @@ class BankrLlmPurchaseService:
                 "Enter a USD amount from 1.00 to 1000.00.",
             )
         return format(amount, "f")
+
+
+DEFAULT_SETTLEMENT_INTERVAL_SECONDS = 30
+DEFAULT_SETTLEMENT_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+
+
+def start_bankr_llm_settlement_worker(
+    service: "BankrLlmPurchaseService",
+    *,
+    env: Mapping[str, str] | None = None,
+) -> threading.Thread | None:
+    """Sweep unfinished top-ups on a daemon thread.
+
+    Returns None when the sweep is disabled. The gateway keeps serving even if
+    Bankr is down, so every failure inside the loop is swallowed by design.
+    """
+    values = os.environ if env is None else env
+    if str(values.get("SIGN402_BANKR_LLM_AUTO_SETTLE", "1")).strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return None
+    try:
+        interval_seconds = float(
+            str(
+                values.get("SIGN402_BANKR_LLM_SETTLE_INTERVAL_SECONDS")
+                or DEFAULT_SETTLEMENT_INTERVAL_SECONDS
+            )
+        )
+        max_age_seconds = int(
+            str(
+                values.get("SIGN402_BANKR_LLM_SETTLE_MAX_AGE_SECONDS")
+                or DEFAULT_SETTLEMENT_MAX_AGE_SECONDS
+            )
+        )
+    except ValueError as exc:
+        raise BankrLlmError(
+            "invalid_configuration",
+            "Bankr LLM settlement sweep settings must be numeric.",
+        ) from exc
+    if not math.isfinite(interval_seconds) or interval_seconds <= 0:
+        raise BankrLlmError(
+            "invalid_configuration",
+            "Bankr LLM settlement interval must be positive.",
+        )
+
+    def loop() -> None:
+        while True:
+            try:
+                service.settle_pending(max_age_seconds=max_age_seconds)
+            except Exception:
+                pass
+            time.sleep(interval_seconds)
+
+    thread = threading.Thread(
+        target=loop,
+        name="sign402-bankr-llm-settlement",
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 def build_bankr_llm_purchase_service_from_env(
@@ -2678,6 +2901,7 @@ def _purchase_row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
         "error_code": "errorCode",
         "error_message": "errorMessage",
         "otp_attempts": "otpAttempts",
+        "api_key_delivered_at": "apiKeyDeliveredAt",
         "created_at": "createdAt",
         "updated_at": "updatedAt",
     }
