@@ -2988,6 +2988,69 @@ class BankrLlmSettlementWorkerTests(unittest.TestCase):
         self.assertTrue(thread.daemon)
         self.assertEqual(calls[0]["max_age_seconds"], 7 * 24 * 60 * 60)
 
+    def test_worker_announces_itself_at_startup(self):
+        with self.assertLogs(
+            "sign402_gateway.bankr_llm_purchase", level="INFO"
+        ) as logs:
+            start_bankr_llm_settlement_worker(
+                SimpleNamespace(
+                    settle_pending=lambda **kwargs: {"checked": 0, "settled": 0}
+                ),
+                env={"SIGN402_BANKR_LLM_SETTLE_INTERVAL_SECONDS": "30"},
+            )
+
+        self.assertTrue(
+            any("settlement sweep started" in line for line in logs.output),
+            logs.output,
+        )
+
+    def test_worker_logs_only_when_it_settles_something(self):
+        settled = threading.Event()
+
+        def settle_pending(**kwargs):
+            settled.set()
+            return {"checked": 3, "settled": 2}
+
+        with self.assertLogs(
+            "sign402_gateway.bankr_llm_purchase", level="INFO"
+        ) as logs:
+            start_bankr_llm_settlement_worker(
+                SimpleNamespace(settle_pending=settle_pending),
+                env={"SIGN402_BANKR_LLM_SETTLE_INTERVAL_SECONDS": "30"},
+            )
+            self.assertTrue(settled.wait(timeout=5))
+            time.sleep(0.1)
+
+        self.assertTrue(
+            any("settled=2 checked=3" in line for line in logs.output),
+            logs.output,
+        )
+
+    def test_worker_logs_a_failed_sweep_without_its_message(self):
+        failed = threading.Event()
+
+        def settle_pending(**kwargs):
+            failed.set()
+            raise RuntimeError("bk_secret_in_message")
+
+        with self.assertLogs(
+            "sign402_gateway.bankr_llm_purchase", level="WARNING"
+        ) as logs:
+            start_bankr_llm_settlement_worker(
+                SimpleNamespace(settle_pending=settle_pending),
+                env={"SIGN402_BANKR_LLM_SETTLE_INTERVAL_SECONDS": "30"},
+            )
+            self.assertTrue(failed.wait(timeout=5))
+            time.sleep(0.1)
+
+        self.assertTrue(
+            any("error=RuntimeError" in line for line in logs.output),
+            logs.output,
+        )
+        self.assertFalse(
+            any("bk_secret_in_message" in line for line in logs.output)
+        )
+
     def test_worker_rejects_a_non_numeric_interval(self):
         with self.assertRaises(BankrLlmError):
             start_bankr_llm_settlement_worker(

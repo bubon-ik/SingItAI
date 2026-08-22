@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -93,6 +94,8 @@ class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 _DEFAULT_OPENER = urllib.request.build_opener(_RejectRedirectHandler())
+
+logger = logging.getLogger(__name__)
 
 
 class BankrLlmError(RuntimeError):
@@ -2704,9 +2707,21 @@ def start_bankr_llm_settlement_worker(
     def loop() -> None:
         while True:
             try:
-                service.settle_pending(max_age_seconds=max_age_seconds)
-            except Exception:
-                pass
+                summary = service.settle_pending(max_age_seconds=max_age_seconds)
+            except Exception as exc:
+                # The type alone is the diagnosis here; the message can carry
+                # purchase detail that does not belong in the service log.
+                logger.warning(
+                    "Bankr LLM settlement sweep failed error=%s",
+                    type(exc).__name__,
+                )
+            else:
+                if summary.get("settled"):
+                    logger.info(
+                        "Bankr LLM settlement sweep settled=%s checked=%s",
+                        summary.get("settled"),
+                        summary.get("checked"),
+                    )
             time.sleep(interval_seconds)
 
     thread = threading.Thread(
@@ -2715,6 +2730,11 @@ def start_bankr_llm_settlement_worker(
         daemon=True,
     )
     thread.start()
+    logger.info(
+        "Bankr LLM settlement sweep started interval=%ss maxAge=%ss",
+        interval_seconds,
+        max_age_seconds,
+    )
     return thread
 
 
