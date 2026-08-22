@@ -506,45 +506,13 @@ h1 em, h2 em { font-style: normal; color: var(--accent); }
 }
 
 /* --- Project token ------------------------------------------------------- */
-/* Deliberately quiet: the product loop comes first, the token is a footnote
-   for people who arrive from a chart instead of a chat. */
+/* The section wrapper only. Everything inside it is styled by the sg-tk rules
+   that ship with the markup; the card layout replaced the plain block that
+   used to live here, so those rules went with it. */
 .token {
   padding: 96px 0 40px;
-  text-align: center;
-}
-.token h2 { margin: 18px 0 14px; }
-.token > .shell > p { color: var(--muted); max-width: 52ch; margin: 0 auto; }
-
-.token-address {
-  display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  justify-content: center;
-  margin: 26px auto 14px;
-  padding: 10px 10px 10px 16px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.03);
-}
-.token-address code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 13px; letter-spacing: 0.01em; color: var(--text);
-  word-break: break-all;
-}
-.token-address button { flex: none; }
-.token-address button[data-copied] { color: var(--accent); border-color: rgba(62, 207, 142, 0.4); }
-
-.token-links { margin: 0 auto 18px; }
-.token-links a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(62, 207, 142, 0.35); }
-.token-links a:hover { border-bottom-color: var(--accent); }
-
-.token-fine {
-  color: var(--muted); font-size: 13px; max-width: 46ch; margin: 0 auto;
-  opacity: 0.75;
 }
 
 @media (max-width: 560px) {
   .token { padding: 72px 0 32px; }
-  .token-address { border-radius: 18px; padding: 12px 14px; }
-  /* Small enough that all 42 characters stay on one line: an address people
-     check symbol by symbol should not wrap. */
-  .token-address code { font-size: 10.5px; letter-spacing: 0; word-break: normal; }
 }

@@ -68,6 +68,10 @@
     <nav class="nav-links" aria-label="Primary">
       <a href="#how">How it works</a>
       <a href="#features">Features</a>
+      <a href="#token">Token</a>
+      <a class="nav-x" href="https://x.com/SingItAgent" target="_blank" rel="noopener" aria-label="SingIt on X">
+        <span aria-hidden="true">&#120143;</span>
+      </a>
       <a href="https://bubon-ik.github.io/SingItAI/" target="_blank" rel="noopener">Privacy</a>
     </nav>
     <a class="btn btn-primary btn-sm telegram-cta" href="https://t.me/SingIt0qk_bot" target="_blank" rel="noopener">
@@ -269,18 +273,40 @@
   <!-- ACTION -->
   <!-- The token, for the audience arriving from a chart rather than a chat -->
   <section class="token" id="token">
-    <div class="shell shell-narrow">
-      <p class="eyebrow-pill" data-reveal>Project token</p>
-      <h2 data-reveal>SINGIT <em>on Base.</em></h2>
-      <p data-reveal>The bot works with any token in your wallet, SINGIT included. Holding it is not required to use anything on this page.</p>
-      <div class="token-address" data-reveal>
-        <code id="token-contract">0xc2c1e0b7C401e6217193732272444D928646eba3</code>
-        <button class="btn btn-ghost btn-sm" type="button" data-copy="#token-contract">Copy</button>
+    <div class="shell">
+      <div class="sg-tk">
+
+        <div class="sg-tk__card sg-tk__card--token" data-reveal>
+          <div class="sg-tk__eyebrow"><span class="sg-tk__dot" aria-hidden="true"></span>Project token</div>
+          <h2 class="sg-tk__title">SINGIT <em>on Base.</em></h2>
+          <p class="sg-tk__lede">The bot works with any token in your wallet, SINGIT included. Holding it is not required to use anything on this page.</p>
+
+          <div class="sg-tk__addr">
+            <span class="sg-tk__addr-label">Contract</span>
+            <code id="token-contract">0xc2c1e0b7C401e6217193732272444D928646eba3</code>
+            <button class="sg-tk__copy" type="button" data-copy="#token-contract" data-sg-copy="0xc2c1e0b7C401e6217193732272444D928646eba3">Copy</button>
+          </div>
+
+          <div class="sg-tk__links">
+            <a href="https://dexscreener.com/base/0xc2c1e0b7C401e6217193732272444D928646eba3" target="_blank" rel="noopener">Chart on Dexscreener <span aria-hidden="true">&#8599;</span></a>
+            <a href="https://basescan.org/token/0xc2c1e0b7C401e6217193732272444D928646eba3" target="_blank" rel="noopener">Basescan <span aria-hidden="true">&#8599;</span></a>
+          </div>
+
+          <p class="sg-tk__fine">Always check the contract address against this page before you buy. Nobody from SingIt will ever DM you a different one.</p>
+        </div>
+
+        <a class="sg-tk__card sg-tk__card--x" href="https://x.com/SingItAgent" target="_blank" rel="noopener" data-reveal>
+          <div class="sg-tk__xtop">
+            <span class="sg-tk__xmark" aria-hidden="true">&#120143;</span>
+            <span class="sg-tk__xfollow">Follow <span aria-hidden="true">&#8599;</span></span>
+          </div>
+          <div class="sg-tk__xbody">
+            <span class="sg-tk__xhandle">@SingItAgent</span>
+            <span class="sg-tk__xsub">Shipping notes, live payment demos, and everything about the token.</span>
+          </div>
+        </a>
+
       </div>
-      <p class="token-links" data-reveal>
-        <a href="https://dexscreener.com/base/0xc2c1e0b7C401e6217193732272444D928646eba3" target="_blank" rel="noopener">Chart and liquidity on Dexscreener</a>
-      </p>
-      <p class="token-fine" data-reveal>Always check the contract address against this page before you buy. Nobody from SingIt will ever DM you a different one.</p>
     </div>
   </section>
 
@@ -325,6 +351,50 @@
 <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/ScrollTrigger.min.js"></script>
 <script src="app.js"></script>
+
+<style id="sg-token-css">
+.token .sg-tk{display:grid;grid-template-columns:1.2fr .85fr;gap:18px;align-items:stretch}
+.token .sg-tk__card{position:relative;overflow:hidden;border:1px solid rgba(255,255,255,.10);border-radius:22px;background:linear-gradient(180deg,rgba(255,255,255,.045),rgba(255,255,255,.014));padding:38px;backdrop-filter:blur(6px)}
+.token .sg-tk__card--token{display:flex;flex-direction:column;gap:22px}
+.token .sg-tk__card--token::before{content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(680px 240px at 6% -25%,rgba(120,255,190,.10),transparent 70%)}
+.token .sg-tk__eyebrow{position:relative;display:inline-flex;align-items:center;gap:9px;font-family:"Geist Mono",ui-monospace,monospace;font-size:11.5px;letter-spacing:.18em;text-transform:uppercase;color:rgba(255,255,255,.62)}
+.token .sg-tk__dot{width:6px;height:6px;border-radius:99px;background:#7dffbe;box-shadow:0 0 12px rgba(125,255,190,.8);animation:sgTkPulse 2.4s ease-in-out infinite}
+@keyframes sgTkPulse{0%,100%{opacity:.35}50%{opacity:1}}
+.token .sg-tk__title{position:relative;margin:0;font-family:"Clash Display","Geist",sans-serif;font-weight:600;font-size:clamp(30px,3.4vw,46px);line-height:1.02;letter-spacing:-.02em}
+.token .sg-tk__title em{font-style:normal;color:rgba(255,255,255,.45)}
+.token .sg-tk__lede{position:relative;margin:0;max-width:52ch;font-size:16px;line-height:1.6;color:rgba(255,255,255,.62);text-wrap:pretty}
+.token .sg-tk__addr{position:relative;display:flex;align-items:center;gap:14px;flex-wrap:wrap;border:1px solid rgba(255,255,255,.12);border-radius:14px;background:rgba(0,0,0,.42);padding:16px 16px 16px 18px}
+.token .sg-tk__addr-label{font-family:"Geist Mono",ui-monospace,monospace;font-size:10.5px;letter-spacing:.18em;text-transform:uppercase;color:rgba(255,255,255,.38)}
+.token .sg-tk__addr code{flex:1;min-width:220px;font-family:"Geist Mono",ui-monospace,monospace;font-size:15px;line-height:1.5;color:#fff;word-break:break-all}
+.token .sg-tk__copy{flex:none;font-family:"Geist Mono",ui-monospace,monospace;font-size:11.5px;letter-spacing:.12em;text-transform:uppercase;color:#04150d;background:#7dffbe;border:0;border-radius:10px;padding:11px 18px;cursor:pointer;transition:filter .15s ease,transform .12s ease}
+.token .sg-tk__copy:hover{filter:brightness(1.07)}
+.token .sg-tk__copy:active{transform:translateY(1px)}
+.token .sg-tk__links{position:relative;display:flex;flex-wrap:wrap;gap:10px}
+.token .sg-tk__links a{font-family:"Geist Mono",ui-monospace,monospace;font-size:12px;letter-spacing:.05em;color:rgba(255,255,255,.72);border:1px solid rgba(255,255,255,.14);border-radius:99px;padding:10px 15px;text-decoration:none;transition:border-color .18s ease,color .18s ease,background .18s ease}
+.token .sg-tk__links a:hover{border-color:rgba(125,255,190,.55);background:rgba(125,255,190,.06);color:#fff}
+.token .sg-tk__fine{position:relative;margin:0;font-size:13px;line-height:1.6;color:rgba(255,255,255,.42);max-width:56ch;text-wrap:pretty}
+.token .sg-tk__card--x{display:flex;flex-direction:column;justify-content:space-between;gap:36px;text-decoration:none;color:#fff;transition:border-color .2s ease,transform .2s ease}
+.token .sg-tk__card--x::before{content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(520px 220px at 100% 0%,rgba(255,255,255,.07),transparent 70%)}
+.token .sg-tk__card--x:hover{border-color:rgba(255,255,255,.28);transform:translateY(-3px)}
+.token .sg-tk__xtop{position:relative;display:flex;align-items:center;justify-content:space-between;gap:12px}
+.token .sg-tk__xmark{display:flex;align-items:center;justify-content:center;width:48px;height:48px;border-radius:14px;background:#fff;color:#000;font-size:24px;line-height:1}
+.token .sg-tk__xfollow{font-family:"Geist Mono",ui-monospace,monospace;font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:rgba(255,255,255,.45)}
+.token .sg-tk__xbody{position:relative;display:flex;flex-direction:column;gap:9px}
+.token .sg-tk__xhandle{font-family:"Clash Display","Geist",sans-serif;font-weight:600;font-size:30px;letter-spacing:-.02em}
+.token .sg-tk__xsub{font-size:14.5px;line-height:1.6;color:rgba(255,255,255,.55);text-wrap:pretty}
+.nav-links .nav-x{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:8px;font-size:15px;line-height:1;transition:background .18s ease}
+.nav-links .nav-x:hover{background:rgba(255,255,255,.10)}
+@media (max-width:900px){.token .sg-tk{grid-template-columns:1fr}.token .sg-tk__card{padding:28px;border-radius:18px}}
+</style>
+<script id="sg-token-js">
+document.querySelectorAll("[data-sg-copy]").forEach(function (b) {
+  b.addEventListener("click", function () {
+    navigator.clipboard && navigator.clipboard.writeText(b.dataset.sgCopy);
+    var t = b.textContent; b.textContent = "Copied";
+    setTimeout(function () { b.textContent = t; }, 1600);
+  });
+});
+</script>
 
 </body>
 </html>
