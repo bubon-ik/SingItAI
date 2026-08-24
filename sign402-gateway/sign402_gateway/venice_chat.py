@@ -1109,6 +1109,7 @@ class ChatResult:
     prefunded: bool
     remaining_window_atomic: int
     outstanding_atomic: int
+    web_footer: str = ""
 
 
 class VeniceChatClient:
@@ -1122,12 +1123,16 @@ class VeniceChatClient:
         config: VeniceConfig,
         purchases_paused: Callable[[], bool] | None = None,
         now: Callable[[], int] | None = None,
+        web_search: Any = None,
     ):
         self.store = store
         self.transport = transport
         self.signer = signer
         self.settle = settle
         self.config = config
+        # None means the feature is off, and every path below is the one that
+        # ran before it existed.
+        self.web_search = web_search
         self.purchases_paused = purchases_paused or (lambda: False)
         self.now = now or (lambda: int(time.time()))
 
@@ -1188,7 +1193,7 @@ class VeniceChatClient:
         #    failure on existing credit: the first means money moved and no
         #    answer came back.
         try:
-            text, remaining = self._ask(
+            text, remaining, web_footer = self._answer(
                 user_id, prompt, wallet_address=wallet_address
             )
         except ProviderUnavailable:
@@ -1211,7 +1216,44 @@ class VeniceChatClient:
             prefunded=prefunded,
             remaining_window_atomic=self._remaining_window(session),
             outstanding_atomic=session.outstanding_atomic,
+            web_footer=web_footer,
         )
+
+    def _answer(
+        self, user_id: str, prompt: str, *, wallet_address: str
+    ) -> tuple[str, str | None, str]:
+        """One completion, or one search and one completion.
+
+        With `web_search` unset this is exactly `_ask` and nothing else, which
+        is what keeps the feature flag honest.
+        """
+        if self.web_search is None:
+            text, remaining = self._ask(
+                user_id, prompt, wallet_address=wallet_address
+            )
+            return text, remaining, ""
+
+        from .web_search import answer_with_web
+
+        # `_ask` reports the balance header alongside the text; the web turn
+        # only deals in text, so the last header seen is kept here.
+        seen: dict[str, str | None] = {"remaining": None}
+
+        def ask(text: str) -> str:
+            answer, remaining = self._ask(
+                user_id, text, wallet_address=wallet_address
+            )
+            seen["remaining"] = remaining
+            return answer
+
+        result = answer_with_web(
+            ask=ask,
+            search=self.web_search,
+            user_id=user_id,
+            message=prompt,
+            wallet_address=wallet_address,
+        )
+        return result.text, seen["remaining"], result.footer
 
     # -- prefund ---------------------------------------------------------
 

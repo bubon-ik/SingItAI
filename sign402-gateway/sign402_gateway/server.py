@@ -128,6 +128,10 @@ from .venice_chat import (
     build_chat_service_from_env,
     start_payto_watcher,
 )
+from .web_search import (
+    EXA_SEARCH_URL,
+    build_web_search_from_env,
+)
 from .user_wallets import (
     BASE_NATIVE_ETH_ASSET_ID,
     DEFAULT_USER_WALLET_STORE_PATH,
@@ -917,6 +921,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "text": result.text,
+                    # Empty unless the turn paid for a web search. Kept out of
+                    # `text` so the client decides how to show a charge.
+                    "webFooter": getattr(result, "web_footer", ""),
                     "costAtomic": result.cost_atomic,
                     "prefunded": result.prefunded,
                     "remainingWindowAtomic": result.remaining_window_atomic,
@@ -2925,6 +2932,27 @@ def build_server(
             purchases_paused=_purchases_paused,
         )
         if server.chat_service is not None:
+            # Web search rides on the chat service's store and wallet, and is
+            # off unless its own flag is set. With it unset `web_search` stays
+            # None and every chat path is the one that ran before it existed.
+            server.chat_service.client.web_search = build_web_search_from_env(
+                store=server.chat_service.store,
+                settle_from_gateway=lambda requirement, *, user_id, request_body: (
+                    _settle_search_from_gateway(
+                        server, requirement, request_body=request_body
+                    )
+                ),
+                settle_from_user=lambda requirement, *, user_id, request_body: (
+                    _settle_search_from_user(
+                        server,
+                        requirement,
+                        telegram_user_id=user_id,
+                        request_body=request_body,
+                    )
+                ),
+                purchases_paused=_purchases_paused,
+                on_merchant_change=_record_search_merchant_change,
+            )
             server.chat_policy_service = ChatPolicyApprovalService(
                 store=server.chat_service.store,
                 approval_service=imessage_approval_service,
@@ -2937,6 +2965,61 @@ def build_server(
                 bound_pay_to=server.chat_service.client.config.bound_pay_to,
             )
     return server
+
+
+def _settle_search_from_gateway(
+    server, requirement: dict[str, Any], *, request_body: dict[str, Any]
+) -> dict[str, Any]:
+    """Pay for a free-trial search from the gateway's own account.
+
+    "Free" can only mean paid by someone else — Exa charges for every call.
+    The approved terms are the ones the client already checked against the
+    binding, and the node guard checks them again before signing.
+    """
+    return server.base_payment_client(
+        str(requirement.get("resource") or "") or EXA_SEARCH_URL,
+        max_atomic=str(requirement.get("amount") or ""),
+        expected_receiver=str(requirement.get("payTo") or ""),
+        expected_asset=str(requirement.get("asset") or ""),
+        method="POST",
+        request_body=request_body,
+    )
+
+
+def _settle_search_from_user(
+    server,
+    requirement: dict[str, Any],
+    *,
+    telegram_user_id: str,
+    request_body: dict[str, Any],
+) -> dict[str, Any]:
+    """Pay for a search from the user's managed wallet.
+
+    The chat lane's settle path without the prefund around it: one 402, one
+    payment, one response body.
+    """
+    private_key = server.user_wallet_service.decrypt_private_key_for_future_signing(
+        telegram_user_id
+    )
+    return server.user_x402_buyer.base_payment_client(
+        str(requirement.get("resource") or "") or EXA_SEARCH_URL,
+        private_key=private_key,
+        max_atomic=str(requirement.get("amount") or ""),
+        expected_receiver=str(requirement.get("payTo") or ""),
+        expected_asset=str(requirement.get("asset") or ""),
+        method="POST",
+        request_body=request_body,
+    )
+
+
+def _record_search_merchant_change(notice: dict[str, Any]) -> None:
+    """Tell the operator the search merchant moved. Addresses only, no query."""
+    logger.warning(
+        "web search merchant changed: resource=%s expected=%s seen=%s",
+        notice.get("resource"),
+        notice.get("expected"),
+        notice.get("seen"),
+    )
 
 
 def _settle_chat_prefund(
@@ -4283,16 +4366,59 @@ class BankrCliX402PaymentClient:
 
 
 class CdpBaseX402PaymentClient:
-    def __init__(self, service_dir: Path):
+    def __init__(
+        self,
+        service_dir: Path,
+        *,
+        runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    ):
         self.service_dir = service_dir
+        self.runner = runner
 
-    def __call__(self, resource_url: str) -> dict[str, Any]:
+    def __call__(
+        self,
+        resource_url: str,
+        *,
+        max_atomic: str | None = None,
+        expected_receiver: str | None = None,
+        expected_asset: str | None = None,
+        method: str = "GET",
+        request_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         script = self.service_dir / "src" / "index.mjs"
         if not script.exists():
             raise ValueError(f"CDP x402 service script not found: {script}")
 
-        result = subprocess.run(
-            ["node", str(script), "buy", "--url", resource_url],
+        command = ["node", str(script), "buy", "--url", resource_url]
+        # Spending the gateway's own account is not a reason to skip the
+        # approved-terms guard: partial terms would leave the signer free to
+        # accept whatever the resource server asks for, so they are all or
+        # nothing.
+        approved_terms = {
+            "--max-atomic": str(max_atomic or "").strip(),
+            "--expected-receiver": str(expected_receiver or "").strip(),
+            "--expected-asset": str(expected_asset or "").strip(),
+        }
+        supplied = [flag for flag, value in approved_terms.items() if value]
+        if supplied and len(supplied) != len(approved_terms):
+            missing = sorted(
+                flag.removeprefix("--")
+                for flag, value in approved_terms.items()
+                if not value
+            )
+            raise ValueError(
+                "refusing to pay without approved terms: " + ", ".join(missing)
+            )
+        for flag, value in approved_terms.items():
+            if value:
+                command += [flag, value]
+        if str(method or "GET").upper() != "GET":
+            command += ["--method", str(method).upper()]
+        if request_body is not None:
+            command += ["--body-json", json.dumps(request_body)]
+
+        result = self.runner(
+            command,
             cwd=str(self.service_dir),
             check=False,
             capture_output=True,

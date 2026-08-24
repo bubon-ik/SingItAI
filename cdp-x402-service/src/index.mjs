@@ -72,7 +72,18 @@ async function main() {
 
   if (command === "buy") {
     const url = requiredOption(options, "url");
-    const result = await buyPaidResource(url);
+    // The gateway account pays for free-trial web searches, which are a POST
+    // with a query body and carry the same approved terms a user purchase
+    // does. Plain GET buys pass none of these and behave as before.
+    const caps = {
+      maxAtomic: options["max-atomic"],
+      expectedReceiver: options["expected-receiver"],
+      expectedAsset: options["expected-asset"],
+    };
+    const result = await buyPaidResource(url, caps, {
+      method: options.method || "GET",
+      body: options["body-json"] ? JSON.parse(options["body-json"]) : null,
+    });
     writeJson(result);
     return;
   }
@@ -169,9 +180,18 @@ async function getCdpAccount() {
   return account;
 }
 
-async function buyPaidResource(url) {
+async function buyPaidResource(url, caps = {}, request = {}) {
   const cdpAccount = await getCdpAccount();
-  return buyPaidResourceWithSigner(url, cdpAccount);
+  const hasCaps = Boolean(
+    caps.maxAtomic || caps.expectedReceiver || caps.expectedAsset,
+  );
+  return buyPaidResourceWithSigner(url, cdpAccount, caps, {
+    // Terms given means terms enforced: all three or none, checked on the
+    // Python side before we are called.
+    enforceCaps: hasCaps,
+    method: request.method || "GET",
+    body: request.body ?? null,
+  });
 }
 
 async function buyPaidResourceWithPrivateKey(url, caps = {}, request = {}) {

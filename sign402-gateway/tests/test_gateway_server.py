@@ -7973,3 +7973,77 @@ class UserWalletBaseX402PostTests(unittest.TestCase):
                     method="POST",
                     request_body={},
                 )
+
+
+class GatewayWalletSearchPaymentTests(unittest.TestCase):
+    """The gateway's own account pays for the free-trial searches.
+
+    It is the same lane as a user purchase and gets the same guard: paying
+    from our wallet is not a reason to skip the approved-terms check.
+    """
+
+    def _client(self, runner):
+        from sign402_gateway.server import CdpBaseX402PaymentClient
+
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        service_dir = Path(tmpdir.name)
+        script = service_dir / "src" / "index.mjs"
+        script.parent.mkdir(parents=True)
+        script.write_text("// test", encoding="utf-8")
+        return CdpBaseX402PaymentClient(service_dir, runner=runner)
+
+    def _completed(self):
+        return subprocess.CompletedProcess(
+            args=["node"],
+            returncode=0,
+            stdout=json.dumps({"ok": True, "status": 200, "body": {}}),
+            stderr="",
+        )
+
+    def test_a_post_with_approved_terms_reaches_the_node_buyer(self):
+        runner = Mock(return_value=self._completed())
+        client = self._client(runner)
+
+        result = client(
+            "https://api.exa.ai/search",
+            max_atomic="7000",
+            expected_receiver="0x6d6E695b09861467c7d462f5AAF31cF3540B9192",
+            expected_asset="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            method="POST",
+            request_body={"query": "q", "numResults": 3},
+        )
+
+        self.assertTrue(result["ok"])
+        args = runner.call_args.args[0]
+        self.assertEqual(args[2:5], ["buy", "--url", "https://api.exa.ai/search"])
+        self.assertIn("--max-atomic", args)
+        self.assertIn("--expected-receiver", args)
+        self.assertIn("--method", args)
+        self.assertIn("POST", args)
+        self.assertIn(json.dumps({"query": "q", "numResults": 3}), args)
+
+    def test_partial_terms_never_reach_the_signer(self):
+        runner = Mock()
+        client = self._client(runner)
+
+        with self.assertRaises(ValueError):
+            client(
+                "https://api.exa.ai/search",
+                max_atomic="7000",
+                method="POST",
+                request_body={"query": "q"},
+            )
+
+        runner.assert_not_called()
+
+    def test_the_plain_get_purchase_is_unchanged(self):
+        runner = Mock(return_value=self._completed())
+        client = self._client(runner)
+
+        client("https://x402.example/paid")
+
+        args = runner.call_args.args[0]
+        self.assertEqual(args[2:5], ["buy", "--url", "https://x402.example/paid"])
+        self.assertNotIn("--method", args)
+        self.assertNotIn("--max-atomic", args)

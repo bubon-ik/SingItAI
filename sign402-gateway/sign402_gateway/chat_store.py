@@ -56,6 +56,9 @@ class ChatSession:
     policy_expires_at: int = 0
     policy_expired: bool = False
     model: str = ""
+    searches_this_window: int = 0
+    searches_total: int = 0
+    search_paused: bool = False
 
 
 class ChatStore:
@@ -129,6 +132,49 @@ class ChatStore:
                 WHERE user_id = ?
                 """,
                 (amount, self.now(), user_id),
+            )
+            return self._to_session(self._row(db, user_id))
+
+    # -- search ---------------------------------------------------------------
+
+    def record_search(self, user_id: str) -> ChatSession:
+        """Count one delivered search. Money is not tracked here.
+
+        A search is metered in searches, not dollars: the failure mode users
+        react to is "it kept googling", not the eleven cents.
+        """
+        user_id = _user_id(user_id)
+        with self.lock, self._database() as db:
+            self._rolled_over(db, self._ensure_row(db, user_id))
+            db.execute(
+                """
+                UPDATE chat_sessions
+                SET searches_this_window = searches_this_window + 1,
+                    searches_total = searches_total + 1,
+                    updated_at = ?
+                WHERE user_id = ?
+                """,
+                (self.now(), user_id),
+            )
+            return self._to_session(self._row(db, user_id))
+
+    def set_search_paused(self, user_id: str, paused: bool) -> ChatSession:
+        """Stop paid search without stopping the chat.
+
+        Search and chat pay different merchants. A binding that broke for one
+        says nothing about the other, so pausing search must leave the chat
+        answering.
+        """
+        user_id = _user_id(user_id)
+        with self.lock, self._database() as db:
+            self._ensure_row(db, user_id)
+            db.execute(
+                """
+                UPDATE chat_sessions
+                SET search_paused = ?, updated_at = ?
+                WHERE user_id = ?
+                """,
+                (1 if paused else 0, self.now(), user_id),
             )
             return self._to_session(self._row(db, user_id))
 
@@ -379,7 +425,10 @@ class ChatStore:
         db.execute(
             """
             UPDATE chat_sessions
-            SET window_start = ?, spent_atomic = 0, updated_at = ?
+            SET window_start = ?,
+                spent_atomic = 0,
+                searches_this_window = 0,
+                updated_at = ?
             WHERE user_id = ?
             """,
             (current, self.now(), row["user_id"]),
@@ -416,6 +465,9 @@ class ChatStore:
             policy_expires_at=expires_at,
             policy_expired=bool(expires_at) and self.now() >= expires_at,
             model=str(row["model"] or ""),
+            searches_this_window=int(row["searches_this_window"] or 0),
+            searches_total=int(row["searches_total"] or 0),
+            search_paused=bool(row["search_paused"]),
         )
 
     def _init_db(self) -> None:
@@ -434,6 +486,9 @@ class ChatStore:
                     daily_cap_atomic INTEGER NOT NULL DEFAULT 0,
                     policy_expires_at INTEGER NOT NULL DEFAULT 0,
                     model TEXT NOT NULL DEFAULT '',
+                    searches_this_window INTEGER NOT NULL DEFAULT 0,
+                    searches_total INTEGER NOT NULL DEFAULT 0,
+                    search_paused INTEGER NOT NULL DEFAULT 0,
                     prefund_claimed_at INTEGER,
                     updated_at INTEGER NOT NULL
                 )
@@ -465,6 +520,9 @@ class ChatStore:
         ("policy_expires_at", "INTEGER NOT NULL DEFAULT 0"),
         ("model", "TEXT NOT NULL DEFAULT ''"),
         ("prefund_claimed_at", "INTEGER"),
+        ("searches_this_window", "INTEGER NOT NULL DEFAULT 0"),
+        ("searches_total", "INTEGER NOT NULL DEFAULT 0"),
+        ("search_paused", "INTEGER NOT NULL DEFAULT 0"),
     )
 
     def _migrate(self, db: sqlite3.Connection) -> None:

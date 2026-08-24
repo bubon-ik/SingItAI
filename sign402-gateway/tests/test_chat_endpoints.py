@@ -243,6 +243,31 @@ class MessageTests(ChatEndpointTestCase):
         self.assertEqual(body["costAtomic"], 3_000)
         self.assertEqual(body["remainingWindowAtomic"], 4_997_000)
 
+    def test_the_web_footer_travels_with_the_answer(self):
+        server = self.authenticated(ChatDummyServer())
+        server.chat_service.send.return_value = self.make_result(
+            web_footer="searched the web · $0.007 · 19 searches left today"
+        )
+        handler = self.make_handler(
+            "/agent/chat/message",
+            {"telegramUserId": USER_ID, "text": "eth price now"},
+            server=server,
+        )
+        body = self.response_json(handler)
+        self.assertEqual(
+            body["webFooter"], "searched the web · $0.007 · 19 searches left today"
+        )
+
+    def test_an_answer_without_a_search_carries_an_empty_footer(self):
+        server = self.authenticated(ChatDummyServer())
+        server.chat_service.send.return_value = self.make_result()
+        handler = self.make_handler(
+            "/agent/chat/message",
+            {"telegramUserId": USER_ID, "text": "hi"},
+            server=server,
+        )
+        self.assertEqual(self.response_json(handler)["webFooter"], "")
+
     def test_window_exhausted_is_a_clean_refusal_not_a_crash(self):
         server = self.authenticated(ChatDummyServer())
         server.chat_service.send.side_effect = WindowExhausted(

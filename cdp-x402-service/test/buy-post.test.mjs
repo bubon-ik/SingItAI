@@ -55,3 +55,35 @@ test("a different asset is refused before signing", () => {
   );
   assert.throws(() => select(2, [requirement({ asset: "0xbadc0ffee" })])) ;
 });
+
+// The gateway's own account pays for the free-trial searches, and it POSTs a
+// query body. The guard must apply there exactly as it does to a user wallet:
+// our money is still money.
+test("a search requirement is selected when the terms match", () => {
+  const EXA = "0x6d6E695b09861467c7d462f5AAF31cF3540B9192";
+  const select = makePaymentRequirementsSelector(
+    { maxAtomic: "7000", expectedReceiver: EXA, expectedAsset: USDC },
+    { requireAll: true },
+  );
+  assert.ok(
+    select(2, [
+      requirement({ payTo: EXA, amount: "7000", maxTimeoutSeconds: 60 }),
+    ]),
+  );
+});
+
+test("a search payout to an unexpected address is refused before signing", () => {
+  const EXA = "0x6d6E695b09861467c7d462f5AAF31cF3540B9192";
+  const select = makePaymentRequirementsSelector(
+    { maxAtomic: "7000", expectedReceiver: EXA, expectedAsset: USDC },
+    { requireAll: true },
+  );
+  assert.throws(() =>
+    select(2, [
+      requirement({
+        payTo: "0xB98eF29eb2be19Ae646A8FC0248255B90A332dbC",
+        amount: "7000",
+      }),
+    ]),
+  );
+});
