@@ -1132,6 +1132,13 @@ def _chat_answer_text(user_id: str, result: dict) -> str:
     remaining = _usd_from_atomic(remaining_atomic)
     footer = f"{cost} · {remaining} left"
 
+    # A paid web search is a separate charge to a separate merchant, so it gets
+    # its own line rather than being folded into the message cost. Empty
+    # whenever the turn did not search, which is most turns.
+    web = str(result.get("webFooter", "") or "").strip()
+    if web:
+        footer = f"{web}\n{footer}"
+
     warning = ""
     cap = result.get("dailyCapAtomic")
     state = _CHAT_MODE_USERS.get(str(user_id))

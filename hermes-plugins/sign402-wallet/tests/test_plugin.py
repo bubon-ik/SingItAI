@@ -5204,6 +5204,28 @@ class ChatFooterShowsSpendableCreditTests(unittest.TestCase):
 
         self.assertIn("$0.003", text)
 
+    def test_a_paid_web_search_is_shown_under_the_answer(self):
+        plugin = load_plugin()
+        text = plugin._chat_answer_text(
+            "u1",
+            self.result(
+                webFooter="searched the web · $0.007 · 19 searches left today"
+            ),
+        )
+
+        self.assertIn("searched the web", text)
+        self.assertIn("$0.007", text)
+        # The chat's own meter is not replaced by it.
+        self.assertIn("$4.90", text)
+
+    def test_an_answer_without_a_search_reads_exactly_as_before(self):
+        plugin = load_plugin()
+
+        self.assertEqual(
+            plugin._chat_answer_text("u1", self.result(webFooter="")),
+            plugin._chat_answer_text("u1", self.result()),
+        )
+
     def test_credit_running_out_is_visible(self):
         plugin = load_plugin()
         text = plugin._chat_answer_text("u1", self.result(outstandingAtomic=1_000))
