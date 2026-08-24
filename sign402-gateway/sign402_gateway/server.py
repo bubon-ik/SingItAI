@@ -2939,7 +2939,9 @@ def build_server(
                 store=server.chat_service.store,
                 settle_from_gateway=lambda requirement, *, user_id, request_body: (
                     _settle_search_from_gateway(
-                        server, requirement, request_body=request_body
+                        base_payment_client,
+                        requirement,
+                        request_body=request_body,
                     )
                 ),
                 settle_from_user=lambda requirement, *, user_id, request_body: (
@@ -2968,15 +2970,22 @@ def build_server(
 
 
 def _settle_search_from_gateway(
-    server, requirement: dict[str, Any], *, request_body: dict[str, Any]
+    pay: Callable[..., dict[str, Any]],
+    requirement: dict[str, Any],
+    *,
+    request_body: dict[str, Any],
 ) -> dict[str, Any]:
     """Pay for a free-trial search from the gateway's own account.
 
     "Free" can only mean paid by someone else — Exa charges for every call.
     The approved terms are the ones the client already checked against the
     binding, and the node guard checks them again before signing.
+
+    The payment client is passed in rather than read off the server: it is a
+    local in the builder and never lived on the server object, which is a
+    difference no test sees until someone actually pays.
     """
-    return server.base_payment_client(
+    return pay(
         str(requirement.get("resource") or "") or EXA_SEARCH_URL,
         max_atomic=str(requirement.get("amount") or ""),
         expected_receiver=str(requirement.get("payTo") or ""),

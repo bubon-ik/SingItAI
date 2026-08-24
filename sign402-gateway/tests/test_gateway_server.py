@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -8047,3 +8048,73 @@ class GatewayWalletSearchPaymentTests(unittest.TestCase):
         self.assertEqual(args[2:5], ["buy", "--url", "https://x402.example/paid"])
         self.assertNotIn("--method", args)
         self.assertNotIn("--max-atomic", args)
+
+
+class SearchSettleHelperTests(unittest.TestCase):
+    """The settle helpers must not reach through the server for a collaborator.
+
+    A missing attribute here is invisible until someone pays: the search
+    client catches the failure, logs it, and answers without the web. That is
+    how `user_wallet_base_x402_client` survived to production once already.
+    """
+
+    def test_the_gateway_settle_uses_the_client_it_was_given(self):
+        from sign402_gateway.server import _settle_search_from_gateway
+
+        calls = []
+
+        def pay(url, **kwargs):
+            calls.append((url, kwargs))
+            return {"ok": True, "status": 200, "body": {"results": []}}
+
+        result = _settle_search_from_gateway(
+            pay,
+            {
+                "resource": "https://api.exa.ai/search",
+                "amount": "7000",
+                "payTo": "0x6d6E695b09861467c7d462f5AAF31cF3540B9192",
+                "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            },
+            request_body={"query": "q", "numResults": 3},
+        )
+
+        self.assertTrue(result["ok"])
+        url, kwargs = calls[0]
+        self.assertEqual(url, "https://api.exa.ai/search")
+        self.assertEqual(kwargs["method"], "POST")
+        self.assertEqual(kwargs["max_atomic"], "7000")
+        self.assertEqual(
+            kwargs["expected_receiver"],
+            "0x6d6E695b09861467c7d462f5AAF31cF3540B9192",
+        )
+        self.assertEqual(kwargs["request_body"], {"query": "q", "numResults": 3})
+
+    def test_every_attribute_the_settle_helpers_reach_for_exists(self):
+        """The check the AttributeError outage did not have.
+
+        Reads the helpers' own source for `server.<name>` and asserts the
+        built server actually carries each one.
+        """
+        import inspect
+
+        from sign402_gateway import server as server_module
+
+        names = set()
+        for helper in (
+            server_module._settle_search_from_user,
+            server_module._settle_chat_prefund,
+        ):
+            names.update(
+                re.findall(r"\bserver\.([a-z_0-9]+)", inspect.getsource(helper))
+            )
+
+        self.assertTrue(names, "no server attributes found to check")
+        missing = [
+            name
+            for name in sorted(names)
+            if name
+            not in inspect.signature(
+                server_module.Sign402GatewayServer.__init__
+            ).parameters
+        ]
+        self.assertEqual(missing, [])
