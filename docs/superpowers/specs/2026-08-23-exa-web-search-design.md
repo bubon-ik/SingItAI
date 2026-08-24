@@ -169,7 +169,7 @@ SIGN402_AI_SEARCH_ENABLED=0
 SIGN402_AI_SEARCH_MERCHANT_PAYTO=0x6d6E695b09861467c7d462f5AAF31cF3540B9192
 SIGN402_AI_SEARCH_FREE_CALLS=0                  # per user, lifetime; 0 = no trial
 SIGN402_AI_SEARCH_MAX_PER_CALL_ATOMIC=20000     # $0.02 ceiling
-SIGN402_AI_SEARCH_MAX_PER_DAY=20                # searches, not dollars
+SIGN402_AI_SEARCH_MAX_PER_DAY=20                # searches, not dollars; 0 = no cap
 SIGN402_AI_SEARCH_RESULTS=3
 SIGN402_AI_SEARCH_URL=https://api.exa.ai/search
 ```

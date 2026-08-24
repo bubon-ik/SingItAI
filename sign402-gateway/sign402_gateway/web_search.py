@@ -165,6 +165,8 @@ class SearchConfig:
     network: str = BASE_MAINNET
     asset: str = BASE_USDC
     max_per_call_atomic: int = 20_000
+    # Searches per user per UTC day. 0 removes the cap entirely, which also
+    # removes the only guard against a bug that searches on every message.
     max_per_day: int = 20
     # No trial by default: a search spends the user's own wallet from the
     # first call. Set a number here and the gateway account pays for that
@@ -185,7 +187,9 @@ class SearchOutcome:
     results: tuple[SearchHit, ...]
     cost_atomic: int
     free: bool
-    searches_left_today: int
+    # None when there is no daily cap: "0 left" and "no limit" must not look
+    # the same to the user.
+    searches_left_today: int | None
 
 
 class InMemorySearchLedger:
@@ -252,7 +256,7 @@ class WebSearchClient:
         if self.ledger.is_paused(user_id):
             raise SearchUnavailable("Web search is paused for this account.")
         used_today = self.ledger.count_today(user_id)
-        if used_today >= self.config.max_per_day:
+        if self.config.max_per_day and used_today >= self.config.max_per_day:
             raise SearchBudgetExhausted(
                 "Today's web searches are used up. They reset at 00:00 UTC."
             )
@@ -306,8 +310,10 @@ class WebSearchClient:
             results=results,
             cost_atomic=0 if free else amount,
             free=free,
-            searches_left_today=max(
-                0, self.config.max_per_day - self.ledger.count_today(user_id)
+            searches_left_today=(
+                max(0, self.config.max_per_day - self.ledger.count_today(user_id))
+                if self.config.max_per_day
+                else None
             ),
         )
 
@@ -515,6 +521,8 @@ def _clean(text: str) -> str:
 
 def _footer(outcome: SearchOutcome) -> str:
     dollars = outcome.cost_atomic / 1_000_000
+    if outcome.searches_left_today is None:
+        return f"searched the web · ${dollars:.3f}"
     return (
         f"searched the web · ${dollars:.3f} · "
         f"{outcome.searches_left_today} searches left today"

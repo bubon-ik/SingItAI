@@ -297,6 +297,15 @@ class SearchClientTest(unittest.TestCase):
 
         self.assertEqual(len(self.user_settle.calls), 2)
 
+    def test_a_zero_limit_means_no_limit(self):
+        client = self.build(max_per_day=0, free_calls=0)
+
+        for _ in range(25):
+            outcome = client.search("u1", "q", wallet_address=WALLET)
+
+        self.assertEqual(len(self.user_settle.calls), 25)
+        self.assertIsNone(outcome.searches_left_today)
+
     def test_free_searches_count_against_the_daily_limit(self):
         from sign402_gateway.web_search import SearchBudgetExhausted
 
@@ -618,6 +627,25 @@ class AnswerWithWebTest(unittest.TestCase):
 
         self.assertIn("$0.007", answer.footer)
         self.assertIn("19", answer.footer)
+
+    def test_an_unlimited_footer_shows_the_cost_and_no_count(self):
+        from sign402_gateway.web_search import SearchHit, SearchOutcome
+
+        answer = self.run_turn(
+            "eth price now",
+            answers=["ok"],
+            search=StubSearch(
+                outcome=SearchOutcome(
+                    results=(SearchHit("https://a.example", "A", "alpha"),),
+                    cost_atomic=7000,
+                    free=False,
+                    searches_left_today=None,
+                )
+            ),
+        )
+
+        self.assertIn("$0.007", answer.footer)
+        self.assertNotIn("left today", answer.footer)
 
     def test_a_free_search_shows_zero_rather_than_hiding_the_meter(self):
         from sign402_gateway.web_search import SearchHit, SearchOutcome
