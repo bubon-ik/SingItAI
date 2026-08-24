@@ -146,12 +146,16 @@ no local ledger. One call, one payment.
 
 Reuse whatever the Venice client uses to settle, with the prefund logic removed.
 
-**Who pays for a free search.** Exa charges for every call, so "free" can only
-mean *paid by someone else*. The first `SIGN402_AI_SEARCH_FREE_CALLS` per user
-settle from the gateway's own CDP account; after that they settle from the
-user's managed wallet. Two settle callables, one client, chosen per call —
-the user's wallet is never touched during the trial, so a search can work
-before any budget is approved.
+**Who pays.** The user, from their own managed wallet, from the first search.
+
+Exa charges for every call, so a "free" search only means *paid by someone
+else* — the gateway. That machinery stays (two settle callables, one client,
+chosen per call) but `SIGN402_AI_SEARCH_FREE_CALLS` defaults to 0, so the
+gateway account is not touched unless an operator deliberately funds a trial.
+
+The cost of switching it off is the case the trial covered: a new user whose
+wallet holds no USDC gets "the web was unavailable" instead of a current
+answer, because the payment simply fails.
 
 ---
 
@@ -163,7 +167,7 @@ shown and limited:
 ```env
 SIGN402_AI_SEARCH_ENABLED=0
 SIGN402_AI_SEARCH_MERCHANT_PAYTO=0x6d6E695b09861467c7d462f5AAF31cF3540B9192
-SIGN402_AI_SEARCH_FREE_CALLS=5                  # per user, lifetime
+SIGN402_AI_SEARCH_FREE_CALLS=0                  # per user, lifetime; 0 = no trial
 SIGN402_AI_SEARCH_MAX_PER_CALL_ATOMIC=20000     # $0.02 ceiling
 SIGN402_AI_SEARCH_MAX_PER_DAY=20                # searches, not dollars
 SIGN402_AI_SEARCH_RESULTS=3
@@ -245,11 +249,11 @@ returned `SearchUnavailable`, which is the path that keeps the chat answering.
 2. Cache identical queries across users for a few minutes? Cuts cost
    noticeably at scale and leaks nothing, since queries are not user-specific
    once answered — but it does mean one user's spend subsidises another's.
-3. ~~Should search be free for the first N per user?~~ **Decided: yes, the
-   first 5 searches per user are free** — no policy approval, no wallet
-   balance needed, the gateway eats 3.5 cents. At $0.007 generosity costs
-   nothing and a first impression costs a lot. It also routes around the
-   unfixed Venice free-tier problem: a new user gets current answers before
-   they ever approve a budget. Free searches still count against
-   `SIGN402_AI_SEARCH_MAX_PER_DAY` and still show their cost as $0.000 in the
-   footer, so the meter never lies about what happened.
+3. ~~Should search be free for the first N per user?~~ **Decided: no.** The
+   trial was specified as five free searches and built, then dropped before
+   launch: the gateway's wallet is not the place to absorb other people's
+   spending, and at scale the 3.5 cents per user is a bill nobody agreed to.
+   Users pay from their own wallet from the first search. The trial remains
+   available as `SIGN402_AI_SEARCH_FREE_CALLS`, off by default; when it is on,
+   free searches still count against the daily limit and still show `$0.000`
+   in the footer, so the meter never lies about what happened.

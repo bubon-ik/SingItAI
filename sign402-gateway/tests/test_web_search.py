@@ -208,8 +208,18 @@ class SearchClientTest(unittest.TestCase):
 
     # -- the free trial ---------------------------------------------------
 
-    def test_first_search_is_free_to_the_user_and_paid_by_the_gateway(self):
-        client = self.build()
+    def test_the_user_pays_from_the_first_search(self):
+        client = self.build(free_calls=0)
+
+        outcome = client.search("u1", "eth price now", wallet_address=WALLET)
+
+        self.assertEqual(outcome.cost_atomic, 7000)
+        self.assertFalse(outcome.free)
+        self.assertEqual(len(self.user_settle.calls), 1)
+        self.assertEqual(self.gateway_settle.calls, [])
+
+    def test_a_configured_trial_is_paid_by_the_gateway(self):
+        client = self.build(free_calls=5)
 
         outcome = client.search("u1", "eth price now", wallet_address=WALLET)
 
@@ -644,6 +654,16 @@ class EnvBuilderTest(unittest.TestCase):
     def test_enabling_it_without_a_merchant_is_refused(self):
         with self.assertRaises(ValueError):
             self.build({"SIGN402_AI_SEARCH_ENABLED": "1"})
+
+    def test_there_is_no_free_trial_unless_it_is_asked_for(self):
+        client = self.build(
+            {
+                "SIGN402_AI_SEARCH_ENABLED": "1",
+                "SIGN402_AI_SEARCH_MERCHANT_PAYTO": BOUND_PAY_TO,
+            }
+        )
+
+        self.assertEqual(client.config.free_calls, 0)
 
     def test_the_limits_come_from_the_environment(self):
         client = self.build(

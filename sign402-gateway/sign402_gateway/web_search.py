@@ -166,7 +166,10 @@ class SearchConfig:
     asset: str = BASE_USDC
     max_per_call_atomic: int = 20_000
     max_per_day: int = 20
-    free_calls: int = 5
+    # No trial by default: a search spends the user's own wallet from the
+    # first call. Set a number here and the gateway account pays for that
+    # many per user instead.
+    free_calls: int = 0
     results: int = 3
 
 
@@ -561,7 +564,7 @@ def build_web_search_from_env(
                 "SIGN402_AI_SEARCH_MAX_PER_CALL_ATOMIC", 20_000
             ),
             max_per_day=number("SIGN402_AI_SEARCH_MAX_PER_DAY", 20),
-            free_calls=number("SIGN402_AI_SEARCH_FREE_CALLS", 5),
+            free_calls=number("SIGN402_AI_SEARCH_FREE_CALLS", 0),
             results=number("SIGN402_AI_SEARCH_RESULTS", 3),
         ),
         purchases_paused=purchases_paused,
