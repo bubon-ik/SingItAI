@@ -293,8 +293,17 @@ class WebSearchClient:
         # Paid. From here the search is billed whatever came back — including
         # nothing. A delivered service that found no pages is still delivered.
         self.ledger.record(user_id, 0 if free else amount)
+        results = _hits(settlement.get("body"))
+        # Enough to answer "did it search, and what did that cost" from the
+        # journal. Never the query, never a retrieved page.
+        logger.info(
+            "web search paid: atomic=%s payer=%s results=%s",
+            0 if free else amount,
+            "gateway" if free else "user",
+            len(results),
+        )
         return SearchOutcome(
-            results=_hits(settlement.get("body")),
+            results=results,
             cost_atomic=0 if free else amount,
             free=free,
             searches_left_today=max(

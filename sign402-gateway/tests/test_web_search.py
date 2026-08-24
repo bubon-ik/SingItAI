@@ -388,6 +388,17 @@ class SearchClientTest(unittest.TestCase):
         joined = "\n".join(logs.output)
         self.assertNotIn("embarrassing", joined)
 
+    def test_a_paid_search_leaves_a_trace_without_the_query(self):
+        client = self.build(free_calls=0)
+
+        with self.assertLogs("sign402_gateway.web_search", level="INFO") as logs:
+            client.search("u1", "my embarrassing query", wallet_address=WALLET)
+
+        joined = "\n".join(logs.output)
+        self.assertIn("7000", joined)
+        self.assertIn("results=2", joined)
+        self.assertNotIn("embarrassing", joined)
+
     def test_the_request_body_carries_the_query_and_the_result_count(self):
         client = self.build()
         client.search("u1", "eth price now", wallet_address=WALLET)
