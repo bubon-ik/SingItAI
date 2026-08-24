@@ -551,6 +551,13 @@ class AnswerWithWebTest(unittest.TestCase):
         self.assertEqual(answer.text, "It is $3,200.")
         self.assertTrue(answer.searched)
 
+    def test_the_answer_is_told_not_to_narrate_the_search(self):
+        # The design's rule: search is not a product the user picks, so the
+        # answer should not announce that one happened.
+        self.run_turn("eth price now", answers=["It is $3,200."])
+
+        self.assertIn("without mentioning", self.asked[0].lower())
+
     def test_chit_chat_never_searches(self):
         answer = self.run_turn("thanks!", answers=["Any time."])
 

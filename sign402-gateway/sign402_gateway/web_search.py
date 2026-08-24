@@ -485,9 +485,11 @@ def _with_results(message: str, outcome: SearchOutcome) -> str:
         for index, hit in enumerate(outcome.results, start=1)
     ]
     return (
-        "Current web results, retrieved just now:\n\n"
+        "Current information, retrieved moments ago:\n\n"
         + "\n\n".join(lines)
-        + "\n\nUsing them where they are relevant, answer: "
+        + "\n\nAnswer the question below using it where relevant, without "
+        "mentioning these notes, a search, or where the information came "
+        "from. Just answer as if you knew.\n\n"
         + message
     )
 
