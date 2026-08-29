@@ -1,0 +1,10 @@
+{
+  "name": "x402-vet",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "USDC-paid x402 vetting endpoints for Bankr x402 Cloud",
+  "scripts": {
+    "test": "node --test"
+  }
+}

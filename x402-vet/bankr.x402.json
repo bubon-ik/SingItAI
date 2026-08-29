@@ -1,0 +1,161 @@
+{
+  "network": "base",
+  "currency": "USDC",
+  "tokenAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  "services": {
+    "vet-shortlist": {
+      "description": "Human-readable shortlist of x402 services worth calling: 575 traction-rated services ranked by volume net of the largest buyer, plus ~42,000 facilitator-listed endpoints on request",
+      "price": "0.02",
+      "currency": "USDC",
+      "tokenAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "paymentScheme": "exact",
+      "category": "security",
+      "tags": [
+        "x402",
+        "discovery",
+        "vetting",
+        "agent-payments",
+        "base",
+        "reputation"
+      ],
+      "schema": {
+        "input": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "description": "Directory category to filter by, e.g. AI. Omit for all categories"
+            },
+            "network": {
+              "type": "string",
+              "description": "Settlement network the service must support, e.g. base"
+            },
+            "maxPriceUsd": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Highest acceptable minimum price per call, in USD"
+            },
+            "minBuyers": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Fewest distinct 30-day buyers to accept. Default 2"
+            },
+            "minUptime30d": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "Lowest acceptable 30-day uptime percentage. Default 90"
+            },
+            "minNetVolume30d": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Lowest acceptable 30-day volume net of the largest buyer, in USD. Default 10"
+            },
+            "minUsdPerBuyer": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Lowest acceptable revenue per buyer, in USD. Default 0.1"
+            },
+            "includeThin": {
+              "type": "boolean",
+              "description": "Include services whose demand is one relationship or too small to read. Default false"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "description": "Most results to return, 1 to 100. Default 20"
+            },
+            "probe": {
+              "type": "boolean",
+              "description": "Run the unpaid 402 handshake against the top 50 results, aimed at each seller's published paid path. Rated rows may require one detail request plus the probe. Default false"
+            },
+            "includeUnrated": {
+              "type": "boolean",
+              "description": "Also return endpoints from the facilitator catalogs that have prices and receivers but no measured demand at all. Default false"
+            }
+          }
+        },
+        "output": {
+          "type": "string",
+          "description": "Human-readable Markdown shortlist with verdicts, prices, networks, live payment checks, evidence, coverage, freshness and attribution"
+        }
+      },
+      "files": {
+        "enabled": true,
+        "roots": [
+          "/x402/vet-shortlist"
+        ],
+        "read": true,
+        "write": true,
+        "delete": false
+      }
+    },
+    "vet-service": {
+      "description": "Human-readable review of one x402 endpoint before paying it: traction directory first, then ~42,000 facilitator-listed endpoints, always with a live 402 handshake",
+      "price": "0.005",
+      "currency": "USDC",
+      "tokenAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "methods": [
+        "GET",
+        "POST"
+      ],
+      "paymentScheme": "exact",
+      "category": "security",
+      "tags": [
+        "x402",
+        "vetting",
+        "agent-payments",
+        "base",
+        "reputation"
+      ],
+      "schema": {
+        "input": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Directory slug of the service to vet"
+            },
+            "url": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https://",
+              "description": "Public HTTPS resource URL of the endpoint to vet. Resolves against the facilitator catalogs when the traction directory has never heard of it"
+            }
+          },
+          "oneOf": [
+            {
+              "required": [
+                "slug"
+              ]
+            },
+            {
+              "required": [
+                "url"
+              ]
+            }
+          ]
+        },
+        "output": {
+          "type": "string",
+          "description": "Human-readable Markdown review with a recommendation, price, network, live payment check, recipient comparison, evidence, freshness and attribution"
+        }
+      },
+      "files": {
+        "enabled": true,
+        "roots": [
+          "/x402/vet-service"
+        ],
+        "read": true,
+        "write": true,
+        "delete": false
+      }
+    }
+  }
+}
