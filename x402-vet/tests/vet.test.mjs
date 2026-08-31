@@ -471,7 +471,7 @@ function withBazaar({ total, pageSize, failing = [], probeImpl } = {}) {
     const href = String(url);
     if (href.startsWith(DIRECTORY)) return directoryReturning(FIXTURE)(href, init);
 
-    const source = Object.keys({ payai: 1, coinbase: 1, thirdweb: 1, dexter: 1 }).find((n) =>
+    const source = ["payai", "coinbase", "thirdweb", "dexter", "ultravioletadao"].find((n) =>
       href.includes(n),
     );
     if (source && href.includes("/discovery/resources")) {
@@ -702,6 +702,8 @@ test("deployment sources stay identical and the manifest describes text output",
   const manifest = JSON.parse(await readFile(new URL("../bankr.x402.json", import.meta.url), "utf8"));
   assert.equal(manifest.services["vet-shortlist"].schema.output.type, "string");
   assert.equal(manifest.services["vet-service"].schema.output.type, "string");
+  assert.equal(manifest.services["vet-service"].schema.input.properties.url.pattern, "^https?://");
+  assert.match(manifest.services["vet-shortlist"].description, /40,600/);
   assert.match(manifest.services["vet-shortlist"].schema.input.properties.probe.description, /50/);
 });
 
@@ -730,4 +732,416 @@ test("public handlers return readable Markdown instead of JSON", async () => {
   assert.match(shortlistText, /services worth calling/);
   assert.match(shortlistText, /Healthy — Recommended/);
   assert.doesNotMatch(shortlistText, /^\s*\{/);
+});
+
+// --- the directory's measurement status ---------------------------------------
+
+function tractionFixture(status, over = {}) {
+  return service({
+    slug: `svc-${status}`,
+    name: status,
+    assessment: {
+      reliability_uptime_30d: 100,
+      risk_level: "clean",
+      traction: {
+        status,
+        volume_usd_30d: 500,
+        unique_buyers_30d: 40,
+        top_buyer_share_30d: 0.1,
+        ...over,
+      },
+    },
+  });
+}
+
+test("an unmeasured service is `unrated`, never `thin`", async () => {
+  const rows = [
+    tractionFixture("measured"),
+    tractionFixture("unmeasured-network", { volume_usd_30d: null, unique_buyers_30d: null, top_buyer_share_30d: null }),
+    tractionFixture("no-payto", { volume_usd_30d: null, unique_buyers_30d: null, top_buyer_share_30d: null }),
+  ];
+  const handler = await load("vet-shortlist", directoryReturning(rows));
+  const body = await (await handler(post({ includeThin: true, includeUnrated: true, limit: 10 }))).json();
+
+
+  const byName = Object.fromEntries(body.results.map((r) => [r.name, r]));
+  assert.equal(byName["measured"].verdict, "ok");
+  assert.equal(byName["unmeasured-network"].verdict, "unrated");
+  assert.equal(byName["no-payto"].verdict, "unrated");
+
+  // The reason must state that nothing was measured, not that demand was low.
+  assert.match(byName["unmeasured-network"].why[0], /does not measure/);
+  assert.ok(!byName["unmeasured-network"].why.some((w) => w.includes("little or no distributed demand")));
+});
+
+test("includeThin does not smuggle in services nobody measured", async () => {
+  const rows = [
+    tractionFixture("measured", { volume_usd_30d: 1, unique_buyers_30d: 1 }),
+    tractionFixture("unmeasured-network", { volume_usd_30d: null, unique_buyers_30d: null, top_buyer_share_30d: null }),
+  ];
+  const handler = await load("vet-shortlist", directoryReturning(rows));
+
+  const thinOnly = await (await handler(post({ includeThin: true, minBuyers: 0, minNetVolume30d: 0, minUsdPerBuyer: 0 }))).json();
+  assert.deepEqual(thinOnly.results.map((r) => r.verdict), ["thin"]);
+
+  const unratedOnly = await (await handler(post({ includeUnrated: true, minBuyers: 0, minNetVolume30d: 0, minUsdPerBuyer: 0 }))).json();
+  assert.ok(unratedOnly.results.some((r) => r.verdict === "unrated"));
+  assert.ok(!unratedOnly.results.some((r) => r.verdict === "thin"));
+});
+
+
+test("includeUnrated is not defeated by thresholds that only measured services can meet", async () => {
+  const rows = [
+    tractionFixture("unmeasured-network", {
+      volume_usd_30d: null,
+      unique_buyers_30d: null,
+      top_buyer_share_30d: null,
+    }),
+  ];
+  const handler = await load("vet-shortlist", directoryReturning(rows));
+
+  // Defaults ask for 2 buyers and $10 of net volume. An unmeasured service has
+  // neither figure, and must still be returned when it was explicitly asked for.
+  const body = await (await handler(post({ includeUnrated: true }))).json();
+
+  assert.equal(body.returned, 1);
+  assert.equal(body.results[0].verdict, "unrated");
+});
+
+test("unmeasured status remains authoritative when stale demand fields exist", async () => {
+  const rows = ["a", "b", "c"].map((slug) => service({
+    slug,
+    name: slug,
+    assessment: {
+      reliability_uptime_30d: 100,
+      risk_level: "clean",
+      traction: {
+        status: "unmeasured-network",
+        volume_usd_30d: 500,
+        unique_buyers_30d: 7,
+        top_buyer_share_30d: 0.99,
+      },
+    },
+  }));
+  const handler = await load("vet-shortlist", directoryReturning(rows));
+  const body = await (await handler(post({ includeUnrated: true, limit: 10 }))).json();
+
+  assert.equal(body.returned, 3);
+  assert.ok(body.results.every((r) => r.verdict === "unrated"));
+  assert.ok(body.results.every((r) => !r.why.some((reason) => reason.includes("one buyer accounts"))));
+  assert.ok(body.results.every((r) => r.identicalPairCluster === 0));
+});
+
+test("unresponsive traction has a specific unmeasured reason", async () => {
+  const row = tractionFixture("unresponsive", {
+    volume_usd_30d: null,
+    unique_buyers_30d: null,
+    top_buyer_share_30d: null,
+  });
+  row.status = "offline";
+  const handler = await load("vet-service", directoryReturning([row]));
+  const body = await (await handler(post({ slug: row.slug }))).json();
+
+  assert.equal(body.result.verdict, "check");
+  assert.ok(body.result.why.some((reason) => /suppresses traction.*unresponsive/.test(reason)));
+});
+
+test("a changed receiver requires review for thin and unrated services", async () => {
+  const rows = [
+    tractionFixture("measured", { volume_usd_30d: 1, unique_buyers_30d: 1 }),
+    tractionFixture("unmeasured-network", {
+      volume_usd_30d: null,
+      unique_buyers_30d: null,
+      top_buyer_share_30d: null,
+    }),
+  ];
+
+  for (const row of rows) {
+    const handler = await load(
+      "vet-service",
+      directoryReturning([row], async () =>
+        Response.json({ accepts: [{ payTo: "0xBBBB", network: "eip155:8453", amount: "1000" }] }, { status: 402 }),
+      ),
+    );
+    const body = await (await handler(post({ slug: row.slug }))).json();
+    assert.equal(body.result.payToChanged, true);
+    assert.equal(body.result.verdict, "check");
+  }
+});
+
+test("a pre-status snapshot is refreshed instead of serving stale verdicts", async () => {
+  const store = fileStore();
+  store.disk.set("/x402/vet-shortlist/snapshot.json", JSON.stringify({
+    at: Date.now(),
+    records: [{
+      name: "stale",
+      slug: "stale",
+      resource: "https://stale.example",
+      category: "AI",
+      priceUsd: 0.01,
+      networks: ["base"],
+      uptime30d: 100,
+      netVolume30d: 0,
+      usdPerBuyer: 0,
+      buyers30d: 0,
+      verdict: "thin",
+      why: ["little or no distributed demand measured yet"],
+    }],
+  }));
+  let directoryPulls = 0;
+  const row = tractionFixture("unmeasured-network", {
+    volume_usd_30d: null,
+    unique_buyers_30d: null,
+    top_buyer_share_30d: null,
+  });
+  const handler = await load("vet-shortlist", async (url, init) => {
+    if (String(url).startsWith(DIRECTORY)) directoryPulls += 1;
+    return directoryReturning([row])(url, init);
+  });
+  const body = await (await handler(post({ includeUnrated: true }), store.ctx)).json();
+
+  assert.equal(directoryPulls, 1);
+  assert.equal(body.results[0].slug, row.slug);
+  assert.equal(body.results[0].verdict, "unrated");
+});
+
+test("facilitator data cannot reintroduce a directory service under another verdict", async () => {
+  const row = tractionFixture("measured", { volume_usd_30d: 1, unique_buyers_30d: 1 });
+  row.base_url = "https://duplicate.example";
+  const item = bazaarItem("https://duplicate.example/paid");
+  const handler = await load("vet-shortlist", async (url, init) => {
+    const href = String(url);
+    if (href.startsWith(DIRECTORY)) return directoryReturning([row])(url, init);
+    if (href.includes("/discovery/resources")) {
+      const payai = href.includes("facilitator.payai.network");
+      const offset = Number(new URL(href).searchParams.get("offset") ?? 0);
+      return Response.json({
+        items: payai && offset === 0 ? [item] : [],
+        pagination: { total: payai ? 1 : 0 },
+      });
+    }
+    throw new Error(`unexpected fetch ${href}`);
+  });
+  const body = await (await handler(post({ includeUnrated: true, limit: 10 }))).json();
+
+  assert.equal(body.returned, 0);
+});
+
+test("shortlist markdown states every demand threshold and its unrated scope", async () => {
+  const handler = await loadDefault("vet-shortlist", directoryReturning(FIXTURE));
+  const response = await handler(post({
+    includeUnrated: true,
+    minNetVolume30d: 15,
+    minUsdPerBuyer: 0.5,
+  }));
+  const text = await response.text();
+
+  assert.match(text, /at least \$15 net volume/);
+  assert.match(text, /at least \$0\.5 per buyer/);
+  assert.match(text, /unrated services included without demand thresholds/);
+});
+
+test("service markdown explains an unknown live check", async () => {
+  const handler = await loadDefault(
+    "vet-service",
+    directoryReturning(FIXTURE, async () => new Response("bad request", { status: 400 })),
+  );
+  const text = await (await handler(post({ slug: "healthy" }))).text();
+
+  assert.match(text, /Live payment check: unknown/);
+  assert.match(text, /HTTP 400/);
+});
+
+test("service markdown names a non-USDC live asset", async () => {
+  const asset = "0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42";
+  const handler = await loadDefault(
+    "vet-service",
+    directoryReturning(FIXTURE, async () =>
+      Response.json({ accepts: [{ payTo: "0xAAAA", network: "eip155:8453", asset, amount: "1000" }] }, { status: 402 }),
+    ),
+  );
+  const text = await (await handler(post({ slug: "healthy" }))).text();
+
+  assert.match(text, new RegExp(`Live asset: ${asset}`, "i"));
+});
+
+test("malformed measured demand cannot produce a recommended verdict", async () => {
+  const row = tractionFixture("measured", { top_buyer_share_30d: "99%" });
+  const handler = await load("vet-service", directoryReturning([row]));
+  const body = await (await handler(post({ slug: row.slug }))).json();
+
+  assert.equal(body.result.verdict, "check");
+  assert.ok(body.result.why.some((reason) => reason.includes("malformed demand metrics")));
+});
+
+test("legacy and zero-demand measured records remain distinguishable", async () => {
+  const legacy = service({ slug: "legacy" });
+  const zero = tractionFixture("measured", {
+    volume_usd_30d: 0,
+    unique_buyers_30d: 0,
+    top_buyer_share_30d: null,
+  });
+  const handler = await load("vet-shortlist", directoryReturning([legacy, zero]));
+  const body = await (await handler(post({ includeThin: true, minBuyers: 0, minNetVolume30d: 0, minUsdPerBuyer: 0 }))).json();
+  const bySlug = Object.fromEntries(body.results.map((record) => [record.slug, record]));
+
+  assert.equal(bySlug.legacy.verdict, "ok");
+  assert.equal(bySlug[zero.slug].verdict, "thin");
+});
+
+test("future traction statuses fail closed as unrated", async () => {
+  const row = tractionFixture("future-status", {
+    volume_usd_30d: null,
+    unique_buyers_30d: null,
+    top_buyer_share_30d: null,
+  });
+  const handler = await load("vet-shortlist", directoryReturning([row]));
+  const body = await (await handler(post({ includeUnrated: true }))).json();
+
+  assert.equal(body.results[0].verdict, "unrated");
+  assert.match(body.results[0].why[0], /future-status/);
+});
+
+test("probe targets reject expanded and mapped IPv6 loopback addresses", async () => {
+  let externalFetch = false;
+  const handler = await load("vet-service", async () => {
+    externalFetch = true;
+    return Response.json({});
+  });
+
+  for (const url of ["https://[0:0:0:0:0:0:0:1]/admin", "https://[::ffff:7f00:1]/admin"]) {
+    const response = await handler(post({ url }));
+    assert.equal(response.status, 400);
+  }
+  assert.equal(externalFetch, false);
+});
+
+test("a slow directory leaves no index budget, and the request still answers", async () => {
+  const store = fileStore();
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  // The traction directory burns most of the request budget before the
+  // facilitator index is even reached.
+  const slow = async (url, init) => {
+    const href = String(url);
+    if (href.startsWith(`${DIRECTORY}?`)) {
+      now += 12_000;
+      return Response.json({ data: FIXTURE, meta: { total_pages: 1 } });
+    }
+    if (href.includes("/discovery/resources")) {
+      throw new Error("index must not be fetched with no budget left");
+    }
+    return directoryReturning(FIXTURE)(href, init);
+  };
+
+  try {
+    const handler = await load("vet-service", slow);
+    const res = await handler(post({ url: "https://absent.example/paid" }), store.ctx);
+    assert.equal(res.status, 404);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("partial index progress survives a facilitator that hangs", async () => {
+  const store = fileStore();
+  const handler = await load("vet-shortlist", async (url, init) => {
+    const href = String(url);
+    if (href.startsWith(`${DIRECTORY}?`)) {
+      return Response.json({ data: FIXTURE, meta: { total_pages: 1 } });
+    }
+    if (href.includes("payai") && href.includes("/discovery/resources")) {
+      return Response.json({
+        items: [
+          {
+            resource: "https://slow-seller.example/paid",
+            method: "GET",
+            accepts: [{ network: "eip155:8453", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", amount: "3000", payTo: "0xDDDD" }],
+          },
+        ],
+        pagination: { total: 1 },
+      });
+    }
+    if (href.includes("/discovery/resources")) throw new Error("facilitator down");
+    return Response.json({ accepts: [] }, { status: 402 });
+  });
+
+  const res = await handler(post({ includeUnrated: true }), store.ctx);
+
+  assert.equal(res.status, 200);
+  // What one request managed to index is written down, so the next call starts
+  // from there instead of repeating the work.
+  const saved = JSON.parse(store.disk.get("/x402/vet-shortlist/index.json"));
+  assert.ok(Object.keys(saved.entries).length >= 1);
+});
+
+test("a facilitator that names the field `url` is indexed, not silently dropped", async () => {
+  const store = fileStore();
+  const handler = await load("vet-service", async (url, init) => {
+    const href = String(url);
+    if (href.startsWith(`${DIRECTORY}?`)) {
+      return Response.json({ data: FIXTURE, meta: { total_pages: 1 } });
+    }
+    if (href.includes("ultravioletadao") && href.includes("/discovery/resources")) {
+      return Response.json({
+        items: [
+          {
+            url: "https://uvd-seller.example/paid",
+            accepts: [
+              {
+                network: "eip155:8453",
+                asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                amount: "1000000",
+                payTo: "0xEEEE",
+                scheme: "exact",
+              },
+            ],
+          },
+        ],
+        pagination: { total: 1 },
+      });
+    }
+    if (href.includes("/discovery/resources")) return Response.json({ items: [], pagination: { total: 0 } });
+    return Response.json({ accepts: [] }, { status: 402 });
+  });
+
+  const body = await (await handler(post({ url: "https://uvd-seller.example/paid" }), store.ctx)).json();
+
+  assert.equal(body.ok, true);
+  assert.equal(body.result.verdict, "unrated");
+  assert.equal(body.result.priceUsd, 1);
+  assert.equal(body.source, "ultravioletadao");
+});
+
+test("a plaintext HTTP endpoint is indexed and flagged, not silently dropped", async () => {
+  const store = fileStore();
+  const handler = await load("vet-service", async (url, init) => {
+    const href = String(url);
+    if (href.startsWith(`${DIRECTORY}?`)) {
+      return Response.json({ data: FIXTURE, meta: { total_pages: 1 } });
+    }
+    if (href.includes("payai") && href.includes("/discovery/resources")) {
+      return Response.json({
+        items: [
+          {
+            resource: "http://plaintext-seller.example/paid",
+            accepts: [{ network: "eip155:8453", asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", amount: "3000", payTo: "0xFFFF" }],
+          },
+        ],
+        pagination: { total: 1 },
+      });
+    }
+    if (href.includes("/discovery/resources")) return Response.json({ items: [], pagination: { total: 0 } });
+    throw new Error("a plaintext endpoint must never be probed");
+  });
+
+  const body = await (await handler(post({ url: "http://plaintext-seller.example/paid" }), store.ctx)).json();
+
+  assert.equal(body.ok, true);
+  assert.equal(body.result.insecureTransport, true);
+  assert.equal(body.result.verdict, "check");
+  assert.ok(body.result.why.some((w) => w.includes("altered in transit")));
+  // Indexed, but never contacted: the SSRF guard still refuses a non-HTTPS target.
+  assert.equal(body.result.liveProbe, "unknown");
 });

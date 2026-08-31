@@ -4,7 +4,7 @@
   "tokenAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
   "services": {
     "vet-shortlist": {
-      "description": "Human-readable shortlist of x402 services worth calling: 575 traction-rated services ranked by volume net of the largest buyer, plus ~42,000 facilitator-listed endpoints on request",
+      "description": "Human-readable shortlist of x402 services worth calling: ~600 traction-directory services ranked by volume net of the largest buyer, plus ~40,600 facilitator-listed endpoints on request",
       "price": "0.02",
       "currency": "USDC",
       "tokenAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
@@ -62,7 +62,7 @@
             },
             "includeThin": {
               "type": "boolean",
-              "description": "Include services whose demand is one relationship or too small to read. Default false"
+              "description": "Also return services that were measured and found to have little distributed demand. Distinct from includeUnrated, which returns services that were never measured. Default false"
             },
             "limit": {
               "type": "integer",
@@ -76,7 +76,7 @@
             },
             "includeUnrated": {
               "type": "boolean",
-              "description": "Also return endpoints from the facilitator catalogs that have prices and receivers but no measured demand at all. Default false"
+              "description": "Also return endpoints nobody has measured: catalogued services whose settlement network the traction directory does not observe, and the facilitator-listed endpoints with prices but no demand data. Default false"
             }
           }
         },
@@ -96,7 +96,7 @@
       }
     },
     "vet-service": {
-      "description": "Human-readable review of one x402 endpoint before paying it: traction directory first, then ~42,000 facilitator-listed endpoints, always with a live 402 handshake",
+      "description": "Human-readable review of one x402 endpoint before paying it: traction directory first, then ~40,600 facilitator-listed endpoints, always with a live 402 handshake",
       "price": "0.005",
       "currency": "USDC",
       "tokenAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
@@ -125,8 +125,8 @@
             "url": {
               "type": "string",
               "format": "uri",
-              "pattern": "^https://",
-              "description": "Public HTTPS resource URL of the endpoint to vet. Resolves against the facilitator catalogs when the traction directory has never heard of it"
+              "pattern": "^https?://",
+              "description": "Public HTTP(S) resource URL of the endpoint to vet. Plain HTTP listings are reported as insecure and never probed"
             }
           },
           "oneOf": [

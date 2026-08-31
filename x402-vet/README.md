@@ -33,21 +33,21 @@ acquire a custom token and sign a one-time Permit2 approval is a caller who
 never arrives. USDC is what every x402 agent already holds, and the Bankr agent
 caps any single automatic payment at $10 — well above both prices here.
 
-## Two sources, because one is 1.4% of the ecosystem
+## Two sources, because one is roughly 1.5% of the ecosystem
 
 | source | knows | endpoints |
 |---|---|---|
-| x402-list.com | what services **earn** — buyers, volume, uptime, compliance | 575 |
-| facilitator Bazaars (PayAI, Coinbase, thirdweb) | the **resource URLs** themselves, with prices and receivers | ~42,000 across ~2,000 hosts |
+| x402-list.com | what services **earn** — buyers, volume, uptime, compliance | ~600 and changing |
+| facilitator Bazaars (PayAI, Coinbase, thirdweb, Dexter, UltravioletaDAO) | the **resource URLs** themselves, with prices and receivers | ~40,600 across ~2,600 hosts |
 
 Neither is a census — a seller registers nowhere, answering 402 on its own
 domain is the whole requirement — so this is a union and says so in every
 response. The two halves are complementary: the traction directory can rank but
 barely covers; the facilitator catalogs cover but measure nothing.
 
-An agent shown only the 575 is being told the ecosystem is 1.4% of its real
-size, and `vet-service` would answer "not found" to roughly forty thousand real
-endpoints.
+An agent shown only the traction directory is being shown roughly 1.5% of the
+visible ecosystem, and `vet-service` would answer "not found" to roughly forty
+thousand real endpoints.
 
 ## What is actually being sold
 
@@ -71,7 +71,33 @@ freshness:
 | `ok` | live, payment-ready, uptime above the requested floor, demand spread across more than one buyer, no identical-pair cluster |
 | `thin` | live and answering, but the demand behind it is one relationship or too small to read. Not an accusation — good new services look exactly like this for a month |
 | `check` | something specific is off: not answering, live receiver differs from the recorded one, or its buyer/volume pair matches unrelated services to the cent |
-| `unrated` | listed by a facilitator, but no traction data exists for it anywhere. Unmeasured, which is not the same as bad — and it can never be confused with `ok` |
+| `unrated` | nobody measured it: either a facilitator-listed endpoint with no traction data anywhere, or a catalogued service whose settlement network the directory does not observe. Unmeasured is not the same as bad, and can never be confused with `ok` |
+
+`thin` and `unrated` are separate claims and are requested separately —
+`includeThin` for "measured, and there is little", `includeUnrated` for "nobody
+measured". The demand thresholds apply only to measured services, since an
+unrated record has no demand figures rather than a figure of zero.
+
+## The directory changed its methodology, and it matters
+
+As of 30 August the traction directory publishes a `status` on every service:
+`measured`, `unmeasured-network`, `no-payto`, or `unresponsive`. It now counts
+only USDC settlements through facilitators it observes, calling the result *"a
+measured floor, not an estimate"*. An unknown future status also fails closed as
+unrated rather than being interpreted as zero demand.
+
+The effect on the visible economy is severe. Four days earlier the top service
+showed $16,736 of volume net of its largest buyer; after the methodology change,
+measured volume is orders of magnitude smaller and most measured services show
+zero. Nothing currently reaches `ok` under the default $10 net-volume floor —
+and degraded or offline services are `check` regardless.
+
+**The defaults are calibrated to the old scale.** `minNetVolume30d: 10` was set
+against a catalog whose top service did five figures; against the much smaller
+measured range it admits almost nothing. Lowering it is a product decision, not
+a bug fix, so it has deliberately been left alone: `ok` is a public claim about
+someone else's service, and quietly redefining it to keep the list populated is
+the one thing this endpoint must never do.
 
 **No verdict ever implies fraud.** `why` carries observations, not motives:
 "one buyer accounts for 99% of volume", never "farmed". That distinction is what
@@ -106,7 +132,7 @@ parallel, and a full shortlist call with every row probed live returns in 3.7s.
 
 | | per `vet-shortlist` call |
 |---|---|
-| analysed | all 575 rated services, plus the ~42,000-endpoint index when `includeUnrated` is set |
+| analysed | all ~600 traction-directory services, plus the ~40,600-endpoint index when `includeUnrated` is set |
 | returned | up to `limit`, capped at 100 |
 | probed live | up to 50 — more than the 27 the default filters yield |
 
@@ -128,8 +154,9 @@ Every field optional. Returns surviving services ranked by net volume, with
 ```
 
 Or `{ "url": "https://api.venice.ai/api/v1/chat/completions" }` — when the
-caller passes a URL, that URL is probed, because they know the paid path and the
-directory may not.
+caller passes a public HTTPS URL, that URL is probed, because they know the paid
+path and the directory may not. Public HTTP URLs can be looked up and are
+reported as insecure, but are never contacted.
 
 ## Honest limits, stated in every response
 
@@ -181,6 +208,15 @@ Two things that had to be handled, both found by running it:
 - **Facilitators clamp page size silently.** thirdweb returns 200 rows when
   asked for 1,000. Treating a short page as exhaustion stopped at a quarter of
   its catalog, so a source ends only on an empty page or a declared total.
+- **Catalogs disagree on the field name.** PayAI, Coinbase, Dexter and thirdweb
+  send `resource`; Ultravioleta sends `url`. Reading only the first discarded
+  that catalog whole - 2,683 endpoints, no error, nothing in the logs.
+- **A rejected endpoint is not an absent one.** Plain-HTTP listings were being
+  dropped by the probe's HTTPS guard before they ever reached the index: 2,953
+  endpoints across 263 domains, invisible. They are now indexed and marked
+  `insecureTransport`, which earns `check` - payment terms that can be rewritten
+  in transit are a live defect, not missing data - and the probe still refuses
+  to contact them.
 - **A dead facilitator must not block coverage forever.** dexter answers HTTP
   502. After three failures a source is retired and reported as `unavailable`,
   rather than being retried on every request while `complete` stays false

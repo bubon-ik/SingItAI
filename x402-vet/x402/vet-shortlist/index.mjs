@@ -23,6 +23,7 @@ const NOTE =
 const PAGE_SIZE = 100;
 const SNAPSHOT_TTL_MS = 60 * 60 * 1000;
 const SNAPSHOT_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+const SNAPSHOT_SCHEMA_VERSION = 2;
 const DIRECTORY_TIMEOUT_MS = 8000;
 const PROBE_TIMEOUT_MS = 4000;
 const MAX_CHALLENGE_BYTES = 256 * 1024;
@@ -54,11 +55,19 @@ async function fetchAll() {
  * a market: a service booking $160k with a 99% top-buyer share is worth ~$1.6k
  * of distributed demand, and ranking it first would be a lie of omission.
  */
+function metricNumber(value) {
+  if (value === null || value === undefined || value === "" || typeof value === "boolean") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 function netVolume(t) {
-  const gross = Number(t.volume_usd_30d ?? 0);
-  const share = t.top_buyer_share_30d;
-  if (share === null || share === undefined) return gross;
-  return gross * (1 - Number(share));
+  const gross = metricNumber(t.volume_usd_30d);
+  const share = metricNumber(t.top_buyer_share_30d);
+  if (gross === null || gross < 0) return 0;
+  if (t.top_buyer_share_30d === null || t.top_buyer_share_30d === undefined) return gross;
+  if (share === null || share < 0 || share > 1) return 0;
+  return gross * (1 - share);
 }
 
 /**
@@ -70,26 +79,79 @@ function clusterSizes(services) {
   const counts = new Map();
   for (const s of services) {
     const t = (s.assessment && s.assessment.traction) || {};
-    const buyers = Number(t.unique_buyers_30d ?? 0);
-    if (buyers <= 0) continue;
-    const key = `${buyers}:${Number(t.volume_usd_30d ?? 0).toFixed(2)}`;
+    if (measurementState(t).state !== "measured") continue;
+    const buyers = metricNumber(t.unique_buyers_30d);
+    const gross = metricNumber(t.volume_usd_30d);
+    const share = metricNumber(t.top_buyer_share_30d);
+    if (buyers === null || gross === null || buyers <= 0 || gross < 0) continue;
+    if (t.top_buyer_share_30d !== null && t.top_buyer_share_30d !== undefined && (share === null || share < 0 || share > 1)) continue;
+    const key = `${buyers}:${gross.toFixed(2)}`;
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return counts;
 }
 
+/**
+ * The traction directory measures a subset of settlement paths and says so:
+ * `measured` means it watched the money, `unmeasured-network` that the service
+ * settles somewhere it does not observe, and `no-payto` that there is no
+ * receiver to watch. Absent field: an older snapshot shape, treated as measured
+ * only when it actually carries buyer numbers.
+ */
+function measurementState(traction) {
+  const status = typeof traction.status === "string" ? traction.status : null;
+
+  if (status === "measured") return { state: "measured" };
+  if (status === "unmeasured-network") {
+    return {
+      state: "unmeasured",
+      reason:
+        "the directory does not measure this service's settlement network, so no demand figure exists either way",
+    };
+  }
+  if (status === "no-payto") {
+    return {
+      state: "unmeasured",
+      reason: "the directory has no payment receiver on file, so settlements cannot be attributed",
+    };
+  }
+  if (status === "unresponsive") {
+    return {
+      state: "unmeasured",
+      reason: "the directory suppresses traction while the service is unresponsive, so settlements cannot be attributed",
+    };
+  }
+  if (status) {
+    return { state: "unmeasured", reason: `the directory reports its demand data as "${status}"` };
+  }
+
+  return Number(traction.unique_buyers_30d ?? 0) > 0
+    ? { state: "measured" }
+    : { state: "unmeasured", reason: "the directory publishes no demand data for this service" };
+}
+
 function toRecord(s, clusters) {
   const a = s.assessment || {};
   const t = a.traction || {};
-  const buyers = Number(t.unique_buyers_30d ?? 0);
-  const gross = Number(t.volume_usd_30d ?? 0);
+  const buyerMetric = metricNumber(t.unique_buyers_30d);
+  const grossMetric = metricNumber(t.volume_usd_30d);
+  const shareRaw = t.top_buyer_share_30d;
+  const shareMetric = metricNumber(shareRaw);
+  const buyers = buyerMetric ?? 0;
+  const gross = grossMetric ?? 0;
   const net = netVolume(t);
   const perBuyer = buyers > 0 ? gross / buyers : 0;
   const key = `${buyers}:${gross.toFixed(2)}`;
   const cluster = buyers > 0 ? (clusters.get(key) ?? 0) : 0;
-  const share = t.top_buyer_share_30d ?? null;
+  const share = shareRaw === null || shareRaw === undefined ? null : shareMetric;
   const uptime = a.reliability_uptime_30d ?? s.uptime_24h ?? null;
   const checkedAgo = minutesSince(s.last_checked_at);
+  const measured = measurementState(t);
+  const malformedDemand = measured.state === "measured" && (
+    buyerMetric === null || buyerMetric < 0 || !Number.isInteger(buyerMetric) ||
+    grossMetric === null || grossMetric < 0 ||
+    (shareRaw !== null && shareRaw !== undefined && (shareMetric === null || shareMetric < 0 || shareMetric > 1))
+  );
 
   const why = [];
   let verdict = "ok";
@@ -104,13 +166,27 @@ function toRecord(s, clusters) {
       `reports the same buyer count and volume as ${cluster - 1} unrelated services`,
     );
   }
-  if (share !== null && Number(share) > 0.9) {
-    if (verdict === "ok") verdict = "thin";
-    why.push(`one buyer accounts for ${Math.round(Number(share) * 100)}% of volume`);
+  // "Not measured" and "measured, found little" are different claims, and only
+  // the second is `thin`. The directory now says which it means: it counts only
+  // USDC settlements through facilitators it observes, and reports every other
+  // service as unmeasured rather than as having no demand. Calling those `thin`
+  // would put a demand judgement on services nobody has weighed.
+  if (measured.state !== "measured") {
+    if (verdict !== "check") verdict = "unrated";
+    why.push(measured.reason);
+  } else if (!malformedDemand) {
+    if (share !== null && Number(share) > 0.9) {
+      if (verdict === "ok") verdict = "thin";
+      why.push(`one buyer accounts for ${Math.round(Number(share) * 100)}% of volume`);
+    }
+    if (buyers < 2 || net < 10) {
+      if (verdict === "ok") verdict = "thin";
+      why.push("little or no distributed demand measured yet");
+    }
   }
-  if (buyers < 2 || net < 10) {
-    if (verdict === "ok") verdict = "thin";
-    why.push("little or no distributed demand measured yet");
+  if (malformedDemand) {
+    verdict = "check";
+    why.push("the directory returned malformed demand metrics, so no demand verdict is safe");
   }
   if (a.risk_level && a.risk_level !== "clean" && a.risk_level !== "low") {
     verdict = "check";
@@ -161,13 +237,13 @@ function toRecord(s, clusters) {
  */
 async function getSnapshot(ctx, cachePath) {
   const raw = await readCache(ctx, cachePath);
-  const cached = raw && Array.isArray(raw.records) ? raw : null;
+  const cached = raw && raw.version === SNAPSHOT_SCHEMA_VERSION && Array.isArray(raw.records) ? raw : null;
   if (cached && Date.now() - cached.at < SNAPSHOT_TTL_MS) return cached;
 
   try {
     const services = await fetchAll();
     const clusters = clusterSizes(services);
-    const fresh = { at: Date.now(), records: services.map((s) => toRecord(s, clusters)) };
+    const fresh = { version: SNAPSHOT_SCHEMA_VERSION, at: Date.now(), records: services.map((s) => toRecord(s, clusters)) };
     await writeCache(ctx, cachePath, fresh);
     return fresh;
   } catch (error) {
@@ -323,6 +399,19 @@ function joinUrl(base, path) {
   return publicHttpsUrl(`${root}${tail}`);
 }
 
+/**
+ * Same host rules as publicHttpsUrl, but allows plain http. Used only to admit
+ * an endpoint to the index - never to choose a probe target, which stays
+ * HTTPS-only.
+ */
+function publicHttpUrl(value) {
+  const url = new URL(String(value));
+  if (url.protocol !== "http:" || url.username || url.password || unsafeHostname(url.hostname)) {
+    throw new Error("unsafe URL");
+  }
+  return url.toString();
+}
+
 function publicHttpsUrl(value) {
   const url = new URL(String(value));
   if (url.protocol !== "https:" || url.username || url.password || unsafeHostname(url.hostname)) {
@@ -331,15 +420,40 @@ function publicHttpsUrl(value) {
   return url.toString();
 }
 
+function ipv6Words(host) {
+  let value = host.toLowerCase();
+  if (value.includes(".")) {
+    const split = value.lastIndexOf(":");
+    const ipv4 = value.slice(split + 1).split(".");
+    if (split < 0 || ipv4.length !== 4 || ipv4.some((part) => !/^\d+$/.test(part) || Number(part) > 255)) return null;
+    value = `${value.slice(0, split)}:${(Number(ipv4[0]) * 256 + Number(ipv4[1])).toString(16)}:${(Number(ipv4[2]) * 256 + Number(ipv4[3])).toString(16)}`;
+  }
+  const halves = value.split("::");
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  if ([...left, ...right].some((part) => !/^[0-9a-f]{1,4}$/.test(part))) return null;
+  const missing = 8 - left.length - right.length;
+  if ((halves.length === 1 && missing !== 0) || (halves.length === 2 && missing < 1)) return null;
+  return [...left.map((part) => parseInt(part, 16)), ...Array(missing).fill(0), ...right.map((part) => parseInt(part, 16))];
+}
+
 function unsafeHostname(value) {
   const host = String(value).toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
   if (!host || host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) {
     return true;
   }
   if (host.includes(":")) {
-    if (host === "::" || host === "::1" || /^f[cd]/.test(host) || /^fe[89ab]/.test(host)) return true;
-    const mapped = host.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    return mapped ? privateIpv4(mapped[1]) : false;
+    const words = ipv6Words(host);
+    if (!words) return true;
+    if (words.every((word) => word === 0) || (words.slice(0, 7).every((word) => word === 0) && words[7] === 1)) return true;
+    if ((words[0] & 0xfe00) === 0xfc00 || (words[0] & 0xffc0) === 0xfe80 || (words[0] & 0xffc0) === 0xfec0 || (words[0] & 0xff00) === 0xff00) return true;
+    const mapped = words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff;
+    const compatible = words.slice(0, 6).every((word) => word === 0);
+    if (mapped || compatible) {
+      return privateIpv4(`${words[6] >> 8}.${words[6] & 255}.${words[7] >> 8}.${words[7] & 255}`);
+    }
+    return false;
   }
   return privateIpv4(host);
 }
@@ -361,14 +475,26 @@ function privateIpv4(host) {
   );
 }
 
+/**
+ * Index keys and comparisons accept plain http as well: they name an endpoint,
+ * they do not reach one. Only probe targets are held to HTTPS.
+ */
+function publicIndexUrl(value) {
+  try {
+    return publicHttpsUrl(value);
+  } catch {
+    return publicHttpUrl(value);
+  }
+}
+
 function resourceKey(value) {
-  return publicHttpsUrl(value);
+  return publicIndexUrl(value);
 }
 
 function urlsShareResource(query, resource) {
   try {
-    const left = new URL(publicHttpsUrl(query));
-    const right = new URL(publicHttpsUrl(resource));
+    const left = new URL(publicIndexUrl(query));
+    const right = new URL(publicIndexUrl(resource));
     if (left.origin !== right.origin) return false;
     const a = left.pathname.replace(/\/+$/, "") || "/";
     const b = right.pathname.replace(/\/+$/, "") || "/";
@@ -563,7 +689,7 @@ function applyProbe(record, result) {
     ) {
       out.payToChanged = true;
       out.why = [...out.why, "live payment receiver differs from the one the directory lists"];
-      if (out.verdict === "ok") out.verdict = "check";
+      out.verdict = "check";
     } else if (networkName(result.liveNetwork) === "base" && result.catalogPayTo && result.livePayTo) {
       out.payToChanged = false;
     }
@@ -588,20 +714,22 @@ function applyProbe(record, result) {
 /**
  * The second source: facilitator Bazaar catalogs.
  *
- * x402-list knows 575 services and, uniquely, what they earn. The facilitator
- * catalogs know two orders of magnitude more endpoints - ~42,000 across ~2,000
- * domains - and, uniquely, the resource URLs themselves with their prices and
- * receivers. Neither is a census: a seller registers nowhere, answering 402 on
- * its own domain is the whole requirement. This is a union, and says so.
+ * x402-list knows roughly 600 services and, uniquely, what they earn. The
+ * facilitator catalogs know two orders of magnitude more endpoints - ~40,600
+ * across ~2,600 domains - and, uniquely, the resource URLs themselves with
+ * their prices and receivers. Neither is a census: a seller registers nowhere,
+ * answering 402 on its own domain is the whole requirement. This is a union,
+ * and says so.
  *
  * These two halves are complementary rather than redundant, and an agent that
- * only ever sees the 575 is being told the ecosystem is 1.4% of its real size.
+ * only sees the traction directory sees roughly 1.5% of the visible ecosystem.
  */
 const BAZAAR = {
   payai: "https://facilitator.payai.network",
   coinbase: "https://api.cdp.coinbase.com/platform/v2/x402",
   thirdweb: "https://api.thirdweb.com/v1/payments/x402",
   dexter: "https://facilitator.dexter.cash",
+  ultravioletadao: "https://facilitator.ultravioletadao.xyz",
 };
 const BAZAAR_PAGE = 1000;
 const INDEX_TTL_MS = 24 * 60 * 60 * 1000;
@@ -646,7 +774,13 @@ async function extendIndex(prev, budgetMs) {
             `${base.replace(/\/+$/, "")}/discovery/resources?limit=${BAZAAR_PAGE}&offset=${state.offset}`,
             {
               headers: { accept: "application/json", "user-agent": "x402-vet/1.0 (catalog read)" },
-              signal: AbortSignal.timeout(PROBE_TIMEOUT_MS * 2),
+              // Clamped to what is left of the budget: the deadline is checked
+              // before a page starts, so an unclamped page can overrun it by
+              // its whole timeout and push the request past the 30-second
+              // ceiling - where the answer is lost and this progress with it.
+              signal: AbortSignal.timeout(
+                Math.max(1000, Math.min(PROBE_TIMEOUT_MS * 2, deadline - Date.now())),
+              ),
             },
           );
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -692,11 +826,28 @@ async function extendIndex(prev, budgetMs) {
 }
 
 function absorb(entries, item, source) {
+  // Bazaar implementations disagree on the field name: PayAI and Coinbase send
+  // `resource`, ultravioletadao sends `url`. Reading only the first silently
+  // discarded that catalog whole, which is the worst kind of gap - no error,
+  // just 2,683 endpoints that never existed as far as the answer was concerned.
+  const raw = [item.resource, item.url].find((value) => typeof value === "string" && value.trim());
+
   let resource;
+  let insecure = false;
   try {
-    resource = publicHttpsUrl(typeof item.resource === "string" ? item.resource.trim() : "");
+    resource = publicHttpsUrl(raw ? raw.trim() : "");
   } catch {
-    return;
+    // A plaintext endpoint is still a real endpoint, and an agent about to pay
+    // one deserves to be told so rather than to be told it does not exist.
+    // Dropping it here would repeat, quietly, the same mistake the `url` field
+    // caused: roughly 1.2% of PayAI's catalog is http://, and it was vanishing
+    // without a trace. It is indexed and flagged; the probe still refuses it.
+    try {
+      resource = publicHttpUrl(raw ? raw.trim() : "");
+      insecure = true;
+    } catch {
+      return;
+    }
   }
 
   const accepts = Array.isArray(item.accepts) ? item.accepts : [];
@@ -714,6 +865,7 @@ function absorb(entries, item, source) {
     n: networkName(pick.network),
     s: String(item.serviceName || item.description || "").slice(0, 80) || null,
     f: existing ? [...new Set([...existing.f, source])] : [source],
+    ...(insecure ? { x: true } : {}),
   };
   entries[key] = existing ? { ...existing, ...entry } : entry;
 }
@@ -799,9 +951,18 @@ function unratedRecord(resource, entry) {
     buyers30d: 0,
     topBuyerShare: null,
     identicalPairCluster: 0,
-    verdict: "unrated",
-    why: [`listed by ${entry.f.join(", ")}; no traction data published anywhere`],
+    verdict: entry.x ? "check" : "unrated",
+    why: [
+      `listed by ${entry.f.join(", ")}; no traction data published anywhere`,
+      // Plain HTTP is not a missing-data problem, it is a live one: payment
+      // terms, including the receiving address, can be rewritten in transit.
+      // That is a specific defect, so it earns `check` rather than `unrated`.
+      ...(entry.x
+        ? ["listed over plain HTTP, so its payment terms can be altered in transit"]
+        : []),
+    ],
     listedPayTo: entry.t,
+    ...(entry.x ? { insecureTransport: true } : {}),
   };
 }
 
@@ -872,8 +1033,19 @@ const PROBE_LIMIT = 50;
 const SNAPSHOT_PATH = "/x402/vet-shortlist/snapshot.json";
 const INDEX_PATH = "/x402/vet-shortlist/index.json";
 const INDEX_BUDGET_MS = 9000;
+// The runtime kills a handler at 30 seconds and settles nothing, so the whole
+// request works to a wall-clock deadline well inside it. Whatever the index
+// reached by then is persisted and the next call carries on from there.
+const REQUEST_BUDGET_MS = 20000;
+const PROBE_RESERVE_MS = 9000;
+
+function indexBudgetFrom(startedAt) {
+  const remaining = REQUEST_BUDGET_MS - (Date.now() - startedAt);
+  return Math.max(0, Math.min(INDEX_BUDGET_MS, remaining - PROBE_RESERVE_MS));
+}
 
 export async function evaluate(request, ctx) {
+  const startedAt = Date.now();
   let input;
   try {
     input = await readInput(request);
@@ -925,42 +1097,53 @@ export async function evaluate(request, ctx) {
   let results = snap.records
     .filter((r) => {
       if (r.verdict === "check") return false;
-      if (!includeThin && r.verdict !== "ok") return false;
+      // `thin` and `unrated` are different claims and are asked for
+      // separately: one is "measured, and there is little", the other "nobody
+      // measured". Folding them under one flag would return hundreds of
+      // unweighed services to a caller who asked to see weak ones.
+      if (r.verdict === "thin" && !includeThin) return false;
+      if (r.verdict === "unrated" && !includeUnrated) return false;
       if (category && r.category.toLowerCase() !== category) return false;
       if (network && !r.networks.some((n) => networkName(n) === network)) return false;
       if (maxPrice !== null && !Number.isNaN(maxPrice)) {
         if (r.priceUsd === null || r.priceUsd > maxPrice) return false;
       }
-      if (r.buyers30d < minBuyers) return false;
       if (r.uptime30d === null || r.uptime30d < minUptime) return false;
-      if (r.netVolume30d < minNet) return false;
-      if (r.usdPerBuyer < minPerBuyer) return false;
+      // Demand thresholds judge measured demand, so they are applied only to
+      // services that were measured. Running them against an unrated record -
+      // which has no demand figures by definition, not a figure of zero -
+      // would silently reject everything `includeUnrated` was asked for.
+      if (r.verdict !== "unrated") {
+        if (r.buyers30d < minBuyers) return false;
+        if (r.netVolume30d < minNet) return false;
+        if (r.usdPerBuyer < minPerBuyer) return false;
+      }
       return true;
     })
     .sort((a, b) => b.netVolume30d - a.netVolume30d)
     .slice(0, limit);
 
-  // The traction directory covers 575 services. Asking for unrated endpoints
-  // opens the other ~42,000, which have prices and receivers but no measured
+  // The traction directory covers roughly 600 services. Asking for unrated endpoints
+  // opens the other ~40,600, which have prices and receivers but no measured
   // demand at all - useful for "what is cheap on this network", never for
   // "what is proven".
   let coverage = null;
   if (includeUnrated) {
-    const index = await getIndex(ctx, INDEX_PATH, INDEX_BUDGET_MS);
+    const index = await getIndex(ctx, INDEX_PATH, indexBudgetFrom(startedAt));
     coverage = indexCoverage(index);
-    const seen = new Set(
-      results.map((r) => {
-        try {
-          return resourceKey(r.resource || "");
-        } catch {
-          return r.resource || "";
-        }
-      }),
-    );
+    const directoryByDomain = new Map();
+    for (const record of snap.records) {
+      const domain = domainOf(record.resource);
+      if (!domain) continue;
+      const resources = directoryByDomain.get(domain) ?? [];
+      resources.push(record.resource);
+      directoryByDomain.set(domain, resources);
+    }
 
     const extra = Object.entries(index.entries || {})
       .filter(([resource, entry]) => {
-        if (seen.has(resource)) return false;
+        const directoryResources = directoryByDomain.get(domainOf(resource)) ?? [];
+        if (directoryResources.some((known) => urlsShareResource(resource, known))) return false;
         if (network && networkName(entry.n) !== network) return false;
         if (maxPrice !== null && (entry.p === null || entry.p > maxPrice)) return false;
         return true;
@@ -1014,12 +1197,21 @@ function priceLabel(value) {
 
 function formatFilters(filter) {
   const values = [];
-  if (filter.category) values.push(`category ${filter.category}`);
+  if (filter.category) values.push(`directory category ${filter.category}`);
   if (filter.network) values.push(`network ${filter.network}`);
   if (filter.maxPrice !== null) values.push(`maximum price ${priceLabel(filter.maxPrice)}`);
-  values.push(`at least ${filter.minBuyers} buyers`, `at least ${filter.minUptime}% uptime`);
+  values.push(
+    `directory services: at least ${filter.minUptime}% uptime`,
+    `measured services: at least ${filter.minBuyers} buyers`,
+    `at least ${priceLabel(filter.minNet)} net volume`,
+    `at least ${priceLabel(filter.minPerBuyer)} per buyer`,
+  );
   if (filter.includeThin) values.push("limited-evidence services included");
-  if (filter.includeUnrated) values.push("unrated catalog services included");
+  if (filter.includeUnrated) {
+    // Naming the demand thresholds without this would claim they were applied
+    // to every row, when unrated rows are by definition exempt from them.
+    values.push("unrated services included without demand thresholds");
+  }
   return values.join("; ");
 }
 
@@ -1053,6 +1245,7 @@ function formatShortlistResponse(body, status) {
       `Networks: ${result.networks?.length ? result.networks.join(", ") : "unknown"}`,
     );
     if (result.liveProbe) lines.push(`Live payment check: ${result.liveProbe}`);
+    if (result.liveProbeReason) lines.push(`Live check detail: ${result.liveProbeReason}`);
     if (result.payToChanged === false) lines.push("Payment recipient: unchanged from the catalog");
     if (result.payToChanged === true) lines.push("Payment recipient: differs from the catalog; verify it before paying");
     if (result.why?.length) lines.push(`Why: ${result.why.join("; ")}`);
