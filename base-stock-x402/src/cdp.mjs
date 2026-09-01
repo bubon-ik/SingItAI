@@ -30,20 +30,21 @@ export const CDP_NETWORK = "base";
  * Reads stay on our own RPC: a receipt is public data and there is no reason
  * to spend an API call, or a dependency, on fetching it.
  */
-export function cdpClients(account, { rpcUrl = BASE_RPC_URL } = {}) {
+export function cdpClients(account, { rpcUrl = BASE_RPC_URL, publicClient: injected = null } = {}) {
   if (!account?.address) {
     throw new Error("a CDP account with an address is required");
   }
-  const publicClient = createPublicClient({ chain: base, transport: http(rpcUrl) });
+  const publicClient = injected ?? createPublicClient({ chain: base, transport: http(rpcUrl) });
 
   return () => ({
     account,
     publicClient,
     walletClient: {
-      async sendTransaction({ to, data, value }) {
+      async sendTransaction({ to, data, value = 0n }) {
+        const transaction = await complete({ publicClient, from: account.address, to, data, value });
         const result = await account.sendTransaction({
           network: CDP_NETWORK,
-          transaction: { to, data, ...(value === undefined ? {} : { value }) },
+          transaction,
         });
         // Both spellings, because the SDK has used both and the existing
         // cdp-x402-service reads them the same defensive way.
@@ -55,6 +56,40 @@ export function cdpClients(account, { rpcUrl = BASE_RPC_URL } = {}) {
       },
     },
   });
+}
+
+// estimateGas is exact for the state it saw. A swap moves the pool it is
+// swapping against, and an approve landing first changes what the swap costs,
+// so the estimate is a floor rather than an answer.
+const GAS_HEADROOM_PERCENT = 125n;
+
+/**
+ * Fill in what CDP does not.
+ *
+ * The SDK hands the transaction to viem's `serializeTransaction` as given, so
+ * a `{to, data}` object becomes a transaction with zero gas and zero fees —
+ * which the node rejects as invalid parameters, from far enough away that the
+ * error says nothing about gas. Nothing fills these in on the way; this does.
+ *
+ * The nonce is read pending, which is correct only because this service sends
+ * one transaction at a time and waits for each receipt before the next.
+ */
+export async function complete({ publicClient, from, to, data, value = 0n }) {
+  const [nonce, fees, gas] = await Promise.all([
+    publicClient.getTransactionCount({ address: from, blockTag: "pending" }),
+    publicClient.estimateFeesPerGas(),
+    publicClient.estimateGas({ account: from, to, data, value }),
+  ]);
+
+  return {
+    to,
+    data,
+    value,
+    nonce,
+    gas: (gas * GAS_HEADROOM_PERCENT) / 100n,
+    maxFeePerGas: fees.maxFeePerGas,
+    maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+  };
 }
 
 /**

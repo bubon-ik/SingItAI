@@ -11,6 +11,12 @@ import { buildPaymentRequirements, decodePaymentHeader } from "../src/x402.mjs";
 
 const ADDRESS = "0x3333333333333333333333333333333333333333";
 
+const FAKE_PUBLIC = {
+  async getTransactionCount() { return 7; },
+  async estimateFeesPerGas() { return { maxFeePerGas: 1_000_000n, maxPriorityFeePerGas: 1_000n }; },
+  async estimateGas() { return 100_000n; },
+};
+
 function fakeAccount({ result = { transactionHash: "0xabc" }, address = ADDRESS } = {}) {
   const sent = [];
   return {
@@ -26,42 +32,61 @@ function fakeAccount({ result = { transactionHash: "0xabc" }, address = ADDRESS 
   };
 }
 
-test("a transaction is sent on Base, in the shape CDP expects", async () => {
+test("a transaction is sent on Base, complete enough for a node to accept", async () => {
   const { account, sent } = fakeAccount();
-  const { walletClient } = cdpClients(account)();
+  const { walletClient } = cdpClients(account, { publicClient: FAKE_PUBLIC })();
 
-  const hash = await walletClient.sendTransaction({ to: "0xdead", data: "0xbeef" });
+  const hash = await walletClient.sendTransaction({ to: "0x" + "de".repeat(20), data: "0xbeef" });
 
   assert.equal(hash, "0xabc");
   assert.equal(sent[0].network, CDP_NETWORK);
-  assert.deepEqual(sent[0].transaction, { to: "0xdead", data: "0xbeef" });
+  // The bug this covers: the SDK serializes what it is given and fills in
+  // nothing, so {to, data} becomes a transaction with zero gas and zero fees
+  // that the node rejects with an error mentioning neither.
+  const tx = sent[0].transaction;
+  assert.equal(tx.to, "0x" + "de".repeat(20));
+  assert.equal(tx.data, "0xbeef");
+  assert.equal(tx.nonce, 7);
+  assert.equal(tx.value, 0n);
+  assert.ok(tx.gas > 0n, "gas must not be zero");
+  assert.ok(tx.maxFeePerGas > 0n, "fees must not be zero");
+});
+
+test("the gas estimate is given headroom", async () => {
+  const { account, sent } = fakeAccount();
+  const { walletClient } = cdpClients(account, { publicClient: FAKE_PUBLIC })();
+
+  await walletClient.sendTransaction({ to: "0x" + "11".repeat(20), data: "0x2" });
+
+  // A swap moves the pool it estimated against; an exact estimate is a floor.
+  assert.equal(sent[0].transaction.gas, 125_000n);
 });
 
 test("both spellings of the hash are accepted", async () => {
   // The SDK has used transactionHash and hash; cdp-x402-service reads both.
   const { account } = fakeAccount({ result: { hash: "0xfeed" } });
-  const { walletClient } = cdpClients(account)();
+  const { walletClient } = cdpClients(account, { publicClient: FAKE_PUBLIC })();
 
-  assert.equal(await walletClient.sendTransaction({ to: "0x1", data: "0x2" }), "0xfeed");
+  assert.equal(await walletClient.sendTransaction({ to: "0x" + "11".repeat(20), data: "0x2" }), "0xfeed");
 });
 
 test("a send that returns no hash fails loudly", async () => {
   const { account } = fakeAccount({ result: {} });
-  const { walletClient } = cdpClients(account)();
+  const { walletClient } = cdpClients(account, { publicClient: FAKE_PUBLIC })();
 
   await assert.rejects(
-    walletClient.sendTransaction({ to: "0x1", data: "0x2" }),
+    walletClient.sendTransaction({ to: "0x" + "11".repeat(20), data: "0x2" }),
     /no transaction hash/,
   );
 });
 
-test("value is omitted rather than sent as undefined", async () => {
+test("value defaults to zero rather than being left undefined", async () => {
   const { account, sent } = fakeAccount();
-  const { walletClient } = cdpClients(account)();
+  const { walletClient } = cdpClients(account, { publicClient: FAKE_PUBLIC })();
 
-  await walletClient.sendTransaction({ to: "0x1", data: "0x2" });
+  await walletClient.sendTransaction({ to: "0x" + "11".repeat(20), data: "0x2" });
 
-  assert.equal("value" in sent[0].transaction, false);
+  assert.equal(sent[0].transaction.value, 0n);
 });
 
 test("an account with no address is refused before anything is sent", () => {
