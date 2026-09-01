@@ -119,8 +119,32 @@ export async function fulfilOrder({
   });
   journal.push({ step: "settle", ok: settlement.success, tx: settlement.transaction });
   if (!settlement.success) {
-    // Settlement failing is still a free refusal: the authorization was never
-    // consumed, so the buyer has not paid.
+    if (settlement.charged === null) {
+      // Broadcast, unconfirmed. The buyer may well have paid, and we have
+      // delivered nothing. Saying "you were not charged" here would be a guess
+      // dressed as a fact, so it is recorded for a human instead.
+      log.append({
+        orderId,
+        step: "stranded",
+        tx: settlement.transaction,
+        payer: settlement.payer ?? payer,
+        amountAtomic: String(settlement.value ?? requirements.maxAmountRequired),
+        reason: `settlement unconfirmed: ${settlement.message ?? settlement.errorReason}`,
+      });
+      return {
+        ok: false,
+        orderId,
+        stage: "settlement-unknown",
+        error: "confirmation_unknown",
+        detail:
+          "The payment was broadcast and could not be confirmed. It may have " +
+          "settled. Nothing was delivered; do not retry until it is checked.",
+        settlementTx: settlement.transaction,
+        needsOperator: true,
+        journal,
+      };
+    }
+    // A send that never left charged nobody, so this is still a free refusal.
     log.append({ orderId, step: "abandoned", reason: settlement.errorReason ?? "settlement_failed" });
     return refused(settlement.errorReason ?? "settlement_failed", settlement.message ?? null, journal);
   }

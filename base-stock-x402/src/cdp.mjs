@@ -18,9 +18,9 @@
  * on a plain key, and the tests exercise the adaptation without credentials.
  */
 
-import { createPublicClient, http } from "viem";
+import { createPublicClient } from "viem";
 import { base } from "viem/chains";
-import { BASE_RPC_URL } from "./chain.mjs";
+import { baseTransport } from "./x402.mjs";
 
 export const CDP_NETWORK = "base";
 
@@ -30,22 +30,33 @@ export const CDP_NETWORK = "base";
  * Reads stay on our own RPC: a receipt is public data and there is no reason
  * to spend an API call, or a dependency, on fetching it.
  */
-export function cdpClients(account, { rpcUrl = BASE_RPC_URL, publicClient: injected = null } = {}) {
+export function cdpClients(account, { rpcUrl = null, publicClient: injected = null } = {}) {
   if (!account?.address) {
     throw new Error("a CDP account with an address is required");
   }
-  const publicClient = injected ?? createPublicClient({ chain: base, transport: http(rpcUrl) });
+  const publicClient = injected ?? createPublicClient({ chain: base, transport: baseTransport(rpcUrl) });
 
   return () => ({
     account,
     publicClient,
     walletClient: {
       async sendTransaction({ to, data, value = 0n }) {
-        const transaction = await complete({ publicClient, from: account.address, to, data, value });
-        const result = await account.sendTransaction({
-          network: CDP_NETWORK,
-          transaction,
-        });
+        let transaction;
+        try {
+          transaction = await complete({ publicClient, from: account.address, to, data, value });
+        } catch (error) {
+          throw describe(error, "gas/nonce preparation");
+        }
+
+        let result;
+        try {
+          result = await account.sendTransaction({
+            network: CDP_NETWORK,
+            transaction,
+          });
+        } catch (error) {
+          throw describe(error, "CDP sendTransaction", transaction);
+        }
         // Both spellings, because the SDK has used both and the existing
         // cdp-x402-service reads them the same defensive way.
         const hash = result?.transactionHash || result?.hash;
@@ -123,4 +134,40 @@ export function cdpSigner(account) {
     address: account.address,
     signTypedData: (parameters) => account.signTypedData(parameters),
   };
+}
+
+
+/**
+ * Say which step failed and what the provider actually said.
+ *
+ * Errors from this path arrive as one flat sentence — "Invalid parameters were
+ * provided to the RPC method" — which is true of a dozen different mistakes and
+ * useful for none of them. The wrapper names the step and carries whatever the
+ * error was actually hiding.
+ */
+function describe(error, step, transaction = null) {
+  const parts = [`${step} failed`];
+  const short = error?.shortMessage || error?.message;
+  if (short) parts.push(String(short).split("\n")[0]);
+  for (const key of ["name", "code", "statusCode", "errorType", "errorMessage", "details", "correlationId"]) {
+    const value = error?.[key];
+    if (value !== undefined && value !== null && typeof value !== "object") {
+      parts.push(`${key}=${value}`);
+    }
+  }
+  if (error?.cause) {
+    const cause = error.cause.shortMessage || error.cause.message;
+    if (cause) parts.push(`cause=${String(cause).split("\n")[0]}`);
+  }
+  if (transaction) {
+    // Shapes, not values: enough to see a missing or malformed field.
+    parts.push(
+      "tx={" + Object.entries(transaction)
+        .map(([k, v]) => `${k}:${typeof v === "string" ? `${v.slice(0, 12)}…(${v.length})` : String(v)}`)
+        .join(" ") + "}",
+    );
+  }
+  const wrapped = new Error(parts.join(" | "));
+  wrapped.cause = error;
+  return wrapped;
 }

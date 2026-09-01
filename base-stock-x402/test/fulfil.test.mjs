@@ -292,3 +292,70 @@ test("a settlement that never landed is closed, not left dangling", async () => 
   assert.deepEqual(log.read().map((e) => e.step), ["intent", "abandoned"]);
   assert.deepEqual(log.unresolved(), []);
 });
+
+
+// -- broadcast succeeded, confirmation did not ---------------------------
+
+test("an unconfirmed settlement is never reported as 'you were not charged'", async () => {
+  // What actually happened: the RPC we defaulted to serves eth_call and
+  // eth_getLogs but rejects eth_getTransactionReceipt. Four settlements landed
+  // on chain and all four were journalled as abandoned.
+  const built = deps({ allowance: 10n ** 18n });
+  built.deps.settle = async () => ({
+    success: false,
+    errorReason: "confirmation_unknown",
+    message: "Invalid parameters were provided to the RPC method.",
+    charged: null,
+    transaction: "0xsent",
+    payer: PAYER,
+    value: "101000000",
+  });
+  const log = new Journal({ path: join(mkdtempSync(join(tmpdir(), "unconf-")), "orders.jsonl") });
+
+  const result = await fulfilOrder({
+    payload: { authorization: { nonce: "0xn" }, signature: "0x" },
+    requirements: requirements(),
+    market: NVDA,
+    amountInAtomic: AMOUNT_IN,
+    privateKey: "0xkey",
+    journal: log,
+    deps: built.deps,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, "settlement-unknown");
+  assert.equal(result.needsOperator, true);
+  assert.equal(result.settlementTx, "0xsent");
+  assert.notEqual(result.charged, false, "must not claim the buyer was spared");
+
+  const last = log.read().at(-1);
+  assert.equal(last.step, "stranded", "a human has to resolve this, not a retry");
+  assert.equal(last.tx, "0xsent");
+  assert.equal(last.amountAtomic, "101000000");
+});
+
+test("a send that never left is still a free refusal", async () => {
+  const built = deps({ allowance: 10n ** 18n });
+  built.deps.settle = async () => ({
+    success: false,
+    errorReason: "broadcast_failed",
+    message: "connection refused",
+    charged: false,
+    transaction: null,
+  });
+  const log = new Journal({ path: join(mkdtempSync(join(tmpdir(), "nosend-")), "orders.jsonl") });
+
+  const result = await fulfilOrder({
+    payload: { authorization: { nonce: "0xn" }, signature: "0x" },
+    requirements: requirements(),
+    market: NVDA,
+    amountInAtomic: AMOUNT_IN,
+    privateKey: "0xkey",
+    journal: log,
+    deps: built.deps,
+  });
+
+  assert.equal(result.stage, "pre-settlement");
+  assert.equal(result.charged, false);
+  assert.equal(log.read().at(-1).step, "abandoned");
+});

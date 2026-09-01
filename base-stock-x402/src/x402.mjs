@@ -8,10 +8,10 @@
  * path, which `fulfil.mjs` owns.
  */
 
-import { createPublicClient, createWalletClient, encodeFunctionData, http } from "viem";
+import { createPublicClient, createWalletClient, encodeFunctionData, fallback, http } from "viem";
 import { base } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
-import { BASE_CAIP2, BASE_RPC_URL, USDC, USDC_DOMAIN } from "./chain.mjs";
+import { BASE_CAIP2, BASE_RPC_URL, BASE_RPC_URLS, USDC, USDC_DOMAIN } from "./chain.mjs";
 import { preflightPayment } from "./preflight.mjs";
 
 export const X402_VERSION = 2;
@@ -130,8 +130,14 @@ export function facilitatorAccount(privateKey = process.env.BASE_FACILITATOR_KEY
   return privateKey ? privateKeyToAccount(privateKey) : null;
 }
 
-export function clients(privateKey = process.env.BASE_FACILITATOR_KEY, { rpcUrl = BASE_RPC_URL } = {}) {
-  const transport = http(rpcUrl);
+/** One transport over every configured endpoint, so a single sick RPC is not an outage. */
+export function baseTransport(rpcUrl = null) {
+  const urls = rpcUrl ? [rpcUrl] : BASE_RPC_URLS;
+  return fallback(urls.map((url) => http(url)), { rank: false });
+}
+
+export function clients(privateKey = process.env.BASE_FACILITATOR_KEY, { rpcUrl = null } = {}) {
+  const transport = baseTransport(rpcUrl);
   const account = facilitatorAccount(privateKey);
   return {
     account,
@@ -149,7 +155,7 @@ export function clients(privateKey = process.env.BASE_FACILITATOR_KEY, { rpcUrl 
  */
 export async function settlePayment(payload, requirements, {
   privateKey = process.env.BASE_FACILITATOR_KEY,
-  rpcUrl = BASE_RPC_URL,
+  rpcUrl = null,
   // Already-built clients win over a key. This is how the CDP wallet settles:
   // it cannot hand over a key, so it hands over something that can send.
   walletClient: injectedWallet = null,
@@ -172,7 +178,7 @@ export async function settlePayment(payload, requirements, {
   const built = injectedWallet ? null : clients(privateKey, { rpcUrl });
   const walletClient = injectedWallet ?? built.walletClient;
   const publicClient = injectedPublic ?? built?.publicClient
-    ?? createPublicClient({ chain: base, transport: http(rpcUrl) });
+    ?? createPublicClient({ chain: base, transport: baseTransport(rpcUrl) });
   const { r, s, v } = splitSignature(signature);
   const data = encodeFunctionData({
     abi: TRANSFER_WITH_AUTHORIZATION_ABI,
@@ -190,12 +196,30 @@ export async function settlePayment(payload, requirements, {
     ],
   });
 
+  // Sending and confirming are separate failures and must never be reported as
+  // one. A send that throws charged nobody. A send that succeeded and could not
+  // be confirmed may well have taken the money — treating that as "nothing
+  // happened" is how a buyer gets charged for an order we recorded as refused.
+  let hash;
   try {
-    const hash = await walletClient.sendTransaction({ to: requirements.asset ?? USDC.address, data });
+    hash = await walletClient.sendTransaction({ to: requirements.asset ?? USDC.address, data });
+  } catch (error) {
+    return {
+      success: false,
+      errorReason: "broadcast_failed",
+      message: error.shortMessage ?? error.message,
+      charged: false,
+      transaction: null,
+    };
+  }
+
+  try {
     const receipt = await publicClient.waitForTransactionReceipt({ hash, timeout: 90_000 });
     return {
       success: receipt.status === "success",
       errorReason: receipt.status === "success" ? null : "reverted",
+      // A revert is definite: it consumed gas and moved nothing.
+      charged: receipt.status === "success",
       transaction: hash,
       network: BASE_CAIP2,
       payer: authorization.from,
@@ -204,9 +228,15 @@ export async function settlePayment(payload, requirements, {
   } catch (error) {
     return {
       success: false,
-      errorReason: "broadcast_failed",
+      errorReason: "confirmation_unknown",
       message: error.shortMessage ?? error.message,
-      transaction: null,
+      // Not false, and not true. The transaction is on its way or already
+      // mined; only the chain knows, and this is the one state a human has to
+      // resolve rather than a caller retrying into a second charge.
+      charged: null,
+      transaction: hash,
+      payer: authorization.from,
+      value: String(authorization.value),
     };
   }
 }

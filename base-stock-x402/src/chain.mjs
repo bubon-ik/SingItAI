@@ -7,7 +7,17 @@
 
 export const BASE_CHAIN_ID = 8453;
 export const BASE_CAIP2 = "eip155:8453";
-export const BASE_RPC_URL = process.env.BASE_RPC_URL || "https://base-rpc.publicnode.com";
+// A list, not one endpoint. Public Base RPCs do not all serve the same
+// methods: base-rpc.publicnode.com answers eth_call and eth_getLogs and
+// rejects eth_getTransactionReceipt outright, which reads as "invalid
+// parameters" long after the transaction it cannot confirm has landed.
+export const BASE_RPC_URLS = (process.env.BASE_RPC_URL || [
+  "https://mainnet.base.org",
+  "https://base.drpc.org",
+  "https://1rpc.io/base",
+].join(",")).split(",").map((url) => url.trim()).filter(Boolean);
+
+export const BASE_RPC_URL = BASE_RPC_URLS[0];
 export const BASE_EXPLORER = "https://basescan.org";
 
 export const USDC = {
