@@ -52,6 +52,9 @@ export function config(env = process.env) {
   return {
     payTo: payTo || account?.address || null,
     hasKey: Boolean(key),
+    // When set, the wallet lives in CDP and there is no key here to leak.
+    // The address is resolved at startup, so `payTo` is filled in then.
+    cdpAccountName: String(env.BASE_CDP_ACCOUNT_NAME || "").trim() || null,
     feeBps: number(env.BASE_FEE_BPS, DEFAULT_FEE_BPS),
     maxUsd: number(env.BASE_MAX_USD, DEFAULT_MAX_USD),
     minUsd: number(env.BASE_MIN_USD, DEFAULT_MIN_USD),
@@ -72,7 +75,7 @@ export function priceOrder(usd, { feeBps }) {
   return { amountInAtomic, feeAtomic, totalAtomic: amountInAtomic + feeAtomic };
 }
 
-export function createServer(settings = config(), log = settings.hasKey ? new Journal() : nullJournal) {
+export function createServer(settings = config(), log = settings.hasKey ? new Journal() : nullJournal, deps = {}) {
   const app = express();
   app.use(express.json({ limit: "256kb" }));
 
@@ -168,7 +171,7 @@ export function createServer(settings = config(), log = settings.hasKey ? new Jo
     if (!payload) {
       return sendChallenge(response, requirements, undefined, bazaarExtension(entry, settings));
     }
-    if (!settings.hasKey) {
+    if (!settings.hasKey && !deps.makeClients) {
       return response.status(503).json({ error: "facilitator_not_configured" });
     }
 
@@ -179,6 +182,7 @@ export function createServer(settings = config(), log = settings.hasKey ? new Jo
       amountInAtomic,
       slippageBps: settings.slippageBps,
       journal: log,
+      deps,
     });
 
     if (result.ok) {
@@ -298,9 +302,36 @@ function orderSize(request, settings) {
   return { value };
 }
 
+/**
+ * Put the wallet in front of the server.
+ *
+ * With BASE_CDP_ACCOUNT_NAME set, the signing wallet lives in CDP and this
+ * process never holds a key — the account is resolved once here, and `payTo`
+ * comes from it rather than from the environment, so the two cannot disagree.
+ */
+export async function walletFor(settings) {
+  if (!settings.cdpAccountName) return { deps: {}, settings };
+
+  const [{ CdpClient }, { cdpClients, resolveCdpAccount }] = await Promise.all([
+    import("@coinbase/cdp-sdk"),
+    import("./cdp.mjs"),
+  ]);
+  const account = await resolveCdpAccount({
+    client: new CdpClient(),
+    name: settings.cdpAccountName,
+    expectedAddress: settings.payTo,
+  });
+  return {
+    deps: { makeClients: cdpClients(account) },
+    settings: { ...settings, payTo: account.address, hasKey: true },
+  };
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const settings = config();
+  let settings = config();
   const port = Number(process.env.PORT || 8413);
+  const wallet = await walletFor(settings);
+  settings = wallet.settings;
   const log = settings.hasKey ? new Journal() : nullJournal;
   const open = log.unresolved();
   if (open.length) {
@@ -308,7 +339,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     // process stopped before it finished. They do not resolve themselves.
     console.error(`WARNING: ${open.length} unresolved order(s) in ${log.path}. Run: npm run orders`);
   }
-  createServer(settings, log).listen(port, () => {
-    console.log(`base-stock-x402 on :${port} — payTo ${settings.payTo ?? "(unset)"}, payable=${settings.hasKey}`);
+  createServer(settings, log, wallet.deps).listen(port, () => {
+    const how = settings.cdpAccountName ? `CDP "${settings.cdpAccountName}"` : "local key";
+    console.log(`base-stock-x402 on :${port} — payTo ${settings.payTo ?? "(unset)"} via ${how}, payable=${settings.hasKey}`);
   });
 }

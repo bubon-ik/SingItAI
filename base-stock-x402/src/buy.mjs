@@ -21,10 +21,27 @@ const ticker = String(args.ticker ?? "NVDA").toUpperCase();
 const usd = String(args.usd ?? "10");
 const server = String(args.server ?? "http://localhost:8413").replace(/\/$/, "");
 const key = process.env.BUYER_KEY;
+const cdpName = process.env.BUYER_CDP_ACCOUNT_NAME;
 
-if (!key) {
-  console.error("BUYER_KEY is required (a private key holding USDC on Base)");
+if (!key && !cdpName) {
+  console.error(
+    "Set BUYER_KEY (a private key holding USDC on Base) or BUYER_CDP_ACCOUNT_NAME " +
+    "(a named CDP account, with CDP credentials in the environment)",
+  );
   process.exit(2);
+}
+
+// The buyer only signs a message, so a wallet that will not export its key can
+// still be the payer.
+let signer = null;
+if (cdpName) {
+  const [{ CdpClient }, { cdpSigner, resolveCdpAccount }] = await Promise.all([
+    import("@coinbase/cdp-sdk"),
+    import("./cdp.mjs"),
+  ]);
+  const account = await resolveCdpAccount({ client: new CdpClient(), name: cdpName });
+  signer = cdpSigner(account);
+  console.log(`paying from CDP account "${cdpName}" (${account.address})`);
 }
 
 // Default ceiling: the order plus 10%. Enough for any sane fee, tight enough
@@ -37,6 +54,7 @@ console.log(`buyer-side ceiling: ${max} atomic USDC\n`);
 
 const response = await fetchWithPayment(url, { method: "POST" }, {
   privateKey: key,
+  signer,
   maxAmountAtomic: max,
 });
 

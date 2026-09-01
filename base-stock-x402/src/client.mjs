@@ -16,7 +16,7 @@ import { USDC_DOMAIN } from "./chain.mjs";
 import { TRANSFER_WITH_AUTHORIZATION_TYPES } from "./preflight.mjs";
 import { X402_VERSION, encodePaymentHeader } from "./x402.mjs";
 
-export async function fetchWithPayment(url, options = {}, { privateKey, maxAmountAtomic } = {}) {
+export async function fetchWithPayment(url, options = {}, { privateKey, signer, maxAmountAtomic } = {}) {
   const first = await fetch(url, options);
   if (first.status !== 402) return first;
 
@@ -30,7 +30,7 @@ export async function fetchWithPayment(url, options = {}, { privateKey, maxAmoun
     throw new Error(`price ${value} exceeds the allowed maximum ${maxAmountAtomic}`);
   }
 
-  const header = await signPayment(requirements, privateKey);
+  const header = await signPayment(requirements, signer ?? privateKey);
   return fetch(url, {
     ...options,
     headers: { ...(options.headers ?? {}), "X-PAYMENT": header },
@@ -58,9 +58,21 @@ export async function readRequirements(response) {
   }
 }
 
-/** Sign an authorization for these requirements and return the X-PAYMENT header. */
-export async function signPayment(requirements, privateKey, { now = Math.floor(Date.now() / 1000) } = {}) {
-  const account = privateKeyToAccount(privateKey);
+/**
+ * Sign an authorization for these requirements and return the X-PAYMENT header.
+ *
+ * `keyOrSigner` is a private key, or anything with an `address` and a
+ * viem-shaped `signTypedData` — which is what a CDP account is. The buyer only
+ * ever signs a message, so a wallet that refuses to export its key can still
+ * be the payer.
+ */
+export async function signPayment(requirements, keyOrSigner, { now = Math.floor(Date.now() / 1000) } = {}) {
+  const account = typeof keyOrSigner === "string"
+    ? privateKeyToAccount(keyOrSigner)
+    : keyOrSigner;
+  if (!account?.address || typeof account.signTypedData !== "function") {
+    throw new Error("a private key or a signer with address and signTypedData is required");
+  }
   const authorization = {
     from: account.address,
     to: requirements.payTo,

@@ -111,6 +111,46 @@ cp .env.example .env   # set BASE_FACILITATOR_KEY and BASE_PAY_TO to the same wa
 npm run serve
 ```
 
+### On a CDP wallet, without a key here
+
+This service holds a buyer's USDC for the seconds between settlement and the
+swap, so the wallet doing the holding is the one worth protecting. Point it at
+a CDP account and nothing on this machine ever holds a key — signing happens in
+Coinbase's TEE and this process sees only a transaction hash:
+
+```env
+BASE_CDP_ACCOUNT_NAME=sign402-stocks-seller
+```
+
+with CDP credentials in the environment. The address is resolved at startup and
+becomes `payTo`, so the two cannot disagree. `getOrCreateAccount` is idempotent
+by name, so a fresh name is a fresh wallet and re-running is safe.
+
+**Use a name of its own.** This repository already has a production CDP account
+(`sign402-mainnet-buyer`) that pays for real Bitrefill orders; an experimental
+endpoint that holds float and signs swaps has no business being that wallet.
+Set `BASE_PAY_TO` alongside the name and startup fails if they disagree, which
+turns a typo from "quietly spent from the wrong wallet" into an error.
+
+The buyer can do the same — it only ever signs a message:
+
+```bash
+BUYER_CDP_ACCOUNT_NAME=sign402-stocks-buyer npm run buy -- --ticker NVDA --usd 1
+```
+
+The trade-off is honest: CDP is an external dependency inside the settlement
+path. If it is unreachable mid-order the swap fails and the refund runs — but
+the refund needs CDP too, so an outage in that window strands the order instead
+of resolving it. That is what the journal is for.
+
+`@coinbase/cdp-sdk` is deliberately **not** a dependency of this package; the
+adapter takes an already-constructed account, so the CDP path costs nothing to
+anyone running on a plain key. The adapter is unit-tested without credentials,
+but it has never been run against the live CDP API — unlike the rest of this
+service, treat that path as unproven until one order goes through it.
+
+### On a local key
+
 `BASE_PAY_TO` must be the facilitator's own address — settlement pays it and
 the swap spends from it — and the server refuses to start if they differ rather
 than discovering it one order at a time. That wallet needs ETH on Base: the
