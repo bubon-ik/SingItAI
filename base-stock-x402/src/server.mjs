@@ -197,13 +197,24 @@ export function createServer(settings = config(), log = settings.hasKey ? new Jo
     // challenge. A post-settlement failure is ours, and says what happened to
     // the money.
     if (result.stage === "pre-settlement") {
-      response.set("x402-detail", String(result.detail ?? "").slice(0, 200));
-      return sendChallenge(response, requirements, result.error, bazaarExtension(entry, settings));
+      // Header values are single-line ASCII. Provider errors are neither — a
+      // viem revert spans several lines — and an invalid header value throws
+      // inside the response, which took the whole process down rather than the
+      // one request. The detail also goes in the body, where it can be read.
+      response.set("x402-detail", headerSafe(result.detail));
+      const body = challengeBody(requirements, result.error, bazaarExtension(entry, settings));
+      return response.status(402).json({ ...body, detail: result.detail ?? null });
     }
     return response.status(502).json(result);
   });
 
   app.use((_request, response) => response.status(404).json({ error: "not found" }));
+  // Express does not catch a rejected async handler, and an unhandled
+  // rejection ends the process — mid-order, which is the worst moment there is.
+  app.use((error, _request, response, _next) => {
+    console.error("route failed:", error?.message ?? error);
+    response.status(500).json({ error: "internal_error", detail: headerSafe(error?.message) });
+  });
   return app;
 }
 
@@ -287,6 +298,15 @@ export function bazaarExtension(entry, settings) {
   };
 }
 
+/** One line of printable ASCII, or nothing. Never a reason to drop a response. */
+export function headerSafe(value) {
+  return String(value ?? "")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/[^\x20-\x7E]/g, "")
+    .trim()
+    .slice(0, 200);
+}
+
 function unknownTicker(ticker) {
   return `unknown ticker ${String(ticker).toUpperCase()}; this node sells ${Object.keys(MARKETS).join(", ")}`;
 }
@@ -332,7 +352,7 @@ export async function walletFor(settings) {
 // "Berlin Hack", say — percent-encodes in import.meta.url and does not in a
 // template literal, so the two never match and the server starts nothing while
 // exiting 0. Silent, and it looks exactly like a server that refused to bind.
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   let settings = config();
   const port = Number(process.env.PORT || 8413);
   const wallet = await walletFor(settings);

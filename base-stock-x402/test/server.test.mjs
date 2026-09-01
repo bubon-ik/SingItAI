@@ -159,3 +159,43 @@ test("health reports how much money is owed, without naming who is owed it", asy
     server.close();
   }
 });
+
+
+// -- a bad detail string must not take the server down -------------------
+
+test("a multi-line provider error is flattened, not put in a header raw", async () => {
+  // What killed the process: viem errors span several lines, Node rejects a
+  // header containing one, and the throw happened inside the response.
+  const { headerSafe } = await import("../src/server.mjs");
+
+  assert.equal(headerSafe("Execution reverted\n\nDetails: 0xabc\tmore"), "Execution reverted Details: 0xabc more");
+  assert.equal(headerSafe("цена — мала"), "");
+  assert.equal(headerSafe(null), "");
+  assert.ok(headerSafe("x".repeat(500)).length <= 200);
+  assert.match(headerSafe("ok\r\nInjected: yes"), /^ok Injected: yes$/, "no CRLF survives");
+});
+
+test("the refusal detail is readable in the body, not only in a header", async () => {
+  const settings = config({ BASE_FACILITATOR_KEY: KEY, BASE_PAY_TO: ACCOUNT.address });
+  const { nullJournal } = await import("../src/journal.mjs");
+
+  const server = createServer(settings, nullJournal, {
+    async verify() {
+      return { isValid: false, invalidReason: "the signature does not match\nline two", payer: null };
+    },
+  }).listen(0);
+  await new Promise((resolve) => server.once("listening", resolve));
+
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${server.address().port}/paid/buy/NVDA?usd=1`,
+      { method: "POST", headers: { "X-PAYMENT": Buffer.from("{}").toString("base64") } },
+    );
+    assert.equal(response.status, 402);
+    const body = await response.json();
+    assert.match(body.detail, /signature does not match/);
+    assert.equal(response.headers.get("x402-detail").includes("\n"), false);
+  } finally {
+    server.close();
+  }
+});
