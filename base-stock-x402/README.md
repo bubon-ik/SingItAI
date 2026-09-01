@@ -143,11 +143,16 @@ path. If it is unreachable mid-order the swap fails and the refund runs — but
 the refund needs CDP too, so an outage in that window strands the order instead
 of resolving it. That is what the journal is for.
 
-`@coinbase/cdp-sdk` is deliberately **not** a dependency of this package; the
-adapter takes an already-constructed account, so the CDP path costs nothing to
-anyone running on a plain key. The adapter is unit-tested without credentials,
-but it has never been run against the live CDP API — unlike the rest of this
-service, treat that path as unproven until one order goes through it.
+`@coinbase/cdp-sdk` is imported dynamically and only when `BASE_CDP_ACCOUNT_NAME`
+is set, so running on a plain key never loads it. It is a normal dependency
+rather than an optional one because npm skips the transitive tree of optional
+packages and the SDK then fails to import — a broken install is worse than an
+unused dependency. Its pinned axios is overridden to `^1.18.1`, the same
+override `cdp-x402-service` already carries.
+
+The adapter is unit-tested against a fake account, but it has never been run
+against the live CDP API — unlike the rest of this service, treat that path as
+unproven until one order goes through it.
 
 ### On a local key
 
