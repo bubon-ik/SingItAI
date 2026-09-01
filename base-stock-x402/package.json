@@ -8,7 +8,8 @@
     "serve": "node src/server.mjs",
     "probe": "node src/probe.mjs",
     "test": "node --test test/*.test.mjs",
-    "orders": "node src/orders.mjs"
+    "orders": "node src/orders.mjs",
+    "buy": "node src/buy.mjs"
   },
   "dependencies": {
     "express": "^4.19.2",

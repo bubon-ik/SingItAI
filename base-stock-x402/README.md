@@ -125,8 +125,23 @@ payer signs only a message, and we pay gas for the whole sequence.
 curl "http://localhost:8413/quote/NVDA?usd=100"
 ```
 
-Then pay `POST /paid/buy/NVDA?usd=100` with an `X-PAYMENT` header, exactly as
-any other x402 `exact` resource on Base.
+Then place the order. The buyer needs USDC on Base and nothing else — no ETH,
+no account, no key with this server:
+
+```bash
+BUYER_KEY=0x… npm run buy -- --ticker NVDA --usd 10 --server http://localhost:8413
+```
+
+`src/client.mjs` reads the challenge from **both** forms (body and
+`payment-required` header), signs one EIP-3009 authorization under the domain
+the seller published, and always sends a buyer-side ceiling: an agent that does
+not cap its own spend has not set a budget.
+
+The signature path is proven end to end against live Base. Pointing an empty
+wallet at the endpoint fails with `the payer does not hold enough USDC` rather
+than `the signature does not match the stated payer` — which is what a domain
+mismatch would say, and is the failure that looks like the payer's fault and is
+not.
 
 ## Test
 
