@@ -273,6 +273,33 @@ async function ensureAllowance({ account, walletClient, publicClient, amount, re
   if (receipt.status !== "success") {
     throw new Error("the router approval reverted");
   }
+
+  // A receipt from one node does not mean every node has the block. The swap
+  // is estimated and sent across a fallback chain, and a node one block behind
+  // still sees no allowance — which surfaces as the router failing to pull the
+  // USDC, "STF", with nothing in it about lag. So wait until the allowance
+  // actually reads back before spending against it.
+  await confirmAllowance({ owner: account.address, amount, readAllowance, options, journal });
+}
+
+const ALLOWANCE_READBACK_ATTEMPTS = 8;
+const ALLOWANCE_READBACK_DELAY_MS = 750;
+
+async function confirmAllowance({ owner, amount, readAllowance, options, journal, sleep = defaultSleep }) {
+  for (let attempt = 1; attempt <= ALLOWANCE_READBACK_ATTEMPTS; attempt += 1) {
+    const seen = await readAllowance({ owner, spender: ROUTER_EQUITY, options });
+    if (seen >= amount) {
+      journal.push({ step: "allowance", ok: true, attempts: attempt });
+      return;
+    }
+    if (attempt < ALLOWANCE_READBACK_ATTEMPTS) await sleep(ALLOWANCE_READBACK_DELAY_MS);
+  }
+  journal.push({ step: "allowance", ok: false });
+  throw new Error("the approval did not read back before the swap");
+}
+
+function defaultSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**

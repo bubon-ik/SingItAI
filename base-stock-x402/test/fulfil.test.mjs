@@ -359,3 +359,65 @@ test("a send that never left is still a free refusal", async () => {
   assert.equal(result.charged, false);
   assert.equal(log.read().at(-1).step, "abandoned");
 });
+
+
+// -- read-your-writes across a fallback RPC chain ------------------------
+
+test("the swap waits for the approval to read back, not just to be mined", async () => {
+  // What happened on chain: the approve receipt arrived, the swap was then
+  // estimated against a node one block behind, saw no allowance, and the
+  // router failed to pull the USDC — "STF", which says nothing about lag.
+  let reads = 0;
+  const built = deps({
+    allowance: 0n,
+    receipts: [
+      { status: "success" }, // approve
+      { status: "success", logs: [transferLog(NVDA.token, PAYER, 45_000_000n)] },
+    ],
+  });
+  built.deps.readAllowance = async () => {
+    reads += 1;
+    // Nothing, nothing, then the block finally shows up.
+    return reads >= 3 ? 10n ** 18n : 0n;
+  };
+
+  const result = await fulfilOrder({
+    payload: { authorization: { nonce: "0xn" }, signature: "0x" },
+    requirements: requirements(),
+    market: NVDA,
+    amountInAtomic: AMOUNT_IN,
+    privateKey: "0xkey",
+    now: () => 1_800_000_000,
+    deps: built.deps,
+  });
+
+  assert.equal(result.ok, true, "a lagging node should cost a wait, not the order");
+  assert.ok(reads >= 3, "it kept asking until the allowance was visible");
+  const allowanceStep = result.journal.find((entry) => entry.step === "allowance");
+  assert.equal(allowanceStep.ok, true);
+});
+
+test("an approval that never reads back refunds instead of swapping blind", async () => {
+  const built = deps({
+    allowance: 0n,
+    receipts: [
+      { status: "success" }, // approve
+      { status: "success" }, // refund
+    ],
+  });
+  built.deps.readAllowance = async () => 0n;
+
+  const result = await fulfilOrder({
+    payload: { authorization: { nonce: "0xn" }, signature: "0x" },
+    requirements: requirements(),
+    market: NVDA,
+    amountInAtomic: AMOUNT_IN,
+    privateKey: "0xkey",
+    deps: built.deps,
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /did not read back/);
+  assert.equal(result.refunded, "101.000000 USDC", "the buyer is made whole");
+  assert.equal(result.needsOperator, false);
+});
