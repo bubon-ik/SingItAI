@@ -109,7 +109,14 @@ export async function fulfilOrder({
     nonce: readAuthorization(payload).authorization?.nonce ?? null,
   });
 
-  const settlement = await settle(payload, requirements, { privateKey, ...options });
+  // The same wallet settles and swaps. Handing it over rather than handing over
+  // a key is what lets a CDP account, which has no key to hand over, do both.
+  const settlement = await settle(payload, requirements, {
+    privateKey,
+    walletClient,
+    publicClient,
+    ...options,
+  });
   journal.push({ step: "settle", ok: settlement.success, tx: settlement.transaction });
   if (!settlement.success) {
     // Settlement failing is still a free refusal: the authorization was never

@@ -147,12 +147,19 @@ export function clients(privateKey = process.env.BASE_FACILITATOR_KEY, { rpcUrl 
  * structured result rather than throwing, so a settlement failure downgrades a
  * response instead of taking the process down.
  */
-export async function settlePayment(payload, requirements, { privateKey = process.env.BASE_FACILITATOR_KEY, rpcUrl = BASE_RPC_URL } = {}) {
-  if (!privateKey) {
+export async function settlePayment(payload, requirements, {
+  privateKey = process.env.BASE_FACILITATOR_KEY,
+  rpcUrl = BASE_RPC_URL,
+  // Already-built clients win over a key. This is how the CDP wallet settles:
+  // it cannot hand over a key, so it hands over something that can send.
+  walletClient: injectedWallet = null,
+  publicClient: injectedPublic = null,
+} = {}) {
+  if (!injectedWallet && !privateKey) {
     return {
       success: false,
       errorReason: "facilitator_not_configured",
-      message: "BASE_FACILITATOR_KEY is not set; the server can verify but not settle.",
+      message: "No signing wallet: set BASE_FACILITATOR_KEY or BASE_CDP_ACCOUNT_NAME.",
       transaction: null,
     };
   }
@@ -162,7 +169,10 @@ export async function settlePayment(payload, requirements, { privateKey = proces
     return { success: false, errorReason: "malformed_payload", transaction: null };
   }
 
-  const { walletClient, publicClient } = clients(privateKey, { rpcUrl });
+  const built = injectedWallet ? null : clients(privateKey, { rpcUrl });
+  const walletClient = injectedWallet ?? built.walletClient;
+  const publicClient = injectedPublic ?? built?.publicClient
+    ?? createPublicClient({ chain: base, transport: http(rpcUrl) });
   const { r, s, v } = splitSignature(signature);
   const data = encodeFunctionData({
     abi: TRANSFER_WITH_AUTHORIZATION_ABI,

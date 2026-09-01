@@ -133,3 +133,57 @@ test("something that is neither a key nor a signer is refused", async () => {
     /private key or a signer/,
   );
 });
+
+// -- settling without a key ---------------------------------------------
+
+test("a wallet with no key to give can still settle", async () => {
+  // The bug this covers: the swap was wired to the CDP wallet and settlement
+  // was not, so a CDP deployment answered facilitator_not_configured to every
+  // paid request while /health cheerfully reported payable: true.
+  const { settlePayment } = await import("../src/x402.mjs");
+  const sent = [];
+
+  const result = await settlePayment(
+    {
+      authorization: {
+        from: "0x1111111111111111111111111111111111111111",
+        to: "0x2222222222222222222222222222222222222222",
+        value: "1010000",
+        validAfter: "0",
+        validBefore: "1900000000",
+        nonce: "0x" + "11".repeat(32),
+      },
+      signature: "0x" + "22".repeat(65),
+    },
+    { asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" },
+    {
+      privateKey: undefined,
+      walletClient: {
+        async sendTransaction(tx) {
+          sent.push(tx);
+          return "0xsettled";
+        },
+      },
+      publicClient: {
+        async waitForTransactionReceipt() {
+          return { status: "success" };
+        },
+      },
+    },
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(result.transaction, "0xsettled");
+  assert.equal(sent.length, 1, "the authorization was broadcast");
+  assert.match(sent[0].data, /^0xe3ee160e/, "transferWithAuthorization");
+});
+
+test("no key and no wallet is still a clear refusal", async () => {
+  const { settlePayment } = await import("../src/x402.mjs");
+
+  const result = await settlePayment({}, {}, { privateKey: undefined });
+
+  assert.equal(result.success, false);
+  assert.equal(result.errorReason, "facilitator_not_configured");
+  assert.match(result.message, /BASE_CDP_ACCOUNT_NAME/, "names both ways to fix it");
+});
