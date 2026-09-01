@@ -21,6 +21,7 @@ import {
 import { DEFAULT_SLIPPAGE_BPS, quoteBuy, readPoolPrice } from "./quote.mjs";
 import { buildPaymentRequirements, challengeBody, decodePaymentHeader, facilitatorAccount, sendChallenge } from "./x402.mjs";
 import { fulfilOrder } from "./fulfil.mjs";
+import { pathToFileURL } from "node:url";
 import { Journal, nullJournal } from "./journal.mjs";
 
 const DEFAULT_FEE_BPS = 100;
@@ -327,7 +328,11 @@ export async function walletFor(settings) {
   };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// pathToFileURL, not string concatenation: a path with a space in it —
+// "Berlin Hack", say — percent-encodes in import.meta.url and does not in a
+// template literal, so the two never match and the server starts nothing while
+// exiting 0. Silent, and it looks exactly like a server that refused to bind.
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   let settings = config();
   const port = Number(process.env.PORT || 8413);
   const wallet = await walletFor(settings);
