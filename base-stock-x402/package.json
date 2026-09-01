@@ -1,0 +1,17 @@
+{
+  "name": "sign402-base-stock-x402",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "x402 checkout for Coinbase tokenized equities on Base, settled in USDC",
+  "scripts": {
+    "serve": "node src/server.mjs",
+    "probe": "node src/probe.mjs",
+    "test": "node --test test/*.test.mjs",
+    "orders": "node src/orders.mjs"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "viem": "^2.55.16"
+  }
+}

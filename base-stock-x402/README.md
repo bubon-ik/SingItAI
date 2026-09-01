@@ -1,0 +1,162 @@
+# Sign402 x402 stock checkout on Base
+
+Pay USDC over x402, receive Coinbase tokenized equities at the address that
+signed the payment. Self-facilitated: no dependency on a third-party
+facilitator's uptime.
+
+| Endpoint | What it does |
+|---|---|
+| `GET /quote/:ticker?usd=100` | Free. What the live pool would give, and the floor below which the order refunds. |
+| `POST /paid/buy/:ticker?usd=100` | Pay, and the shares are swapped straight to you. |
+
+Markets: **NVDA, AAPL, GOOGL, META** — Coinbase's B20 predeploys on Base.
+
+## Why the shares never touch our books
+
+`exactInputSingle` takes a recipient. So the swap sends the equity directly to
+the payer, whose address is recovered from the payment signature rather than
+read out of the request body. There is no second transfer that could fail, no
+window where we custody somebody's stock, and nothing to seize here if a
+jurisdiction ever asks.
+
+That is also why this works at all. B20 puts no allowlist on secondary
+transfers — KYC gates minting and redeeming against the underlying shares, not
+holding them — so an arbitrary payer address is a valid destination.
+
+## The rule this node inverts, and what it costs
+
+The Robinhood Chain node runs work **before** settlement, so a handler that
+throws never leaves a buyer charged for nothing. Here the work is spending our
+own USDC on shares, so settlement has to come first.
+
+The price of that inversion is a refund path, and it is the load-bearing part
+of `fulfil.mjs`. Once the money is ours there are exactly two acceptable
+endings:
+
+- the shares arrive, or
+- the full amount paid — our fee included — goes back to the payer.
+
+Anything else sets `needsOperator: true` and says so in the response rather
+than resolving into a generic error. Every refusal *before* settlement reports
+`charged: false`, because the authorization was never consumed.
+
+## When something is owed
+
+Every order writes an `intent` line to `~/.base-stock-x402/orders.jsonl` —
+flushed to disk — **before** the settlement is broadcast, and a line for each
+step after it. A crash between taking the money and delivering the shares
+therefore leaves a record instead of a silence.
+
+The line carries the payer and the authorization nonce, which is all it takes
+to ask the chain what actually happened:
+
+```
+USDC.authorizationState(payer, nonce) == true  → they paid, we owe them
+                                       == false → nothing was taken
+```
+
+`GET /health` publishes `unresolvedOrders` as a **count only** — the route is
+public and the entries carry payer addresses. For the details:
+
+```bash
+npm run orders
+```
+
+It prints every order whose last step is not an ending, plus anything marked
+`stranded` — an order where the delivery failed *and* the refund failed, which
+is the one state that means a human owes somebody money. The server also warns
+loudly at startup if the file is not clean.
+
+## The challenge is sent in both forms
+
+x402 v2 allows the terms in the JSON body or in a base64 `payment-required`
+header. Sellers pick one: Massive publishes only the header, this repository's
+own Robinhood node only the body. A buyer that reads the other one sees an
+endpoint with no payable leg and refuses to pay a working service.
+
+So this node sends both, and the test asserts they agree.
+
+The challenge also carries a `bazaar` extension with the input schema, the size
+limits and an example response — the shape Massive uses, and the reason an
+agent can call this correctly the first time without finding documentation.
+
+## The chain facts, and where they came from
+
+Every constant in `src/chain.mjs` was read off Base, and `test/chain.test.mjs`
+re-reads them.
+
+- USDC `0x8335…2913`, "USD Coin", **6 decimals**, implements EIP-3009, so a
+  payer signs one message and needs no ETH.
+- Its EIP-712 domain is `{"USD Coin", "2", 8453, 0x8335…}`, which reproduces
+  the on-chain `DOMAIN_SEPARATOR`
+  `0x02fa7265e7c5d81118673727957699e4d68f74cd74b7db77da710fe8a2c7834f`. The
+  server publishes it in `extra` on every 402 so buyers never guess.
+- The four equities are predeploys at `0xb2…`, **8 decimals** — not 18, not 6.
+- **USDC is `token0` in every pool** and the equity is `token1`, so the raw
+  pool ratio is shares-per-dollar and has to be inverted. Getting that backwards
+  prices a $300 share at half a cent, which is why the test asserts the ordering
+  instead of trusting it.
+- Pools are Aerodrome Slipstream, tickSpacing **10**, fee **0.05%**. The router
+  is `0x698c…a92f`, taken from Bankr's published `aero-stock-lp` skill.
+- `exactInputSingle` is `0xa026383e` over an **eight-word static tuple carrying
+  tickSpacing where Uniswap carries fee**. The selector and the layout travel
+  together; Uniswap's tuple against this selector encodes a different trade that
+  still decodes.
+
+## Run
+
+```bash
+npm install
+cp .env.example .env   # set BASE_FACILITATOR_KEY and BASE_PAY_TO to the same wallet
+npm run serve
+```
+
+`BASE_PAY_TO` must be the facilitator's own address — settlement pays it and
+the swap spends from it — and the server refuses to start if they differ rather
+than discovering it one order at a time. That wallet needs ETH on Base: the
+payer signs only a message, and we pay gas for the whole sequence.
+
+- `GET /health` — what this node is, and whether it can actually be paid.
+- `GET /.well-known/x402` — machine-readable catalog for agent discovery.
+
+## Buy something
+
+```bash
+curl "http://localhost:8413/quote/NVDA?usd=100"
+```
+
+Then pay `POST /paid/buy/NVDA?usd=100` with an `X-PAYMENT` header, exactly as
+any other x402 `exact` resource on Base.
+
+## Test
+
+```bash
+npm test                 # offline, against fakes — no key, no money
+BASE_LIVE=1 npm test     # also re-reads every constant from Base
+```
+
+The fulfilment tests replace the whole chain surface, because a test that can
+move real money eventually does. One of them asserts that the intent reaches
+disk *before* the settlement call — which is the only property the journal
+actually exists for.
+
+## Honest limits
+
+- **We hold float.** Between settlement and the swap the buyer's USDC is ours —
+  seconds, and no working capital of our own is required, but a server
+  compromise in that window is a real risk, exactly as `README.md` at the
+  repository root says of the custodial wallet.
+- **No order has ever run.** Everything here is tested against fakes and every
+  constant is checked against live Base, but no real payment has settled. Until
+  one has, treat the gas cost and the real fill as unmeasured.
+- **Order size is capped at $250 by default** because a market order into a
+  concentrated-liquidity band moves the price it fills at. Past the cap the
+  buyer is mostly paying for their own impact, and the 1.5% floor starts
+  rejecting fills that were never dishonest.
+- **The quote is an estimate.** The fill is whatever the pool gives when the
+  swap lands; the only promise is the floor, and below it the order refunds.
+- **Jurisdiction is not enforced here.** Coinbase's program is for eligible
+  non-US users and restricts that at its own application layer. This node does
+  not check who you are, and whoever operates it owns that question.
+- **The issuer can freeze.** B20 keeps freeze-and-seize powers at the token
+  level. Delivery to the payer does not change that, and buyers should know it.
