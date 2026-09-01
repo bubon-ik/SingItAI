@@ -206,9 +206,16 @@ actually exists for.
   seconds, and no working capital of our own is required, but a server
   compromise in that window is a real risk, exactly as `README.md` at the
   repository root says of the custodial wallet.
-- **No order has ever run.** Everything here is tested against fakes and every
-  constant is checked against live Base, but no real payment has settled. Until
-  one has, treat the gas cost and the real fill as unmeasured.
+- **One order has run**, on Base mainnet, 1 September 2026: settlement
+  [`0x0f99f5ea…`](https://basescan.org/tx/0x0f99f5eac7d8d92995ee3e5a217ae71dd7e5f8a4baebdf2e6bcebb75a21ff96c)
+  and swap
+  [`0xf182d23c…`](https://basescan.org/tx/0xf182d23ceabc089153207d082a0f400ac7aa269d4b4a98e9ec2709d5b65d6000),
+  both in block 50746926. $1 in, 0.00457420 NVDAc delivered to the payer,
+  342,213 gas for the pair — under a cent. The fill beat the quote: 457,420
+  atomic against an estimate of 457,306.
+  That order had the payer and the seller on one wallet, so the settlement was
+  a transfer to itself. Everything else — the challenge, the signature, the
+  broadcast, the swap, the delivery — was the real path.
 - **Order size is capped at $250 by default** because a market order into a
   concentrated-liquidity band moves the price it fills at. Past the cap the
   buyer is mostly paying for their own impact, and the 1.5% floor starts
