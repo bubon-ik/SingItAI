@@ -5146,6 +5146,33 @@ class GatewayServerTests(unittest.TestCase):
                     )
                 )
 
+    def test_an_explicit_env_mapping_is_the_environment(self):
+        """The dict a caller passes is read, not just the process environment.
+
+        The package reads its own variables from `os.environ`, so a mapping
+        given here has to be forwarded as arguments. A helper that checked the
+        flag in the dict and then built the policy from the process would let
+        a test pass for the wrong reason — and did.
+        """
+        db_path = Path(tempfile.mkdtemp()) / "memory.db"
+        policy = gateway_server.build_spending_policy_from_env(
+            {
+                "SIGN402_SPENDING_MEMORY_ENABLED": "1",
+                "SPENDING_MEMORY_DB": str(db_path),
+                "SPENDING_MEMORY_AUTONOMY_CAP": "0.25",
+            }
+        )
+        self.assertEqual(policy.daily_cap_usd, Decimal("0.25"))
+
+        with self.assertRaises(ValueError):
+            gateway_server.build_spending_policy_from_env(
+                {
+                    "SIGN402_SPENDING_MEMORY_ENABLED": "1",
+                    "SPENDING_MEMORY_DB": str(Path(tempfile.mkdtemp()) / "memory.db"),
+                    "SPENDING_MEMORY_AUTONOMY_CAP": "banana",
+                }
+            )
+
     def test_agent_buy_tool_for_user_releases_the_hold_when_payment_fails(self):
         server = DummyServer()
         server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"

@@ -6965,6 +6965,11 @@ def build_spending_policy_from_env(env: dict[str, str] | None = None):
     The switch is read *before* the policy is built, so a box with the switch
     off starts even when the autonomy cap is unset. A rescue lever that itself
     needs configuration is not a rescue lever.
+
+    The package reads its own variables from `os.environ` directly, so an
+    explicitly passed mapping is forwarded as arguments — a dict that was
+    checked for the flag and then silently ignored for everything else would
+    let a test pass for the wrong reason.
     """
     values = os.environ if env is None else env
     raw = str(values.get(SPENDING_MEMORY_ENABLED_ENV, "1")).strip().lower()
@@ -6975,7 +6980,21 @@ def build_spending_policy_from_env(env: dict[str, str] | None = None):
             SPENDING_MEMORY_ENABLED_ENV,
         )
         return None
-    return build_policy()
+    if env is None:
+        return build_policy()
+    overrides: dict[str, Any] = {}
+    db_path = str(values.get("SPENDING_MEMORY_DB", "") or "").strip()
+    if db_path:
+        overrides["db_path"] = db_path
+    cap = str(values.get("SPENDING_MEMORY_AUTONOMY_CAP", "") or "").strip()
+    try:
+        overrides["daily_cap_usd"] = Decimal(cap) if cap else None
+    except InvalidOperation:
+        raise ValueError(
+            f"SPENDING_MEMORY_AUTONOMY_CAP must be a decimal amount in USD, "
+            f"got {cap!r}"
+        ) from None
+    return build_policy(**overrides)
 
 
 class SpendingBlocked(ValueError):
