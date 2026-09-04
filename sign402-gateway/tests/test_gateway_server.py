@@ -27,7 +27,10 @@ from sign402_gateway.secure_state import (
     SensitiveStateDecryptionError,
     SensitiveStateError,
 )
+from spending_memory import SpendingMemory, SpendingPolicy
+
 from sign402_gateway.user_wallets import BASE_NATIVE_ETH_ASSET_ID
+from sign402_gateway import server as gateway_server
 from sign402_gateway.server import (
     FUND_MOVING_POST_PATHS,
     MAX_REQUEST_BODY_BYTES,
@@ -153,6 +156,14 @@ class DummyServer:
         self.user_spend_limit_store.reserve_within_limits.side_effect = (
             self._reserve_within_limits
         )
+        # A real policy on a database of its own, not a Mock: every merchant in
+        # these tests is one nobody has paid before, so memory escalates and
+        # the human approval path each test is about is the one that runs.
+        self.spending_policy = SpendingPolicy(
+            SpendingMemory.local(str(Path(tempfile.mkdtemp()) / "memory.db")),
+            daily_cap_usd=Decimal("5"),
+        )
+        self.spending_memory_holds: dict[str, dict] = {}
 
     def _reserve_within_limits(
         self,
@@ -548,6 +559,10 @@ class GatewayServerTests(unittest.TestCase):
                         "build_bitrefill_funding_runner_from_env"
                     ),
                     "sign402_gateway.server.build_usdc_reserve_guard_from_env",
+                    # Stubbed like every other builder here: this test is about
+                    # the master key, and the real one refuses to build without
+                    # an autonomy cap, which a cleared environment cannot have.
+                    "sign402_gateway.server.build_spending_policy_from_env",
                     (
                         "sign402_gateway.server."
                         "build_singit_settlement_verifier_from_env"
@@ -4940,6 +4955,196 @@ class GatewayServerTests(unittest.TestCase):
             "hold_test"
         )
         server.user_spend_limit_store.settle_reservation.assert_not_called()
+
+    # ---------------------------------------------------------------- memory
+
+    MEMORY_RESOURCE_URL = "https://x402.ottoai.services/crypto-news"
+
+    def memory_payment_requirements(self):
+        return {
+            "scheme": "exact",
+            "network": "base-mainnet",
+            "x402Network": "eip155:8453",
+            "amountAtomic": "1000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "receiver": "0x0E84dDEdAaE6A779c462C22a59F301EC31B6b808",
+            "paymentIntent": "crypto-news-1",
+            "purpose": "x402_api_access",
+            "extra": {"name": "USD Coin", "version": "2"},
+        }
+
+    def memory_server(self, requirements, *, buyer_ok=True):
+        """A server whose only unusual feature is that memory is switched on."""
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
+        server.event_store = Mock()
+        server.user_event_store = Mock()
+        server.imessage_approval_service.request_purchase_approval.return_value = {
+            "ok": True,
+            "status": "approved",
+            "approvalId": "approval-1",
+            "commitmentHash": "c" * 64,
+        }
+        server.user_wallet_service.decrypt_private_key_for_future_signing.return_value = (
+            "0xUSER_PRIVATE_KEY"
+        )
+        server.user_x402_buyer.return_value = {
+            "decision": "approved_and_executed",
+            "ok": buyer_ok,
+            "mode": "official_x402_base_user_wallet",
+            "resourceUrl": self.MEMORY_RESOURCE_URL,
+            "txId": "0xTX",
+            "amountAtomic": requirements["amountAtomic"],
+            "asset": requirements["asset"],
+            "network": requirements["network"],
+            "telegramText": "✅ Crypto News unlocked.",
+        }
+        return server
+
+    def memory_payment(self, server, requirements):
+        return gateway_server._payment_from_requirements(
+            requirements, owner="1045618308", resource_url=self.MEMORY_RESOURCE_URL
+        )
+
+    def teach_memory(self, server, requirements, times=3):
+        """Settle the same purchase a few times, the way the owner approving it would."""
+        payment = self.memory_payment(server, requirements)
+        for _ in range(times):
+            server.spending_policy.memory.remember_settlement(payment, tx_id="0xseed")
+        return payment
+
+    def run_memory_buy(self, server, requirements):
+        with patch("sys.stderr", io.StringIO()):
+            with (
+                patch(
+                    "sign402_gateway.server.fetch_x402_payment_required",
+                    return_value={"x402Version": 2, "accepts": [{}]},
+                ),
+                patch(
+                    "sign402_gateway.server.normalize_x402_payment_required",
+                    return_value=requirements,
+                ),
+            ):
+                handler = self.make_handler(
+                    "/agent/buy-tool",
+                    {"tool": "news", "telegramUserId": "1045618308"},
+                    server=server,
+                    headers=self.llm_auth_headers(),
+                )
+        response = self.response_text(handler)
+        return response, json.loads(response.split("\r\n\r\n", 1)[1])
+
+    def test_a_merchant_memory_knows_is_paid_without_asking_anyone(self):
+        """The one branch that spends money with no human in it.
+
+        Same merchant, same address, same price as three settled purchases, so
+        there is nothing left to ask about — and the approval that authorises
+        the payment points at the journal entry that decided it.
+        """
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+        self.teach_memory(server, requirements)
+
+        response, body = self.run_memory_buy(server, requirements)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertTrue(body["ok"])
+        server.imessage_approval_service.request_purchase_approval.assert_not_called()
+
+        approval = server.user_x402_buyer.call_args.kwargs["approval"]
+        self.assertEqual(approval["status"], "approved")
+        self.assertEqual(approval["source"], "spending_memory")
+        self.assertEqual(approval["rule"], "known_good")
+        self.assertTrue(approval["approvalId"].startswith("sm-"))
+
+        journal_id = approval["approvalId"][len("sm-"):]
+        entry = next(
+            e
+            for e in server.spending_policy.memory.journal(limit=20)
+            if e["id"] == journal_id
+        )
+        self.assertEqual(entry["extra"]["rule"], "known_good")
+        self.assertIn(approval["reason"], entry["acted"][0])
+
+    def test_a_merchant_memory_does_not_know_still_asks(self):
+        """The other side of the same branch: no history, no autonomy."""
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+
+        response, body = self.run_memory_buy(server, requirements)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        server.imessage_approval_service.request_purchase_approval.assert_called_once()
+        approval = server.user_x402_buyer.call_args.kwargs["approval"]
+        self.assertEqual(approval["approvalId"], "approval-1")
+
+    def test_a_blocked_payment_gives_the_hold_back_and_says_why(self):
+        """A second identical payment while the first is still in flight.
+
+        Nothing is spent, so nothing may stay held, and the person gets the
+        sentence memory wrote rather than a generic refusal.
+        """
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+        payment = self.teach_memory(server, requirements)
+
+        # The first attempt takes the claim and never finishes.
+        first, claim_id = server.spending_policy.authorise(payment)
+        self.assertEqual(first.action.value, "PAY")
+        self.assertIsNotNone(claim_id)
+
+        response, body = self.run_memory_buy(server, requirements)
+
+        self.assertIn("HTTP/1.0 400 Bad Request", response)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["decision"], "blocked_by_memory")
+        self.assertEqual(body["rule"], "already_in_flight")
+        self.assertIn("not sending a second one", body["telegramText"])
+        self.assertEqual(body["evidence"]["claim_status"], "held")
+        server.user_spend_limit_store.release_reservation.assert_called_once_with(
+            "hold_test"
+        )
+        server.user_x402_buyer.assert_not_called()
+        server.imessage_approval_service.request_purchase_approval.assert_not_called()
+
+    def test_the_kill_switch_puts_every_purchase_back_to_asking(self):
+        """The rescue lever, exercised.
+
+        With memory off, a merchant it would otherwise pay silently is asked
+        about like every other purchase — the behaviour of the week before this
+        existed, one restart away.
+        """
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+        self.teach_memory(server, requirements)
+        server.spending_policy = None  # SIGN402_SPENDING_MEMORY_ENABLED=0
+
+        response, body = self.run_memory_buy(server, requirements)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertTrue(body["ok"])
+        server.imessage_approval_service.request_purchase_approval.assert_called_once()
+        approval = server.user_x402_buyer.call_args.kwargs["approval"]
+        self.assertEqual(approval["approvalId"], "approval-1")
+
+    def test_the_kill_switch_needs_no_other_configuration(self):
+        """A rescue lever that itself needs configuring is not a rescue lever.
+
+        With the switch off the autonomy cap is never read, so a box that never
+        set one still boots.
+        """
+        self.assertIsNone(
+            gateway_server.build_spending_policy_from_env(
+                {"SIGN402_SPENDING_MEMORY_ENABLED": "0"}
+            )
+        )
+        for value in ("false", "no", "off", "0"):
+            with self.subTest(value=value):
+                self.assertIsNone(
+                    gateway_server.build_spending_policy_from_env(
+                        {"SIGN402_SPENDING_MEMORY_ENABLED": value}
+                    )
+                )
 
     def test_agent_buy_tool_for_user_releases_the_hold_when_payment_fails(self):
         server = DummyServer()
