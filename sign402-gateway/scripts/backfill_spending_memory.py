@@ -33,9 +33,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from spending_memory import Payment, SpendingMemory  # noqa: E402
+from spending_memory.adapters.x402 import DB_PATH_ENV  # noqa: E402
 
 MERCHANT = "bitrefill"
 DELIVERED = "DELIVERED"
+DEFAULT_DB = "~/.sibyl-memory/memory.db"
 
 
 def settlement_address() -> str:
@@ -116,6 +118,11 @@ def main() -> None:
             )
         ),
     )
+    parser.add_argument(
+        "--memory-db",
+        default=None,
+        help=f"Sibyl database to write to (default: ${DB_PATH_ENV}, else {DEFAULT_DB})",
+    )
     parser.add_argument("--owner", default="backfill")
     parser.add_argument("--pay-to", default=None, help="override the counterparty")
     parser.add_argument("--dry-run", action="store_true")
@@ -129,7 +136,14 @@ def main() -> None:
     orders = read_delivered(args.db)
     pay_to = args.pay_to or settlement_address()
 
+    # The same database the gateway reads, not whatever `~` happens to mean for
+    # whoever runs this. Under systemd the service's HOME is not the operator's,
+    # so a backfill that ignored this would report success into a file the live
+    # path never opens — and the first real purchase would still ask.
+    memory_db = args.memory_db or os.getenv(DB_PATH_ENV, "") or DEFAULT_DB
+
     print(f"store      {args.db}")
+    print(f"memory     {Path(memory_db).expanduser()}")
     print(f"merchant   {MERCHANT}")
     print(f"pay_to     {pay_to}")
     print(f"delivered  {len(orders)} orders")
@@ -146,7 +160,7 @@ def main() -> None:
         print("\ndry run, nothing written")
         return
 
-    memory = SpendingMemory.local()
+    memory = SpendingMemory.local(memory_db)
 
     known = memory.recall_merchant(MERCHANT)
     if known is not None and not args.force:
