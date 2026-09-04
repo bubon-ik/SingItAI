@@ -16,7 +16,6 @@ fi
 
 missing=()
 [[ -n "${BITREFILL_API_KEY:-}" ]] || missing+=("BITREFILL_API_KEY")
-[[ -n "${FIREFLY_PORT:-}" ]] || missing+=("FIREFLY_PORT")
 if [[ "${SIGN402_BITREFILL_CHECKOUT_MODE:-account}" == "guest" ]]; then
   [[ -n "${SIGN402_WALLET_MASTER_KEY:-}" ]] || missing+=("SIGN402_WALLET_MASTER_KEY")
 fi
