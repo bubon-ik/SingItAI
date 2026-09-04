@@ -56,9 +56,12 @@ _USER_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 5 * 60
 _USER_ACCESS_TOKEN_CACHE_MAX_USERS = 4096
 _TELEGRAM_OPERATION_MAX_USERS = 4096
 _TELEGRAM_PAID_TOOL_STARTED_MESSAGE = (
-    "Sign402 purchase started. Approve it in your selected approval channel; "
-    "I'll post the result here."
+    "Sign402 purchase started. I'll post the result here."
 )
+# Deliberately does not promise an approval prompt. This line is sent before
+# the gateway is called, so it cannot know whether one is coming: memory may
+# settle a known merchant with nobody asked. Promising a prompt that never
+# arrives reads as the product not knowing what it does.
 _TELEGRAM_BITREFILL_STARTED_MESSAGE = (
     "Bitrefill purchase started. Approve it in your selected approval channel; "
     "I'll post the result here."
