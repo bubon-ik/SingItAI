@@ -16,7 +16,7 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Mapping
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote
 import urllib.request
 
 
@@ -113,6 +113,7 @@ from .diagnostics import (
     log_hidden_detail,
     log_swallowed_failure,
 )
+from .decide import decide as decide_payment, journal as read_decision_journal
 from .numeric import format_decimal
 from .goplausible import fetch_x402_paid_resource, fetch_x402_payment_required, normalize_x402_payment_required
 from .real_rate_pricing import RealRateSingitPricer
@@ -469,6 +470,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/health":
             endpoints = [
+                "/v1/decide",
+                "/v1/journal",
                 "/agent/buy-tool",
                 "/agent/search-bitrefill",
                 "/agent/list-bitrefill-products",
@@ -538,6 +541,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         if path == "/events/latest":
             self._handle_get_latest_event()
             return
+        if path == "/v1/journal":
+            self._handle_decision_journal()
+            return
         self._send_json({"error": "not_found"}, status=404)
 
     def do_POST(self) -> None:
@@ -556,6 +562,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         if path in FUND_MOVING_POST_PATHS and self._reject_if_purchases_paused():
             return
 
+        if path == "/v1/decide":
+            self._handle_decide()
+            return
         if path == "/approve-policy":
             self._handle_approve_policy()
             return
@@ -2112,6 +2121,34 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             status=503,
         )
         return True
+
+    def _handle_decide(self) -> None:
+        """POST /v1/decide — ask the spending policy about one payment.
+
+        Nothing is spent, held or settled here. The handler reads a body,
+        forwards it to the policy the gateway already runs, and writes the
+        answer back.
+        """
+        try:
+            # do_POST has already validated the header is an int inside the
+            # body-size ceiling, so this only has to read what it promised.
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length) or b"")
+        except (ValueError, UnicodeDecodeError):
+            self._send_json({"error": "invalid-request"}, status=400)
+            return
+        status, body = decide_payment(payload, self.server.spending_policy)
+        self._send_json(body, status=status)
+
+    def _handle_decision_journal(self) -> None:
+        """GET /v1/journal?owner=…&limit=… — one owner's decisions, newest first."""
+        query = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+        owner = (query.get("owner") or [None])[0]
+        limit = (query.get("limit") or [None])[0]
+        status, body = read_decision_journal(
+            owner, limit, self.server.spending_policy
+        )
+        self._send_json(body, status=status)
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
