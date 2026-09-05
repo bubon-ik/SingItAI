@@ -114,6 +114,7 @@ from .diagnostics import (
     log_swallowed_failure,
 )
 from .decide import decide as decide_payment, journal as read_decision_journal
+from .keyring import install_master_key
 from .numeric import format_decimal
 from .goplausible import fetch_x402_paid_resource, fetch_x402_payment_required, normalize_x402_payment_required
 from .real_rate_pricing import RealRateSingitPricer
@@ -2767,6 +2768,13 @@ def build_server(
         lookup_bitrefill_order,
     )
     from .commerce_store import BitrefillCommerceStore
+
+    # Before anything reads it. Eight call sites pull
+    # SIGN402_WALLET_MASTER_KEY out of an environment mapping, and with the key
+    # ring switched on none of them would find it there. Resolving it once,
+    # here, leaves all eight unchanged; with the ring off this is the value
+    # that was already in the environment, put back.
+    install_master_key()
 
     approval_env = None
     if approval_provider is not None:

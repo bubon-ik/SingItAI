@@ -18,6 +18,9 @@ env/
 payment-executor/.venv/
 
 # Secrets and local runtime config
+# Ledger key ring ciphertext. The encrypted master key is still the master
+# key: anyone who has it and WALLET_PASS has every managed wallet.
+*.enc
 .env
 *.env
 !*.env.example
