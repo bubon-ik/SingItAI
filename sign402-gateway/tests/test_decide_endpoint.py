@@ -111,6 +111,29 @@ class DecideTests(unittest.TestCase):
             body["evidence"]["requested_pay_to"], OTHER_ADDRESS.lower()
         )
 
+    def test_a_url_where_a_merchant_belongs_is_refused(self):
+        """Trimming the URL into a host would be a guess about the seller.
+
+        Guess wrong and the agent asks memory about a merchant nobody has ever
+        paid, is told they are a stranger, and gets a useless answer in the
+        confident direction.
+        """
+        for merchant in (
+            "https://gateway.thegraph.com/api/x402/subgraphs/id/5zvR82",
+            "http://gateway.thegraph.com",
+            "gateway.thegraph.com/api/x402",
+            "//gateway.thegraph.com",
+            "gateway.thegraph.com?q=1",
+            "gateway thegraph com",
+            "",
+        ):
+            with self.subTest(merchant=merchant):
+                status, body = decide(
+                    request(merchant=merchant), build_policy()
+                )
+                self.assertEqual(status, 400)
+                self.assertEqual(body, {"error": "invalid-merchant"})
+
     def test_an_amount_sent_as_a_number_is_refused(self):
         """A float cannot hold 0.1, and this number is compared to a limit."""
         for amount in (25, 25.0, 0.1, True, None, "", "-1", "1e5", ".5", "abc"):
@@ -170,6 +193,14 @@ class DecideTests(unittest.TestCase):
 
         self.assertEqual(status, 503)
         self.assertEqual(body, {"error": "spending-memory-disabled"})
+
+    def test_a_malformed_request_is_refused_before_any_journal_line(self):
+        """A 400 decided nothing, so it must not leave a decision behind."""
+        policy = build_policy()
+
+        decide(request(merchant="https://evil.example.com"), policy)
+
+        self.assertEqual(policy.memory.journal(limit=50), [])
 
     def test_the_merchant_is_matched_regardless_of_case(self):
         policy = build_policy()

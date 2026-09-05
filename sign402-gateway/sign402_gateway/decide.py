@@ -33,6 +33,17 @@ from spending_memory import Action, Payment
 
 DISABLED_ERROR = "spending-memory-disabled"
 
+MERCHANT_PATTERN = re.compile(r"^[A-Za-z0-9._-]+(:[0-9]{1,5})?$")
+"""A bare host, optionally with a port — `gateway.thegraph.com`, `bitrefill`.
+
+Not a URL. A merchant is the identity a payout address is remembered against,
+and `https://gateway.thegraph.com/api/x402/subgraphs/id/5zvR…` silently reduced
+to a host is a guess about which part of the string was the seller. When the
+guess is wrong the agent asks memory about a merchant nobody has ever paid,
+gets told they are a stranger, and the answer is useless in the confident
+direction. Rejecting is the only reading that cannot be quietly wrong.
+"""
+
 PAY_TO_PATTERN = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
 AMOUNT_PATTERN = re.compile(r"^[0-9]+(\.[0-9]+)?$")
@@ -87,6 +98,8 @@ def payment_from_request(payload: Any) -> Payment:
         raise DecideError("invalid-request")
 
     merchant = _require_text(payload, "merchant", "invalid-merchant")
+    if not MERCHANT_PATTERN.match(merchant):
+        raise DecideError("invalid-merchant")
 
     pay_to = _require_text(payload, "payTo", "invalid-pay-to")
     if not PAY_TO_PATTERN.match(pay_to):
