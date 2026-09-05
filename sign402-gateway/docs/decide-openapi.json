@@ -1,0 +1,404 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Spending Memory — decide",
+    "version": "1.0.0",
+    "description": "Ask whether a payment an agent is about to make should be settled without its owner.\n\nThe service answers from what the fleet remembers paying before: which address a merchant has actually been paid at, what they usually charge, what this owner has already spent today, and what happened the last few times this merchant came up. It reads. It does not move money, hold funds, or touch a wallet.\n\nA verdict is returned in the body with HTTP 200, including when the verdict is BLOCK. The HTTP status describes whether the question was understood; the `action` field describes the answer.",
+    "license": {
+      "name": "MIT",
+      "url": "https://opensource.org/licenses/MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://example.invalid",
+      "description": "Replace with the deployment being asked."
+    }
+  ],
+  "paths": {
+    "/v1/decide": {
+      "post": {
+        "operationId": "decide",
+        "summary": "Should this payment be settled without asking its owner?",
+        "description": "Send the payment as it is about to be made — who is being paid, at which address, how much, and on whose behalf. The answer is one of three actions, with the remembered facts that produced it.\n\nCall this before paying, not after. The `claimId` returned with a PAY is what stops the same payment being sent twice.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecideRequest"
+              },
+              "examples": {
+                "unknownMerchant": {
+                  "summary": "A merchant that has never been paid",
+                  "value": {
+                    "merchant": "giftcards.example.com",
+                    "payTo": "0x8f3a1c2b4d5e6f708192a3b4c5d6e7f809a1b2c3",
+                    "amountUsd": "25.00",
+                    "owner": "agent-7"
+                  }
+                },
+                "graphQuery": {
+                  "summary": "A cent for a subgraph query",
+                  "value": {
+                    "merchant": "gateway.thegraph.com",
+                    "payTo": "0x79DC34E41B2b591078d3dE222C43EcaaBD52FcCB",
+                    "amountUsd": "0.01",
+                    "owner": "agent-7",
+                    "resource": "https://gateway.thegraph.com/api/x402/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The question was understood and answered. Read `action` for the verdict — a BLOCK is a successful response, not an error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Decision"
+                },
+                "examples": {
+                  "pay": {
+                    "summary": "Known merchant, same address, ordinary price",
+                    "value": {
+                      "action": "PAY",
+                      "rule": "known_good",
+                      "reason": "Paid gateway.thegraph.com 14 times at this same address, usually around 0.01 USD. 4.87 USD left today.",
+                      "evidence": {
+                        "merchant_status": "trusted",
+                        "payment_count": 14,
+                        "pay_to": "0x79dc34e41b2b591078d3de222c43ecaabd52fccb",
+                        "typical_usd": "0.01",
+                        "remaining_after_usd": "4.87"
+                      },
+                      "journalId": "01JB8Z3Q7K9M2N4P6R8T0V2X4Z",
+                      "claimId": "claim:agent-7:9f2c…#01JB8Z3Q7M"
+                    }
+                  },
+                  "escalate": {
+                    "summary": "Never paid this merchant",
+                    "value": {
+                      "action": "ESCALATE",
+                      "rule": "unknown_merchant",
+                      "reason": "I have never paid giftcards.example.com before. Confirm this one and I will handle the next.",
+                      "evidence": {
+                        "merchant": "giftcards.example.com"
+                      },
+                      "journalId": "01JB8Z4A1B2C3D4E5F6G7H8J9K",
+                      "claimId": null
+                    }
+                  },
+                  "block": {
+                    "summary": "The payout address is not the remembered one",
+                    "value": {
+                      "action": "BLOCK",
+                      "rule": "payout_address_changed",
+                      "reason": "giftcards.example.com is asking to be paid at 0xdead…beef, but the last 6 payments went to 0x8f3a…b2c3. I am not sending this without you.",
+                      "evidence": {
+                        "merchant_status": "established",
+                        "remembered_pay_to": "0x8f3a1c2b4d5e6f708192a3b4c5d6e7f809a1b2c3",
+                        "requested_pay_to": "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                        "payment_count": 6
+                      },
+                      "journalId": "01JB8Z5M3N4P5Q6R7S8T9U0V1W",
+                      "claimId": null
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request could not be read as a payment. Nothing was decided and nothing was written to the journal.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "invalidMerchant": {
+                    "summary": "A URL was sent where a merchant is required",
+                    "value": {
+                      "error": "invalid-merchant"
+                    }
+                  },
+                  "invalidAmount": {
+                    "summary": "amountUsd was sent as a number",
+                    "value": {
+                      "error": "invalid-amount"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Spending memory is switched off in this deployment, so there is no verdict to give. Nothing is remembered and no decision can be made — treat it as the absence of an answer, not as permission.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "spending-memory-disabled"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/journal": {
+      "get": {
+        "operationId": "readJournal",
+        "summary": "The decisions taken for one owner, newest first",
+        "description": "Every call to `/v1/decide` writes one line here, whatever the verdict. This is what answers \"why did you buy that\", and how much has been spent on a given kind of thing over a period.\n\nOne owner per request. There is no call that returns everybody's.",
+        "parameters": [
+          {
+            "name": "owner",
+            "in": "query",
+            "required": true,
+            "description": "Whose decisions to return. The same identifier passed to `/v1/decide`.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "How many entries to return, newest first.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The owner's decisions, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Journal"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`owner` was missing or empty.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "missing-owner"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Spending memory is switched off, so there is no journal to read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "spending-memory-disabled"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "DecideRequest": {
+        "type": "object",
+        "required": [
+          "merchant",
+          "payTo",
+          "amountUsd",
+          "owner"
+        ],
+        "properties": {
+          "merchant": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253,
+            "description": "Who is being paid, as a bare host — `gateway.thegraph.com`, not `https://gateway.thegraph.com/api/x402/...`. This is the identity the payout address is remembered against, so one seller's endpoints stay one merchant.\n\nA value containing a scheme, a path, or a query string is rejected with `invalid-merchant` rather than being trimmed into shape: a merchant silently derived from a URL is a different merchant from the one that was meant, and the whole answer depends on getting that identity right.",
+            "example": "gateway.thegraph.com"
+          },
+          "payTo": {
+            "type": "string",
+            "pattern": "^0x[a-fA-F0-9]{40}$",
+            "description": "The address the merchant is asking to be paid at, exactly as it arrived in the payment requirements. Case is not significant; it is compared case-insensitively against the address on file.\n\nThis is the field the service exists to check. It arrives from the merchant on every call, so it is the one thing about a payment that an attacker can change without touching anything you control.",
+            "example": "0x79DC34E41B2b591078d3dE222C43EcaaBD52FcCB"
+          },
+          "amountUsd": {
+            "type": "string",
+            "pattern": "^[0-9]+(\\.[0-9]+)?$",
+            "description": "The amount in US dollars, as a decimal **string**. `\"25.00\"`, not `25.0`.\n\nA JSON number is rejected with `invalid-amount`. This is not pedantry: the amount is compared against a limit, and a binary float cannot hold `0.1` exactly, so a number arriving as `25.000000000000004` decides a boundary case differently from the same payment sent as a string.",
+            "example": "0.01"
+          },
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "description": "Whose money this is. Required, with no default.\n\nLimits, past refusals and the daily total all belong to a person; a merchant's payout address does not. Two owners sharing one identifier share one budget, which is a bug that surfaces only once the second owner arrives.",
+            "example": "agent-7"
+          },
+          "resource": {
+            "type": "string",
+            "maxLength": 2048,
+            "description": "Optional. The URL being bought, for the journal. Not used to decide anything.",
+            "example": "https://gateway.thegraph.com/api/x402/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"
+          }
+        }
+      },
+      "Decision": {
+        "type": "object",
+        "required": [
+          "action",
+          "rule",
+          "reason",
+          "evidence",
+          "journalId",
+          "claimId"
+        ],
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/Action"
+          },
+          "rule": {
+            "$ref": "#/components/schemas/Rule"
+          },
+          "reason": {
+            "type": "string",
+            "description": "One or two sentences, written to be read by a person exactly as they are. It names the merchant, the numbers involved, and what the service did about them.\n\nIt is not a template to reformat or summarise. When a human is asked about a payment, this sentence is the question."
+          },
+          "evidence": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "The remembered facts the verdict was reached from — payout addresses, counts, typical prices, what is left of today's limit. Which keys appear depends on `rule`.\n\nThis is the audit trail: a settled payment carrying its `journalId` points at exactly these numbers."
+          },
+          "journalId": {
+            "type": "string",
+            "description": "Identifier of the journal line written for this decision. Every call gets one, whatever the verdict.\n\nStore it next to the transaction. It is what joins a payment in your ledger to the remembered facts that authorised it."
+          },
+          "claimId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Set only when `action` is `PAY`; `null` otherwise.\n\nA PAY has reserved this exact payment for a short window, so an identical one asked for again inside that window is refused instead of being sent twice. Settle the claim when the money moves and release it when it does not; abandoning it leaves the same payment blocked until the window expires."
+          }
+        }
+      },
+      "Action": {
+        "type": "string",
+        "enum": [
+          "PAY",
+          "ESCALATE",
+          "BLOCK"
+        ],
+        "description": "The verdict.\n\n* `PAY` — everything about this payment matches what is remembered, and it is inside the limit its owner set.\n* `ESCALATE` — memory and reality do not match in a way a person can resolve. The merchant is new, or the price is unlike their usual one, or this would go past today's limit. It is a question, and the question is in `reason`.\n* `BLOCK` — the payment looks like it goes somewhere it should not. A moved payout address, an unresolved warning raised by another agent, or the same payment already in flight."
+      },
+      "Rule": {
+        "type": "string",
+        "enum": [
+          "known_good",
+          "unknown_merchant",
+          "previously_rejected",
+          "price_spike",
+          "daily_cap",
+          "payout_address_changed",
+          "merchant_alert",
+          "repeated_escalations",
+          "already_in_flight"
+        ],
+        "description": "Which rule decided it. The rules run in a fixed order and the first that fires wins, so this names one cause rather than a set.\n\n* `known_good` → PAY. Paid before, same address, ordinary price, inside today's limit.\n* `unknown_merchant` → ESCALATE. Never paid them. Nothing is known, so nothing is assumed.\n* `previously_rejected` → ESCALATE. This owner turned this merchant down before.\n* `price_spike` → ESCALATE. Well above what this merchant usually charges. The band tightens as the price becomes better known.\n* `daily_cap` → ESCALATE. Would take this owner past the limit they set for the day.\n* `payout_address_changed` → BLOCK. They are asking to be paid somewhere other than where they have been paid before. Raises a warning the rest of the fleet reads.\n* `merchant_alert` → BLOCK. Such a warning is already open on this merchant, raised while serving someone else.\n* `repeated_escalations` → BLOCK. This merchant has produced an unusual number of questions in a short window.\n* `already_in_flight` → BLOCK. An identical payment is being made right now, or already went through."
+      },
+      "Journal": {
+        "type": "object",
+        "required": [
+          "owner",
+          "entries"
+        ],
+        "properties": {
+          "owner": {
+            "type": "string"
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JournalEntry"
+            }
+          }
+        }
+      },
+      "JournalEntry": {
+        "type": "object",
+        "required": [
+          "journalId",
+          "at",
+          "merchant",
+          "action",
+          "rule",
+          "evidence"
+        ],
+        "properties": {
+          "journalId": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the decision was taken, UTC."
+          },
+          "merchant": {
+            "type": "string"
+          },
+          "action": {
+            "$ref": "#/components/schemas/Action"
+          },
+          "rule": {
+            "$ref": "#/components/schemas/Rule"
+          },
+          "evidence": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "enum": [
+              "invalid-merchant",
+              "invalid-pay-to",
+              "invalid-amount",
+              "missing-owner",
+              "invalid-request",
+              "spending-memory-disabled"
+            ],
+            "description": "A stable machine-readable code.\n\n* `invalid-merchant` — `merchant` was empty, or was a URL where a bare host is required.\n* `invalid-pay-to` — `payTo` was not a 40-hex-digit `0x` address.\n* `invalid-amount` — `amountUsd` was missing, was a JSON number rather than a string, or was not a positive decimal.\n* `missing-owner` — `owner` was absent or empty.\n* `invalid-request` — the body was not a JSON object, or a field was of the wrong type. Fields this endpoint does not know are ignored.\n* `spending-memory-disabled` — the deployment has spending memory switched off."
+          }
+        }
+      }
+    }
+  }
+}
