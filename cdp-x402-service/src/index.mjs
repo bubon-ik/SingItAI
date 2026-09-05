@@ -14,6 +14,7 @@ import { createPublicClient, createWalletClient, erc20Abi, http, parseUnits } fr
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
 import { assertSwapMeetsMinUsdc } from "./swap-floor.mjs";
+import { parseArgs } from "./parse-args.mjs";
 import { makePaymentRequirementsSelector } from "./payment-guard.mjs";
 import {
   executeStagedSwap,
@@ -579,22 +580,7 @@ function normalizeSwapResult(payload) {
   return payload;
 }
 
-function parseArgs(args) {
-  const options = {};
-  for (let index = 0; index < args.length; index += 1) {
-    const current = args[index];
-    if (!current.startsWith("--")) continue;
-    const key = current.slice(2);
-    const value = args[index + 1];
-    if (!value || value.startsWith("--")) {
-      options[key] = "true";
-      continue;
-    }
-    options[key] = value;
-    index += 1;
-  }
-  return options;
-}
+
 
 function requiredOption(options, key) {
   const value = options[key];
