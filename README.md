@@ -103,10 +103,19 @@ The diff that contains all of it, and nothing else, is
 | Ledger | The wallet master key is decrypted through the Ledger Key Ring at start-up instead of sitting in plaintext in `/etc/sign402-gateway.env`, and the gateway refuses to boot if the ring cannot produce it | [`keyring.py`](https://github.com/bubon-ik/SingItAI/blob/2506927ec23512d646bab54ee1bd8ad8ffb4599e/sign402-gateway/sign402_gateway/keyring.py) · [commit](https://github.com/bubon-ik/SingItAI/commit/2506927ec23512d646bab54ee1bd8ad8ffb4599e) |
 | Ledger | Required DX feedback, kept from the first command of phase 0 rather than written from memory afterwards | [`docs/ledger-dx-notes.md`](https://github.com/bubon-ik/SingItAI/blob/244a98fd3087d3e5a4138ad57b1c605e44cd98bf/docs/ledger-dx-notes.md) |
 | Bazantic | `POST /v1/decide` and `GET /v1/journal`: a read-only HTTP surface over the spending policy, so an agent can ask whether a payment should happen without being able to make one happen | [`decide.py`](https://github.com/bubon-ik/SingItAI/blob/df9d39bae8540b1a22a925fbebf5a51149f6a3ed/sign402-gateway/sign402_gateway/decide.py) · [OpenAPI](https://github.com/bubon-ik/SingItAI/blob/b20cab05ba8021455ec5fed6f803b2a1c6f7fc68/sign402-gateway/docs/decide-openapi.json) |
+| The Graph | An agent pays The Graph's x402 gateway per subgraph query out of a budget: the daily cap applies to a cent, the first payment escalates like any unknown merchant, a moved payout address blocks and warns the whole fleet, and a question already bought inside the cache window is answered by **reading the journal** instead of paying again | [`thegraph.py`](https://github.com/bubon-ik/spending-memory/blob/cbc0739b2842e92f7d7c698580d48284a7063960/spending_memory/adapters/thegraph.py) · [live demo](https://github.com/bubon-ik/spending-memory/blob/e4a79d3eda55a4fa6043108fc909248516415b36/demo/graph_queries.py) |
+| The Graph | A real query, really bought: $0.01 USDC settled on Base mainnet to the address the live 402 named | [tx `0x57ddeebd…`](https://basescan.org/tx/0x57ddeebd74b89f8834c8627d7e1ad6878e44a651744da49fae677491ac2d7958) |
+| The Graph · Bazantic | `SKILL.md`: what an agent must **do** about each verdict — the part no schema can carry, and the independent variable of the Bazantic experiment | [`SKILL.md`](https://github.com/bubon-ik/spending-memory/blob/cb0cdb3a791dbbba3e6d9ef1ad04c96d165c0633/skills/paying-for-data/SKILL.md) · [experiment](https://github.com/bubon-ik/SingItAI/blob/0cd35796610900182a634b481de87c634239e45c/docs/bazantic-experiment.md) |
 | All | Phase 0 findings, including the two checks that failed and changed the plan | [`docs/checks.md`](https://github.com/bubon-ik/SingItAI/blob/244a98fd3087d3e5a4138ad57b1c605e44cd98bf/docs/checks.md) |
 
 The links are pinned to commit hashes, not to the branch, so they keep pointing
 at the reviewed code after the branch moves.
+
+The Graph work lives in the **`spending-memory`** repository rather than this
+one, and deliberately so: the track asks for reusable infrastructure rather than
+an application, and a paid-query client that only works inside this gateway
+would be the second thing. It is a `pip install`, MIT, with no dependency on
+anything here — this gateway is one caller of it.
 
 ## What was already here
 
