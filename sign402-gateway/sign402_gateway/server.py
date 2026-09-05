@@ -2138,7 +2138,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             self._send_json({"error": "invalid-request"}, status=400)
             return
-        status, body = decide_payment(payload, self.server.spending_policy)
+        status, body = decide_payment(payload, self.server.decide_policy)
         self._send_json(body, status=status)
 
     def _handle_decision_journal(self) -> None:
@@ -2147,7 +2147,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         owner = (query.get("owner") or [None])[0]
         limit = (query.get("limit") or [None])[0]
         status, body = read_decision_journal(
-            owner, limit, self.server.spending_policy
+            owner, limit, self.server.decide_policy
         )
         self._send_json(body, status=status)
 
@@ -3035,6 +3035,8 @@ def build_server(
     # Built once, at start-up: constructing it per request would open a SQLite
     # handle per request.
     server.spending_policy = build_spending_policy_from_env()
+    # Its own memory, on purpose. See build_decide_policy_from_env.
+    server.decide_policy = build_decide_policy_from_env()
     # Decisions for purchases in flight, keyed by reservation id. The Bitrefill
     # runner reserves, approves and settles in three separate calls, and only
     # the reservation knows what memory decided.
@@ -7040,6 +7042,74 @@ def build_spending_policy_from_env(env: dict[str, str] | None = None):
             f"got {cap!r}"
         ) from None
     return build_policy(**overrides)
+
+
+DECIDE_MEMORY_DB_ENV = "SIGN402_DECIDE_MEMORY_DB"
+DECIDE_AUTONOMY_CAP_ENV = "SIGN402_DECIDE_AUTONOMY_CAP"
+DEFAULT_DECIDE_MEMORY_DB = "~/.sibyl-memory/decide.db"
+
+
+def build_decide_policy_from_env(env: dict[str, str] | None = None):
+    """The policy `/v1/decide` answers from — never the custodial one.
+
+    `/v1/decide` is unauthenticated by design: an agent has to be able to ask
+    before it spends, and requiring a key would defeat the point. That makes
+    *writing* the deciding factor, and the journal is written on every call.
+
+    Rule 6 counts a merchant's escalations across every owner, straight out of
+    the journal. So three anonymous requests quoting an absurd price for a real
+    merchant push that merchant over the escalation limit, and the next genuine
+    customer to buy from them is refused for an hour. No key, no cost, no trace
+    beyond the journal lines that caused it. It was reproduced before this was
+    written, not imagined afterwards.
+
+    The boundary in the design was drawn around *money* — no wallets, no
+    reservations, nothing on the payment path — and it missed that the journal
+    is an input to the decision, so writing to it **is** the payment path.
+
+    Hence a separate memory. Callers of the public endpoint still form a fleet
+    and still learn from each other, which is the whole value; they simply do
+    not get a vote on the decisions that move real customers' USDC. The rules
+    are the same rules and the class is the same class. Only the database
+    differs, and that is the trust boundary.
+
+    Returns None — and the endpoint answers 503 — when the kill switch is off
+    or no cap is configured. An endpoint that is not set up says so instead of
+    inventing a verdict.
+    """
+    values = os.environ if env is None else env
+    raw = str(values.get(SPENDING_MEMORY_ENABLED_ENV, "1")).strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return None
+
+    cap = str(values.get(DECIDE_AUTONOMY_CAP_ENV, "") or "").strip()
+    if not cap:
+        logger.warning(
+            "%s is not set, so /v1/decide will answer 503. There is no safe "
+            "default for how much an agent may spend without asking.",
+            DECIDE_AUTONOMY_CAP_ENV,
+        )
+        return None
+    try:
+        daily_cap_usd = Decimal(cap)
+    except InvalidOperation:
+        raise ValueError(
+            f"{DECIDE_AUTONOMY_CAP_ENV} must be a decimal amount in USD, "
+            f"got {cap!r}"
+        ) from None
+
+    db_path = str(
+        values.get(DECIDE_MEMORY_DB_ENV, "") or DEFAULT_DECIDE_MEMORY_DB
+    ).strip()
+    if db_path == str(values.get("SPENDING_MEMORY_DB", "") or "").strip():
+        raise ValueError(
+            f"{DECIDE_MEMORY_DB_ENV} points at the same database as "
+            "SPENDING_MEMORY_DB. The public endpoint must not be able to write "
+            "the journal the custodial payment path reads from: three "
+            "anonymous requests can otherwise block a real customer's "
+            "purchase for an hour."
+        )
+    return build_policy(db_path=db_path, daily_cap_usd=daily_cap_usd)
 
 
 class SpendingBlocked(ValueError):

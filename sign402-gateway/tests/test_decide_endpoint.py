@@ -17,9 +17,10 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from spending_memory import Payment, SpendingMemory, SpendingPolicy
+from spending_memory import Action, Payment, SpendingMemory, SpendingPolicy
 
 from sign402_gateway.decide import decide, journal
+from sign402_gateway import server as gateway_server
 from sign402_gateway.server import Sign402GatewayHandler
 from tests.test_gateway_server import FakeSocket
 
@@ -287,7 +288,7 @@ class DecideOverHttpTests(unittest.TestCase):
 
     class Server:
         def __init__(self, policy):
-            self.spending_policy = policy
+            self.decide_policy = policy
 
     def call(self, request_bytes: bytes, policy):
         socket = FakeSocket(request_bytes)
@@ -346,6 +347,138 @@ class DecideOverHttpTests(unittest.TestCase):
 
         self.assertIn(" 400 ", status)
         self.assertEqual(body, {"error": "missing-owner"})
+
+
+class IsolationTests(unittest.TestCase):
+    """The public endpoint must not be able to decide the custodial fleet's fate.
+
+    `/v1/decide` takes no key — an agent has to be able to ask before it spends.
+    That makes writing the deciding factor, and every call writes a journal
+    line. Rule 6 counts a merchant's escalations across every owner straight out
+    of that journal, so anonymous traffic that produces escalations is anonymous
+    traffic that changes what a real customer is allowed to buy.
+    """
+
+    def custodial_policy(self):
+        policy = build_policy(daily_cap_usd="500")
+        for _ in range(5):
+            policy.memory.remember_settlement(
+                Payment(
+                    "bitrefill",
+                    KNOWN_ADDRESS,
+                    Decimal("25"),
+                    owner="telegram:1001",
+                ),
+                # A previous day, so today's budget is clean and the baseline
+                # verdict is a plain PAY.
+                day="2026-09-01",
+            )
+        return policy
+
+    def buy_a_gift_card(self, policy):
+        return policy.authorise(
+            Payment(
+                "bitrefill", KNOWN_ADDRESS, Decimal("25"), owner="telegram:1001"
+            )
+        )[0]
+
+    def test_three_anonymous_requests_used_to_block_a_real_purchase(self):
+        """The vulnerability, against one shared memory. Reproduced, not imagined.
+
+        Kept as a test because the fix is a configuration boundary rather than a
+        line of logic, and a boundary with nothing asserting it is a boundary
+        somebody removes.
+        """
+        shared = self.custodial_policy()
+        self.assertEqual(self.buy_a_gift_card(shared).action, Action.PAY)
+
+        for n in range(3):
+            verdict = decide(
+                request(
+                    merchant="bitrefill",
+                    amountUsd="9999.00",
+                    owner=f"anon-{n}",
+                ),
+                shared,
+            )[1]
+            self.assertEqual(verdict["rule"], "price_spike")
+
+        blocked = self.buy_a_gift_card(shared)
+        self.assertEqual(blocked.action, Action.BLOCK)
+        self.assertEqual(blocked.rule, "repeated_escalations")
+
+    def test_a_separate_memory_leaves_the_custodial_fleet_alone(self):
+        """The same attack, against the arrangement that actually ships."""
+        custodial = self.custodial_policy()
+        public = build_policy(daily_cap_usd="500")
+
+        for n in range(6):
+            decide(
+                request(
+                    merchant="bitrefill",
+                    amountUsd="9999.00",
+                    owner=f"anon-{n}",
+                ),
+                public,
+            )
+
+        unaffected = self.buy_a_gift_card(custodial)
+        self.assertEqual(unaffected.action, Action.PAY)
+        self.assertEqual(unaffected.rule, "known_good")
+
+
+class BuilderTests(unittest.TestCase):
+    def env(self, **overrides) -> dict:
+        values = {
+            "SIGN402_SPENDING_MEMORY_ENABLED": "1",
+            "SIGN402_DECIDE_AUTONOMY_CAP": "5",
+            "SIGN402_DECIDE_MEMORY_DB": str(
+                Path(tempfile.mkdtemp()) / "decide.db"
+            ),
+            "SPENDING_MEMORY_DB": str(Path(tempfile.mkdtemp()) / "custodial.db"),
+        }
+        values.update(overrides)
+        return values
+
+    def test_a_configured_endpoint_gets_its_own_policy(self):
+        policy = gateway_server.build_decide_policy_from_env(self.env())
+
+        self.assertEqual(policy.daily_cap_usd, Decimal("5"))
+
+    def test_pointing_it_at_the_custodial_database_is_refused(self):
+        """The whole fix is that these are two databases, so this is the one
+        misconfiguration that quietly undoes it."""
+        shared = str(Path(tempfile.mkdtemp()) / "one.db")
+
+        with self.assertRaises(ValueError) as raised:
+            gateway_server.build_decide_policy_from_env(
+                self.env(
+                    SIGN402_DECIDE_MEMORY_DB=shared, SPENDING_MEMORY_DB=shared
+                )
+            )
+
+        self.assertIn("block a real customer", str(raised.exception))
+
+    def test_the_kill_switch_turns_the_endpoint_off_too(self):
+        self.assertIsNone(
+            gateway_server.build_decide_policy_from_env(
+                self.env(SIGN402_SPENDING_MEMORY_ENABLED="0")
+            )
+        )
+
+    def test_without_a_cap_the_endpoint_answers_503_rather_than_guessing(self):
+        """There is no safe default for what an agent may spend unasked."""
+        self.assertIsNone(
+            gateway_server.build_decide_policy_from_env(
+                self.env(SIGN402_DECIDE_AUTONOMY_CAP="")
+            )
+        )
+
+    def test_a_nonsense_cap_refuses_to_start(self):
+        with self.assertRaises(ValueError):
+            gateway_server.build_decide_policy_from_env(
+                self.env(SIGN402_DECIDE_AUTONOMY_CAP="banana")
+            )
 
 
 if __name__ == "__main__":
