@@ -82,3 +82,75 @@ original hackathon build), `demo-resource-server`, `live-demo`.
 
 Running the service, deploying, and the test commands are in
 [docs/operations.md](docs/operations.md).
+
+---
+
+# ETHOnline 2026 — Continuity submission
+
+This is a live custodial payment system that has existed for months, entered in
+a Continuity track. So the first thing this section does is draw the line
+between what was already here and what was built during the event, because the
+tracks are judged on the second only.
+
+## What was built during the event
+
+Everything below is on the `ethonline` branch, dated 5 September 2026 or later.
+The diff that contains all of it, and nothing else, is
+[`x402Bnkr..ethonline`](https://github.com/bubon-ik/SingItAI/compare/x402Bnkr...ethonline).
+
+| Track | What it does | Where |
+| --- | --- | --- |
+| Ledger | The wallet master key is decrypted through the Ledger Key Ring at start-up instead of sitting in plaintext in `/etc/sign402-gateway.env`, and the gateway refuses to boot if the ring cannot produce it | [`keyring.py`](https://github.com/bubon-ik/SingItAI/blob/2506927ec23512d646bab54ee1bd8ad8ffb4599e/sign402-gateway/sign402_gateway/keyring.py) · [commit](https://github.com/bubon-ik/SingItAI/commit/2506927ec23512d646bab54ee1bd8ad8ffb4599e) |
+| Ledger | Required DX feedback, kept from the first command of phase 0 rather than written from memory afterwards | [`docs/ledger-dx-notes.md`](https://github.com/bubon-ik/SingItAI/blob/244a98fd3087d3e5a4138ad57b1c605e44cd98bf/docs/ledger-dx-notes.md) |
+| Bazantic | `POST /v1/decide` and `GET /v1/journal`: a read-only HTTP surface over the spending policy, so an agent can ask whether a payment should happen without being able to make one happen | [`decide.py`](https://github.com/bubon-ik/SingItAI/blob/df9d39bae8540b1a22a925fbebf5a51149f6a3ed/sign402-gateway/sign402_gateway/decide.py) · [OpenAPI](https://github.com/bubon-ik/SingItAI/blob/b20cab05ba8021455ec5fed6f803b2a1c6f7fc68/sign402-gateway/docs/decide-openapi.json) |
+| All | Phase 0 findings, including the two checks that failed and changed the plan | [`docs/checks.md`](https://github.com/bubon-ik/SingItAI/blob/244a98fd3087d3e5a4138ad57b1c605e44cd98bf/docs/checks.md) |
+
+The links are pinned to commit hashes, not to the branch, so they keep pointing
+at the reviewed code after the branch moves.
+
+## What was already here
+
+None of this is offered for judging. It is listed so that a judge reading the
+branch can tell at a glance which parts of it are not new.
+
+- **The gateway itself** — Telegram bot, custodial Base wallets, spending
+  limits, Bitrefill orders, second-device approval. Months old, in production,
+  handling real USDC.
+- **The x402 client** and Base Mainnet settlement. Months old.
+- **Spending Memory** (`spending-memory` v0.5.1) and its integration at the
+  spend chokepoint — built days earlier for the Sibyl Labs hackathon, on the
+  `spending-memory` branch, commits dated 3–4 September. The work in this
+  submission sits on top of it: `/decide` is a read-only surface over that
+  policy and adds no second decision point to the payment path.
+- **Hardware approval through Trezor**, with video. Prior work, and deliberately
+  not shown in the Ledger material: it is evidence that the architecture wanted
+  a hardware root of trust before Ledger was in the picture, which is what makes
+  the difference legible — same flow, different root of trust.
+
+## Use of AI tools
+
+Development was spec-driven and AI-assisted throughout, with Claude (Opus) as
+the assistant.
+
+The spec — [`docs/ethonline-spec.md`](docs/ethonline-spec.md) — was written
+first and is committed unedited, including the parts the implementation later
+departed from. It fixed the phase 0 checks, the acceptance criteria and the cut
+lines before any code existed. `docs/checks.md` records what those checks
+actually returned, two of them failures that changed the plan: `WALLET_CLI_MOCK`
+does not give CI a device-free path, so the tests use a stand-in binary instead.
+
+AI assistance covered implementation and test drafting under that spec.
+Direction, the phase 0 findings, the threat model in `keyring.py` and every
+decision about what not to build were the author's. The commit messages carry
+the reasoning behind each choice and are the best record of it.
+
+## Running the new work
+
+```bash
+cd sign402-gateway
+pytest tests/test_ledger_keyring.py tests/test_decide_endpoint.py
+```
+
+The Ledger key ring is off by default (`SIGN402_LEDGER_KEYRING_ENABLED`), so an
+unprovisioned checkout behaves exactly as it did before. The tests need no
+device.
