@@ -1,3 +1,8 @@
+> **ETHOnline 2026 judges:** the work entered for this event, and the line
+> between it and the production system it was built on, are in
+> [ETHOnline 2026 — Continuity submission](#ethonline-2026--continuity-submission)
+> at the bottom of this file. Everything above that heading is prior work.
+
 # SingIt
 
 An AI agent that buys things for you, where every payment needs a human to
