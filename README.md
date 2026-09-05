@@ -2,6 +2,12 @@
 > between it and the production system it was built on, are in
 > [ETHOnline 2026 — Continuity submission](#ethonline-2026--continuity-submission)
 > at the bottom of this file. Everything above that heading is prior work.
+>
+> One project, **two repositories**. The Ledger and Bazantic work is here; the
+> **The Graph** work is in
+> [`bubon-ik/spending-memory`](https://github.com/bubon-ik/spending-memory) —
+> the MIT library this gateway is one caller of. The submission section links
+> to every file in both.
 
 # SingIt
 
@@ -97,6 +103,11 @@ a Continuity track. So the first thing this section does is draw the line
 between what was already here and what was built during the event, because the
 tracks are judged on the second only.
 
+**Two repositories, one project.** This one holds the gateway, `/v1/decide` and
+the Ledger key ring. [`spending-memory`](https://github.com/bubon-ik/spending-memory)
+holds the library and The Graph work. The split is the point rather than an
+accident, and the reason is under the table below.
+
 ## What was built during the event
 
 Everything below is on the `ethonline` branch, dated 5 September 2026 or later.
@@ -150,8 +161,15 @@ The spec — [`docs/ethonline-spec.md`](docs/ethonline-spec.md) — was written
 first and is committed unedited, including the parts the implementation later
 departed from. It fixed the phase 0 checks, the acceptance criteria and the cut
 lines before any code existed. `docs/checks.md` records what those checks
-actually returned, two of them failures that changed the plan: `WALLET_CLI_MOCK`
-does not give CI a device-free path, so the tests use a stand-in binary instead.
+actually returned, including the two that failed and changed the plan.
+
+`WALLET_CLI_MOCK=1` swaps wallet-cli's trustchain backend and leaves the device
+transport alone, so it does not give CI a device-free path and the tests use a
+stand-in binary instead. And no subgraph indexes arbitrary Base addresses — none
+can, because a subgraph indexes a contract's events and "every address on Base"
+is not a contract — so a planned rule that would have used onchain counterparty
+history as evidence was cut rather than faked, and no subgraph was written to
+rescue it.
 
 AI assistance covered implementation and test drafting under that spec.
 Direction, the phase 0 findings, the threat model in `keyring.py` and every
@@ -160,11 +178,30 @@ the reasoning behind each choice and are the best record of it.
 
 ## Running the new work
 
+The gateway suite needs an interpreter with this project's dependencies; there
+is no extra test runner to install.
+
 ```bash
 cd sign402-gateway
-pytest tests/test_ledger_keyring.py tests/test_decide_endpoint.py
+python -m unittest tests.test_ledger_keyring tests.test_decide_endpoint -v
 ```
 
+The whole suite — 1095 tests, including the 48 added here — is
+`python -m unittest discover -s tests`.
+
 The Ledger key ring is off by default (`SIGN402_LEDGER_KEYRING_ENABLED`), so an
-unprovisioned checkout behaves exactly as it did before. The tests need no
-device.
+unprovisioned checkout behaves exactly as it did before. **No Ledger device is
+needed to run these**: the tests drive a stand-in binary, for the reason in
+`docs/checks.md` under L2.
+
+The Graph work is in the other repository and runs against the live gateway,
+paying real money only when you ask it to:
+
+```bash
+git clone https://github.com/bubon-ik/spending-memory && cd spending-memory
+python -m pytest tests/test_thegraph_adapter.py     # 33 tests, no network
+python demo/graph_queries.py stranger               # live 402, nothing paid
+```
+
+`demo/graph_queries.py` fetches a real 402 from `gateway.thegraph.com` on every
+run. Only `--live-pay` spends anything, and only a cent.
