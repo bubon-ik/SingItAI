@@ -39,20 +39,34 @@ than in a local file whose default is "forward everything".
 
 ## 1. Deploy the branch — read this before running it
 
-Production runs `x402Bnkr`. `ethonline` is a fast-forward from it, **and it
-carries more than the decide endpoint**:
+Check what the box is actually on before reasoning about the risk. As of
+6 September it runs the branch `spending-memory` at `0bae552` — **not**
+`x402Bnkr`, which is what an earlier draft of this document assumed:
 
-```
-b92f904  memory: decide with Spending Memory at the spend chokepoint
-751c1a1  backfill: write to the database the gateway actually reads
-1ca72b4  memory: honour the env mapping the caller passes, not just the flag
-0bae552  telegram: stop promising an approval that may never come
-72bc7c1  launcher: stop requiring FIREFLY_PORT to start
+```bash
+ssh hermes@164.68.104.44 'cd ~/apps/sign402 && git rev-parse --abbrev-ref HEAD && git log -1 --format="%h %s"'
 ```
 
-Those change how live customer payments are decided. If they are not already on
-the box, deploying for the sake of a hackathon endpoint also ships them, and
-that is a decision about production, not about the submission.
+That matters, because four of the five commits that change how live customer
+payments are decided are **already in production**:
+
+```
+b92f904  memory: decide with Spending Memory at the spend chokepoint    on the box
+751c1a1  backfill: write to the database the gateway actually reads     on the box
+0bae552  telegram: stop promising an approval that may never come       on the box
+72bc7c1  launcher: stop requiring FIREFLY_PORT to start                 on the box
+1ca72b4  memory: honour the env mapping the caller passes, not the flag NOT on the box
+```
+
+So deploying `ethonline` does not ship the payment-decision change — that
+shipped already. It adds `1ca72b4`, which only affects the path where an
+explicit environment mapping is passed in, plus two new modules (`decide.py`,
+`keyring.py`) and the routing for them. The diff to `server.py` is additive:
+two routes, one policy built at start-up, and `install_master_key()`, which with
+the key ring off returns the value that was already in the environment.
+
+It is still a restart of a custodial payment system, and it should still be done
+deliberately. It is not the much larger decision the first draft described.
 
 The kill switch is the way back and it needs no deploy:
 
