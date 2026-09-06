@@ -1124,6 +1124,7 @@ class VeniceChatClient:
         purchases_paused: Callable[[], bool] | None = None,
         now: Callable[[], int] | None = None,
         web_search: Any = None,
+        onchain_data: Any = None,
     ):
         self.store = store
         self.transport = transport
@@ -1133,6 +1134,12 @@ class VeniceChatClient:
         # None means the feature is off, and every path below is the one that
         # ran before it existed.
         self.web_search = web_search
+        self.onchain_data = onchain_data
+        """Onchain readings, when the question is one a subgraph answers better.
+
+        Tried before the web search and never instead of it: anything it
+        declines falls through to exactly the path that ran before it existed.
+        """
         self.purchases_paused = purchases_paused or (lambda: False)
         self.now = now or (lambda: int(time.time()))
 
@@ -1227,6 +1234,14 @@ class VeniceChatClient:
         With `web_search` unset this is exactly `_ask` and nothing else, which
         is what keeps the feature flag honest.
         """
+        onchain = self._onchain_footnote(user_id, prompt)
+        if onchain is not None:
+            fact, footer = onchain
+            text, remaining = self._ask(
+                user_id, fact, wallet_address=wallet_address
+            )
+            return text, remaining, footer
+
         if self.web_search is None:
             text, remaining = self._ask(
                 user_id, prompt, wallet_address=wallet_address
@@ -1254,6 +1269,40 @@ class VeniceChatClient:
             wallet_address=wallet_address,
         )
         return result.text, seen["remaining"], result.footer
+
+    def _onchain_footnote(
+        self, user_id: str, prompt: str
+    ) -> tuple[str, str] | None:
+        """The pool reading for this question, or None to leave it to the web.
+
+        Every refusal is a `None`, never an exception. A price lookup that
+        escalated, found no liquid pool, or could not reach the gateway must
+        cost the user nothing more than the answer they would have got anyway.
+        """
+        if self.onchain_data is None:
+            return None
+        from .onchain_data import (
+            OnchainUnavailable,
+            classify_onchain,
+            with_fact,
+        )
+
+        symbol = classify_onchain(prompt)
+        if not symbol:
+            return None
+        try:
+            price = self.onchain_data.price(user_id, symbol)
+        except OnchainUnavailable as exc:
+            logger.info("onchain declined for %s: %s", symbol, str(exc)[:200])
+            return None
+        except Exception as exc:
+            logger.warning(
+                "onchain raised past its own guard: %s: %s",
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            return None
+        return with_fact(prompt, price.as_fact()), price.footer()
 
     # -- prefund ---------------------------------------------------------
 

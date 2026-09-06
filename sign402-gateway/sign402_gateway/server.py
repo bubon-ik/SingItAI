@@ -132,6 +132,7 @@ from .venice_chat import (
     build_chat_service_from_env,
     start_payto_watcher,
 )
+from .onchain_data import build_onchain_data_from_env
 from .web_search import (
     EXA_SEARCH_URL,
     build_web_search_from_env,
@@ -3101,6 +3102,17 @@ def build_server(
                 ),
                 purchases_paused=_purchases_paused,
                 on_merchant_change=_record_search_merchant_change,
+            )
+            # Onchain readings ride on the same spending policy as every other
+            # purchase, so a one-cent subgraph query draws on the daily cap a
+            # gift card draws on and lands in the same journal. Off unless its
+            # own flag is set, and refuses to build at all when memory is off:
+            # paying for data with no cap and no provider memory is the thing
+            # it exists to avoid.
+            server.chat_service.client.onchain_data = build_onchain_data_from_env(
+                policy=server.spending_policy,
+                pay=base_payment_client,
+                purchases_paused=_purchases_paused,
             )
             server.chat_policy_service = ChatPolicyApprovalService(
                 store=server.chat_service.store,
