@@ -1,0 +1,15 @@
+{
+  "name": "sign402-ledger-approve",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sign one SpendingApproval on a Ledger and print the signature.",
+  "bin": {
+    "sign402-ledger-approve": "./approve.cjs"
+  },
+  "dependencies": {
+    "@ledgerhq/device-management-kit": "^1.9.0",
+    "@ledgerhq/device-signer-kit-ethereum": "^1.18.0",
+    "@ledgerhq/device-transport-kit-node-hid": "^1.0.1",
+    "rxjs": "^7.8.1"
+  }
+}

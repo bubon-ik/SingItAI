@@ -44,7 +44,11 @@ SingIt-presentation-assets/
 
 # Local tooling and duplicated/scratch workspaces
 .tools/
-tools/
+tools/*
+# …except the Ledger approval signer, which is part of the product rather than
+# scratch: the gateway shells out to it to have an escalated payment approved
+# on a device.
+!tools/ledger-approve/
 x402HackBerlin/
 .worktrees/
 
@@ -56,3 +60,7 @@ Sign402 X Longform Post.md
 .idea/
 demo-dashboard/user-purchases.json
 sign402-gateway/sign402_gateway.egg-info/
+
+# …but not its installed dependencies.
+tools/ledger-approve/node_modules/
+tools/ledger-approve/package-lock.json

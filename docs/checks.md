@@ -184,6 +184,46 @@ service did not start and said why".
 
 ---
 
+## L5 — a real Ledger signature, verified, and refused on replay
+
+Part 3 end to end on the hardware, 6 September. Nothing was spent and no wallet
+was touched: the payload is the one the gateway builds for an escalated payment,
+and only the signature is real.
+
+```
+== 1. what the device is asked to show ==
+   merchant   giftcards.example.com
+   payTo      0x8f3a1c2b4d5e6f708192a3b4c5d6e7f809a1b2c3
+   amountUsd  25.00
+   owner      agent-7
+   rule       unknown_merchant
+   journalId  01JB8Z4A1B2C3D4E5F6G7H8J9K
+== 2. signing on the Ledger ==
+  … pending  … completed
+   signature: 0xc96f07842d8760d002…9c988f1b
+== 3. the gateway verifies it ==
+   accepted, signed by 0x1388…d9fa
+== 4. the same signature on the next payment ==
+   refused, as designed: That approval was signed for a different decision.
+```
+
+**Conclusion: PASS.** Step 4 is the one worth the exercise. Same merchant, same
+payout address, same amount, same signer — refused, because the journal entry is
+a different one. That is the property a tap in a chat cannot have: an approval
+is spent when the decision it names is spent.
+
+Device: Ledger Nano S Plus, Ethereum app, derivation `44'/60'/0'/0/0`. Signed
+through `@ledgerhq/device-signer-kit-ethereum` 1.18.0 on DMK 1.9.0, because L2
+established `wallet-cli` cannot sign messages at all.
+
+Three bugs stood between the device and this output, and all three were ours or
+the SDK's rather than the hardware's. They are written up in
+`ledger-dx-notes.md` because each one presents, from the caller's side, as a
+device that never answered — which is the most expensive way for an integration
+to fail.
+
+---
+
 ## L2 — does `wallet-cli` sign messages?
 
 ```
@@ -377,6 +417,7 @@ agent can buy an answer about *a protocol* for a cent and cannot buy one about
 | L1 | **pass** | decrypt needs neither device nor network — on the enrolled host |
 | L3 | **failed** | a USB-less host cannot be enrolled at all; part 2 runs where a device can reach |
 | L4 | **pass** | keyring.py drives the real wallet-cli; all four §4 criteria met |
+| L5 | **pass** | a real Ledger signature authorises one payment and is refused on the next |
 | L2 | **no message signing** | Part 3 (§5) needs DMK; its §5 cut line is live from day one |
 | G1 | pass | header not body, `accepts[0]`, `amount`, $0.01, Base USDC |
 | G2 | fails as predicted | `thegraph.py` adds a third spelling and the header decode |

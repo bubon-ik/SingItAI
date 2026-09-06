@@ -55,7 +55,58 @@ else's security product, and the point of the exercise was the opposite of that.
 
 ---
 
-## 2. `npm i -g` is the documented install and it fails on a default macOS
+## 2. The Device Management Kit does not release the process, and it looks like a dead device
+
+Signing worked on the first try. Getting the signature *out* took three
+attempts, and every failure presented identically: the device asks, the person
+confirms, and the caller sits there forever. Anyone integrating DMK from a
+script rather than a long-lived app will meet this, and will spend the time
+looking at their Ledger.
+
+**The one that is yours.** After a completed `signTypedData` and a successful
+`dmk.disconnect({ sessionId })`, the node process does not exit. The HID
+transport keeps a listener registered, the event loop never empties, and a
+caller reading stdout waits on a process that has already done its job.
+
+```js
+await dmk.disconnect({ sessionId });   // resolves
+// …and the process still hangs here
+process.exit(0);                       // required
+```
+
+**Suggested fix:** give the builder a `close()` / `dispose()` that tears the
+transport down, and say in the docs that a CLI must call it. Right now the only
+way to find this is to add `process.exit(0)` on a hunch.
+
+**The other one that is yours.** The ESM entry point does not resolve:
+
+```
+ERR_UNSUPPORTED_DIR_IMPORT
+.../@ledgerhq/device-management-kit/lib/esm/src
+```
+
+`"module"` points at a directory rather than a file, which Node refuses.
+CommonJS works, so the fix for us was to stop using ESM — but the package
+advertises an ESM build that cannot be imported.
+
+**And an error message.** A wrong or missing app on the device produces:
+
+```
+OpenAppCommandError: Unknown application name
+```
+
+It does not say which name it tried to open. The library has that string in
+hand; printing it would turn a guessing game into a one-line fix.
+
+For completeness, the third failure was ours: we waited for the first
+non-`pending` state, and `DeviceActionStatus` emits `not-started` first, so we
+stopped listening before the device had been asked. Worth mentioning only
+because the shape of the enum invites it — a `terminal` predicate, or a promise
+alongside the observable, would make the correct thing the easy thing.
+
+---
+
+## 3. `npm i -g` is the documented install and it fails on a default macOS
 
 ```
 $ npm i -g @ledgerhq/wallet-cli
@@ -81,7 +132,7 @@ the `npx @ledgerhq/wallet-cli` form as the primary. Do not tell people to sudo.
 
 ---
 
-## 3. `WALLET_CLI_MOCK=1` mocks the backend, not the device — and the docs do not say which
+## 4. `WALLET_CLI_MOCK=1` mocks the backend, not the device — and the docs do not say which
 
 This is the note that cost the most time, so it is the one worth reading.
 
@@ -107,7 +158,7 @@ would make the split explicit rather than implied.
 
 ---
 
-## 4. The output format changes between commands, in the same invocation style
+## 5. The output format changes between commands, in the same invocation style
 
 `wallet-cli --help` and every `ring …` command answer with a JSON envelope:
 
@@ -133,7 +184,7 @@ command; `--output human` already exists to opt out.
 
 ---
 
-## 5. Errors are well-shaped and say the next command — keep this
+## 6. Errors are well-shaped and say the next command — keep this
 
 ```json
 {
@@ -152,7 +203,7 @@ human. Worth saying out loud so it does not get lost in a refactor.
 
 ---
 
-## 6. `ring encrypt/decrypt` defaulting to stdin/stdout is the right default, and it is under-sold
+## 7. `ring encrypt/decrypt` defaulting to stdin/stdout is the right default, and it is under-sold
 
 ```
 --input, -i  Input file (default: stdin)
@@ -170,7 +221,7 @@ threat you were trying to remove.
 
 ---
 
-## 7. `ring` is encryption, and the name will keep costing people a day
+## 8. `ring` is encryption, and the name will keep costing people a day
 
 "Key Ring" plus a hardware wallet reads as *signing*. It is not: `ring` derives
 scoped AES-256-GCM keys and encrypts blobs. We checked the entire command tree
@@ -193,7 +244,7 @@ search.
 
 ---
 
-## 8. The command table says `ring decrypt` needs network. It does not.
+## 9. The command table says `ring decrypt` needs network. It does not.
 
 The documented requirements column marks `ring decrypt` as needing the network.
 Measured, with the device unplugged and Wi-Fi off, it decrypts fine and exits 0.
@@ -216,7 +267,7 @@ deploying it on a server, and right now the docs point the wrong way.
 
 ---
 
-## 9. `resource.url` in the x402 402 block points at an internal indexer host
+## 10. `resource.url` in the x402 402 block points at an internal indexer host
 
 Not a `wallet-cli` note, but a Graph one, filed here to keep the DX findings in
 one place. See `checks.md` G1: the `payment-required` header names
