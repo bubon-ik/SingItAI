@@ -112,7 +112,13 @@ accident, and the reason is under the table below.
 
 Everything below is on the `ethonline` branch, dated 5 September 2026 or later.
 The diff that contains all of it, and nothing else, is
-[`x402Bnkr..ethonline`](https://github.com/bubon-ik/SingItAI/compare/x402Bnkr...ethonline).
+[`1ca72b4..ethonline`](https://github.com/bubon-ik/SingItAI/compare/1ca72b4...ethonline)
+— fourteen commits, starting at the phase 0 findings.
+
+It does **not** start at `x402Bnkr`. That range would sweep in five commits
+dated 4 September which wired Spending Memory into the payment chokepoint, and
+those belong to the Sibyl Labs hackathon, not this one. They are listed as prior
+work below.
 
 | Track | What it does | Where |
 | --- | --- | --- |
