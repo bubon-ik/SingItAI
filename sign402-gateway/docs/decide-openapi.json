@@ -11,8 +11,8 @@
   },
   "servers": [
     {
-      "url": "https://example.invalid",
-      "description": "Replace with the deployment being asked."
+      "url": "https://decide.singitai.app",
+      "description": "Live. Only /v1/decide, /v1/journal and /health are routed; every other path is refused at the edge."
     }
   ],
   "paths": {

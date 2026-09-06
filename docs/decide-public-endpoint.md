@@ -151,6 +151,37 @@ changes, no port opens, and the existing hostnames on this tunnel are untouched.
 
 ## 5. Verify the allow-list, do not assume it
 
+**Verified 6 September, from outside the box.** Recorded here because "the
+config looks right" is not the same claim as "the money paths are unreachable".
+
+```
+POST /v1/decide    200      GET /v1/journal   200      GET /health   200
+
+/agent/wallet                404     /agent/create-wallet         404
+/agent/buy-tool              404     /internal/fulfill-bitrefill  404
+/agent/withdraw              404     /agent/chat/message          404
+/agent/spending-limits       404
+```
+
+404 rather than 401 throughout, which is the distinction that matters: the
+request was refused at Cloudflare and never reached the gateway at all.
+
+The allow-list was then attacked rather than admired. Path traversal
+(`/v1/decide/../agent/wallet`), doubled traversal, case (`/V1/DECIDE`), prefix
+extension (`/v1/decidex`, `/v1/decide/agent/wallet`), traversal from the health
+route, and percent-encoded traversal (`%2e%2e`) — every one 404, and the last
+400 before that. The path field is a real match, not a prefix.
+
+The contract was checked against the live endpoint too: a URL in `merchant`
+gives `invalid-merchant`, a JSON number in `amountUsd` gives `invalid-amount`, a
+missing `owner` gives `missing-owner`, a malformed address gives
+`invalid-pay-to`, and an unknown merchant gives `ESCALATE` / `unknown_merchant`.
+`/v1/journal` returns one owner's entries and 400s without an owner.
+
+### The commands, to re-run after any change
+
+
+
 Run all of these. The last three are the ones that matter.
 
 ```bash
