@@ -96,6 +96,61 @@ README says so in those words.
 
 ---
 
+## L3 — can the VPS, which has no USB port, be a ring member at all?
+
+Not part of the original five. It should have been, and it is the check that
+changed part 2 the most.
+
+L1 proved decrypt needs no device **on the machine that ran `ring init`**. It
+says nothing about a second machine, and the plan — "only `master-key.enc` goes
+to the server" — assumed the answer without testing it.
+
+`wallet-cli` 2.1.0 installs and runs fine on the VPS (Linux x86_64, node
+installed in userspace, no sudo, nothing about the host changed):
+
+```
+$ node .../wallet-cli --version        →  {"ok": true, ... "version": "2.1.0"}
+$ node .../wallet-cli ring keys
+{"ok": false, "error": {"message": "Ledger Key Ring not initialized. Run `wallet-cli ring init` first.", "command": "keys"}}
+```
+
+So the server must be enrolled. Three facts close every route to that:
+
+1. **`ring init` requires a physically attached device.** Its own help says
+   "creating or recovering a trustchain (device required)", and L1 confirmed the
+   device step is not skippable — `WALLET_CLI_MOCK=1` does not stand in for it.
+   A cloud VPS has no USB port to attach one to.
+2. **There is no export or import verb.** The `ring` subcommands are `init`,
+   `encrypt`, `decrypt`, `keys`, `destroy`. Nothing moves a membership between
+   machines.
+3. **There is nowhere to put it even by hand.** The member private key is held
+   by the OS secret service — macOS Keychain here, as
+   `ledger-wallet-cli` / `member-private-key-8d7f63a1…`, 510 bytes,
+   password-protected. The Linux build reaches for `libsecret` / `secret-tool` /
+   `gnome-keyring` over DBus, and this host has none of them:
+
+```
+  secret-tool            ABSENT
+  gnome-keyring-daemon   ABSENT
+  dbus-launch            ABSENT
+  libsecret lib          ABSENT
+```
+
+**Conclusion: FAILED. A host that cannot have a Ledger physically attached to it
+cannot join the ring by any supported path.** This is precisely the case Ledger
+advertises — Key Ring on hosts without USB ports — and in 2.1.0 there is no
+route to it. It is the headline entry in `ledger-dx-notes.md`.
+
+**What it changes.** Part 2's code is unaffected and every acceptance criterion
+still holds: the key is ciphertext at rest, it is decrypted at boot through the
+ring, and the gateway refuses to start when that fails. What changes is where it
+can run — an enrolled host, which for now means one a device can reach. The
+claim "this runs on a keyless VPS" is not made, because it is not true, and
+making it to the company that built the product would be found out in a
+sentence.
+
+---
+
 ## L2 — does `wallet-cli` sign messages?
 
 ```
@@ -286,7 +341,8 @@ agent can buy an answer about *a protocol* for a cent and cannot buy one about
 
 | | Result | Effect on the plan |
 |---|---|---|
-| L1 | **pass** | decrypt works with no device attached, so the VPS design in §4 holds |
+| L1 | **pass** | decrypt needs neither device nor network — on the enrolled host |
+| L3 | **failed** | a USB-less host cannot be enrolled at all; part 2 runs where a device can reach |
 | L2 | **no message signing** | Part 3 (§5) needs DMK; its §5 cut line is live from day one |
 | G1 | pass | header not body, `accepts[0]`, `amount`, $0.01, Base USDC |
 | G2 | fails as predicted | `thegraph.py` adds a third spelling and the header decode |

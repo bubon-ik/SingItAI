@@ -9,7 +9,53 @@ macOS (darwin arm64).
 
 ---
 
-## 1. `npm i -g` is the documented install and it fails on a default macOS
+## 1. The headline use case — Key Ring on a host with no USB port — has no path
+
+This is the most important note here, so it is first. Everything below it is
+smaller.
+
+The pitch that made us choose the Key Ring is "one device tap to set up, then
+none", and hosts without USB ports called out specifically. Our gateway is a
+cloud VPS. It has no USB port and never will.
+
+That case does not work in 2.1.0, and the reason is not a bug — it is a missing
+piece:
+
+- `ring init` requires a physically attached device ("creating or recovering a
+  trustchain (device required)"). A VPS cannot satisfy it.
+- There is no `ring export` / `ring import`. The subcommands are `init`,
+  `encrypt`, `decrypt`, `keys`, `destroy`. Nothing moves a membership.
+- The member private key lives in the OS secret service — macOS Keychain as
+  `ledger-wallet-cli` / `member-private-key-…`, password-protected; on Linux via
+  `libsecret`/`secret-tool` over DBus. A headless server typically has no secret
+  service at all. Ours has none of them installed.
+
+So the machine that encrypts must be the machine that decrypts, and the useful
+half of the feature — encrypt on a laptop with the device, decrypt on a fleet of
+servers without one — cannot be assembled. We got as far as `ring init`,
+verified decrypt works with the device unplugged **and** the network off, and
+only then discovered that none of it transfers.
+
+**Suggested fix**, in order of how much it would help:
+
+1. `ring export-member` / `ring import-member`, exchanging the
+   password-protected member key. It is already encrypted at rest with
+   `WALLET_PASS`; a file is the same secret in a different container.
+2. Failing that, let `ring init` enrol a new member using the device *once*, on
+   a machine that has one, and emit credentials targeted at another host — the
+   device tap you already require, producing something that can be deployed.
+3. At minimum, say so in the docs. "The host that decrypts must itself have been
+   enrolled with a physically attached device" is one sentence, and it would
+   have changed our architecture on day one instead of on day two.
+
+A note on what we did **not** do: we did not work around this by extracting the
+key from the Keychain by hand. It would probably have worked. It would also mean
+shipping a production payment system on an unsupported path through someone
+else's security product, and the point of the exercise was the opposite of that.
+
+---
+
+## 2. `npm i -g` is the documented install and it fails on a default macOS
 
 ```
 $ npm i -g @ledgerhq/wallet-cli
@@ -35,7 +81,7 @@ the `npx @ledgerhq/wallet-cli` form as the primary. Do not tell people to sudo.
 
 ---
 
-## 2. `WALLET_CLI_MOCK=1` mocks the backend, not the device — and the docs do not say which
+## 3. `WALLET_CLI_MOCK=1` mocks the backend, not the device — and the docs do not say which
 
 This is the note that cost the most time, so it is the one worth reading.
 
@@ -61,7 +107,7 @@ would make the split explicit rather than implied.
 
 ---
 
-## 3. The output format changes between commands, in the same invocation style
+## 4. The output format changes between commands, in the same invocation style
 
 `wallet-cli --help` and every `ring …` command answer with a JSON envelope:
 
@@ -87,7 +133,7 @@ command; `--output human` already exists to opt out.
 
 ---
 
-## 4. Errors are well-shaped and say the next command — keep this
+## 5. Errors are well-shaped and say the next command — keep this
 
 ```json
 {
@@ -106,7 +152,7 @@ human. Worth saying out loud so it does not get lost in a refactor.
 
 ---
 
-## 5. `ring encrypt/decrypt` defaulting to stdin/stdout is the right default, and it is under-sold
+## 6. `ring encrypt/decrypt` defaulting to stdin/stdout is the right default, and it is under-sold
 
 ```
 --input, -i  Input file (default: stdin)
@@ -124,7 +170,7 @@ threat you were trying to remove.
 
 ---
 
-## 6. `ring` is encryption, and the name will keep costing people a day
+## 7. `ring` is encryption, and the name will keep costing people a day
 
 "Key Ring" plus a hardware wallet reads as *signing*. It is not: `ring` derives
 scoped AES-256-GCM keys and encrypts blobs. We checked the entire command tree
@@ -147,7 +193,7 @@ search.
 
 ---
 
-## 7. The command table says `ring decrypt` needs network. It does not.
+## 8. The command table says `ring decrypt` needs network. It does not.
 
 The documented requirements column marks `ring decrypt` as needing the network.
 Measured, with the device unplugged and Wi-Fi off, it decrypts fine and exits 0.
@@ -170,7 +216,7 @@ deploying it on a server, and right now the docs point the wrong way.
 
 ---
 
-## 8. `resource.url` in the x402 402 block points at an internal indexer host
+## 9. `resource.url` in the x402 402 block points at an internal indexer host
 
 Not a `wallet-cli` note, but a Graph one, filed here to keep the DX findings in
 one place. See `checks.md` G1: the `payment-required` header names

@@ -16,13 +16,19 @@ runs.
 **Gives:** the key is unreadable at rest; recovery is bound to the device that
 provisioned the ring; a stolen disk without `WALLET_PASS` is ciphertext.
 
-**Does not give:** `ring decrypt` works on a box with no device attached, and —
-measured, not assumed — with no network either (`docs/checks.md`, L1b). That is
-Ledger's intended design; it is the thing that makes a keyless VPS possible at
-all. The device is therefore the root of *enrolment*, not a gate on each use,
-and after `ring init` the scoped key is derivable on this host from the member
-credentials and `WALLET_PASS` alone. So an attacker who already owns a *running*
-host decrypts exactly as we do.
+**Does not give:** `ring decrypt` works with no device attached, and — measured,
+not assumed — with no network either (`docs/checks.md`, L1b). The device is the
+root of *enrolment*, not a gate on each use: after `ring init` the scoped key is
+derivable on that host from the member credentials and `WALLET_PASS` alone. So
+an attacker who already owns a *running* host decrypts exactly as we do.
+
+**Where this can run.** On a host that has been enrolled, and enrolment needs a
+device physically attached to *that* host. `ring init` requires one, there is no
+export or import of a membership, and the member key lives in the OS secret
+service — Keychain on macOS, libsecret on Linux — which a headless server
+usually does not have. So the appealing shape, encrypt on a laptop and decrypt
+on a fleet of keyless servers, is not reachable in wallet-cli 2.1.0. This was
+measured on the actual VPS rather than assumed: `docs/checks.md`, L3.
 
 This raises the cost of a stolen disk and a stolen backup. It does not make a
 fully compromised host safe, and describing it as though it did would be a
