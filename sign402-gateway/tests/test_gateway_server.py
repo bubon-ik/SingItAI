@@ -5173,6 +5173,36 @@ class GatewayServerTests(unittest.TestCase):
                 }
             )
 
+    def test_a_decision_whose_purchase_never_finished_stops_answering(self):
+        """The leak that matters is not the memory, it is the wrong answer.
+
+        Holds are found by owner, so a verdict left behind by a purchase that
+        died would wave through the buyer's next one — a purchase nobody
+        decided about, approved on the strength of an old decision.
+        """
+        server = DummyServer()
+        server.spending_memory_holds = {
+            "res-crashed": {
+                "owner": "1045618308",
+                "decision": object(),
+                "heldAt": time.time() - gateway_server.SPENDING_MEMORY_HOLD_TTL_SECONDS - 1,
+            },
+            "res-live": {
+                "owner": "2222222222",
+                "decision": object(),
+                "heldAt": time.time(),
+            },
+        }
+
+        self.assertIsNone(
+            gateway_server._memory_hold_for_owner(server, "1045618308")
+        )
+        self.assertNotIn("res-crashed", server.spending_memory_holds)
+
+        still_going = gateway_server._memory_hold_for_owner(server, "2222222222")
+        self.assertIsNotNone(still_going)
+        self.assertIn("res-live", server.spending_memory_holds)
+
     def test_agent_buy_tool_for_user_releases_the_hold_when_payment_fails(self):
         server = DummyServer()
         server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
