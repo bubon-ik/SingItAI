@@ -46,8 +46,8 @@ staged one.
 | | |
 | --- | --- |
 | Gateway | `Create Gateway` → Analyze → Review → Activate |
-| API Base URL | *(the public HTTPS address of `/v1/decide` — filled in at run time)* |
-| Spec URL | **PASTE**, the full `sign402-gateway/docs/decide-openapi.json` with `servers[0].url` replaced by the address above |
+| API Base URL | `https://decide.singitai.app` — live, and verified from outside the box (`docs/decide-public-endpoint.md` §5) |
+| Spec URL | **PASTE**, the full `sign402-gateway/docs/decide-openapi.json`. `servers[0].url` already names the address above, so the file goes in unmodified |
 | Recipe | `Start from a blank form`, arm B only |
 | Model / settings | identical in both arms |
 | Runs | **5 per arm**, 10 total |
@@ -80,7 +80,7 @@ give the owner the reason. Not pay. Not retry. Not report an error.
 The complete OpenAPI document and nothing else — no Recipe.
 
 The document is `sign402-gateway/docs/decide-openapi.json` in this repository,
-reproduced byte for byte apart from `servers[0].url`. It is not summarised here
+reproduced byte for byte. It is not summarised here
 because "verbatim" is the point; read it at
 [`decide-openapi.json`](../sign402-gateway/docs/decide-openapi.json), and note
 in particular that it already contains:
