@@ -11,36 +11,88 @@ Machine: darwin arm64, node v24.12.0, npm 11.6.2, Python 3.14.5.
 
 ## L1 — ring init → encrypt → decrypt, then unplug and decrypt again
 
-**Status: BLOCKED — needs the physical Ledger device.**
+**Status: PASS.** Run on the real device, 5 September.
 
 ```
-$ WALLET_CLI_MOCK=1 WALLET_PASS=… wallet-cli ring init
-Generating member credentials…
-Connect device, open Ledger Sync app — provisioning your Ledger Key Ring…
-[✖] No Ledger device found. Unlock the device and try again.
+$ wallet-cli ring init
+✔ Member credentials created
+✔ Ledger Key Ring ready
+
+Member:  mymac.local (darwin)
+Root ID: 001a903e…                      (truncated: this identifies the trustchain)
+Encrypt/decrypt with: wallet-cli ring encrypt --key <name>
 ```
 
+With the device connected:
+
 ```
-$ wallet-cli ring keys
-{
-  "ok": false,
-  "error": {
-    "kind": "command-execution",
-    "name": "CommandExecutionError",
-    "tag": "CommandExecutionError",
-    "message": "Ledger Key Ring not initialized. Run `wallet-cli ring init` first.",
-    "command": "keys"
-  }
-}
+$ printf 'phase-0-l1-canary' | wallet-cli ring encrypt --key l1-test > l1.enc \
+    && wallet-cli ring decrypt --key l1-test < l1.enc
+✔ Key retrieved
+✔ Encrypted (45 bytes, AES-256-GCM)
+✔ Key retrieved
+✔ Decrypted
+phase-0-l1-canary
 ```
 
-**Conclusion:** cannot be run without hardware, and `WALLET_CLI_MOCK=1` does not
-substitute for it — see the DX note in `ledger-dx-notes.md`. The provisioning
-half of §4 stays a manual step on the laptop, exactly as the spec describes it;
-what this check still owes us is the answer to *does decrypt work with the
-device unplugged*, and that answer decides nothing in the code — §4 already
-assumes it does and says so in the threat model. Re-run and fill in before the
-video.
+Then the device was **physically disconnected**, and the same decrypt run again:
+
+```
+$ wallet-cli ring decrypt --key l1-test < l1.enc
+✔ Key retrieved
+✔ Decrypted
+phase-0-l1-canary
+```
+
+**Conclusion: decrypt works with no device attached.** This is what makes §4
+possible at all — the gateway runs on a VPS with no USB port, and it is Ledger's
+own stated model, "one device tap to set up, then none", confirmed rather than
+assumed.
+
+It is also exactly the property the threat model in `keyring.py` has to state
+plainly rather than talk around: an attacker who already holds a live,
+compromised host holds the ring credentials and `WALLET_PASS` too, and will
+decrypt. What this buys is that a stolen disk, a leaked backup or a copied
+`/etc` is AES-256-GCM ciphertext instead of a key. That is a real and worthwhile
+gain, and it is not the same thing as protecting a host that is already lost.
+
+Note that 17 bytes of plaintext became 45 bytes of ciphertext — a 28-byte
+overhead, consistent with a 12-byte GCM nonce and a 16-byte tag.
+
+### L1b — and with the network off as well
+
+The documented command table says `ring decrypt` requires network. It does not.
+With Wi-Fi disabled **and** the device unplugged:
+
+```
+$ wallet-cli ring decrypt --key l1-test < l1.enc; echo "exit=$?"
+✔ Key retrieved
+✔ Decrypted
+phase-0-l1-canary
+exit=0
+```
+
+Two consequences, and they pull in opposite directions, so both get written
+down.
+
+**Operationally this is the good outcome.** Boot does not depend on Ledger's
+LKRP service being up. Had it gone the other way, the gateway would refuse to
+start whenever someone else's API had a bad afternoon, and a key-management
+change would have quietly introduced a third-party dependency into the start-up
+path of a payment system. That is worth knowing before shipping rather than
+after.
+
+**For the threat model it sharpens the claim, and downwards.** After `ring
+init`, the scoped key is derivable on this host from the local member
+credentials and `WALLET_PASS` alone — no device, no network, no Ledger. So the
+device is the *enrolment* root, not a per-use gate, and what actually stands
+between the encrypted file and plaintext on a running host is `WALLET_PASS` and
+the credential store next to it.
+
+That is still a real gain over a key in plaintext in `/etc`: a stolen disk, a
+leaked backup, or a copied `/etc` without the passphrase is AES-256-GCM
+ciphertext. It is not the stronger claim it would be easy to imply, and the
+README says so in those words.
 
 ---
 
@@ -234,7 +286,7 @@ agent can buy an answer about *a protocol* for a cent and cannot buy one about
 
 | | Result | Effect on the plan |
 |---|---|---|
-| L1 | blocked, needs the device | provisioning stays manual; no code depends on the answer |
+| L1 | **pass** | decrypt works with no device attached, so the VPS design in §4 holds |
 | L2 | **no message signing** | Part 3 (§5) needs DMK; its §5 cut line is live from day one |
 | G1 | pass | header not body, `accepts[0]`, `amount`, $0.01, Base USDC |
 | G2 | fails as predicted | `thegraph.py` adds a third spelling and the header decode |

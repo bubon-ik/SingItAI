@@ -147,7 +147,30 @@ search.
 
 ---
 
-## 7. `resource.url` in the x402 402 block points at an internal indexer host
+## 7. The command table says `ring decrypt` needs network. It does not.
+
+The documented requirements column marks `ring decrypt` as needing the network.
+Measured, with the device unplugged and Wi-Fi off, it decrypts fine and exits 0.
+
+This is not a nitpick about a table cell. We were deciding whether putting the
+master key behind the ring would add a third-party dependency to the start-up
+path of a payment system — whether an LKRP outage would stop the gateway
+booting. The docs said yes, the behaviour says no, and the answer changes
+whether the design is shippable. We only found out by unplugging the machine.
+
+It also matters the other way, for anyone writing a threat model: if decrypt
+needs neither device nor network, then after `init` the scoped key is derivable
+from local credentials plus `WALLET_PASS`, and a reader should not be left to
+infer that from a requirements table.
+
+**Suggested fix:** mark `ring decrypt` as requiring neither, and add a sentence
+saying what the device is a root *of* — enrolment, not per-use authorisation.
+This is the single most consequential fact about the feature for anyone
+deploying it on a server, and right now the docs point the wrong way.
+
+---
+
+## 8. `resource.url` in the x402 402 block points at an internal indexer host
 
 Not a `wallet-cli` note, but a Graph one, filed here to keep the DX findings in
 one place. See `checks.md` G1: the `payment-required` header names

@@ -16,13 +16,21 @@ runs.
 **Gives:** the key is unreadable at rest; recovery is bound to the device that
 provisioned the ring; a stolen disk without `WALLET_PASS` is ciphertext.
 
-**Does not give:** `ring decrypt` works on a box with no device attached. That
-is Ledger's intended design — it is the thing that makes a keyless VPS possible
-at all — which means an attacker who already owns a *running* host, with both
-the ring's member credentials and `WALLET_PASS`, decrypts exactly as we do. This
-raises the cost of a stolen disk and a stolen backup. It does not make a fully
-compromised host safe, and describing it as though it did would be a
+**Does not give:** `ring decrypt` works on a box with no device attached, and —
+measured, not assumed — with no network either (`docs/checks.md`, L1b). That is
+Ledger's intended design; it is the thing that makes a keyless VPS possible at
+all. The device is therefore the root of *enrolment*, not a gate on each use,
+and after `ring init` the scoped key is derivable on this host from the member
+credentials and `WALLET_PASS` alone. So an attacker who already owns a *running*
+host decrypts exactly as we do.
+
+This raises the cost of a stolen disk and a stolen backup. It does not make a
+fully compromised host safe, and describing it as though it did would be a
 misdescription of Ledger's own product to the people who built it.
+
+The absence of a network requirement is deliberate good news operationally: boot
+does not depend on the LKRP service being reachable, so this change adds no
+third-party dependency to the start-up path of a payment system.
 
 ## Why a failure here refuses to boot
 
