@@ -132,6 +132,11 @@ from .venice_chat import (
     build_chat_service_from_env,
     start_payto_watcher,
 )
+from .ledger_approval import (
+    LedgerApprovalError,
+    approval_enabled as ledger_approval_enabled,
+    verify_approval as verify_ledger_approval,
+)
 from .onchain_data import build_onchain_data_from_env
 from .web_search import (
     EXA_SEARCH_URL,
@@ -1724,13 +1729,19 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             )
 
             if decision is None or decision.needs_human:
-                approval = self.server.imessage_approval_service.request_purchase_approval(
-                    telegram_user_id=user_id,
-                    tool_name=str(tool.get("name") or "x402 resource"),
-                    resource_url=resource_url,
-                    payment_requirements=payment_requirements,
-                    payment_context=payment_context,
-                )
+                # A device approval, when this deployment requires one, stands
+                # in for the chat round trip rather than being added to it: the
+                # signature already carries what the chat was there to
+                # establish, over fields a compromised host cannot repaint.
+                approval = _ledger_approval_for(payload, payment, decision, claim_id)
+                if approval is None:
+                    approval = self.server.imessage_approval_service.request_purchase_approval(
+                        telegram_user_id=user_id,
+                        tool_name=str(tool.get("name") or "x402 resource"),
+                        resource_url=resource_url,
+                        payment_requirements=payment_requirements,
+                        payment_context=payment_context,
+                    )
                 if not approval.get("ok") or approval.get("status") != "approved":
                     if self.server.spending_policy is not None:
                         self.server.spending_policy.memory.remember_rejection(
@@ -1795,6 +1806,16 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 settled = True
                 self.server.user_event_store.write(user_id, enriched)
             self._send_json(enriched, status=200 if enriched.get("ok") else 400)
+        except LedgerApprovalError as exc:
+            self._send_json(
+                {
+                    "decision": "needs_ledger_approval",
+                    "ok": False,
+                    "error": str(exc),
+                    "telegramText": str(exc),
+                },
+                status=400,
+            )
         except SpendingBlocked as exc:
             self._send_json(
                 {
@@ -7241,6 +7262,51 @@ def _reserve_user_wallet_spend(
             spent_today=spent_today,
         )
     )
+
+
+def _ledger_approval_for(
+    payload: dict[str, Any],
+    payment: Any,
+    decision: Any,
+    claim_id: str | None,
+) -> dict[str, Any] | None:
+    """A device approval for this escalated payment, or None to ask as before.
+
+    Returns None — leaving the existing iMessage or WhatsApp path exactly as it
+    was — when the flag is off, or when there is no journal entry for a
+    signature to be bound to. The second case is memory being switched off: with
+    no journal there is nothing that makes an approval unrepeatable, and a
+    device signature that authorises every future identical payment is worse
+    than a tap in a chat, not better.
+
+    Otherwise the signature is required. A missing or bad one raises, and the
+    handler's `finally` gives back the reservation and the claim, so an
+    unapproved payment leaves nothing held.
+    """
+    if not ledger_approval_enabled():
+        return None
+    journal_id = str(getattr(decision, "journal_id", "") or "")
+    if not journal_id:
+        return None
+
+    signer = verify_ledger_approval(
+        payload.get("ledgerApproval"),
+        payment=payment,
+        decision=decision,
+        claim_id=claim_id,
+    )
+    return {
+        "ok": True,
+        "status": "approved",
+        "source": "ledger",
+        # Same shape as the memory-approved case, and the same reason: the spend
+        # ledger row should point at the journal entry that carries the rule and
+        # the evidence, whoever said yes.
+        "approvalId": f"ledger-{journal_id}",
+        "approvedBy": signer,
+        "reason": getattr(decision, "reason", ""),
+        "rule": getattr(decision, "rule", ""),
+    }
 
 
 def _memory_hold_for_owner(

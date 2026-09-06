@@ -214,3 +214,54 @@ class PayloadTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EscalationGateTests(unittest.TestCase):
+    """The branch in the payment path, tested for the property that has to hold
+    before anything else: with the flag off, nothing changes."""
+
+    def gate(self, payload, *, on=True, dec=None, claim="claim-1"):
+        from unittest.mock import patch
+
+        from sign402_gateway.server import _ledger_approval_for
+
+        values = {ENABLED_ENV: "1" if on else "0", APPROVERS_ENV: OWNER_KEY.address}
+        with patch.dict("os.environ", values, clear=False):
+            return _ledger_approval_for(
+                payload, payment(), dec if dec is not None else decision(), claim
+            )
+
+    def test_off_leaves_the_chat_approval_exactly_as_it_was(self):
+        """None means the handler asks iMessage, which is what it did before
+        this existed. No signature is looked for and none is required."""
+        self.assertIsNone(self.gate({}, on=False))
+        self.assertIsNone(self.gate({"ledgerApproval": sign()}, on=False))
+
+    def test_on_and_signed_approves_without_asking_the_chat(self):
+        approval = self.gate({"ledgerApproval": sign()})
+        self.assertEqual(approval["status"], "approved")
+        self.assertEqual(approval["source"], "ledger")
+        self.assertEqual(approval["approvedBy"], OWNER_KEY.address.lower())
+        self.assertEqual(approval["approvalId"], f"ledger-{JOURNAL}")
+
+    def test_on_and_unsigned_refuses_rather_than_falling_back_to_the_chat(self):
+        """A deployment that requires a device must not quietly accept a tap
+        instead — that would make the requirement advisory."""
+        with self.assertRaises(LedgerApprovalError):
+            self.gate({})
+
+    def test_on_and_badly_signed_refuses(self):
+        with self.assertRaises(LedgerApprovalError):
+            self.gate({"ledgerApproval": sign(OTHER_KEY)})
+
+    def test_no_journal_entry_falls_back_instead_of_demanding_a_signature(self):
+        """Memory switched off: there is no journal entry to bind an approval
+        to, and an unrepeatable approval is the whole point. Better the chat
+        than a signature that authorises every future identical payment."""
+        no_journal = decision(journal_id="")
+        self.assertIsNone(self.gate({"ledgerApproval": sign()}, dec=no_journal))
+        self.assertIsNone(self.gate({}, dec=no_journal))
+
+    def test_a_released_claim_refuses_even_with_a_good_signature(self):
+        with self.assertRaises(LedgerApprovalError):
+            self.gate({"ledgerApproval": sign()}, claim=None)
