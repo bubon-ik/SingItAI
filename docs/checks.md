@@ -151,6 +151,39 @@ sentence.
 
 ---
 
+## L4 — `keyring.py` against the real `wallet-cli`, end to end
+
+The 19 unit tests drive a stand-in binary, and L1 exercised the ring on its own.
+Neither shows the two working *together*, which is the only thing that matters
+on the morning of a demo. Run on the enrolled machine, 6 September, with a
+**throwaway** Fernet key — the production master key was not involved.
+
+```
+== 1. throwaway Fernet key, encrypted through the ring ==
+✔ Encrypted (72 bytes, AES-256-GCM)
+== 2. the gateway loads it through the ring ==
+   loaded a valid Fernet key, length 44 - value not printed
+== 3. corrupt the ciphertext: it must refuse ==
+   refused, as designed:
+    `wallet-cli ring decrypt` failed with exit code 1 reading key 'sign402-master'
+    in /var/folders/…/master-key.enc
+== 4. ring off: unchanged behaviour ==
+   read straight from the environment: not-a-real-key
+```
+
+**Conclusion: PASS, all four acceptance criteria of §4.** A 44-character Fernet
+key becomes 72 bytes of ciphertext; `load_master_key` recovers it through the
+real CLI and validates it as a Fernet key before returning; a single appended
+byte makes the gateway refuse to start; and with the ring off the value comes
+straight from the environment as it always did.
+
+Criterion 3 is the one worth insisting on, and it was tested by actually
+corrupting the file rather than by reading the code. The refusal names both the
+key and the file, which is what turns "the wallets are undecryptable" into "the
+service did not start and said why".
+
+---
+
 ## L2 — does `wallet-cli` sign messages?
 
 ```
@@ -343,6 +376,7 @@ agent can buy an answer about *a protocol* for a cent and cannot buy one about
 |---|---|---|
 | L1 | **pass** | decrypt needs neither device nor network — on the enrolled host |
 | L3 | **failed** | a USB-less host cannot be enrolled at all; part 2 runs where a device can reach |
+| L4 | **pass** | keyring.py drives the real wallet-cli; all four §4 criteria met |
 | L2 | **no message signing** | Part 3 (§5) needs DMK; its §5 cut line is live from day one |
 | G1 | pass | header not body, `accepts[0]`, `amount`, $0.01, Base USDC |
 | G2 | fails as predicted | `thegraph.py` adds a third spelling and the header decode |
