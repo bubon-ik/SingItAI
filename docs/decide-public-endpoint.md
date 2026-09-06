@@ -111,61 +111,43 @@ ssh hermes@164.68.104.44 'curl -s -X POST http://127.0.0.1:8099/v1/decide -H "co
 
 Expect `200` with `"action": "ESCALATE"` and `"rule": "unknown_merchant"`.
 
-## 3. Create the tunnel
+## 3. The tunnel already exists, and is remotely managed
 
-`singitai.app` is already on Cloudflare, so a named tunnel on a subdomain gives
-a stable hostname that survives restarts. A quick tunnel
-(`cloudflared tunnel --url ...`) works too, but its `*.trycloudflare.com`
-hostname changes every restart — and Bazantic stores the URL, so a restart
-mid-experiment invalidates the gateway and both arms have to be re-run.
+Check before creating anything:
 
 ```bash
-ssh -t hermes@164.68.104.44
-sudo apt-get install -y cloudflared     # or the .deb from Cloudflare
-cloudflared tunnel login                # opens a URL; authorise singitai.app
-cloudflared tunnel create sign402-decide
-cloudflared tunnel route dns sign402-decide decide.singitai.app
+ssh hermes@164.68.104.44 'systemctl cat cloudflared | grep ExecStart'
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel run --token-file /etc/cloudflared/tunnel.token
 ```
 
-`tunnel create` prints a UUID and writes credentials to
-`~/.cloudflared/<UUID>.json`. Note the UUID for the next step.
+`--token-file` means this is a **remotely managed** tunnel: its ingress rules
+live in the Cloudflare Zero Trust dashboard, not in a local `config.yml`. There
+is no `~/.cloudflared/config.yml` to write, `/etc/cloudflared` is root-only, and
+`cloudflared tunnel create` would make a second, unrelated tunnel.
 
-## 4. The ingress allow-list
+It is also already carrying production traffic. Nothing below removes or edits
+an existing hostname — only a new one is added.
 
-`~/.cloudflared/config.yml` — **order matters**, the first matching rule wins:
+## 4. Add one hostname, with the paths as the allow-list
 
-```yaml
-tunnel: <UUID from step 3>
-credentials-file: /home/hermes/.cloudflared/<UUID>.json
+Cloudflare Zero Trust → **Networks → Tunnels** → the running tunnel → **Public
+Hostnames**. Add **three** entries, each pointing at `http://127.0.0.1:8099`:
 
-ingress:
-  # The only two paths that reach the gateway.
-  - hostname: decide.singitai.app
-    path: ^/v1/(decide|journal)(\?.*)?$
-    service: http://127.0.0.1:8099
+| Subdomain | Domain | Path | Service |
+|---|---|---|---|
+| `decide` | `singitai.app` | `v1/decide` | `http://127.0.0.1:8099` |
+| `decide` | `singitai.app` | `v1/journal` | `http://127.0.0.1:8099` |
+| `decide` | `singitai.app` | `health` | `http://127.0.0.1:8099` |
 
-  # Bazantic's Analyze step fetches the base URL. Answer it, from a route that
-  # reveals nothing.
-  - hostname: decide.singitai.app
-    path: ^/health$
-    service: http://127.0.0.1:8099
+> **The path field is the security control, and leaving it empty is the whole
+> risk of this document.** A hostname entry with no path forwards *everything*
+> on `decide.singitai.app` to the gateway — including `/agent/withdraw`,
+> `/agent/buy-tool` and every other route that moves customer USDC. With paths
+> set, anything else on that hostname is refused by `cloudflared` before it
+> reaches the box.
 
-  # Everything else on this hostname is refused at the edge and never reaches
-  # the box. This rule is the security control, not a tidiness measure.
-  - hostname: decide.singitai.app
-    service: http_status:404
-
-  # cloudflared requires a catch-all last.
-  - service: http_status:404
-```
-
-Run it as a service so it survives a reboot:
-
-```bash
-sudo cloudflared service install
-sudo systemctl enable --now cloudflared
-systemctl is-active cloudflared
-```
+Adding the hostname creates the DNS record automatically. No firewall rule
+changes, no port opens, and the existing hostnames on this tunnel are untouched.
 
 ## 5. Verify the allow-list, do not assume it
 
@@ -216,10 +198,18 @@ byte for byte identical; see [bazantic-experiment.md](bazantic-experiment.md).
 
 ## Taking it down afterwards
 
-```bash
-ssh -t hermes@164.68.104.44 'sudo systemctl disable --now cloudflared'
-```
+**Do not stop `cloudflared`.** That daemon carries production traffic on other
+hostnames; stopping it takes them down with it. An earlier draft of this
+document said to do exactly that, which would have caused an outage in the name
+of tidying up a hackathon endpoint.
 
-The gateway keeps running and goes back to being reachable only on
-`127.0.0.1:8099`. Nothing else needs undoing, which is the other reason for a
-tunnel over a web server.
+Remove the three `decide.singitai.app` entries from the tunnel's **Public
+Hostnames** in the Cloudflare dashboard. That is the whole rollback: the DNS
+record goes with them, the gateway keeps running, and it is reachable only on
+`127.0.0.1:8099` again.
+
+To stop answering without touching Cloudflare at all, unset
+`SIGN402_DECIDE_AUTONOMY_CAP` in `/etc/sign402-gateway.env` and restart. The
+endpoint then returns `503` to everyone, which is the same safe failure it had
+before step 2 — no verdict rather than a guessed one. The rest of the gateway is
+unaffected either way.
