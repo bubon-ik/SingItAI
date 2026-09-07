@@ -65,7 +65,18 @@ CHAIN_ID_ENV = "SIGN402_LEDGER_APPROVAL_CHAIN_ID"
 DEFAULT_CHAIN_ID = 8453
 """Base. The payments this approves settle there, so the domain says so."""
 
-DOMAIN_NAME = "Sign402 Spending Approval"
+DOMAIN_NAME = "SingIt Spending Approval"
+"""What the device prints as the domain, so it has to be the product's name.
+
+The owner is being asked to approve a purchase by the thing they installed. A
+domain reading `Sign402` — the internal name of the gateway — asks them to
+recognise a name they have never been shown, and "approve only what you
+recognise" is the entire instruction a hardware wallet gives its user.
+
+Changing this changes every signature: the domain is part of what is signed, so
+an approval produced under the old name no longer verifies. That is correct, and
+it is why it is worth getting right before anything depends on it.
+"""
 DOMAIN_VERSION = "1"
 
 MAX_LIFETIME_SECONDS = 3600

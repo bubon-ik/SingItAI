@@ -73,7 +73,7 @@ const readStdin = async () => {
         `at ${message.payTo}\n`
     );
 
-    const signer = new SignerEthBuilder({ dmk, sessionId, originToken: "sign402" }).build();
+    const signer = new SignerEthBuilder({ dmk, sessionId, originToken: "singit" }).build();
     // Wait for a *terminal* state, not merely a non-pending one. The first
     // emission is `not-started`, so filtering on "not pending" resolves before
     // the device has been asked anything — the signature then arrives with
