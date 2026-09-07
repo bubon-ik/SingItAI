@@ -9,10 +9,25 @@ Nothing is spent. No wallet is touched. This builds the payload the gateway
 would build for an escalated payment, asks the device to sign it, verifies the
 signature the way the gateway verifies it, and then replays the same signature
 against a second payment to show it is refused.
+
+By default it signs a made-up escalation. Give it the real one instead — the
+merchant, amount and journal id a live purchase actually produced — and the
+device renders those, not a fixture:
+
+    .venv/bin/python scripts/ledger-approval-rehearsal.py \
+        --merchant x402.ottoai.services --pay-to 0x0e84… --amount 0.001 \
+        --owner telegram:1045618308 --rule unknown_merchant --journal-id <id>
+
+Read the journal id off the gateway that escalated:
+
+    .venv/bin/python -c "from spending_memory import SpendingMemory; \
+        [print(e['id'], e['extra'].get('rule')) for e in \
+         SpendingMemory.local('<db>').journal(limit=5)]"
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -35,17 +50,29 @@ from sign402_gateway.ledger_approval import (
 
 TOOL = Path(__file__).resolve().parents[2] / "tools" / "ledger-approve" / "approve.cjs"
 
+parser = argparse.ArgumentParser(description=__doc__)
+# Positional, because that is how this script has always taken the approver.
+parser.add_argument("approver", nargs="?", default="")
+parser.add_argument("--merchant", default="giftcards.example.com")
+parser.add_argument("--pay-to", default="0x8f3a1c2b4d5e6f708192a3b4c5d6e7f809a1b2c3")
+parser.add_argument("--amount", default="25.00")
+parser.add_argument("--owner", default="agent-7")
+parser.add_argument("--rule", default="unknown_merchant")
+parser.add_argument("--reason", default="")
+parser.add_argument("--journal-id", default="01JB8Z4A1B2C3D4E5F6G7H8J9K")
+args = parser.parse_args()
+
 payment = Payment(
-    merchant="giftcards.example.com",
-    pay_to="0x8f3a1c2b4d5e6f708192a3b4c5d6e7f809a1b2c3",
-    amount_usd=Decimal("25.00"),
-    owner="agent-7",
+    merchant=args.merchant,
+    pay_to=args.pay_to,
+    amount_usd=Decimal(args.amount),
+    owner=args.owner,
 )
 decision = Decision(
     action=Action.ESCALATE,
-    reason="I have never paid giftcards.example.com before.",
-    rule="unknown_merchant",
-    journal_id="01JB8Z4A1B2C3D4E5F6G7H8J9K",
+    reason=args.reason or f"I have never paid {args.merchant} before.",
+    rule=args.rule,
+    journal_id=args.journal_id,
 )
 
 expires_at = int(time.time()) + 600
@@ -83,7 +110,7 @@ submitted = {
 }
 
 print("\n== 3. the gateway verifies it ==")
-env = {ENABLED_ENV: "1", APPROVERS_ENV: sys.argv[1] if len(sys.argv) > 1 else ""}
+env = {ENABLED_ENV: "1", APPROVERS_ENV: args.approver}
 if not env[APPROVERS_ENV]:
     from eth_account import Account
     from eth_account.messages import encode_typed_data
