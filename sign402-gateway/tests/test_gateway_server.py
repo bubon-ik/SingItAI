@@ -5173,6 +5173,45 @@ class GatewayServerTests(unittest.TestCase):
                 }
             )
 
+    def test_a_silent_purchase_tells_the_buyer_why_nobody_asked(self):
+        """The sentence memory wrote is the one the buyer needs to see.
+
+        A purchase that settles in silence is the point of this layer, and a
+        buyer who is only told that it happened has no way to judge whether the
+        agent decided well.
+        """
+        from types import SimpleNamespace
+
+        enriched = {"telegramText": "Crypto News unlocked. Paid 0.001 USDC."}
+        gateway_server._explain_memory_decision(
+            enriched,
+            SimpleNamespace(
+                needs_human=False,
+                reason="Paid x402.ottoai.services twice at this same address.",
+                rule="known_good",
+            ),
+        )
+        self.assertIn("Settled without asking you", enriched["telegramText"])
+        self.assertIn("twice at this same address", enriched["telegramText"])
+        self.assertIn("Crypto News unlocked", enriched["telegramText"])
+        self.assertEqual(enriched["memoryRule"], "known_good")
+
+    def test_an_escalated_purchase_does_not_explain_itself(self):
+        """The owner was asked; they do not need to be told why they were."""
+        from types import SimpleNamespace
+
+        enriched = {"telegramText": "Crypto News unlocked."}
+        gateway_server._explain_memory_decision(
+            enriched,
+            SimpleNamespace(needs_human=True, reason="Never paid them.", rule="unknown_merchant"),
+        )
+        self.assertEqual(enriched["telegramText"], "Crypto News unlocked.")
+        self.assertNotIn("memoryReason", enriched)
+
+        # Memory switched off: no decision, and nothing added.
+        gateway_server._explain_memory_decision(enriched, None)
+        self.assertEqual(enriched["telegramText"], "Crypto News unlocked.")
+
     def test_a_decision_whose_purchase_never_finished_stops_answering(self):
         """The leak that matters is not the memory, it is the wrong answer.
 

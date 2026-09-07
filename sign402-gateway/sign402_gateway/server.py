@@ -1770,6 +1770,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             enriched["decision"] = result.get("decision", "approved_and_executed")
             enriched["ok"] = bool(result.get("ok", False))
             enriched["telegramUserId"] = user_id
+            _explain_memory_decision(enriched, decision)
             if enriched.get("ok"):
                 _settle_user_wallet_spend(
                     self.server,
@@ -6699,6 +6700,32 @@ def _x402_telegram_text(result: dict[str, Any]) -> str:
         f"Paid {amount}. "
         f"Tx {tx_url}. "
         f"Budget left {remaining}."
+    )
+
+
+def _explain_memory_decision(enriched: dict[str, Any], decision: Any) -> None:
+    """Tell the buyer why nobody asked them.
+
+    A purchase that settles in silence is the whole point of this layer, and
+    until now the buyer saw only that it happened. That is the wrong way round:
+    the moment worth explaining is the one where the agent decided on its own,
+    and the sentence explaining it already exists — memory writes every reason
+    to be read by a person.
+
+    Only for decisions taken without a human. When the owner was asked, they
+    already know why.
+    """
+    if decision is None or decision.needs_human:
+        return
+    reason = str(getattr(decision, "reason", "") or "").strip()
+    if not reason:
+        return
+    text = str(enriched.get("telegramText") or "").strip()
+    enriched["memoryReason"] = reason
+    enriched["memoryRule"] = str(getattr(decision, "rule", "") or "")
+    enriched["telegramText"] = (
+        f"{text}\n\nSettled without asking you. {reason}" if text
+        else f"Settled without asking you. {reason}"
     )
 
 
