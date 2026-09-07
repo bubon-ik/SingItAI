@@ -4,7 +4,7 @@
 > at the bottom of this file. Everything above that heading is prior work.
 >
 > One project, **two repositories**. The Ledger and Bazantic work is here; the
-> **The Graph** work is in
+> **Graph** work is in
 > [`bubon-ik/spending-memory`](https://github.com/bubon-ik/spending-memory) —
 > the MIT library this gateway is one caller of. The submission section links
 > to every file in both.
