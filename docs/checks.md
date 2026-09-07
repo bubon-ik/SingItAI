@@ -212,7 +212,10 @@ payout address, same amount, same signer — refused, because the journal entry 
 a different one. That is the property a tap in a chat cannot have: an approval
 is spent when the decision it names is spent.
 
-Device: Ledger Nano S Plus, Ethereum app, derivation `44'/60'/0'/0/0`. Signed
+Device: Ledger Nano S Plus, Ethereum app, derivation `44'/60'/0'/0/0`, domain
+`SingIt Spending Approval` — the product's name, checked on the screen, because
+the one instruction a hardware wallet gives is to approve only what you
+recognise. Signed
 through `@ledgerhq/device-signer-kit-ethereum` 1.18.0 on DMK 1.9.0, because L2
 established `wallet-cli` cannot sign messages at all.
 
