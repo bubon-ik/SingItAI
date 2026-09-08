@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 import logging
 import os
 import re
@@ -213,8 +214,16 @@ class GatewayClient:
         identity: TelegramIdentity,
         *,
         user_access_token: str | None = None,
+        request_id: str | None = None,
     ) -> str:
-        payload = {"tool": str(tool or "").strip(), "telegramUserId": identity.user_id}
+        payload = {
+            "tool": str(tool or "").strip(),
+            "telegramUserId": identity.user_id,
+            # One id per request the buyer made. A resend of this same request
+            # carries it again and is refused as a duplicate; the next time
+            # they ask for the same thing, it is a new purchase and says so.
+            "requestId": request_id or uuid.uuid4().hex,
+        }
         if identity.username:
             payload["telegramUsername"] = identity.username
         result = self._post(

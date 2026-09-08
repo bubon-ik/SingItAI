@@ -5013,7 +5013,7 @@ class GatewayServerTests(unittest.TestCase):
             server.spending_policy.memory.remember_settlement(payment, tx_id="0xseed")
         return payment
 
-    def run_memory_buy(self, server, requirements):
+    def run_memory_buy(self, server, requirements, request_id=None):
         with patch("sys.stderr", io.StringIO()):
             with (
                 patch(
@@ -5027,7 +5027,11 @@ class GatewayServerTests(unittest.TestCase):
             ):
                 handler = self.make_handler(
                     "/agent/buy-tool",
-                    {"tool": "news", "telegramUserId": "1045618308"},
+                    {
+                        "tool": "news",
+                        "telegramUserId": "1045618308",
+                        **({"requestId": request_id} if request_id else {}),
+                    },
                     server=server,
                     headers=self.llm_auth_headers(),
                 )
@@ -5088,12 +5092,16 @@ class GatewayServerTests(unittest.TestCase):
         server = self.memory_server(requirements)
         payment = self.teach_memory(server, requirements)
 
-        # The first attempt takes the claim and never finishes.
-        first, claim_id = server.spending_policy.authorise(payment)
+        # The first attempt takes the claim and never finishes. Same request
+        # id as the retry below, because that is what makes it the same
+        # purchase rather than a new one.
+        first, claim_id = server.spending_policy.authorise(
+            payment, claim_scope=gateway_server._claim_scope("take-1")
+        )
         self.assertEqual(first.action.value, "PAY")
         self.assertIsNotNone(claim_id)
 
-        response, body = self.run_memory_buy(server, requirements)
+        response, body = self.run_memory_buy(server, requirements, request_id="take-1")
 
         self.assertIn("HTTP/1.0 400 Bad Request", response)
         self.assertFalse(body["ok"])
@@ -5106,6 +5114,29 @@ class GatewayServerTests(unittest.TestCase):
         )
         server.user_x402_buyer.assert_not_called()
         server.imessage_approval_service.request_purchase_approval.assert_not_called()
+
+    def test_a_new_request_for_the_same_thing_is_not_a_replay(self):
+        """The defect this closes, end to end.
+
+        A fixed-price API is the same owner, merchant, address and amount every
+        time. Without a scope the first settled purchase made every later one
+        impossible — settled claims are permanent, which is the replay
+        protection — so asking again tomorrow was refused as a replay.
+        """
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+        payment = self.teach_memory(server, requirements)
+
+        first, claim_id = server.spending_policy.authorise(
+            payment, claim_scope=gateway_server._claim_scope("yesterday")
+        )
+        self.assertIsNotNone(claim_id)
+        server.spending_policy.memory.settle_claim(claim_id, tx_id="0xsettled")
+
+        response, body = self.run_memory_buy(server, requirements, request_id="today")
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertTrue(body["ok"])
 
     def test_the_kill_switch_puts_every_purchase_back_to_asking(self):
         """The rescue lever, exercised.
@@ -5172,6 +5203,39 @@ class GatewayServerTests(unittest.TestCase):
                     "SPENDING_MEMORY_AUTONOMY_CAP": "banana",
                 }
             )
+
+    def test_the_same_purchase_can_be_made_again_tomorrow(self):
+        """The defect a scope closes.
+
+        A fixed-price API costs the same cent to the same address every time,
+        so owner-merchant-address-amount is the same claim for every purchase
+        anyone ever makes of it. Settled claims are permanent — that is the
+        replay protection — so without a scope the first successful purchase
+        refuses every later one for ever.
+        """
+        scopes = {
+            gateway_server._claim_scope("request-1"),
+            gateway_server._claim_scope("request-2"),
+        }
+        self.assertEqual(len(scopes), 2)
+
+    def test_a_resent_request_is_the_same_purchase(self):
+        """The retry the claim exists to catch keeps its id, and its scope."""
+        self.assertEqual(
+            gateway_server._claim_scope("request-1"),
+            gateway_server._claim_scope("request-1"),
+        )
+
+    def test_a_caller_without_a_request_id_still_collapses_a_retry(self):
+        """No id means guessing, and the guess is a window, not for ever."""
+        with patch.object(gateway_server.time, "time", return_value=1_000.0):
+            first = gateway_server._claim_scope(None)
+            immediate_retry = gateway_server._claim_scope("")
+        self.assertEqual(first, immediate_retry)
+
+        with patch.object(gateway_server.time, "time", return_value=1_000.0 + 600):
+            later = gateway_server._claim_scope(None)
+        self.assertNotEqual(first, later)
 
     def test_a_decision_whose_purchase_never_finished_stops_answering(self):
         """The leak that matters is not the memory, it is the wrong answer.

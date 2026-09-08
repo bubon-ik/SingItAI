@@ -1706,7 +1706,11 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             # Reserving now decides too: a BLOCK raises SpendingBlocked and is
             # rendered below, and a PAY comes back holding its claim.
             reservation_id, decision, claim_id = _reserve_user_wallet_spend(
-                self.server, user_id, payment_requirements, resource_url=resource_url
+                self.server,
+                user_id,
+                payment_requirements,
+                resource_url=resource_url,
+                claim_scope=payload.get("requestId"),
             )
             payment = _payment_from_requirements(
                 payment_requirements, owner=user_id, resource_url=resource_url
@@ -2838,7 +2842,12 @@ def build_server(
             quote.get("totalUsd") or quote["priceUsd"]
         )
         reservation_id, decision, claim_id = _reserve_user_wallet_spend(
-            server, user_id, requirement
+            server,
+            user_id,
+            requirement,
+            # One quote is one purchase, and a resent order for the same quote
+            # is the retry this is here to catch.
+            claim_scope=str(quote.get("quoteId") or quote.get("id") or ""),
         )
         _forget_stale_spending_memory_holds(server)
         server.spending_memory_holds[reservation_id] = {
@@ -7024,6 +7033,35 @@ class SpendingBlocked(ValueError):
         self.decision = decision
 
 
+CLAIM_SCOPE_WINDOW_SECONDS = 120
+"""Fallback window when a caller does not identify its own request.
+
+Same length as the claim itself. A client that resends inside it is retrying;
+one that comes back later meant it. Callers that send a request id get exact
+semantics instead of this guess.
+"""
+
+
+def _claim_scope(request_id: Any) -> str:
+    """What tells two purchases of the same thing apart.
+
+    A claim is keyed on owner, merchant, payout address and amount, which is a
+    good identity when the amount distinguishes purchases. For a fixed-price
+    API it does not: every call costs the same cent to the same address, so
+    without a scope the first successful purchase settles that claim for ever
+    and every later one is refused as already in flight.
+
+    The caller's own request id is the honest answer — a retry carries the same
+    one, a new intention carries a new one. Without it, fall back to a window,
+    which keeps a redelivered request from paying twice while still letting the
+    same purchase happen again tomorrow.
+    """
+    scope = str(request_id or "").strip()[:128]
+    if scope:
+        return scope
+    return f"window-{int(time.time()) // CLAIM_SCOPE_WINDOW_SECONDS}"
+
+
 def _payment_from_requirements(
     payment_requirements: dict[str, Any],
     *,
@@ -7066,6 +7104,7 @@ def _reserve_user_wallet_spend(
     payment_requirements: dict[str, Any],
     *,
     resource_url: str | None = None,
+    claim_scope: str | None = None,
 ) -> tuple[str, Any, str | None]:
     """Check the caps, hold the amount, and ask memory what to do about it.
 
@@ -7099,7 +7138,9 @@ def _reserve_user_wallet_spend(
             owner=telegram_user_id,
             resource_url=resource_url,
         )
-        decision, claim_id = server.spending_policy.authorise(payment)
+        decision, claim_id = server.spending_policy.authorise(
+            payment, claim_scope=_claim_scope(claim_scope)
+        )
         if decision.action.value == "BLOCK":
             # Nothing was spent, so nothing may stay held — including on the
             # paths whose own error handling never learns a decision was taken.
