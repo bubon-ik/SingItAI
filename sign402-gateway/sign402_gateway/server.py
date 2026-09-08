@@ -7133,14 +7133,20 @@ def _reserve_user_wallet_spend(
             # Memory is off. No decision means "ask the owner", which is what
             # every caller already does when the answer is not a clean PAY.
             return reservation_id, None, None
-        payment = _payment_from_requirements(
-            payment_requirements,
-            owner=telegram_user_id,
-            resource_url=resource_url,
-        )
-        decision, claim_id = server.spending_policy.authorise(
-            payment, claim_scope=_claim_scope(claim_scope)
-        )
+        try:
+            payment = _payment_from_requirements(
+                payment_requirements,
+                owner=telegram_user_id,
+                resource_url=resource_url,
+            )
+            decision, claim_id = server.spending_policy.authorise(
+                payment, claim_scope=_claim_scope(claim_scope)
+            )
+        except Exception:
+            # The caller has not received this id yet and cannot release it
+            # when mapping or memory fails before we return.
+            _release_user_wallet_spend(server, reservation_id)
+            raise
         if decision.action.value == "BLOCK":
             # Nothing was spent, so nothing may stay held — including on the
             # paths whose own error handling never learns a decision was taken.

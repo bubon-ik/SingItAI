@@ -642,7 +642,8 @@ class GatewayClient:
         is_bitrefill = operation in {"quote-bitrefill", "buy-wallet-bitrefill"}
         is_llm = operation.startswith("llm-")
         is_imessage = operation in _IMESSAGE_OPERATION_PATHS
-        if not is_bitrefill and not is_llm and not is_imessage:
+        is_paid_tool = operation == "buy-tool"
+        if not is_bitrefill and not is_llm and not is_imessage and not is_paid_tool:
             return None
         try:
             body = exc.read(self.max_response_bytes + 1)
@@ -656,6 +657,18 @@ class GatewayClient:
             return None
         if not isinstance(payload, dict):
             return None
+        if is_paid_tool:
+            # These are deliberate policy/approval outcomes with text written
+            # for the buyer. Unexpected exceptions still use the fixed error;
+            # never forward a signer's stderr or an upstream response body.
+            if payload.get("decision") in {"blocked_by_memory", "rejected_by_imessage"}:
+                text = payload.get("telegramText")
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+            error = str(payload.get("error") or "").strip()
+            if error.startswith(_SPEND_LIMIT_PREFIX):
+                return f"{error}\n\n{_SPEND_LIMIT_HINT}"
+            return _GATEWAY_ERROR_TEXTS.get(error)
         if is_imessage:
             for key in ("imessageText", "telegramText"):
                 text = payload.get(key)

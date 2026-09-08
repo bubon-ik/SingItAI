@@ -536,6 +536,7 @@ class GatewayServerTests(unittest.TestCase):
             with ExitStack() as stack:
                 stack.enter_context(patch.dict(os.environ, {}, clear=True))
                 for target in (
+                    "sign402_gateway.server.BuyerEmailStore",
                     "sign402_gateway.server.build_approval_client_from_env",
                     "sign402_gateway.server.build_payment_executor",
                     (
@@ -5137,6 +5138,52 @@ class GatewayServerTests(unittest.TestCase):
 
         self.assertIn("HTTP/1.0 200 OK", response)
         self.assertTrue(body["ok"])
+
+    def test_initial_approvals_do_not_block_a_successfully_paid_merchant(self):
+        """Three cold-start prompts followed by settlement, as in the incident."""
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+        payment = self.memory_payment(server, requirements)
+        for _ in range(3):
+            decision = server.spending_policy.decide(payment)
+            self.assertEqual(decision.rule, "unknown_merchant")
+        server.spending_policy.memory.remember_settlement(payment, tx_id="0xfirst")
+
+        response, body = self.run_memory_buy(server, requirements, request_id="repeat")
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertTrue(body["ok"])
+        server.imessage_approval_service.request_purchase_approval.assert_not_called()
+        server.user_x402_buyer.assert_called_once()
+
+    def test_repeated_price_spikes_still_block_a_paid_tool(self):
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+        self.teach_memory(server, requirements)
+        expensive = self.memory_payment(server, {**requirements, "amountAtomic": "10000"})
+        for _ in range(3):
+            self.assertEqual(server.spending_policy.decide(expensive).rule, "price_spike")
+
+        response, body = self.run_memory_buy(server, requirements, request_id="repeat")
+
+        self.assertIn("HTTP/1.0 400 Bad Request", response)
+        self.assertEqual(body["decision"], "blocked_by_memory")
+        self.assertEqual(body["rule"], "repeated_escalations")
+        self.assertTrue(body["telegramText"])
+        server.user_x402_buyer.assert_not_called()
+        server.imessage_approval_service.request_purchase_approval.assert_not_called()
+
+    def test_memory_failure_releases_the_budget_before_returning_a_reservation(self):
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+        with patch.object(server.spending_policy, "authorise", side_effect=RuntimeError("memory unavailable")):
+            response, body = self.run_memory_buy(server, requirements)
+
+        self.assertIn("HTTP/1.0 400 Bad Request", response)
+        self.assertFalse(body["ok"])
+        server.user_spend_limit_store.release_reservation.assert_called_once_with("hold_test")
+        server.user_x402_buyer.assert_not_called()
+        server.imessage_approval_service.request_purchase_approval.assert_not_called()
 
     def test_the_kill_switch_puts_every_purchase_back_to_asking(self):
         """The rescue lever, exercised.

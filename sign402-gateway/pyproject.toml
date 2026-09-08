@@ -8,7 +8,7 @@ dependencies = [
   "eth-account>=0.13.0",
   "mcp>=1.27,<2",
   "pyserial>=3.5",
-  "spending-memory @ git+https://github.com/bubon-ik/spending-memory@2bc8ec6efbac063029caf812db99f17108655baf",
+  "spending-memory @ git+https://github.com/bubon-ik/spending-memory@443743ea2d69ef765528bd70b28a7e2d8c80e564",
   "toons>=0.7,<1",
 ]
 
