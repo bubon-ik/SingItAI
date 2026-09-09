@@ -572,6 +572,7 @@ class GatewayServerTests(unittest.TestCase):
                         "build_bitrefill_user_funding_runner_from_env"
                     ),
                     "sign402_gateway.server.UserWalletBaseX402PaymentClient",
+                    "sign402_gateway.server.BuyerEmailStore",
                     "sign402_gateway.server.UserWalletTokenTransferClient",
                     "sign402_gateway.server.BankrLlmCreditsTopUpClient",
                     (
@@ -604,6 +605,7 @@ class GatewayServerTests(unittest.TestCase):
                     bitrefill_commerce_store_path=root / "orders.sqlite3",
                     user_wallet_store_path=root / "user-wallets.json",
                     user_spend_limit_store_path=root / "spend-limits.json",
+                    buyer_email_store_path=root / "emails.sqlite3",
                     imessage_approval_store_path=root / "approvals.json",
                 )
 
@@ -628,6 +630,7 @@ class GatewayServerTests(unittest.TestCase):
                         bitrefill_commerce_store_path=root / "orders.sqlite3",
                         user_wallet_store_path=root / "user-wallets.json",
                         user_spend_limit_store_path=root / "spend-limits.json",
+                        buyer_email_store_path=root / "emails.sqlite3",
                         imessage_approval_store_path=root / "approvals.json",
                     )
 
@@ -1963,6 +1966,7 @@ class GatewayServerTests(unittest.TestCase):
             "/execute-payment": "_handle_execute_payment",
             "/agent/buy-probe": "_handle_agent_buy_probe",
             "/agent/buy-tool": "_handle_agent_buy_tool",
+            "/agent/ledger-approve": "_handle_ledger_operation",
             "/agent/buy-x402": "_handle_agent_buy_x402",
             "/agent/top-up-llm-credits": "_handle_agent_top_up_llm_credits",
             "/agent/buy-bitrefill": "_handle_agent_buy_bitrefill",

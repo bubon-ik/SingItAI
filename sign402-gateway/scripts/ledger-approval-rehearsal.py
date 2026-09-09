@@ -1,145 +1,144 @@
-#!/usr/bin/env python
-"""Sign one SpendingApproval on a real Ledger, then prove it cannot be reused.
+#!/usr/bin/env python3
+"""Exercise the real HTTP approval flow with a Ledger and a test payer.
 
-Run from `sign402-gateway/` with the device connected and the Ethereum app open:
+Run with the gateway dependencies installed and the Ethereum app open:
+    python sign402-gateway/scripts/ledger-approval-rehearsal.py
 
-    .venv/bin/python scripts/ledger-approval-rehearsal.py
-
-Nothing is spent. No wallet is touched. This builds the payload the gateway
-would build for an escalated payment, asks the device to sign it, verifies the
-signature the way the gateway verifies it, and then replays the same signature
-against a second payment to show it is refused.
-
-By default it signs a made-up escalation. Give it the real one instead — the
-merchant, amount and journal id a live purchase actually produced — and the
-device renders those, not a fixture:
-
-    .venv/bin/python scripts/ledger-approval-rehearsal.py \
-        --merchant x402.ottoai.services --pay-to 0x0e84… --amount 0.001 \
-        --owner telegram:1045618308 --rule unknown_merchant --journal-id <id>
-
-Read the journal id off the gateway that escalated:
-
-    .venv/bin/python -c "from spending_memory import SpendingMemory; \
-        [print(e['id'], e['extra'].get('rule')) for e in \
-         SpendingMemory.local('<db>').journal(limit=5)]"
+All state, tokens and the encryption key are temporary. The quote and payer
+are local doubles: this script cannot transfer money or access a real wallet.
+It uses the production HTTP handler, policy, approval store, budget store and
+local client. --software-signer is a device-free check of this rehearsal only.
 """
-
 from __future__ import annotations
 
 import argparse
-import json
+import copy
 import subprocess
 import sys
-import time
+import tempfile
+import threading
+from contextlib import ExitStack
 from decimal import Decimal
+from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import Mock, patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "sign402-gateway"))
+sys.path.insert(0, str(ROOT / "tools" / "ledger-approve"))
 
-from spending_memory import Action, Decision, Payment
+from cryptography.fernet import Fernet
+from spending_memory import SpendingMemory, SpendingPolicy
+from sign402_gateway import server as gateway
+from sign402_gateway.ledger_payments import LedgerConfig
+import purchase
 
-from sign402_gateway.ledger_approval import (
-    APPROVERS_ENV,
-    DEFAULT_CHAIN_ID,
-    ENABLED_ENV,
-    LedgerApprovalError,
-    SpendingApproval,
-    verify_approval,
-)
-
-TOOL = Path(__file__).resolve().parents[2] / "tools" / "ledger-approve" / "approve.cjs"
-
-parser = argparse.ArgumentParser(description=__doc__)
-# Positional, because that is how this script has always taken the approver.
-parser.add_argument("approver", nargs="?", default="")
-parser.add_argument("--merchant", default="giftcards.example.com")
-parser.add_argument("--pay-to", default="0x8f3a1c2b4d5e6f708192a3b4c5d6e7f809a1b2c3")
-parser.add_argument("--amount", default="25.00")
-parser.add_argument("--owner", default="agent-7")
-parser.add_argument("--rule", default="unknown_merchant")
-parser.add_argument("--reason", default="")
-parser.add_argument("--journal-id", default="01JB8Z4A1B2C3D4E5F6G7H8J9K")
-args = parser.parse_args()
-
-payment = Payment(
-    merchant=args.merchant,
-    pay_to=args.pay_to,
-    amount_usd=Decimal(args.amount),
-    owner=args.owner,
-)
-decision = Decision(
-    action=Action.ESCALATE,
-    reason=args.reason or f"I have never paid {args.merchant} before.",
-    rule=args.rule,
-    journal_id=args.journal_id,
-)
-
-expires_at = int(time.time()) + 600
-approval = SpendingApproval(
-    merchant=payment.merchant,
-    pay_to=payment.pay_to_normalised,
-    amount_usd=str(payment.amount_usd),
-    owner=payment.owner,
-    rule=decision.rule,
-    journal_id=decision.journal_id,
-    expires_at=expires_at,
-)
-typed = approval.typed_data(chain=DEFAULT_CHAIN_ID)
-
-print("== 1. what the device is asked to show ==", flush=True)
-for field, value in approval.message().items():
-    print(f"   {field:<10} {value}")
-
-print("\n== 2. signing on the Ledger ==", flush=True)
-# stderr is inherited, not captured: it carries "confirm on the device", and a
-# prompt shown only after the process exits is not a prompt. Only stdout is
-# read, because only stdout carries the signature.
-result = subprocess.run(
-    ["node", str(TOOL)], input=json.dumps(typed).encode(), stdout=subprocess.PIPE
-)
-signature = result.stdout.decode().strip()
-if result.returncode != 0 or not signature:
-    sys.exit("   no signature came back")
-print(f"   signature: {signature[:20]}…{signature[-8:]}")
-
-submitted = {
-    "signature": signature,
-    "expiresAt": expires_at,
-    "journalId": decision.journal_id,
+OWNER = "ledger-rehearsal"
+REQUIREMENTS = {
+    "scheme": "exact", "network": "base-mainnet", "x402Network": "eip155:8453",
+    "amountAtomic": "1000", "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "receiver": "0x0000000000000000000000000000000000000001",
+    "paymentIntent": "ledger-rehearsal", "purpose": "x402_api_access",
+    "extra": {"name": "USD Coin", "version": "2"},
 }
 
-print("\n== 3. the gateway verifies it ==")
-env = {ENABLED_ENV: "1", APPROVERS_ENV: args.approver}
-if not env[APPROVERS_ENV]:
-    from eth_account import Account
-    from eth_account.messages import encode_typed_data
 
-    signer = Account.recover_message(
-        encode_typed_data(full_message=typed), signature=signature
-    )
-    print(f"   no approver given, so trusting this run's device: {signer}")
-    env[APPROVERS_ENV] = signer
+def check(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+    print("PASS: " + message, flush=True)
 
-accepted = verify_approval(
-    submitted, payment=payment, decision=decision, claim_id="claim-1", env=env
-)
-print(f"   accepted, signed by {accepted}")
 
-print("\n== 4. the same signature on the next payment ==")
-next_decision = Decision(
-    action=Action.ESCALATE,
-    reason="Same merchant, same amount, a new escalation.",
-    rule="unknown_merchant",
-    journal_id="01JB8Z9ZZZZZZZZZZZZZZZZZZZ",
-)
-try:
-    verify_approval(
-        submitted, payment=payment, decision=next_decision, claim_id="claim-2", env=env
-    )
-    print("   *** FAILED: the approval was reusable ***")
-    sys.exit(1)
-except LedgerApprovalError as exc:
-    print(f"   refused, as designed: {exc}")
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--path", default="44'/60'/0'/0/0")
+    parser.add_argument("--software-signer", action="store_true")
+    args = parser.parse_args()
+    print("TEST PAYER ONLY. No USDC will be transferred; no real wallet is loaded.", flush=True)
+    with ExitStack() as stack:
+        if args.software_signer:
+            from eth_account import Account
+            from eth_account.messages import encode_defunct
+            key = Account.create()
+            address = key.address
+            def software_sign(pending, owner, **kwargs):
+                msg = pending["approval"]["message"]
+                return {"signingMethod": "personal_sign", "signature": key.sign_message(encode_defunct(text=pending["approval"]["displayText"])).signature.hex(),
+                        "expiresAt": msg["expiresAt"], "journalId": msg["journalId"]}
+            stack.enter_context(patch.object(purchase, "sign_pending", side_effect=software_sign))
+        else:
+            result = subprocess.run(["node", str(ROOT / "tools/ledger-approve/approve.cjs"),
+                                     "--address", "--path", args.path],
+                                    stdout=subprocess.PIPE, text=True, timeout=185)
+            address = result.stdout.strip()
+            if result.returncode or not LedgerConfig.from_env({
+                "SIGN402_LEDGER_APPROVAL_ENABLED": "1", "SIGN402_LEDGER_OWNER_ID": OWNER,
+                "SIGN402_LEDGER_APPROVER_ADDRESSES": address,
+            }):
+                raise RuntimeError("Could not read the Ledger address.")
+        print("Approver read before preparing the operation: " + address, flush=True)
+        root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="ledger-http-rehearsal-")))
+        stack.enter_context(patch.dict("os.environ", {
+            "SIGN402_WALLET_MASTER_KEY": Fernet.generate_key().decode(),
+            "SIGN402_PURCHASES_PAUSED": "0", "SIGN402_USER_PURCHASES_PER_HOUR": "0",
+            "SIGN402_USER_REQUESTS_PER_MINUTE": "0", "SIGN402_USER_WALLET_MAX_ATOMIC_PER_TX": "10000",
+            "SIGN402_USER_WALLET_DAILY_ATOMIC_CAP": "100000",
+        }))
+        tool = {**gateway.PAID_TOOLS["otto.crypto_news"], "resourceUrl": "https://ledger-rehearsal.invalid/news"}
+        stack.enter_context(patch.dict(gateway.PAID_TOOLS, {"otto.crypto_news": tool}))
+        stack.enter_context(patch.object(gateway, "fetch_x402_payment_required", return_value={"accepts": [{}]}))
+        stack.enter_context(patch.object(gateway, "normalize_x402_payment_required", side_effect=lambda *a, **k: copy.deepcopy(REQUIREMENTS)))
 
-print("\nAll four steps behaved. Nothing was spent.")
+        class QuietHandler(gateway.Sign402GatewayHandler):
+            def log_message(self, *args):
+                pass
+
+        server = stack.enter_context(ThreadingHTTPServer(("127.0.0.1", 0), QuietHandler))
+        server.user_wallet_api_token = "rehearsal-gateway-token"
+        server.user_wallet_service = Mock()
+        server.user_wallet_service.resolve_telegram_user_id.side_effect = lambda token: OWNER if token == "rehearsal-user-token" else "wrong-owner"
+        server.user_wallet_service.decrypt_private_key_for_future_signing.return_value = "NOT_A_PRIVATE_KEY"
+        server.user_event_store = Mock()
+        server.spending_memory_holds = {}
+        server.spending_policy = SpendingPolicy(SpendingMemory.local(str(root / "memory.db")), daily_cap_usd=Decimal("5"))
+        server.user_spend_limit_store = gateway.UserSpendLimitStore(root / "limits.json")
+        server.user_x402_buyer = Mock(return_value={
+            "ok": True, "txId": "TEST_PAYER_NO_TRANSACTION", "amountAtomic": "1000",
+            "asset": REQUIREMENTS["asset"], "network": REQUIREMENTS["network"],
+            "telegramText": "Rehearsal result. No money was transferred.",
+            "resourceResult": {"status": 200, "body": {"rehearsal": True}},
+        })
+        config = LedgerConfig(OWNER, frozenset({address.lower()}))
+        state_path = root / "ledger" / "operations.db"
+        server.ledger_payments = gateway.build_ledger_payments(server, config, path=state_path)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        stack.callback(thread.join)
+        stack.callback(server.shutdown)
+        client = purchase.Gateway(f"http://127.0.0.1:{server.server_port}", OWNER,
+                                  "rehearsal-gateway-token", "rehearsal-user-token")
+        request_id = "ledger-http-rehearsal"
+        pending = client.post("/agent/buy-tool", {"tool": "news", "requestId": request_id})
+        check(pending.get("status") == "pending", "real policy escalates before any payer call")
+        check(server.user_x402_buyer.call_count == 0, "no payer call while waiting for the device")
+        check(client.post("/agent/buy-tool", {"tool": "news", "requestId": request_id}) == pending,
+              "retry returns the same journal ID and challenge")
+        server.ledger_payments = gateway.build_ledger_payments(server, config, path=state_path)
+        result = purchase.run(client, "approve", request_id, device_path=args.path)
+        check(result.get("status") == "succeeded", "local client signs; HTTP gateway verifies and runs the test payer")
+        server.ledger_payments = gateway.build_ledger_payments(server, config, path=state_path)
+        check(purchase.run(client, "approve", request_id) == result, "completed approval survives reopening without another signature")
+        check(purchase.run(client, "buy", request_id) == result, "duplicate buy returns the original result")
+        check(server.user_x402_buyer.call_count == 1, "exactly one test payer call")
+        check(server.spending_policy.memory.spent_today(OWNER) == Decimal("0.001"), "spending memory accounts for the operation once")
+        server.user_event_store.write.assert_called_once()
+        print("COMPLETE: " + ("software" if args.software_signer else "hardware") + " HTTP rehearsal passed. Nothing was spent.", flush=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit("Rehearsal interrupted. Nothing was spent.")
+    except Exception as exc:
+        sys.exit("FAIL: " + (str(exc) if isinstance(exc, (ValueError, RuntimeError)) else type(exc).__name__))

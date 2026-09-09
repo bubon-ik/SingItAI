@@ -31,6 +31,7 @@ sign402-gateway/.bitrefill-api-key
 
 # Demo runtime artifacts
 .demo-logs/
+.ledger-live/
 demo-dashboard/latest-run.json
 demo-dashboard/agent-state.json
 demo-dashboard/bitrefill-orders.sqlite3
@@ -46,8 +47,7 @@ SingIt-presentation-assets/
 .tools/
 tools/*
 # …except the Ledger approval signer, which is part of the product rather than
-# scratch: the gateway shells out to it to have an escalated payment approved
-# on a device.
+# scratch: the local client signs a gateway operation on the owner's device.
 !tools/ledger-approve/
 x402HackBerlin/
 .worktrees/
@@ -63,4 +63,3 @@ sign402-gateway/sign402_gateway.egg-info/
 
 # …but not its installed dependencies.
 tools/ledger-approve/node_modules/
-tools/ledger-approve/package-lock.json

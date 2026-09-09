@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from collections.abc import Mapping
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -214,7 +215,8 @@ class GatewayClient:
         *,
         user_access_token: str | None = None,
     ) -> str:
-        payload = {"tool": str(tool or "").strip(), "telegramUserId": identity.user_id}
+        payload = {"tool": str(tool or "").strip(), "telegramUserId": identity.user_id,
+                   "requestId": str(uuid.uuid4())}
         if identity.username:
             payload["telegramUsername"] = identity.username
         result = self._post(

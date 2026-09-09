@@ -1,54 +1,22 @@
-"""A payment memory escalated waits for a signature from the owner's Ledger.
+"""Readable approval of one escalated Base-USDC tool purchase.
 
-When `SpendingPolicy` says `ESCALATE`, the gateway asks a person. Today that
-question goes to iMessage or WhatsApp and the answer is a tap in a chat, which
-proves that somebody pressed a button in a chat. It does not prove that the
-owner saw *this* amount going to *this* address, and a phone that has been taken
-over can press the button.
+The Ledger signs compact EIP-191 text: purchase name, amount/network, full
+recipient and a SHA-256 reference. The reference commits the domain, purchase,
+resource, merchant, amount, recipient, owner, rule, journal ID and expiry. The
+verifier reconstructs it from the stored order, never from a caller's display
+text. Changing any field changes the message that must be signed.
 
-An EIP-712 signature from a Ledger proves both. The device renders the fields on
-its own screen, which the host cannot repaint, and the signature is over exactly
-those fields.
-
-## What is signed, and why `journalId` is in it
-
-    SpendingApproval {
-        merchant   string
-        payTo      address
-        amountUsd  string
-        owner      string
-        rule       string
-        journalId  string
-        expiresAt  uint256
-    }
-
-`journalId` is the field that makes this safe to retry. It names the exact
-journal entry that produced this escalation, so an approval is bound to one
-decision about one payment. Without it a signature would authorise "pay this
-merchant $25", and the same signature would authorise the next $25 to the same
-merchant, forever. With it, an approval is spent when the decision it names is
-spent — the same work-claim discipline the rest of the system already uses,
-extended to a human's answer.
-
-`amountUsd` is a string for the reason it is a string everywhere else here: it
-is compared against a limit, and a float loses cents at the edges. It also has
-to render on a small screen exactly as the person was told, and "25.00" does
-that while a scaled integer does not.
-
-## What this module does not do
-
-It does not fetch signatures, hold them, or talk to a device. It builds the
-payload and checks a signature against a decision. The signature arrives with
-the request that needs it, so there is no waiting room to keep, nothing to
-expire on a timer, and no new place for an approval to sit around being
-replayable.
-
-Off unless `SIGN402_LEDGER_APPROVAL_ENABLED` is set, and with it unset nothing
-in this file runs — the escalation path is exactly the one that shipped.
+Signature validity proves control of the configured key; hardware custody and
+readable review are separate device checks documented in docs/ledger-v1.md.
+ledger_payments.py consumes approvals atomically before calling the payer and
+retains completed results for retries. A signature alone is not replay control.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import logging
 import os
 import re
@@ -61,23 +29,15 @@ logger = logging.getLogger(__name__)
 ENABLED_ENV = "SIGN402_LEDGER_APPROVAL_ENABLED"
 APPROVERS_ENV = "SIGN402_LEDGER_APPROVER_ADDRESSES"
 CHAIN_ID_ENV = "SIGN402_LEDGER_APPROVAL_CHAIN_ID"
+OWNER_ENV = "SIGN402_LEDGER_OWNER_ID"
 
 DEFAULT_CHAIN_ID = 8453
 """Base. The payments this approves settle there, so the domain says so."""
 
 DOMAIN_NAME = "SingIt Spending Approval"
-"""What the device prints as the domain, so it has to be the product's name.
-
-The owner is being asked to approve a purchase by the thing they installed. A
-domain reading `Sign402` — the internal name of the gateway — asks them to
-recognise a name they have never been shown, and "approve only what you
-recognise" is the entire instruction a hardware wallet gives its user.
-
-Changing this changes every signature: the domain is part of what is signed, so
-an approval produced under the old name no longer verifies. That is correct, and
-it is why it is worth getting right before anything depends on it.
-"""
-DOMAIN_VERSION = "1"
+"""Domain separator committed by the signed reference, independent of its UI label."""
+DOMAIN_VERSION = "2"
+SIGNING_METHOD = "personal_sign"
 
 MAX_LIFETIME_SECONDS = 3600
 """How far ahead `expiresAt` may be, whatever the signature says.
@@ -89,22 +49,36 @@ captured approval stops being useful before anyone could use it twice.
 
 ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
-TYPES = {
-    "EIP712Domain": [
-        {"name": "name", "type": "string"},
-        {"name": "version", "type": "string"},
-        {"name": "chainId", "type": "uint256"},
-    ],
-    "SpendingApproval": [
-        {"name": "merchant", "type": "string"},
-        {"name": "payTo", "type": "address"},
-        {"name": "amountUsd", "type": "string"},
-        {"name": "owner", "type": "string"},
-        {"name": "rule", "type": "string"},
-        {"name": "journalId", "type": "string"},
-        {"name": "expiresAt", "type": "uint256"},
-    ],
-}
+
+def display_text(message: Mapping[str, Any], *, chain: int) -> str:
+    """Canonical text signed by the device and reconstructed by the verifier.
+
+    Escape field values as ASCII JSON strings (without their surrounding
+    quotes), so line breaks, control characters and Unicode direction controls
+    cannot create misleading labels on the device. Never truncate signed data.
+    A full SHA-256 reference commits the domain and every field, including
+    resource, owner, rule, journal and expiry. They need not take up individual
+    device screens. Verification reconstructs the text from the stored order.
+    This lane only pays Base USDC; amountUsd is its existing decimal amount.
+    """
+    def field(name):
+        return json.dumps(str(message[name]), ensure_ascii=True)[1:-1]
+
+    network = "Base" if chain == DEFAULT_CHAIN_ID else f"chain {chain}"
+    committed = {"domain": {"name": DOMAIN_NAME, "version": DOMAIN_VERSION, "chainId": chain},
+                 "message": dict(message)}
+    canonical = json.dumps(committed, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    reference = base64.urlsafe_b64encode(hashlib.sha256(canonical).digest()).decode("ascii").rstrip("=")
+    text = "\n".join([
+        f"SingIt purchase v{DOMAIN_VERSION}",
+        f"Buy: {field('purchase')}",
+        f"Pay: {field('amountUsd')} USDC on {network}",
+        f"To: {field('payTo')}",
+        f"Ref: {reference}",
+    ])
+    if len(text) > 2000:
+        raise LedgerApprovalError("Purchase details are too long for device review.")
+    return text
 
 
 class LedgerApprovalError(ValueError):
@@ -139,7 +113,7 @@ def chain_id(env: Mapping[str, str] | None = None) -> int:
 
 @dataclass(frozen=True)
 class SpendingApproval:
-    """The message a Ledger is asked to sign, and the device shows verbatim."""
+    """The signed message; readable device display must be verified separately."""
 
     merchant: str
     pay_to: str
@@ -148,9 +122,13 @@ class SpendingApproval:
     rule: str
     journal_id: str
     expires_at: int
+    purchase: str
+    resource: str
 
     def message(self) -> dict[str, Any]:
         return {
+            "purchase": self.purchase,
+            "resource": self.resource,
             "merchant": self.merchant,
             "payTo": self.pay_to,
             "amountUsd": self.amount_usd,
@@ -160,24 +138,24 @@ class SpendingApproval:
             "expiresAt": self.expires_at,
         }
 
-    def typed_data(self, *, chain: int) -> dict[str, Any]:
+    def payload(self, *, chain: int) -> dict[str, Any]:
         return {
-            "types": TYPES,
-            "primaryType": "SpendingApproval",
+            "signingMethod": SIGNING_METHOD,
             "domain": {
                 "name": DOMAIN_NAME,
                 "version": DOMAIN_VERSION,
                 "chainId": chain,
             },
             "message": self.message(),
+            "displayText": display_text(self.message(), chain=chain),
         }
 
 
-def approval_for(payment: Any, decision: Any, *, lifetime_seconds: int = 900) -> SpendingApproval:
+def approval_for(payment: Any, decision: Any, *, purchase: str | None = None, lifetime_seconds: int = 900) -> SpendingApproval:
     """What the owner is being asked to approve, built from the decision itself.
 
-    Built here rather than taken from the request, so the fields on the device's
-    screen are the gateway's account of the payment and not the caller's.
+    Built here rather than taken from the submitted approval, so the signed
+    fields describe the gateway's payment and decision.
     """
     return SpendingApproval(
         merchant=str(payment.merchant),
@@ -187,14 +165,16 @@ def approval_for(payment: Any, decision: Any, *, lifetime_seconds: int = 900) ->
         rule=str(getattr(decision, "rule", "") or ""),
         journal_id=str(getattr(decision, "journal_id", "") or ""),
         expires_at=int(time.time()) + int(lifetime_seconds),
+        purchase=str(purchase if purchase is not None else payment.resource or payment.merchant),
+        resource=str(payment.resource or ""),
     )
 
 
 def _recover(approval: SpendingApproval, signature: str, *, chain: int) -> str:
     from eth_account import Account
-    from eth_account.messages import encode_typed_data
+    from eth_account.messages import encode_defunct
 
-    encoded = encode_typed_data(full_message=approval.typed_data(chain=chain))
+    encoded = encode_defunct(text=display_text(approval.message(), chain=chain))
     return Account.recover_message(encoded, signature=signature).lower()
 
 
@@ -203,7 +183,7 @@ def verify_approval(
     *,
     payment: Any,
     decision: Any,
-    claim_id: str | None,
+    purchase: str | None = None,
     env: Mapping[str, str] | None = None,
     now: int | None = None,
 ) -> str:
@@ -219,16 +199,10 @@ def verify_approval(
             "could approve anything. Refusing rather than waving the payment "
             "through."
         )
-    if claim_id is None:
-        # The claim is what stops the approved payment being sent twice. An
-        # approval with nothing held is an approval for a payment that is
-        # already gone or already in flight.
-        raise LedgerApprovalError(
-            "This payment is no longer being held, so an approval cannot be "
-            "applied to it. Start it again."
-        )
     if not isinstance(submitted, Mapping):
         raise LedgerApprovalError("This payment needs an approval from your Ledger.")
+    if submitted.get("signingMethod") != SIGNING_METHOD:
+        raise LedgerApprovalError("Use a new readable v2 Ledger approval; the old typed-data format is no longer accepted.")
 
     signature = str(submitted.get("signature") or "").strip()
     if not signature:
@@ -269,6 +243,8 @@ def verify_approval(
         rule=str(getattr(decision, "rule", "") or ""),
         journal_id=journal_id,
         expires_at=expires_at,
+        purchase=str(purchase if purchase is not None else payment.resource or payment.merchant),
+        resource=str(payment.resource or ""),
     )
 
     try:

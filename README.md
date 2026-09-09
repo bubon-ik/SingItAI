@@ -113,7 +113,10 @@ accident, and the reason is under the table below.
 Everything below is on the `ethonline` branch, dated 5 September 2026 or later.
 The diff that contains all of it, and nothing else, is
 [`1ca72b4..ethonline`](https://github.com/bubon-ik/SingItAI/compare/1ca72b4...ethonline)
-— fourteen commits, starting at the phase 0 findings.
+— starting at the phase 0 findings. The Ledger integration and its verification
+are described in [the v1 runbook](docs/ledger-v1.md).
+The real payment is verified. The readable v2 approval format and device-check
+status are documented in [the display notes](docs/ledger-v1.md#device-display-and-approval-format-v2).
 
 It does **not** start at `x402Bnkr`. That range would sweep in five commits
 dated 4 September which wired Spending Memory into the payment chokepoint, and
@@ -122,8 +125,8 @@ work below.
 
 | Track | What it does | Where |
 | --- | --- | --- |
-| Ledger | **`wallet-cli ring` is now the key backend for the `.env` file this repository already had.** `SIGN402_WALLET_MASTER_KEY` — which encrypts every managed wallet's private key — sat in plaintext in `/etc/sign402-gateway.env`; whoever read that file read every customer wallet. It is now AES-256-GCM ciphertext decrypted through the Key Ring at start-up, straight to stdout and never to disk, and the gateway **refuses to boot** if the ring cannot produce it — no silent fallback to the environment variable, because that is how you ship the wrong key and hear about it from a customer | [`keyring.py`](https://github.com/bubon-ik/SingItAI/blob/2506927ec23512d646bab54ee1bd8ad8ffb4599e/sign402-gateway/sign402_gateway/keyring.py) · [commit](https://github.com/bubon-ik/SingItAI/commit/2506927ec23512d646bab54ee1bd8ad8ffb4599e) |
-| Ledger | **A device confirmation in front of a payment that previously had a tap in a chat.** When memory escalates, the owner signs an EIP-712 `SpendingApproval` on their Ledger — merchant, payout address and amount rendered on a screen the host cannot repaint. The signature is bound to the **journal entry that caused the escalation**, so one approval releases exactly one payment: replaying it against the next identical purchase is refused, which was verified on the device, not only in a test | [`ledger_approval.py`](https://github.com/bubon-ik/SingItAI/blob/ed3005e2a4346ab611c6ffa2a46fa4d74b3949fe/sign402-gateway/sign402_gateway/ledger_approval.py) · [DMK signer, 85 lines](https://github.com/bubon-ik/SingItAI/blob/ed3005e2a4346ab611c6ffa2a46fa4d74b3949fe/tools/ledger-approve/approve.cjs) |
+| Ledger | **An optional Key Ring backend for the existing wallet encryption key.** On an enrolled host, startup decrypts `SIGN402_WALLET_MASTER_KEY` through `wallet-cli ring`, into process memory, and refuses to boot if decryption fails. Hardware checks establish the enrolled-host path; they do not establish that the USB-less production VPS was migrated. | [`keyring.py`](sign402-gateway/sign402_gateway/keyring.py) · [scope and setup](docs/ledger-v1.md#key-ring-is-a-separate-feature) |
+| Ledger | **A resumable device approval for one owner’s GET x402 tools.** A real policy escalation produces a persistent order. The client signs compact EIP-191 text showing the purchase, amount/network and recipient, plus a reference binding the entire order. The HTTP gateway verifies the signature, rechecks the quote and limits, and atomically consumes it before calling the payer. Retries return the encrypted result. The earlier EIP-712 hardware rehearsal was followed by a real Otto news purchase for 0.001 USDC on Base from the operator CDP account; delivered data and the transfer were verified, and retries returned the saved result. | [`ledger_payments.py`](sign402-gateway/sign402_gateway/ledger_payments.py) · [local client](tools/ledger-approve/purchase.py) · [v1 runbook](docs/ledger-v1.md) · [real payment](https://basescan.org/tx/0x4ab728a10ee6c35eb76c7270aa24ff4fb02fc3f67e26b8bbf3c5fd04d2a2ffc4) |
 | Ledger | Ten developer-experience findings, kept from the first command rather than written from memory. The headline entry is that the Key Ring's advertised case — a host with no USB port — has no supported path in wallet-cli 2.1.0: `ring init` needs an attached device, no verb exports a membership, and the member key sits in an OS secret service a headless box does not run. Measured on the actual VPS, not argued from the docs | [`docs/ledger-dx-notes.md`](https://github.com/bubon-ik/SingItAI/blob/244a98fd3087d3e5a4138ad57b1c605e44cd98bf/docs/ledger-dx-notes.md) |
 | Ledger | Verified on the hardware, not argued: `ring init` on the device, encrypt, decrypt, then the device **unplugged** and decrypt again — and, unasked, with the network off too, which is why booting the gateway does not depend on Ledger's service being up. Then the whole path end to end against the real `wallet-cli`, including corrupting the ciphertext to confirm the refusal to boot | [`checks.md`](https://github.com/bubon-ik/SingItAI/blob/e317b6699f952a50d0a53642085a37c7286df3f3/docs/checks.md) · [rehearsal script](https://github.com/bubon-ik/SingItAI/blob/e317b6699f952a50d0a53642085a37c7286df3f3/sign402-gateway/scripts/ledger-keyring-rehearsal.sh) |
 | Bazantic | `POST /v1/decide` and `GET /v1/journal`: a read-only HTTP surface over the spending policy, so an agent can ask whether a payment should happen without being able to make one happen | [`decide.py`](https://github.com/bubon-ik/SingItAI/blob/df9d39bae8540b1a22a925fbebf5a51149f6a3ed/sign402-gateway/sign402_gateway/decide.py) · [OpenAPI](https://github.com/bubon-ik/SingItAI/blob/b20cab05ba8021455ec5fed6f803b2a1c6f7fc68/sign402-gateway/docs/decide-openapi.json) |
@@ -192,11 +195,12 @@ is no extra test runner to install.
 
 ```bash
 cd sign402-gateway
-python -m unittest tests.test_ledger_keyring tests.test_decide_endpoint -v
+python -m unittest tests.test_ledger_keyring tests.test_ledger_approval tests.test_ledger_payments tests.test_ledger_client tests.test_decide_endpoint -v
 ```
 
-The whole suite — 1095 tests, including the 48 added here — is
-`python -m unittest discover -s tests`.
+Run the whole gateway suite with `python -m unittest discover -s tests`.
+For Ledger configuration, the resumable client, the hardware HTTP rehearsal and
+the exact v1 boundary, see [docs/ledger-v1.md](docs/ledger-v1.md).
 
 The Ledger key ring is off by default (`SIGN402_LEDGER_KEYRING_ENABLED`), so an
 unprovisioned checkout behaves exactly as it did before. **No Ledger device is

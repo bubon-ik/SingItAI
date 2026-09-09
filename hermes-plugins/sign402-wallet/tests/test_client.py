@@ -2,6 +2,7 @@ import io
 import json
 import sys
 import unittest
+import uuid
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
@@ -257,8 +258,10 @@ class GatewayClientTests(unittest.TestCase):
             request.get_header("Authorization"),
             "Bearer wallet-token-secret-value",
         )
+        posted = json.loads(request.data)
+        self.assertEqual(str(uuid.UUID(posted.pop("requestId"))), json.loads(request.data)["requestId"])
         self.assertEqual(
-            json.loads(request.data),
+            posted,
             {
                 "tool": "news",
                 "telegramUserId": "1045618308",

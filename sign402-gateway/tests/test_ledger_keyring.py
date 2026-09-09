@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -84,6 +86,33 @@ class SwitchedOffTests(unittest.TestCase):
     def test_with_the_ring_off_an_absent_key_is_still_absent(self):
         """Not an error here. The call sites that need it already say so."""
         self.assertEqual(load_master_key({}), "")
+
+
+class RehearsalExitTests(unittest.TestCase):
+    def test_script_requires_exact_round_trip_and_rejection_of_corruption(self):
+        script = Path(__file__).resolve().parents[1] / "scripts/ledger-keyring-rehearsal.sh"
+        for mode, expected in (("correct", 0), ("wrong-key", 1), ("accepts-corruption", 1)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                cli = Path(tmp) / "wallet-cli"
+                cli.write_text(
+                    "#!/usr/bin/env python3\n"
+                    "import sys\nfrom pathlib import Path\n"
+                    f"mode = {mode!r}\n"
+                    "args = sys.argv\n"
+                    "if 'encrypt' in args:\n"
+                    "    Path(args[args.index('-o')+1]).write_bytes(b'ENC:' + sys.stdin.buffer.read())\n"
+                    "else:\n"
+                    "    data = Path(args[args.index('-i')+1]).read_bytes()[4:]\n"
+                    "    if data.endswith(b'tampered') and mode != 'accepts-corruption':\n"
+                    "        sys.exit(3)\n"
+                    f"    sys.stdout.write({VALID_KEY!r} if mode == 'wrong-key' else data[:44].decode())\n"
+                )
+                cli.chmod(0o700)
+                result = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=15,
+                    env={**os.environ, "WALLET_PASS": "rehearsal-test-pass", "SIGN402_LEDGER_WALLET_CLI": str(cli),
+                         "SIGN402_PYTHON": sys.executable})
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertNotIn(VALID_KEY, result.stdout + result.stderr)
 
 
 class DecryptTests(unittest.TestCase):

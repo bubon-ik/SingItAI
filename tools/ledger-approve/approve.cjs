@@ -4,14 +4,15 @@
 //
 // `wallet-cli` cannot sign messages — checked across its whole command tree,
 // see docs/checks.md L2 — so approval goes through the Device Management Kit.
-// This file is deliberately small: it takes the typed data the gateway built,
-// asks the device, prints what came back. It decides nothing and validates
-// nothing; the gateway does both, because it is the side that knows what the
-// payment is.
+// It takes the approval the gateway built, asks the device to sign readable
+// text (EIP-191), and refuses old EIP-712 input. Payment
+// validation lives in the gateway. Successful signing alone does not establish
+// which fields the user reviewed on the device.
 //
-//   echo '<typed-data-json>' | node approve.cjs --path "44'/60'/0'/0/0"
+//   echo '<approval-json>' | node approve.cjs --path "44'/60'/0'/0/0"
 //
-// stdout is the signature and nothing else. Everything a human reads goes to
+// --address reads the public address without signing (no stdin required).
+// stdout is the signature or public address. Everything a human reads goes to
 // stderr, so a caller can take stdout verbatim.
 //
 // CommonJS on purpose: the ESM entry points of these packages resolve to a
@@ -21,11 +22,11 @@
 const {
   DeviceManagementKitBuilder,
   DeviceStatus,
-  DeviceActionStatus,
 } = require("@ledgerhq/device-management-kit");
 const { nodeHidTransportFactory } = require("@ledgerhq/device-transport-kit-node-hid");
 const { SignerEthBuilder } = require("@ledgerhq/device-signer-kit-ethereum");
-const { firstValueFrom, filter, tap } = require("rxjs");
+const { firstValueFrom, filter } = require("rxjs");
+const { waitForDeviceAction, purchaseSigningAction, validateApproval } = require("./device-action.cjs");
 
 const argv = process.argv.slice(2);
 const flag = (name, fallback) => {
@@ -44,18 +45,28 @@ const readStdin = async () => {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
   const raw = Buffer.concat(chunks).toString("utf8").trim();
-  if (!raw) die("no typed data on stdin");
+  if (!raw) die("no approval on stdin");
   try {
     return JSON.parse(raw);
   } catch (e) {
-    die(`typed data is not JSON: ${e.message}`);
+    die(`approval is not JSON: ${e.message}`);
   }
 };
 
 (async () => {
   const derivationPath = flag("path", "44'/60'/0'/0/0");
-  const typedData = await readStdin();
-  const message = typedData.message || {};
+  const timeoutSeconds = Number(flag("timeout-seconds", "180"));
+  if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 600) {
+    die("timeout-seconds must be an integer between 1 and 600");
+  }
+  setTimeout(() => die("Ledger approval timed out; no signature was returned"), timeoutSeconds * 1000);
+  const addressOnly = argv.includes("--address");
+  const approval = addressOnly ? null : await readStdin();
+  const message = approval?.message || {};
+  // Validate the envelope before touching USB.
+  if (!addressOnly) {
+    try { validateApproval(approval); } catch (e) { die(e.message); }
+  }
 
   const dmk = new DeviceManagementKitBuilder().addTransport(nodeHidTransportFactory).build();
   let sessionId;
@@ -68,9 +79,10 @@ const readStdin = async () => {
     const state = await firstValueFrom(dmk.getDeviceSessionState({ sessionId }));
     if (state.deviceStatus === DeviceStatus.LOCKED) die("the device is locked");
 
-    process.stderr.write(
-      `Confirm on the device: ${message.amountUsd} USD to ${message.merchant} ` +
-        `at ${message.payTo}\n`
+    if (!addressOnly) process.stderr.write(
+      `Requested purchase: ${message.purchase}; ${message.amountUsd} USDC on Base ` +
+        `to ${message.payTo}\n` +
+        "Review these values on the Ledger. If they are missing or only hashes appear, reject.\n"
     );
 
     const signer = new SignerEthBuilder({ dmk, sessionId, originToken: "singit" }).build();
@@ -78,18 +90,13 @@ const readStdin = async () => {
     // emission is `not-started`, so filtering on "not pending" resolves before
     // the device has been asked anything — the signature then arrives with
     // nobody listening, which looks from the outside like the device hanging.
-    const TERMINAL = new Set([
-      DeviceActionStatus.Completed,
-      DeviceActionStatus.Error,
-      DeviceActionStatus.Stopped,
-    ]);
-    const { observable } = signer.signTypedData(derivationPath, typedData);
-    const done = await firstValueFrom(
-      observable.pipe(
-        tap((s) => process.stderr.write(`  … ${s.status}\n`)),
-        filter((s) => TERMINAL.has(s.status))
-      )
-    );
+    const action = addressOnly
+      ? signer.getAddress(derivationPath, { checkOnDevice: false })
+      : purchaseSigningAction(signer, derivationPath, approval);
+    const done = await waitForDeviceAction(action, {
+      signing: !addressOnly,
+      log: (line) => process.stderr.write(`${line}\n`),
+    });
     if (done.status !== "completed") {
       const detail = done.error
         ? `${done.error._tag || done.error.name || ""} ${done.error.message || ""} ${
@@ -99,9 +106,13 @@ const readStdin = async () => {
       die(`the device did not sign (${done.status}): ${detail}`);
     }
 
-    const hex = (x) => String(x).replace(/^0x/, "");
-    const { r, s, v } = done.output;
-    process.stdout.write(`0x${hex(r)}${hex(s)}${Number(v).toString(16).padStart(2, "0")}\n`);
+    if (addressOnly) {
+      process.stdout.write(`${done.output.address}\n`);
+    } else {
+      const hex = (x) => String(x).replace(/^0x/, "");
+      const { r, s, v } = done.output;
+      process.stdout.write(`0x${hex(r)}${hex(s)}${Number(v).toString(16).padStart(2, "0")}\n`);
+    }
     // Leave deliberately. The HID transport keeps a listener open, so the event
     // loop never empties and the process hangs after a perfectly good
     // signature — which reads, from the caller's side, exactly like a device
@@ -109,7 +120,7 @@ const readStdin = async () => {
     await dmk.disconnect({ sessionId }).catch(() => {});
     process.exit(0);
   } catch (e) {
-    die(`signing failed: ${e && e.message ? e.message : e}`);
+    die(`Ledger action failed: ${e?.message || e?._tag || e?.name || "device unavailable"}`);
   } finally {
     if (sessionId) await dmk.disconnect({ sessionId }).catch(() => {});
   }

@@ -186,7 +186,7 @@ service did not start and said why".
 
 ## L5 — a real Ledger signature, verified, and refused on replay
 
-Part 3 end to end on the hardware, 6 September. Nothing was spent and no wallet
+Signature verification on the hardware, 6 September. Nothing was spent and no wallet
 was touched: the payload is the one the gateway builds for an escalated payment,
 and only the signature is real.
 
@@ -212,10 +212,10 @@ payout address, same amount, same signer — refused, because the journal entry 
 a different one. That is the property a tap in a chat cannot have: an approval
 is spent when the decision it names is spent.
 
-Device: Ledger Nano S Plus, Ethereum app, derivation `44'/60'/0'/0/0`, domain
-`SingIt Spending Approval` — the product's name, checked on the screen, because
-the one instruction a hardware wallet gives is to approve only what you
-recognise. Signed
+Device: Ledger Nano S Plus, Ethereum app, derivation `44'/60'/0'/0/0`, signed domain
+`SingIt Spending Approval`. This is signature evidence, not verified evidence of
+readable device review. The owner later reported missing purchase details;
+the earlier claim that the domain was checked on-screen is withdrawn. Signed
 through `@ledgerhq/device-signer-kit-ethereum` 1.18.0 on DMK 1.9.0, because L2
 established `wallet-cli` cannot sign messages at all.
 
@@ -420,7 +420,7 @@ agent can buy an answer about *a protocol* for a cent and cannot buy one about
 | L1 | **pass** | decrypt needs neither device nor network — on the enrolled host |
 | L3 | **failed** | a USB-less host cannot be enrolled at all; part 2 runs where a device can reach |
 | L4 | **pass** | keyring.py drives the real wallet-cli; all four §4 criteria met |
-| L5 | **pass** | a real Ledger signature authorises one payment and is refused on the next |
+| L5 | **pass (signature only)** | a real signature verifies for one decision and is refused for another; HTTP lifecycle tested separately in L6 |
 | L2 | **no message signing** | Part 3 (§5) needs DMK; its §5 cut line is live from day one |
 | G1 | pass | header not body, `accepts[0]`, `amount`, $0.01, Base USDC |
 | G2 | fails as predicted | `thegraph.py` adds a third spelling and the header decode |
@@ -428,3 +428,117 @@ agent can buy an answer about *a protocol* for a cent and cannot buy one about
 
 Parts that survive and are fully unblocked: **1** (`/decide`), **2**
 (`keyring.py`), **4** (The Graph adapter), **6** (SKILL.md).
+
+
+## L6 — hardware approval through the HTTP purchase lifecycle, 9 September
+
+**PASS.** The replacement `ledger-approval-rehearsal.py` used the production
+HTTP handler on loopback, a real Spending Policy, encrypted SQLite operation
+state, real budget accounting, and the shipped local `purchase.py` client.
+Only the quote, spending wallet access and payer were doubles.
+
+The connected Ledger at derivation `44'/60'/0'/0/0` returned its public address
+before the pending request was created, then signed `0.001 USD` for
+`ledger-rehearsal.invalid`, payout `0x0000…0001`. The client submitted that
+signature to `/agent/ledger-approve`; verification and settlement accounting
+succeeded. The test payer was called exactly once. Reopening the operation
+store and retrying both approval and buy returned the original result.
+
+No money was transferred. No real payment private key was loaded. No approval
+signature was printed or saved. This establishes the HTTP continuation and
+retry path that the older L5 signature-only exercise did not test. Reproduce
+it with the commands and scope in [ledger-v1.md](ledger-v1.md).
+
+The Key Ring check was not rerun in this session: its enrolled-host
+`WALLET_PASS` was not present in the execution environment. L1/L4 remain
+historical hardware evidence; current fail-closed behavior is covered by
+automated tests. Neither check claims a production VPS key migration.
+
+Automated verification for the payment lifecycle: **1169 gateway tests passed**
+against source exported from the declared Spending Memory pin
+`cbc0739b2842e92f7d7c698580d48284a7063960` (the imported path was checked), plus
+**79 Hermes wallet-client tests passed**. The gateway suite includes 20 Key Ring
+tests, including rehearsal exit checks for an incorrect decrypted key and a
+CLI that incorrectly accepts corrupt ciphertext. JavaScript/Python syntax,
+shell syntax, `git diff --check` and installed direct npm versions also passed.
+
+## L7 — real purchase after Ledger approval, 9 September
+
+**PASS: real money and delivered data.** After the owner explicitly approved
+buying Otto directly for 0.001 USDC, the connected Ledger signed the persisted
+`SpendingApproval` for `x402.ottoai.services`, payout
+`0x0E84dDEdAaE6A779c462C22a59F301EC31B6b808`.
+
+**This run did not verify device display.** The owner subsequently reported seeing
+technical fields without the purchase details. This run proves authorization
+verification, payment and delivery; it does not prove readable review or Clear
+Signing. The subsequent [v2 device check](#l8--readable-compact-approval-9-september)
+verified readable text without another purchase.
+
+The real HTTP approval endpoint accepted it and the existing operator CDP
+account paid through the x402 client, with amount/recipient/token guards.
+The quote, payment and delivered response were real. The live-check script
+uses the same `LedgerPayments` lifecycle and HTTP handler as the customer lane,
+with the configured operator payer. Production customer wallets were not
+migrated or used for this check.
+
+- Transaction: [0x4ab728a1…a2ffc4](https://basescan.org/tx/0x4ab728a10ee6c35eb76c7270aa24ff4fb02fc3f67e26b8bbf3c5fd04d2a2ffc4).
+- Base block: **51078334**, receipt status **0x1**.
+- USDC transfer: **1000 atomic units / 0.001 USDC**, exactly one matching event
+  from `0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd` to the approved recipient.
+- Payer's USDC balance: **6.933403 → 6.932403**.
+- Delivery: HTTP **200**, body `status: success`; news report and ten headlines.
+  Provider metadata: `dataAsOf: 2026-09-09T09:00:13.477Z`, `freshness: fresh`,
+  `degraded: false`. Freshness is the provider's report, not independent news verification.
+- Reopening the local HTTP gateway and requesting the completed operation
+  returned the saved data with **zero payer calls**. Spending Memory recorded
+  the 0.001 USDC once.
+
+The first post-payment RPC check failed through the Python transport. Payment
+had already succeeded and was saved. A separate read-only RPC call confirmed
+the receipt and balance; the diagnostic was changed to the working curl
+transport. Reading status then completed successfully, without another device
+signature or payment. This exercised actual recovery after a diagnostics
+failure rather than hiding it or paying for a replacement request.
+
+Reproduce with [the live-check instructions](ledger-v1.md#real-purchase-check).
+Local purchase records contain only the allowed non-secret fields. Secrets,
+approval signatures and the paid response are not committed to this report.
+
+
+## L8 — readable compact approval, 9 September
+
+**PASS: compact EIP-191 approval on the owner's Ledger Nano S Plus.** A fresh
+v1 EIP-712 rehearsal first reproduced the problem: the owner reported only
+hashes / a Blind signing warning. The SDK reached `provideContext` and
+`signTypedData` without entering `signTypedDataLegacy`; the owner rejected it,
+and nothing was submitted to the gateway for execution.
+
+The signer was changed to Ledger's `signMessage` API with the readable text
+itself. The owner saw the purchase, amount, network and recipient in the first
+text version, but reported that its eight pages contained too much information.
+That version was rejected. The final message was reduced to five lines, 165
+ASCII characters for this purchase: SingIt purchase v2, Otto AI - Crypto News,
+0.001 USDC on Base, the full recipient ending 0001, and a 43-character reference.
+The reference is a full SHA-256 commitment to all frozen approval fields and
+the domain, not a truncated order ID. It binds the technical fields while
+keeping them off separate device pages.
+
+- Device: Nano S Plus, Ethereum app, path `44'/60'/0'/0/0`, configured approver
+  `0x13883199454Fb3a0CaEeF31327Fe2Ec02C08d9fa`.
+- SDK: `sign-personal-message` followed by `completed`.
+- Owner confirmed the compact review was now comfortable: “Да, теперь нормально”.
+- The real HTTP handler verified the hardware signature and called the **test
+  payer exactly once**. No real wallet was loaded and no funds were transferred.
+- After reopening the operation store, both approve and buy retries returned
+  the saved result without another signature or payer call. Accounting recorded
+  the simulated 0.001 USDC once.
+- **1174 gateway tests passed**, including 72 Ledger checks; **six JavaScript
+  checks passed**. Coverage includes changed purchase/resource/technical fields,
+  old-format refusal, historical completed results, exact text passed to the
+  SDK, and refusing invalid input before requesting a device action.
+
+This establishes readable off-chain consent with EIP-191. It does not claim an
+ERC-7730 descriptor integration. The real mainnet payment remains L7's earlier
+EIP-712 run; there was no repeat purchase or production deployment. Production
+continues to use the owner's existing Trezor setup.

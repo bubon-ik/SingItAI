@@ -132,11 +132,8 @@ from .venice_chat import (
     build_chat_service_from_env,
     start_payto_watcher,
 )
-from .ledger_approval import (
-    LedgerApprovalError,
-    approval_enabled as ledger_approval_enabled,
-    verify_approval as verify_ledger_approval,
-)
+from .ledger_approval import LedgerApprovalError
+from .ledger_payments import LedgerConfig, LedgerOperationError, LedgerOperationStore, LedgerPayments
 from .onchain_data import build_onchain_data_from_env
 from .web_search import (
     EXA_SEARCH_URL,
@@ -161,6 +158,7 @@ FUND_MOVING_POST_PATHS = frozenset(
         "/execute-payment",
         "/agent/buy-probe",
         "/agent/buy-tool",
+        "/agent/ledger-approve",
         "/agent/buy-x402",
         "/agent/top-up-llm-credits",
         "/agent/buy-bitrefill",
@@ -592,6 +590,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if path == "/agent/buy-tool":
             self._handle_agent_buy_tool()
+            return
+        if path in {"/agent/ledger-status", "/agent/ledger-approve", "/agent/ledger-cancel"}:
+            self._handle_ledger_operation(path)
             return
         if path == "/agent/inspect-x402":
             self._handle_agent_inspect_x402()
@@ -1706,6 +1707,17 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             user_id = _require_authenticated_user(
                 self, {"telegramUserId": telegram_user_id}
             )
+            ledger = getattr(self.server, "ledger_payments", None)
+            if ledger is not None and user_id == ledger.config.owner:
+                _enforce_user_purchase_rate(user_id)
+                intent = {
+                    "tool": tool,
+                    "resourceUrl": resource_url,
+                    "paymentContext": _tool_payment_context(tool, payload),
+                }
+                status, response = ledger.start(user_id, payload.get("requestId"), intent)
+                self._send_json(response, status=status)
+                return
             _enforce_user_purchase_rate(user_id)
             self.server.user_event_store.preflight_write()
             payment_context = _tool_payment_context(tool, payload)
@@ -1729,19 +1741,13 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             )
 
             if decision is None or decision.needs_human:
-                # A device approval, when this deployment requires one, stands
-                # in for the chat round trip rather than being added to it: the
-                # signature already carries what the chat was there to
-                # establish, over fields a compromised host cannot repaint.
-                approval = _ledger_approval_for(payload, payment, decision, claim_id)
-                if approval is None:
-                    approval = self.server.imessage_approval_service.request_purchase_approval(
-                        telegram_user_id=user_id,
-                        tool_name=str(tool.get("name") or "x402 resource"),
-                        resource_url=resource_url,
-                        payment_requirements=payment_requirements,
-                        payment_context=payment_context,
-                    )
+                approval = self.server.imessage_approval_service.request_purchase_approval(
+                    telegram_user_id=user_id,
+                    tool_name=str(tool.get("name") or "x402 resource"),
+                    resource_url=resource_url,
+                    payment_requirements=payment_requirements,
+                    payment_context=payment_context,
+                )
                 if not approval.get("ok") or approval.get("status") != "approved":
                     if self.server.spending_policy is not None:
                         self.server.spending_policy.memory.remember_rejection(
@@ -1806,7 +1812,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 settled = True
                 self.server.user_event_store.write(user_id, enriched)
             self._send_json(enriched, status=200 if enriched.get("ok") else 400)
-        except LedgerApprovalError as exc:
+        except (LedgerApprovalError, LedgerOperationError) as exc:
             self._send_json(
                 {
                     "decision": "needs_ledger_approval",
@@ -1814,7 +1820,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                     "error": str(exc),
                     "telegramText": str(exc),
                 },
-                status=400,
+                status=getattr(exc, "status", 400),
             )
         except SpendingBlocked as exc:
             self._send_json(
@@ -1843,6 +1849,33 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                     # held, it would refuse the user's own retry until it aged
                     # out, and a purchase that failed is exactly when they retry.
                     self.server.spending_policy.memory.release_claim(claim_id)
+
+    def _handle_ledger_operation(self, path: str) -> None:
+        try:
+            payload = self._read_json()
+            user_id = _require_authenticated_user(self, payload)
+            allowed = {"telegramUserId", "requestId", "ledgerApproval"}
+            if set(payload) - allowed:
+                raise LedgerOperationError("Only the requestId and signature may be submitted; purchase details are frozen.", 400)
+            ledger = getattr(self.server, "ledger_payments", None)
+            if ledger is None:
+                raise LedgerOperationError("Ledger payments are not configured.", 503)
+            request_id = payload.get("requestId")
+            if not isinstance(request_id, str):
+                raise LedgerOperationError("requestId is required.", 400)
+            if path == "/agent/ledger-approve":
+                status, body = ledger.approve(user_id, request_id, payload.get("ledgerApproval"))
+            elif path == "/agent/ledger-cancel":
+                status, body = ledger.cancel(user_id, request_id)
+            else:
+                status, body = ledger.status(user_id, request_id)
+            self._send_json(body, status=status)
+        except WalletApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+        except (LedgerOperationError, LedgerApprovalError) as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=getattr(exc, "status", 400))
+        except Exception:
+            self._send_json({"ok": False, "error": "Ledger operation unavailable. Check its status before retrying."}, status=503)
 
     def _handle_agent_inspect_x402(self) -> None:
         if not self._legacy_operator_request_allowed():
@@ -2791,6 +2824,8 @@ def build_server(
     )
     from .commerce_store import BitrefillCommerceStore
 
+    ledger_config = LedgerConfig.from_env()
+
     # Before anything reads it. Eight call sites pull
     # SIGN402_WALLET_MASTER_KEY out of an environment mapping, and with the key
     # ring switched on none of them would find it there. Resolving it once,
@@ -3057,6 +3092,7 @@ def build_server(
     # Built once, at start-up: constructing it per request would open a SQLite
     # handle per request.
     server.spending_policy = build_spending_policy_from_env()
+    server.ledger_payments = build_ledger_payments(server, ledger_config)
     # Its own memory, on purpose. See build_decide_policy_from_env.
     server.decide_policy = build_decide_policy_from_env()
     # Decisions for purchases in flight, keyed by reservation id. The Bitrefill
@@ -7264,49 +7300,59 @@ def _reserve_user_wallet_spend(
     )
 
 
-def _ledger_approval_for(
-    payload: dict[str, Any],
-    payment: Any,
-    decision: Any,
-    claim_id: str | None,
-) -> dict[str, Any] | None:
-    """A device approval for this escalated payment, or None to ask as before.
-
-    Returns None — leaving the existing iMessage or WhatsApp path exactly as it
-    was — when the flag is off, or when there is no journal entry for a
-    signature to be bound to. The second case is memory being switched off: with
-    no journal there is nothing that makes an approval unrepeatable, and a
-    device signature that authorises every future identical payment is worse
-    than a tap in a chat, not better.
-
-    Otherwise the signature is required. A missing or bad one raises, and the
-    handler's `finally` gives back the reservation and the claim, so an
-    unapproved payment leaves nothing held.
-    """
-    if not ledger_approval_enabled():
+def build_ledger_payments(server, config: LedgerConfig | None, *, path: Path | None = None):
+    if config is None:
         return None
-    journal_id = str(getattr(decision, "journal_id", "") or "")
-    if not journal_id:
-        return None
-
-    signer = verify_ledger_approval(
-        payload.get("ledgerApproval"),
-        payment=payment,
-        decision=decision,
-        claim_id=claim_id,
+    if server.spending_policy is None:
+        raise ValueError("Ledger approval requires spending memory. Refusing to fall back to chat.")
+    store = LedgerOperationStore(
+        path or Path(os.getenv("SIGN402_LEDGER_OPERATIONS_DB", "~/.sign402/ledger/operations.sqlite3")),
+        SensitiveStateCipher(os.getenv("SIGN402_WALLET_MASTER_KEY", "")),
     )
-    return {
-        "ok": True,
-        "status": "approved",
-        "source": "ledger",
-        # Same shape as the memory-approved case, and the same reason: the spend
-        # ledger row should point at the journal entry that carries the rule and
-        # the evidence, whoever said yes.
-        "approvalId": f"ledger-{journal_id}",
-        "approvedBy": signer,
-        "reason": getattr(decision, "reason", ""),
-        "rule": getattr(decision, "rule", ""),
-    }
+
+    def inspect(owner, intent):
+        body = intent["tool"].get("requestBody")
+        if isinstance(body, dict):
+            raise LedgerOperationError("Ledger v1 supports the existing GET x402 tools only.", 400)
+        raw = fetch_x402_payment_required(intent["resourceUrl"], request_body=body if isinstance(body, dict) else None)
+        requirements = normalize_x402_payment_required(raw, resource_url=intent["resourceUrl"])
+        _validate_base_usdc_x402_requirement(requirements)
+        return requirements, _payment_from_requirements(requirements, owner=owner, resource_url=intent["resourceUrl"])
+
+    def reserve(owner, requirements):
+        server.user_event_store.preflight_write()
+        scope = _user_wallet_spend_scope(server, owner, requirements)
+        reservation = server.user_spend_limit_store.reserve_within_limits(
+            owner, amount_atomic=scope["amount"], asset=scope["asset"], network=scope["network"],
+            max_per_tx_atomic=scope["maxPerTx"], daily_cap_atomic=scope["dailyCap"],
+        )
+        if reservation is None:
+            raise LedgerOperationError("This purchase exceeds the current wallet spending limits.")
+        return reservation
+
+    def pay(owner, intent, requirements, approval):
+        kwargs = {
+            "private_key": server.user_wallet_service.decrypt_private_key_for_future_signing(owner),
+            "approval": approval, "payment_requirements": requirements,
+        }
+        if intent["paymentContext"]:
+            kwargs["payment_context"] = intent["paymentContext"]
+        if isinstance(intent["tool"].get("requestBody"), dict):
+            kwargs["request_body"] = intent["tool"]["requestBody"]
+        result = server.user_x402_buyer(intent["resourceUrl"], **kwargs)
+        enriched = _tool_result(intent["tool"], result, intent["resourceUrl"])
+        enriched.update(ok=bool(result.get("ok")), telegramUserId=owner,
+                        approvalId=approval["approvalId"], decision=result.get("decision", "approved_and_executed"))
+        return enriched
+
+    def settle(owner, reservation, intent, requirements, result, payment, claim):
+        _settle_user_wallet_spend(server, reservation, intent["tool"], intent["resourceUrl"], requirements,
+                                 result, payment=payment, claim_id=claim)
+        server.user_event_store.write(owner, result)
+
+    return LedgerPayments(config, store, policy=lambda: server.spending_policy, inspect=inspect,
+                          reserve=reserve, release=server.user_spend_limit_store.release_reservation,
+                          pay=pay, settle=settle, paused=_purchases_paused)
 
 
 def _memory_hold_for_owner(
