@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local Ledger + Graph service for the owner's private Telegram demo command."""
 import argparse
+from contextlib import closing
 import fcntl
 import hmac
 import importlib.util
@@ -8,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import sqlite3
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -32,6 +34,34 @@ def env_value(path, name):
         if raw.startswith(name + "="):
             return raw.split("=", 1)[1].strip().strip('"').strip("'")
     raise ValueError("Required local configuration is missing.")
+
+
+def recording_state(base, owner, cipher, payer, verify):
+    """Select one fixed extra recording session after reconciling the original.
+
+    Never clear either session's cache, attempt marker or encrypted operations.
+    Repeated starts select the same directory and cannot buy another paid slot.
+    """
+    marker = json.loads((base / "payment-attempt.json").read_text())
+    database = (base / "operations.sqlite3").resolve()
+    with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as db:
+        rows = db.execute("SELECT owner,request_id,state,payload FROM ledger_operations").fetchall()
+    if any(row[2] in {"preparing", "pending", "executing", "uncertain"} for row in rows):
+        raise ValueError("Original demo has an unresolved operation.")
+    matching = [row for row in rows if row[0] == owner and row[1] == marker["requestId"]]
+    if len(matching) != 1:
+        raise ValueError("Original payment must belong to the recording owner.")
+    saved_owner, request_id, status, payload = matching[0]
+    operation = cipher.decrypt_json(payload)
+    if (status != "succeeded" or operation.get("status") != status
+            or operation.get("owner") != saved_owner or operation.get("requestId") != request_id
+            or operation.get("result", {}).get("paid") is not True):
+        raise ValueError("Original payment must have a completed saved result.")
+    tx = operation["result"]["transactionHash"]
+    proof = verify(tx, payer)
+    if proof.get("verified") is not True or proof.get("transactionHash") != tx:
+        raise ValueError("Original transaction did not verify.")
+    return base / "recording", proof
 
 
 def handler_for(service, token):
@@ -82,6 +112,8 @@ def main():
     parser.add_argument("--owner", required=True)
     parser.add_argument("--approver", required=True)
     parser.add_argument("--port", type=int, default=8117)
+    parser.add_argument("--recording", action="store_true",
+        help="Use one separately authorised recording session after the original payment verifies")
     args = parser.parse_args()
     state = ROOT / ".graph-live/telegram-demo"
     ensure_private_directory(state)
@@ -98,14 +130,19 @@ def main():
     graph = load_module("graph_verification", ROOT / "sign402-gateway/scripts/graph-live-check.py")
     signer = load_module("ledger_demo_signer", ROOT / "tools/ledger-approve/purchase.py")
     payer_address = graph.payer_address()
-    previous = json.loads((ROOT / ".graph-live/video-demo/result.json").read_text())
-    proof = graph.verify_receipt(previous["transactionHash"], payer_address)
+    cipher = SensitiveStateCipher(env_value(ROOT / "sign402-gateway/.env.wallet-bitrefill", "SIGN402_WALLET_MASTER_KEY"))
+    if args.recording:
+        state, proof = recording_state(state, args.owner, cipher, payer_address, graph.verify_receipt)
+    else:
+        previous = json.loads((ROOT / ".graph-live/video-demo/result.json").read_text())
+        proof = graph.verify_receipt(previous["transactionHash"], payer_address)
     service = GraphLedgerDemo(owner=args.owner, approver=args.approver, payer_address=payer_address,
-        state=state, cipher=SensitiveStateCipher(env_value(ROOT / "sign402-gateway/.env.wallet-bitrefill", "SIGN402_WALLET_MASTER_KEY")),
+        state=state, cipher=cipher,
         quote=_urllib_402, payer=CdpBaseX402PaymentClient(ROOT / "cdp-x402-service"),
         signer=signer.sign_pending, receipt=graph.verify_receipt, historical_proof=proof)
     with ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(service, token)) as server:
         print(f"Telegram Graph + Ledger demo ready on 127.0.0.1:{args.port}; owner {args.owner}.", flush=True)
+        print("Session: " + ("recording" if args.recording else "original"), flush=True)
         print("One paid query maximum: 0.01 USDC, requiring Ledger approval. Waiting for /graph_demo.", flush=True)
         server.serve_forever()
 

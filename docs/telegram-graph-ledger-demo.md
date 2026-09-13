@@ -46,6 +46,17 @@ token stored in ignored, private state. No wallet secrets or Ledger signatures
 are transferred to the bot host. Keep the Mac service, SSH connection and
 device available during recording.
 
+If the original payment was a rehearsal, the owner can explicitly authorise
+one additional 0.01 USDC purchase for recording. Restart the local command with
+`--recording` for that session. Startup refuses unresolved original operations
+and verifies the original owner's paid transaction before selecting the fixed
+`.graph-live/telegram-demo/recording/` directory. It preserves both sessions'
+attempt markers and results. The recording has its own one-payment limit and
+empty cache; restarting with the flag never allocates another paid slot.
+The shared service lock and bridge token remain in the parent directory, so
+the existing bot and SSH connection need no changes. Start OBS before sending
+`/graph_demo`, and repeat within five minutes to show the free cached answer.
+
 `python3 scripts/install-graph-demo-plugin.py --owner <Telegram-user-id>` is the
 project-specific installer for the configured bot host and explicit owner.
 It backs up the plugin and Hermes environment,
