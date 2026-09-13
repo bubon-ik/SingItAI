@@ -59,6 +59,7 @@ would mean a chat message choosing which contract to trust, and the answer to
 """
 
 GRAPH_GATEWAY = "https://gateway.thegraph.com/api/x402/subgraphs/id"
+GRAPH_USER_AGENT = "SingItAI/1.0 (+https://github.com/bubon-ik/SingItAI)"
 
 BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 
@@ -110,6 +111,7 @@ def classify_onchain(message: str) -> str | None:
 
 PRICE_QUERY = """
 query PoolsForSymbol($symbol: String!, $usdc: String!, $minTvl: BigDecimal!) {
+  _meta { block { number } hasIndexingErrors }
   asToken0: pools(
     first: 3
     orderBy: totalValueLockedUSD
@@ -141,6 +143,7 @@ class OnchainPrice:
     fee_tier: str
     paid: bool
     journal_id: str
+    block_number: int | None = None
 
     def as_fact(self) -> str:
         """One line for the model to answer from, source named.
@@ -148,11 +151,16 @@ class OnchainPrice:
         The pool address is in it on purpose: an answer about a market should
         say which market, and a reader who wants to check has what they need.
         """
+        source = (
+            f"Indexed at Base block {self.block_number}."
+            if self.block_number is not None else "Read from the Uniswap V3 subgraph."
+        )
+        if not self.paid:
+            source += " Reused from the journal within the cache TTL; not a fresh reading."
         return (
             f"{self.symbol} trades at ${self.usd:,.6f} USDC on Uniswap V3 "
             f"(Base), pool {self.pool} at the {int(self.fee_tier) / 10_000:.2f}% "
-            f"fee tier, with ${self.liquidity_usd:,.0f} of liquidity. Read from "
-            "the subgraph at the current block."
+            f"fee tier, with ${self.liquidity_usd:,.0f} of liquidity. {source}"
         )
 
     def footer(self) -> str:
@@ -178,6 +186,15 @@ def read_price(payload: Any, symbol: str) -> OnchainPrice | None:
     missing price into a failed chat message.
     """
     data = ((payload or {}).get("data") or {}) if isinstance(payload, Mapping) else {}
+    if not isinstance(data, Mapping) or (isinstance(payload, Mapping) and payload.get("errors")):
+        return None
+    meta = data.get("_meta") or {}
+    if not isinstance(meta, Mapping) or meta.get("hasIndexingErrors"):
+        return None
+    block = meta.get("block") or {}
+    block_number = block.get("number") if isinstance(block, Mapping) else None
+    if not isinstance(block_number, int) or isinstance(block_number, bool) or block_number < 0:
+        block_number = None
     best: tuple[Decimal, Decimal, str, str] | None = None
 
     for key, price_field, token_field in (
@@ -211,6 +228,7 @@ def read_price(payload: Any, symbol: str) -> OnchainPrice | None:
         fee_tier=fee,
         paid=False,
         journal_id="",
+        block_number=block_number,
     )
 
 
@@ -269,8 +287,8 @@ class OnchainDataClient:
         url = self.config.resource_url
 
         def guarded_pay(payment: Any, requirements: Mapping[str, Any]):
-            amount = int(str(requirements.get("amount") or requirements.get("maxAmountRequired") or 0))
-            if amount > self.config.max_per_call_atomic:
+            amount = int(str(requirements.get("amount") or requirements.get("maxAmountRequired") or requirements.get("amountAtomic") or 0))
+            if not 0 < amount <= self.config.max_per_call_atomic:
                 # The one refusal that must happen before money moves. The
                 # policy caps a day; this caps a single surprise.
                 raise OnchainUnavailable(
@@ -308,7 +326,7 @@ class OnchainDataClient:
             raise OnchainUnavailable(str(answer.decision.reason))
 
         price = read_price(answer.answer, symbol)
-        if price is None:
+        if price is None or price.liquidity_usd < self.config.min_liquidity_usd:
             raise OnchainUnavailable(f"No liquid {symbol.upper()}/USDC pool on Base.")
 
         from dataclasses import replace
@@ -327,7 +345,8 @@ def with_fact(message: str, fact: str) -> str:
     """
     return (
         f"{message}\n\n"
-        "Onchain reading, taken just now from the subgraph. Use this number "
+        "Onchain reading from the subgraph or its journal cache. Preserve the "
+        "indexed block and cache status given below. Use this number "
         "rather than anything you remember, and say it is from the pool on "
         f"Uniswap V3 on Base:\n{fact}"
     )
@@ -348,14 +367,18 @@ def _urllib_402(url: str) -> tuple[Mapping[str, str], Any]:
         url,
         data=b"{}",
         method="POST",
-        headers={"content-type": "application/json", "accept": "application/json"},
+        headers={"content-type": "application/json", "accept": "application/json",
+                 "user-agent": GRAPH_USER_AGENT},
     )
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
             return dict(response.headers), response.read()
     except urllib.error.HTTPError as exc:
         # A 402 arrives here, not above: it is the expected answer, not a fault.
-        return dict(exc.headers or {}), exc.read()
+        with exc:
+            if exc.code != 402:
+                raise OnchainUnavailable(f"The Graph quote returned HTTP {exc.code}.") from None
+            return dict(exc.headers or {}), exc.read()
 
 
 ENABLED_ENV = "SIGN402_ONCHAIN_DATA_ENABLED"
@@ -414,7 +437,7 @@ def build_onchain_data_from_env(
         # to whoever asked. Web search already splits it this way.
         result = pay(
             config.resource_url,
-            max_atomic=str(requirements.get("amount") or requirements.get("maxAmountRequired") or ""),
+            max_atomic=str(requirements.get("amount") or requirements.get("maxAmountRequired") or requirements.get("amountAtomic") or ""),
             expected_receiver=str(requirements.get("payTo") or ""),
             expected_asset=str(requirements.get("asset") or ""),
             method="POST",
@@ -422,7 +445,7 @@ def build_onchain_data_from_env(
         )
         if not isinstance(result, dict) or not result.get("ok"):
             raise OnchainUnavailable("The onchain lookup did not go through.")
-        return result.get("body"), str(result.get("txId") or "") or None
+        return result.get("body"), str(result.get("transactionHash") or result.get("txId") or "") or None
 
     return OnchainDataClient(
         paid_queries_factory=lambda owner: PaidGraphQueries(

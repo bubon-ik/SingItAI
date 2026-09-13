@@ -542,3 +542,120 @@ This establishes readable off-chain consent with EIP-191. It does not claim an
 ERC-7730 descriptor integration. The real mainnet payment remains L7's earlier
 EIP-712 run; there was no repeat purchase or production deployment. Production
 continues to use the owner's existing Trezor setup.
+
+
+## G4 — application transport, receipt and restart cache, 10–11 September
+
+**PASS for the unpaid live transport and automated integration checks.**
+The approved paid WETH check subsequently passed; see G5 below. No production changes.
+
+The application check found two defects that the earlier adapter-only demo
+could not catch:
+
+- The application's default Python User-Agent received HTTP **403** from the
+  real Graph gateway. The same unpaid POST with an identifying SingItAI
+  User-Agent returned the expected **402**, with the requirements in the
+  `payment-required` header and an empty body. The application now sets that
+  User-Agent and reports non-402 HTTP errors without parsing HTML as a quote.
+- The actual `CdpBaseX402PaymentClient` returns `transactionHash`; the onchain
+  builder read only `txId`, dropping the receipt from the spending journal.
+  It now accepts the actual payer field, retaining `txId` compatibility.
+
+The price query also requests `_meta.block.number` and `hasIndexingErrors`.
+The model receives the indexed block and an explicit cache indication instead
+of claiming a cached answer was read at the current block. Partial GraphQL
+errors or indexing errors are refused, and the configured liquidity floor is
+checked locally as well as in the query filter.
+
+Verification:
+
+- **1178 gateway tests passed**, including **30 onchain tests**.
+- **33 Graph adapter tests passed** against the installed dependency; its
+  adapter source matches the pinned `cbc0739b2842e92f7d7c698580d48284a7063960`.
+- A regression test uses the real CDP Python wrapper with a simulated Node
+  response, then reopens the SQLite database and enters the actual chat
+  branch. The transaction hash survives, the second query points to the first
+  journal entry, spending remains 0.01 USDC, and both the quote callback and
+  payer are invoked once in total. **This is simulated payment evidence.**
+- The live quote is still **10000 atomic USDC (0.01 USDC), Base 8453**, receiver
+  `0x79DC34E41B2b591078d3dE222C43EcaaBD52FcCB`, asset
+  `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`.
+- A read-only Base RPC receipt check confirmed the historical 0.01 USDC
+  settlement `0x57ddeebd74b89f8834c8627d7e1ad6878e44a651744da49fae677491ac2d7958`.
+  That older purchase queried `_meta`; it is not evidence of today's WETH
+  price flow.
+
+The reproducible check is `sign402-gateway/scripts/graph-live-check.py`:
+
+```sh
+payment-executor/.venv/bin/python sign402-gateway/scripts/graph-live-check.py prepare
+# Only after explicit approval of the displayed terms:
+payment-executor/.venv/bin/python sign402-gateway/scripts/graph-live-check.py run
+# Read the saved result and verify its receipt without paying:
+payment-executor/.venv/bin/python sign402-gateway/scripts/graph-live-check.py status
+```
+
+It uses the existing operator payer with isolated `.graph-live/` state, a
+0.01 USDC daily budget, frozen recipient/asset/price checks, and a permanent
+attempt marker written before calling the payer. A restart or an uncertain
+payment result cannot cause this check script to pay again. Merchant history
+is imported from the verified historical receipt under a separate owner;
+there is no fabricated seed payment. The repeated WETH query uses the normal
+five-minute journal cache and actual chat routing after reopening the database.
+This does not test production deployment, a live Telegram conversation, or a
+paid language-model response.
+
+
+## G5 — real WETH price purchase and free repeats, 11 September
+
+**PASS: one real 0.01 USDC payment, real pool data, and two free cached
+repeats across reopened clients / a separate Python process.** The owner
+explicitly approved this direct Graph query outside Bitrefill. Production was
+not changed and this check did not require Ledger or Trezor signing.
+
+The normal onchain client and CDP payer submitted `PoolsForSymbol` for WETH to
+the pinned Base Uniswap V3 subgraph. The gateway returned HTTP 200:
+
+- WETH price: **2569.701078542337763424403175755199 USDC**.
+- Pool: `0x6c561b446416e1a00e8e93e221854d6ea4171372`, fee tier 3000 (0.30%).
+- Indexed Base block: **51176748**. No GraphQL or indexing errors.
+- Transaction:
+  [`0x0d2ef8410a230f3e1b97532d5a7bdc8ad80d0d2a988c5ded318ee78e5ed2517a`](https://basescan.org/tx/0x0d2ef8410a230f3e1b97532d5a7bdc8ad80d0d2a988c5ded318ee78e5ed2517a).
+- Settlement block: **51176753**, status successful, exactly one matching
+  USDC Transfer of **0.01** from `0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd`
+  to `0x79DC34E41B2b591078d3dE222C43EcaaBD52FcCB`.
+- Balance at block 51176752: **6.932403 USDC**; at 51176753:
+  **6.922403 USDC**. A later `latest` read also returned 6.922403.
+
+An independent, unpaid JSON-RPC check read this pool's `token0()`, `token1()`
+and `slot0()` at **the same indexed block**, 51176748. The tokens were canonical
+Base WETH (`0x4200000000000000000000000000000000000006`, 18 decimals) and USDC
+(`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, 6 decimals). Computing
+`sqrtPriceX96² / 2¹⁹² × 10¹²` gave
+2569.70107854233786010459926228535589422538120058822619553300 USDC,
+relative difference **3.77 × 10⁻¹⁷ or less** from the subgraph answer.
+This checks the price orientation against contract state, independently of
+the fixtures and subgraph price field.
+
+The paid journal entry stored the actual transaction hash. Reopening the
+database and rebuilding the client, then calling the actual chat branch for
+`price of WETH`, returned the same price/block with the cache footer. Its
+journal entry pointed to the paid source and recorded zero cost. Across these
+first two requests, the quote callback and payer were each called once.
+A further read in a **separate Python process** disabled both network and
+payer callbacks: it still returned the same price with `paid=False`, zero
+network/payer calls, and another zero-cost journal entry. All repeats were
+inside the default 300-second cache TTL; this does not claim indefinite free
+refreshes.
+
+The first immediate `latest` balance read still showed the pre-payment balance.
+The transaction receipt was already present. Reading balances at explicit
+blocks independently confirmed the debit; the check script now pins its
+post-payment balance read to the settlement block. No payment was repeated
+to recover the diagnostic. Operational evidence is private and ignored under
+`.graph-live/`; the minimal purchase record contains only the permitted fields.
+
+The preceding **1178 gateway / 33 adapter tests** remain the validation for
+the application fixes. This live check additionally establishes the actual
+paid data, onchain receipt, accounting and restart-cache behavior. It does not
+claim a production deployment or a full Telegram/LLM conversation.

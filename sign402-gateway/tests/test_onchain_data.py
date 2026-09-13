@@ -15,10 +15,14 @@ from __future__ import annotations
 
 import base64
 import json
+import io
+import subprocess
 import tempfile
 import unittest
+import urllib.error
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from spending_memory import Payment, SpendingMemory, SpendingPolicy
 from spending_memory.adapters.thegraph import PaidGraphQueries
@@ -336,3 +340,92 @@ class BuilderTests(unittest.TestCase):
         client = self.build({"SIGN402_ONCHAIN_DATA_ENABLED": "1"})
         self.assertIsNotNone(client)
         self.assertIn("gateway.thegraph.com", client.config.resource_url)
+
+    def test_cdp_receipt_and_cached_chat_answer_survive_a_restart(self):
+        from sign402_gateway.onchain_data import build_onchain_data_from_env, PRICE_QUERY
+        from sign402_gateway.server import CdpBaseX402PaymentClient
+        from sign402_gateway.venice_chat import VeniceChatClient
+
+        db_path = str(Path(tempfile.mkdtemp()) / "memory.db")
+        policy = SpendingPolicy(SpendingMemory.local(db_path), daily_cap_usd=Decimal("5"))
+        make_known(policy, owner="historical-owner")
+        payload = answer(as_token0=[pool()])
+        payload["data"]["_meta"] = {"block": {"number": 123456}, "hasIndexingErrors": False}
+        tx = "0x" + "ab" * 32
+        calls = []
+        quotes = []
+
+        def runner(command, **kwargs):
+            calls.append(command)
+            self.assertEqual(command[command.index("--method") + 1], "POST")
+            self.assertEqual(command[command.index("--max-atomic") + 1], "10000")
+            self.assertEqual(command[command.index("--expected-receiver") + 1], GRAPH_PAY_TO)
+            body = json.loads(command[command.index("--body-json") + 1])
+            self.assertEqual(body["query"], PRICE_QUERY)
+            self.assertEqual(body["variables"]["symbol"], "WETH")
+            return subprocess.CompletedProcess(command, 0, json.dumps({
+                "ok": True, "status": 200, "body": payload, "transactionHash": tx,
+            }), "")
+
+        def quote(url):
+            quotes.append(url)
+            return graph_402()
+
+        service = Path(__file__).resolve().parents[2] / "cdp-x402-service"
+        env = {"SIGN402_ONCHAIN_DATA_ENABLED": "1"}
+        client = build_onchain_data_from_env(policy=policy, pay=CdpBaseX402PaymentClient(service, runner=runner),
+                                            env=env, fetch_402=quote)
+        first = client.price(OWNER, "WETH")
+        self.assertTrue(first.paid)
+        self.assertEqual(first.block_number, 123456)
+        self.assertIn("Base block 123456", first.as_fact())
+        entries = policy.memory.journal(limit=100)
+        paid_entry = next(entry for entry in entries if entry["id"] == first.journal_id)
+        self.assertEqual(paid_entry["extra"]["tx_id"], tx)
+
+        # Open a new connection and build the same objects startup builds.
+        reopened = SpendingPolicy(SpendingMemory.local(db_path), daily_cap_usd=Decimal("5"))
+        chat = VeniceChatClient.__new__(VeniceChatClient)
+        chat.onchain_data = build_onchain_data_from_env(policy=reopened,
+            pay=CdpBaseX402PaymentClient(service, runner=runner), env=env, fetch_402=quote)
+        fact, footer = chat._onchain_footnote(OWNER, "price of WETH")
+        self.assertIn("2,478.090000", fact)
+        self.assertIn("Base block 123456", fact)
+        self.assertIn("not a fresh reading", fact)
+        self.assertNotIn("taken just now", fact)
+        self.assertIn("nothing paid", footer)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(quotes), 1)
+        self.assertEqual(reopened.memory.spent_today(OWNER), Decimal("0.01"))
+        cached_entry = next(e for e in reopened.memory.journal(limit=100)
+                            if e.get("extra", {}).get("served_from") == first.journal_id)
+        self.assertEqual(cached_entry["extra"]["amount_usd"], "0")
+
+
+class QuoteTransportTests(unittest.TestCase):
+    def test_named_user_agent_and_empty_402_body(self):
+        from sign402_gateway.onchain_data import _urllib_402, GRAPH_USER_AGENT
+        headers, body = graph_402()
+        error = urllib.error.HTTPError("https://gateway.thegraph.com/test", 402, "Payment Required", headers, io.BytesIO(body))
+        with patch("urllib.request.urlopen", side_effect=error) as request:
+            received_headers, received_body = _urllib_402(error.url)
+        self.assertEqual(request.call_args.args[0].get_header("User-agent"), GRAPH_USER_AGENT)
+        self.assertEqual(received_headers, headers)
+        self.assertEqual(received_body, b"")
+
+    def test_reports_non_402_http_failure_without_parsing_html_as_a_quote(self):
+        from sign402_gateway.onchain_data import _urllib_402
+        error = urllib.error.HTTPError("https://gateway.thegraph.com/test", 403, "Forbidden", {}, io.BytesIO(b"denied"))
+        with patch("urllib.request.urlopen", side_effect=error):
+            with self.assertRaisesRegex(OnchainUnavailable, "HTTP 403"):
+                _urllib_402(error.url)
+
+
+class IndexingTests(unittest.TestCase):
+    def test_refuses_indexing_errors_and_partial_graphql_errors(self):
+        payload = answer(as_token0=[pool()])
+        payload["errors"] = [{"message": "partial data"}]
+        self.assertIsNone(read_price(payload, "WETH"))
+        del payload["errors"]
+        payload["data"]["_meta"] = {"hasIndexingErrors": True}
+        self.assertIsNone(read_price(payload, "WETH"))
