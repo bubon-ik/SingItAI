@@ -3,8 +3,8 @@
 > [ETHOnline 2026 — Continuity submission](#ethonline-2026--continuity-submission)
 > at the bottom of this file. Everything above that heading is prior work.
 >
-> One project, **two repositories**. The Ledger and Bazantic work is here; the
-> **Graph** work is in
+> One project, **two repositories**. The Ledger and Bazantic work and the
+> **Graph-powered chat integration** are here. The reusable Graph adapter is in
 > [`bubon-ik/spending-memory`](https://github.com/bubon-ik/spending-memory) —
 > the MIT library this gateway is one caller of. The submission section links
 > to every file in both.
@@ -103,20 +103,26 @@ a Continuity track. So the first thing this section does is draw the line
 between what was already here and what was built during the event, because the
 tracks are judged on the second only.
 
-**Two repositories, one project.** This one holds the gateway, `/v1/decide` and
-the Ledger key ring. [`spending-memory`](https://github.com/bubon-ik/spending-memory)
-holds the library and The Graph work. The split is the point rather than an
-accident, and the reason is under the table below.
+**Two repositories, one project.** This one holds the gateway, `/v1/decide`,
+Ledger key ring and purchase approval, and the chat integration with The Graph.
+[`spending-memory`](https://github.com/bubon-ik/spending-memory) holds the
+reusable spending-policy library and paid Graph query adapter. The gateway
+uses that library; other agents can use it independently.
 
 ## What was built during the event
 
 Everything below is on the `ethonline` branch, dated 5 September 2026 or later.
 The diff that contains all of it, and nothing else, is
 [`1ca72b4..ethonline`](https://github.com/bubon-ik/SingItAI/compare/1ca72b4...ethonline)
-— starting at the phase 0 findings. The Ledger integration and its verification
-are described in [the v1 runbook](docs/ledger-v1.md).
-The real payment is verified. The readable v2 approval format and device-check
-status are documented in [the display notes](docs/ledger-v1.md#device-display-and-approval-format-v2).
+— starting at the phase 0 findings. The latest verified implementation commits
+are [Ledger `4ca9c2c`](https://github.com/bubon-ik/SingItAI/commit/4ca9c2c8289b91c4d92af10469d9d26a4a52bfb3)
+and [The Graph `d7d2030`](https://github.com/bubon-ik/SingItAI/commit/d7d2030f7273e9b110ae54eb1d1dbe193b9aa916).
+Hardware checks, real payments and automated tests are recorded separately in
+[the Ledger runbook](docs/ledger-v1.md) and [the verification report](docs/checks.md).
+
+These additions were verified on the hackathon branch with isolated local
+state and the operator's payment wallet. They have not been deployed to the
+production service; its existing Trezor setup is unchanged.
 
 It does **not** start at `x402Bnkr`. That range would sweep in five commits
 dated 4 September which wired Spending Memory into the payment chokepoint, and
@@ -126,24 +132,44 @@ work below.
 | Track | What it does | Where |
 | --- | --- | --- |
 | Ledger | **An optional Key Ring backend for the existing wallet encryption key.** On an enrolled host, startup decrypts `SIGN402_WALLET_MASTER_KEY` through `wallet-cli ring`, into process memory, and refuses to boot if decryption fails. Hardware checks establish the enrolled-host path; they do not establish that the USB-less production VPS was migrated. | [`keyring.py`](sign402-gateway/sign402_gateway/keyring.py) · [scope and setup](docs/ledger-v1.md#key-ring-is-a-separate-feature) |
-| Ledger | **A resumable device approval for one owner’s GET x402 tools.** A real policy escalation produces a persistent order. The client signs compact EIP-191 text showing the purchase, amount/network and recipient, plus a reference binding the entire order. The HTTP gateway verifies the signature, rechecks the quote and limits, and atomically consumes it before calling the payer. Retries return the encrypted result. The earlier EIP-712 hardware rehearsal was followed by a real Otto news purchase for 0.001 USDC on Base from the operator CDP account; delivered data and the transfer were verified, and retries returned the saved result. | [`ledger_payments.py`](sign402-gateway/sign402_gateway/ledger_payments.py) · [local client](tools/ledger-approve/purchase.py) · [v1 runbook](docs/ledger-v1.md) · [real payment](https://basescan.org/tx/0x4ab728a10ee6c35eb76c7270aa24ff4fb02fc3f67e26b8bbf3c5fd04d2a2ffc4) |
+| Ledger | **Resumable approval for one configured owner's GET x402 tools.** A policy escalation creates a persistent order. Compact EIP-191 text shows the purchase, amount/network and recipient; a SHA-256 reference binds the entire order. The gateway verifies the signature, rechecks the quote and limits, and consumes the operation before calling the payer. Retries return the encrypted saved result. The Ledger signs consent; the gateway wallet signs the payment. | [`ledger_payments.py`](https://github.com/bubon-ik/SingItAI/blob/4ca9c2c8289b91c4d92af10469d9d26a4a52bfb3/sign402-gateway/sign402_gateway/ledger_payments.py) · [local client](https://github.com/bubon-ik/SingItAI/blob/4ca9c2c8289b91c4d92af10469d9d26a4a52bfb3/tools/ledger-approve/purchase.py) · [scope and setup](docs/ledger-v1.md) |
+| Ledger | **Device and payment verification, 9 September.** A real Otto news purchase cost 0.001 USDC on Base using the earlier EIP-712 approval. Delivery, settlement and saved-result retries passed. Separately, the final readable EIP-191 message was confirmed on a Nano S Plus and verified by the HTTP gateway with a test payer. | [real payment check](docs/checks.md#l7--real-purchase-after-ledger-approval-9-september) · [readable device check](docs/checks.md#l8--readable-compact-approval-9-september) · [transaction](https://basescan.org/tx/0x4ab728a10ee6c35eb76c7270aa24ff4fb02fc3f67e26b8bbf3c5fd04d2a2ffc4) |
 | Ledger | Ten developer-experience findings, kept from the first command rather than written from memory. The headline entry is that the Key Ring's advertised case — a host with no USB port — has no supported path in wallet-cli 2.1.0: `ring init` needs an attached device, no verb exports a membership, and the member key sits in an OS secret service a headless box does not run. Measured on the actual VPS, not argued from the docs | [`docs/ledger-dx-notes.md`](https://github.com/bubon-ik/SingItAI/blob/244a98fd3087d3e5a4138ad57b1c605e44cd98bf/docs/ledger-dx-notes.md) |
 | Ledger | Verified on the hardware, not argued: `ring init` on the device, encrypt, decrypt, then the device **unplugged** and decrypt again — and, unasked, with the network off too, which is why booting the gateway does not depend on Ledger's service being up. Then the whole path end to end against the real `wallet-cli`, including corrupting the ciphertext to confirm the refusal to boot | [`checks.md`](https://github.com/bubon-ik/SingItAI/blob/e317b6699f952a50d0a53642085a37c7286df3f3/docs/checks.md) · [rehearsal script](https://github.com/bubon-ik/SingItAI/blob/e317b6699f952a50d0a53642085a37c7286df3f3/sign402-gateway/scripts/ledger-keyring-rehearsal.sh) |
 | Bazantic | `POST /v1/decide` and `GET /v1/journal`: a read-only HTTP surface over the spending policy, so an agent can ask whether a payment should happen without being able to make one happen | [`decide.py`](https://github.com/bubon-ik/SingItAI/blob/df9d39bae8540b1a22a925fbebf5a51149f6a3ed/sign402-gateway/sign402_gateway/decide.py) · [OpenAPI](https://github.com/bubon-ik/SingItAI/blob/b20cab05ba8021455ec5fed6f803b2a1c6f7fc68/sign402-gateway/docs/decide-openapi.json) |
 | The Graph | An agent pays The Graph's x402 gateway per subgraph query out of a budget: the daily cap applies to a cent, the first payment escalates like any unknown merchant, a moved payout address blocks and warns the whole fleet, and a question already bought inside the cache window is answered by **reading the journal** instead of paying again | [`thegraph.py`](https://github.com/bubon-ik/spending-memory/blob/cbc0739b2842e92f7d7c698580d48284a7063960/spending_memory/adapters/thegraph.py) · [live demo](https://github.com/bubon-ik/spending-memory/blob/e4a79d3eda55a4fa6043108fc909248516415b36/demo/graph_queries.py) |
-| The Graph | **In the product:** the chat answers "price of WETH" and a bare `$WETH` from the actual Uniswap V3 pool on Base instead of a paid web search — a first-hand number at the current block for the same money. The payment is authorised by the same policy and daily cap as a gift card, so one cent of data and a $25 purchase come out of one budget and one journal | [`onchain_data.py`](https://github.com/bubon-ik/SingItAI/blob/635338b0d3f8a006b7788b2401c20bec826c21fa/sign402-gateway/sign402_gateway/onchain_data.py) · [commit](https://github.com/bubon-ik/SingItAI/commit/635338b0d3f8a006b7788b2401c20bec826c21fa) |
-| The Graph | A real query, really bought: $0.01 USDC settled on Base mainnet to the address the live 402 named | [tx `0x57ddeebd…`](https://basescan.org/tx/0x57ddeebd74b89f8834c8627d7e1ad6878e44a651744da49fae677491ac2d7958) |
+| The Graph | **In the product:** chat price questions such as "price of WETH" and `$WETH` use Uniswap V3 pool data on Base. The answer includes the pool and indexed block; cached readings are identified explicitly. The same spending policy and daily cap authorise the query. Live gateway requests work, CDP transaction hashes are retained in the journal, and indexing errors or insufficient pool liquidity cause the client to decline the answer. | [`onchain_data.py`](https://github.com/bubon-ik/SingItAI/blob/d7d2030f7273e9b110ae54eb1d1dbe193b9aa916/sign402-gateway/sign402_gateway/onchain_data.py) · [regression tests](https://github.com/bubon-ik/SingItAI/blob/d7d2030f7273e9b110ae54eb1d1dbe193b9aa916/sign402-gateway/tests/test_onchain_data.py) |
+| The Graph | **Real WETH query, 11 September:** one 0.01 USDC payment on Base, followed by two free cached repeats, including one in a separate Python process with network and payment callbacks disabled. The price matched the pool's contract state at the same indexed block. The journal retained the receipt and counted the spend once. | [live verification report](docs/checks.md#g5--real-weth-price-purchase-and-free-repeats-11-september) · [check script](https://github.com/bubon-ik/SingItAI/blob/d7d2030f7273e9b110ae54eb1d1dbe193b9aa916/sign402-gateway/scripts/graph-live-check.py) · [tx `0x0d2ef841…`](https://basescan.org/tx/0x0d2ef8410a230f3e1b97532d5a7bdc8ad80d0d2a988c5ded318ee78e5ed2517a) |
 | The Graph · Bazantic | `SKILL.md`: what an agent must **do** about each verdict — the part no schema can carry, and the independent variable of the Bazantic experiment | [`SKILL.md`](https://github.com/bubon-ik/spending-memory/blob/cb0cdb3a791dbbba3e6d9ef1ad04c96d165c0633/skills/paying-for-data/SKILL.md) · [experiment](https://github.com/bubon-ik/SingItAI/blob/0cd35796610900182a634b481de87c634239e45c/docs/bazantic-experiment.md) |
 | All | Phase 0 findings, including the two checks that failed and changed the plan | [`docs/checks.md`](https://github.com/bubon-ik/SingItAI/blob/244a98fd3087d3e5a4138ad57b1c605e44cd98bf/docs/checks.md) |
 
-The links are pinned to commit hashes, not to the branch, so they keep pointing
-at the reviewed code after the branch moves.
+Implementation links are pinned to the verified commits. Relative runbook and
+report links follow the version of the README being read.
 
-The Graph work lives in the **`spending-memory`** repository rather than this
-one, and deliberately so: the track asks for reusable infrastructure rather than
-an application, and a paid-query client that only works inside this gateway
-would be the second thing. It is a `pip install`, MIT, with no dependency on
-anything here — this gateway is one caller of it.
+The Graph adapter lives in **`spending-memory`**, an MIT-licensed Python library
+with no dependency on this gateway. It handles payment-requirement parsing,
+policy authorisation, query fingerprints, the journal cache and spending
+reports. This repository supplies the application integration and a real
+WETH-query check, demonstrating how another agent can use the library.
+
+## Verified results and scope
+
+- **Ledger:** the final compact EIP-191 approval is readable on the tested Nano
+  S Plus. The real 0.001 USDC purchase used the earlier EIP-712 format; the
+  final-format device check used a test payer. This establishes purchase
+  consent on the device, not ERC-7730 Clear Signing or hardware custody of the
+  gateway's spending wallet. The configured approval lane is described in
+  [the scope notes](docs/ledger-v1.md#scope).
+- **The Graph:** the 11 September query returned **2569.701079 USDC per WETH**
+  at indexed Base block **51176748**. An independent RPC check of the pool's
+  tokens and `slot0()` at that block confirmed the price. Settlement at block
+  **51176753** transferred exactly **0.01 USDC**. Two repeats within the default
+  **300-second cache TTL** used the journal without another payment. This
+  exercised the onchain client and chat routing; it was not a full live
+  Telegram/LLM conversation.
+- **Automated checks, 11 September:** **1178 gateway tests** passed, including
+  **30 onchain tests**, plus **33 Graph adapter tests** against the pinned
+  dependency. The Ledger verification also includes **six JavaScript checks**.
 
 ## What was already here
 
@@ -166,8 +192,10 @@ branch can tell at a glance which parts of it are not new.
 
 ## Use of AI tools
 
-Development was spec-driven and AI-assisted throughout, with Claude (Opus) as
-the assistant.
+Development was spec-driven and AI-assisted with **Claude (Opus)** and
+**OpenAI Codex**. Codex assisted with the later Ledger purchase lifecycle and
+readable approval work, The Graph integration fixes, regression tests, live
+verification scripts and documentation.
 
 The spec — [`docs/ethonline-spec.md`](docs/ethonline-spec.md) — was written
 first and is committed unedited, including the parts the implementation later
@@ -183,19 +211,22 @@ is not a contract — so a planned rule that would have used onchain counterpart
 history as evidence was cut rather than faked, and no subgraph was written to
 rescue it.
 
-AI assistance covered implementation and test drafting under that spec.
-Direction, the phase 0 findings, the threat model in `keyring.py` and every
-decision about what not to build were the author's. The commit messages carry
-the reasoning behind each choice and are the best record of it.
+The project owner set the scope, reviewed the device display and explicitly
+approved the real purchases. Hardware observations, simulated payment tests
+and actual onchain settlements are distinguished in [docs/checks.md](docs/checks.md).
+The commits record the implementation changes and their rationale.
 
 ## Running the new work
 
-The gateway suite needs an interpreter with this project's dependencies; there
-is no extra test runner to install.
+From the repository root, use Python 3.11 or later to create an environment
+and install the gateway:
 
 ```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e ./sign402-gateway
 cd sign402-gateway
-python -m unittest tests.test_ledger_keyring tests.test_ledger_approval tests.test_ledger_payments tests.test_ledger_client tests.test_decide_endpoint -v
+python -m unittest tests.test_ledger_keyring tests.test_ledger_approval tests.test_ledger_payments tests.test_ledger_client tests.test_decide_endpoint tests.test_onchain_data -v
 ```
 
 Run the whole gateway suite with `python -m unittest discover -s tests`.
@@ -207,14 +238,48 @@ unprovisioned checkout behaves exactly as it did before. **No Ledger device is
 needed to run these**: the tests drive a stand-in binary, for the reason in
 `docs/checks.md` under L2.
 
-The Graph work is in the other repository and runs against the live gateway,
-paying real money only when you ask it to:
+For the standalone Graph adapter tests, use a separate checkout and environment:
 
 ```bash
-git clone https://github.com/bubon-ik/spending-memory && cd spending-memory
-python -m pytest tests/test_thegraph_adapter.py     # 33 tests, no network
-python demo/graph_queries.py stranger               # live 402, nothing paid
+git clone https://github.com/bubon-ik/spending-memory
+cd spending-memory
+git checkout cbc0739b2842e92f7d7c698580d48284a7063960
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e '.[dev]'
+python -m pytest tests/test_thegraph_adapter.py     # adapter tests, no network
 ```
 
-`demo/graph_queries.py` fetches a real 402 from `gateway.thegraph.com` on every
-run. Only `--live-pay` spends anything, and only a cent.
+The earlier [standalone demonstration](https://github.com/bubon-ik/spending-memory/blob/e4a79d3eda55a4fa6043108fc909248516415b36/demo/graph_queries.py)
+uses a real unpaid quote but simulates the paid fetch unless `--live-pay` is
+supplied. Its simulated transcript is not mainnet payment evidence. The
+application check below is the one used for the real WETH query in the
+verification report.
+
+### The Graph: real application check
+
+From the **SingItAI repository root**, using its configured Python environment:
+
+```bash
+python sign402-gateway/scripts/graph-live-check.py prepare
+# After explicitly approving the displayed 0.01 USDC purchase:
+python sign402-gateway/scripts/graph-live-check.py run
+# Read the saved outcome and verify the receipt without paying:
+python sign402-gateway/scripts/graph-live-check.py status
+```
+
+This requires the Node dependencies and local credentials described in
+[the CDP service setup](cdp-x402-service/README.md#setup), an explicit
+`CDP_EVM_ACCOUNT_ADDRESS`, and at least 0.01 USDC in that operator account on
+Base. `prepare` only reads the quote, balance and historical receipt. `run`
+rechecks the fixed price, recipient and asset, performs at most one payer
+invocation, then reopens the database and verifies a free cached chat answer.
+State stays in ignored `.graph-live/`; a permanent attempt marker prevents the
+script from paying again after a restart or an uncertain result. Keep that
+state and inspect the existing attempt rather than starting a replacement.
+
+The live check configures its own isolated client. The application feature
+remains opt-in through `SIGN402_ONCHAIN_DATA_ENABLED=1` with Spending Memory
+enabled. It uses the operator-funded query path and does not invoke the
+separate Ledger purchase-approval lane. Exact results and the additional
+separate-process cache check are in [G4–G5](docs/checks.md#g4--application-transport-receipt-and-restart-cache-1011-september).
