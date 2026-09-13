@@ -17,6 +17,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .client import GatewayClient, GatewayClientError
+from .graph_demo import handle_graph_demo
 from .identity import (
     TelegramIdentity,
     capture_gateway_identity,
@@ -919,6 +920,11 @@ def _handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
 
     capture_gateway_identity(event=event, **kwargs)
     source = getattr(event, "source", None)
+
+    graph_demo = handle_graph_demo(event=event, source=source, gateway=gateway,
+                                  send=_send_fixed_reply, background=_run_in_background)
+    if graph_demo:
+        return graph_demo
 
     # Chat mode runs before button and command dispatch: while it is on, the
     # user is talking to a model, not to the menu.

@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "sign402-gateway"))
 
 from spending_memory import Payment, SpendingMemory, SpendingPolicy
 from spending_memory.adapters.thegraph import PaidGraphQueries, payment_requirements
-from sign402_gateway.onchain_data import OnchainConfig, _urllib_402, build_onchain_data_from_env
+from sign402_gateway.onchain_data import OnchainConfig, _urllib_402, build_onchain_data_from_env, read_price
 from sign402_gateway.secure_state import atomic_write_private_json, ensure_private_directory
 from sign402_gateway.server import CdpBaseX402PaymentClient
 from sign402_gateway.venice_chat import VeniceChatClient
@@ -94,23 +94,100 @@ def policy():
     return SpendingPolicy(SpendingMemory.local(str(STATE / "memory.sqlite3")), daily_cap_usd=Decimal("0.01"))
 
 
+def video_demo_state(base, payer):
+    """Allow one deliberate new demo only after the original attempt is proven settled."""
+    if (base / "attempt.json").exists():
+        result = json.loads((base / "result.json").read_text())
+        verification = json.loads((base / "verification.json").read_text())
+        tx = result.get("transactionHash")
+        proof = verification.get("proof", {})
+        if (not result.get("ok") or result.get("status") != 200 or not tx
+                or not verification.get("restartCachePassed")
+                or proof.get("verified") is not True or proof.get("transactionHash") != tx):
+            raise ValueError("Reconcile the original attempt before preparing a new demo.")
+        verify_receipt(tx, payer)
+    # Fixed directory: repeating --video-demo never creates another payment slot.
+    return base / "video-demo"
+
+
+def save_completed_check(verification, tx):
+    """Persist payment/data proof before the optional post-payment balance RPC."""
+    atomic_write_private_json(STATE / "verification.json", verification)
+    record_path = STATE / "purchase-record.json"
+    if not record_path.exists():
+        atomic_write_private_json(record_path, {"invoice_id": tx,
+            "product_slug": "thegraph.uniswap-v3-base.weth-price", "amount": "0.01 USDC",
+            "payment_method": "USDC on Base", "timestamp": datetime.now(timezone.utc).isoformat()})
+    proof = verification["proof"]
+    try:
+        # A load-balanced RPC can answer latest from before settlement.
+        amount = balance(proof["payer"], hex(proof["blockNumber"]))
+        verification.update(balanceAfterUsdc=str(Decimal(amount) / 1_000_000),
+                            balanceVerifiedAtBlock=proof["blockNumber"], balanceCheck="verified")
+    except (ValueError, OSError, subprocess.TimeoutExpired):
+        verification.update(balanceAfterUsdc=None, balanceCheck="unavailable")
+        print("Payment and data verified. Optional balance RPC unavailable; no payment retry is needed.", flush=True)
+    atomic_write_private_json(STATE / "verification.json", verification)
+    return verification
+
+
+def recover_completed_check(result, proof):
+    """Recover evidence from the paid response and journal without fetching or paying."""
+    if (result.get("ok") is not True or result.get("status") != 200
+            or result.get("transactionHash") != proof["transactionHash"]):
+        raise ValueError("Stored data does not match the verified payment.")
+    price = read_price(result.get("body"), "WETH")
+    if price is None:
+        raise ValueError("Stored Graph response has no valid price.")
+    reopened = policy()
+    entries = reopened.memory.journal(limit=100)
+    originals = [e for e in entries if e.get("extra", {}).get("paid") is True
+        and e["extra"].get("owner") == OWNER
+        and e["extra"].get("tx_id") == proof["transactionHash"]]
+    if len(originals) != 1:
+        raise ValueError("The journal must contain exactly one matching paid query.")
+    original = originals[0]
+    cached = [e for e in entries if e.get("extra", {}).get("paid") is False
+        and e["extra"].get("owner") == OWNER
+        and e["extra"].get("served_from") == original["id"]]
+    spend = PaidGraphQueries(reopened, owner=OWNER).spent_on_data()
+    if not cached or spend["queries_paid"] != 1 or Decimal(spend["spent_usd"]) != Decimal("0.01"):
+        raise ValueError("The journal does not prove paid-once cache reuse.")
+    plan = json.loads((STATE / "plan.json").read_text())
+    verification = {"priceUsdc": str(price.usd), "pool": price.pool,
+        "indexedBlock": price.block_number, "liquidityUsd": str(price.liquidity_usd),
+        "paidJournalId": original["id"], "cachedJournalId": cached[0]["id"],
+        "cachedRepeatRecorded": True, "recoveredFromSavedResponseAndJournal": True,
+        "spend": spend, "proof": proof, "balanceBeforeUsdc": plan["balanceUsdc"],
+        "readingStatus": "Previously purchased reading; no new query was made."}
+    return save_completed_check(verification, result["transactionHash"])
+
+
 def main():
+    global STATE
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("prepare", "run", "status"))
+    parser.add_argument("--video-demo", action="store_true",
+                        help="One separate recording session; preserves the original completed check.")
     args = parser.parse_args()
-    ensure_private_directory(STATE)
     payer = payer_address()
+    if args.video_demo:
+        STATE = video_demo_state(STATE, payer)
+    ensure_private_directory(STATE)
     if args.action == "status":
         result = json.loads((STATE / "result.json").read_text())
-        print(json.dumps({"proof": verify_receipt(result["transactionHash"], payer),
-            "payerCallsThisRun": 0,
-            "verification": json.loads((STATE / "verification.json").read_text())
-                if (STATE / "verification.json").exists() else "Incomplete; inspect saved result. Do not pay again."}, indent=2))
+        proof = verify_receipt(result["transactionHash"], payer)
+        verification = (json.loads((STATE / "verification.json").read_text())
+            if (STATE / "verification.json").exists() else recover_completed_check(result, proof))
+        print(json.dumps({"proof": proof, "payerCallsThisRun": 0,
+                          "verification": verification}, indent=2))
+        print("View transaction: https://basescan.org/tx/" + result["transactionHash"], flush=True)
         return
 
     if (STATE / "attempt.json").exists():
         raise ValueError("A payment attempt already exists. Use status; never create a replacement attempt.")
     validate_quote(*_urllib_402(URL))
+    print("HTTP 402 Payment Required: The Graph requests 0.01 USDC on Base for this query.", flush=True)
     historic = verify_receipt(HISTORICAL_TX)
     available = balance(payer)
     if available < int(AMOUNT):
@@ -141,6 +218,7 @@ def main():
         quotes.append(url)
         response = _urllib_402(url)
         validate_quote(*response)
+        print("The Graph: unpaid request returned HTTP 402; payment terms verified.", flush=True)
         return response
 
     def pay(url, **kwargs):
@@ -157,6 +235,7 @@ def main():
             stream.flush()
             os.fsync(stream.fileno())
         calls.append(url)
+        print("Paying 0.01 USDC through x402 and retrying the GraphQL POST...", flush=True)
         result = payer_client(url, **kwargs)
         # Persist only public query data and receipt identifiers. Never store
         # payment headers, signatures, or a raw subprocess response.
@@ -164,10 +243,13 @@ def main():
         atomic_write_private_json(STATE / "result.json", safe)
         if not safe["ok"] or safe["status"] != 200 or not safe["transactionHash"] or str(safe["payer"]).lower() != payer.lower():
             raise ValueError("Payment outcome needs inspection; do not retry.")
+        print("HTTP 200: paid GraphQL data received. Transaction: " + safe["transactionHash"], flush=True)
         return safe
 
     client = build_onchain_data_from_env(policy=memory_policy, pay=pay, fetch_402=quote, env=ENV)
+    print("Question: price of WETH", flush=True)
     first = client.price(OWNER, "WETH")
+    print(f"Answer: {first.usd} USDC/WETH; indexed Base block {first.block_number}.", flush=True)
     # Reopen the database, rebuild the client and enter the actual chat branch.
     reopened = policy()
     chat = VeniceChatClient.__new__(VeniceChatClient)
@@ -175,6 +257,7 @@ def main():
     repeated = chat._onchain_footnote(OWNER, "price of WETH")
     if not first.paid or not repeated or "nothing paid" not in repeated[1] or len(calls) != 1 or len(quotes) != 1:
         raise ValueError("The query/cache check did not pass; inspect saved result, never pay again.")
+    print("Repeated question after reopening storage: cached answer, 0 USDC, no second payment.", flush=True)
     result = json.loads((STATE / "result.json").read_text())
     entries = reopened.memory.journal(limit=100)
     original = next(entry for entry in entries if entry["id"] == first.journal_id)
@@ -185,19 +268,13 @@ def main():
     if reopened.memory.spent_today(OWNER) != Decimal("0.01") or spend["queries_paid"] != 1 or spend["queries_from_memory"] != 1:
         raise ValueError("Unexpected accounting after the cached request.")
     proof = verify_receipt(result["transactionHash"], payer)
+    print("Verified payment: https://basescan.org/tx/" + result["transactionHash"], flush=True)
     verification = {"priceUsdc": str(first.usd), "pool": first.pool, "indexedBlock": first.block_number,
         "liquidityUsd": str(first.liquidity_usd), "paidJournalId": first.journal_id,
         "cachedJournalId": cached["id"], "payerCalls": len(calls), "quoteCalls": len(quotes),
         "restartCachePassed": True, "spend": spend, "proof": proof, "chatFact": repeated[0],
-        "chatFooter": repeated[1], "balanceBeforeUsdc": plan["balanceUsdc"],
-        # A load-balanced RPC can still answer "latest" from before the
-        # settlement. Pin the post-payment read to its confirmed block.
-        "balanceAfterUsdc": str(Decimal(balance(payer, hex(proof["blockNumber"]))) / 1_000_000),
-        "balanceVerifiedAtBlock": proof["blockNumber"]}
-    atomic_write_private_json(STATE / "verification.json", verification)
-    atomic_write_private_json(STATE / "purchase-record.json", {"invoice_id": result["transactionHash"],
-        "product_slug": "thegraph.uniswap-v3-base.weth-price", "amount": "0.01 USDC",
-        "payment_method": "USDC on Base", "timestamp": datetime.now(timezone.utc).isoformat()})
+        "chatFooter": repeated[1], "balanceBeforeUsdc": plan["balanceUsdc"]}
+    save_completed_check(verification, result["transactionHash"])
     print(json.dumps(verification, indent=2))
 
 

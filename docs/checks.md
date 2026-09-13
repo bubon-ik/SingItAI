@@ -659,3 +659,58 @@ The preceding **1178 gateway / 33 adapter tests** remain the validation for
 the application fixes. This live check additionally establishes the actual
 paid data, onchain receipt, accounting and restart-cache behavior. It does not
 claim a production deployment or a full Telegram/LLM conversation.
+
+## G6 — video demonstration and report recovery, 13 September
+
+The owner ran `graph-live-check.py run --video-demo`. The real gateway returned
+402, accepted one 0.01 USDC x402 payment, and returned HTTP 200 with a WETH price
+of **2476.223193181634607138906425419718 USDC**, indexed at Base block **51257970**.
+The repeated question after reopening storage was served from the journal.
+The journal contains one paid query and one zero-cost cached query.
+
+- Transaction: [0xebfb3de4…d3c803](https://basescan.org/tx/0xebfb3de4760d796c0835ffbfc023e44416ec26ddf97048a65da1baf742d3c803).
+- Settlement block: **51257974**, successful receipt with exactly one matching
+  0.01 USDC transfer to The Graph's configured recipient.
+- Balance: **6.922403 → 6.912403 USDC**, post-payment read pinned to settlement.
+
+The initial run stopped during the optional balance RPC after verifying the
+receipt. The report writer now persists the payment/data evidence first.
+`status --video-demo` recovered this run from the saved response and journal,
+verified the receipt and balance, and wrote the minimal purchase record with
+**zero payer calls**. This is recovery of the existing reading, not a fresh
+Graph query. The original payment attempt marker remains intact.
+
+**38 focused checks passed** (30 onchain-data tests and eight demo safety/recovery
+tests). This demonstration uses the operator gateway wallet; it does not invoke
+Ledger or send results to Telegram.
+
+## G7 — Telegram → Ledger → The Graph, 13 September
+
+The owner's `/graph_demo` request to the existing Telegram bot reached the
+private Mac service. The Graph returned its fixed 0.01 USDC quote on Base.
+The physical Ledger signed readable EIP-191 consent for `The Graph - WETH price`;
+the configured public address verified successfully before the payer ran.
+The paid GraphQL request then returned HTTP 200.
+
+- Transaction: [0xf65f6f5f…a9212](https://basescan.org/tx/0xf65f6f5f26955e76cfb97e88a7eb20cd7431082ec363eb3dd8f255ba705a9212).
+- Query cost: **0.01 USDC**. The service verified the successful Base receipt
+  and matching USDC transfer to The Graph's recipient.
+- WETH price: **2469.233244628033104191335313461433 USDC**, indexed Base block
+  **51258594**, Uniswap V3 pool `0x6c561b446416e1a00e8e93e221854d6ea4171372`.
+- A second Telegram command completed from the persistent answer cache at
+  **0 USDC**, with the same transaction reference and no second signature or
+  payer invocation. Both operations are saved as `succeeded`.
+
+The owner confirmed receiving the price and BaseScan link in Telegram and
+sent the second command for the free cached response. Access was corrected to the owner's
+confirmed current account after the first command was rejected by the owner
+filter. No payment was created by that rejected command.
+
+The main production gateway and Trezor configuration were not redeployed.
+Ledger supplies off-chain spending consent; the operator gateway wallet funds
+the x402 payment. The demo remains limited to one paid query in its durable
+state directory, with the local Mac service and SSH connection required.
+
+Validation: **71 focused gateway tests**, including 10 combined-flow tests,
+and **310 Hermes plugin tests** passed. The live payment and cached repeat
+above supplement those automated checks.

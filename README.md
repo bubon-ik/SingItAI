@@ -120,9 +120,18 @@ and [The Graph `d7d2030`](https://github.com/bubon-ik/SingItAI/commit/d7d2030f72
 Hardware checks, real payments and automated tests are recorded separately in
 [the Ledger runbook](docs/ledger-v1.md) and [the verification report](docs/checks.md).
 
-These additions were verified on the hackathon branch with isolated local
-state and the operator's payment wallet. They have not been deployed to the
-production service; its existing Trezor setup is unchanged.
+The private **`/graph_demo` Telegram command** also connects these integrations:
+The Graph quote → readable Ledger approval on the local Mac → x402 payment →
+price, indexed block and transaction link in the same Telegram chat. A repeated
+query within the cache lifetime costs nothing. It is limited to the configured
+owner and one new paid query in the demo state; ordinary production wallet
+routes are unchanged. See the [combined demo runbook](docs/telegram-graph-ledger-demo.md)
+for setup, scope, retry protection and validation.
+
+These additions use the hackathon branch, isolated local state and the operator's
+payment wallet. The private demo command is installed in the existing Telegram
+bot and connects to the local Mac. The production payment gateway keeps its
+existing Trezor setup; Ledger approval is limited to the private demo route.
 
 It does **not** start at `x402Bnkr`. That range would sweep in five commits
 dated 4 September which wired Spending Memory into the payment chokepoint, and
@@ -277,6 +286,17 @@ invocation, then reopens the database and verifies a free cached chat answer.
 State stays in ignored `.graph-live/`; a permanent attempt marker prevents the
 script from paying again after a restart or an uncertain result. Keep that
 state and inspect the existing attempt rather than starting a replacement.
+
+For one deliberate new video recording after the original check has completed,
+add `--video-demo` to each command. This uses the fixed `.graph-live/video-demo/`
+directory and verifies the original receipt before proceeding. It refuses an
+unresolved original attempt and retains the same permanent single-payment guard
+for the video session. Run `prepare --video-demo` first and approve its displayed
+terms before `run --video-demo`; use `status --video-demo` afterwards. Terminal
+output shows the unpaid 402, paid 200, indexed price and free cache reuse.
+The verified payment and query report are saved before the optional balance
+read. If a previous run stopped after payment, `status` can recover the report
+from its saved response and journal without fetching another query or paying.
 
 The live check configures its own isolated client. The application feature
 remains opt-in through `SIGN402_ONCHAIN_DATA_ENABLED=1` with Spending Memory
