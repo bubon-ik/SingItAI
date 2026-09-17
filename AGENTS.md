@@ -19,3 +19,7 @@
 - Preserve existing Base behavior when adding Solana. Do not route unsupported Solana operations silently through Base.
 - A shared CLI prototype wallet is not a per-user managed wallet. Do not use it as the default wallet for Telegram users.
 - Real Venice payments require explicit approval of the exact fresh quote; tests must never send payments.
+
+## Documentation language
+
+- Write all README files and future README updates in English.

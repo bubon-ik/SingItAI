@@ -1,19 +1,19 @@
 # SingIt Solana
 
-Отдельный репозиторий для добавления Solana в Telegram-агента SingIt.
-Основа: `SingItAI/main`, коммит `f39959059922b693f14c2a3e9bec97c87881e07b`.
+A separate repository for adding Solana support to the SingIt Telegram agent.
+Based on `SingItAI/main` at commit `f39959059922b693f14c2a3e9bec97c87881e07b`.
 
-## Текущее состояние
+## Current status
 
-- Полный код агента перенесён из зафиксированной `main`.
-- Клиент Venice/x402 для Solana mainnet находится в `solana-x402-service/`.
-- **Telegram-агент пока работает с Base. Подключение Solana к агенту ещё впереди.**
-- Реальные Solana-платежи и платные ответы Venice ещё не выполнялись.
-- Публичный репозиторий: [bubon-ik/singit-solana](https://github.com/bubon-ik/singit-solana).
+- The full agent code has been imported from the committed `main` branch.
+- The Venice/x402 client for Solana mainnet lives in `solana-x402-service/`.
+- **The Telegram agent currently supports Base. Solana integration into the agent is still pending.**
+- No real Solana payments or paid Venice model requests have been completed.
+- Public repository: [bubon-ik/singit-solana](https://github.com/bubon-ik/singit-solana).
 
-## Проверка Solana-модуля
+## Checking the Solana module
 
-Нужен Node.js 24+. Остальной проект сохраняет требования исходной версии ниже.
+Requires Node.js 24+. The rest of the project retains the baseline requirements below.
 
 ```sh
 cd solana-x402-service
@@ -23,23 +23,20 @@ npm run check
 npm start -- --help
 ```
 
-Инструкции по котировкам и оплате: [Solana service](solana-x402-service/README.md).
-Следующие этапы и критерии готовности: [план интеграции](docs/solana-integration.md).
+Quote and payment instructions: [Solana service](solana-x402-service/README.md).
+Next steps and acceptance criteria: [integration plan](docs/solana-integration.md).
 
-## Изоляция запуска
+## Isolated deployment
 
-Перед запуском отдельного Telegram-агента задайте отдельные конфигурацию, токен
-бота, ключ шифрования, базы кошельков и операций, порты и каталоги состояния.
-Исходный gateway использует некоторые пути в домашнем каталоге по умолчанию;
-они ещё не переопределены автоматически для этого репозитория. Нельзя запускать
-его с настройками действующего Base-бота. Секреты и базы исходного проекта не
-переносились. Локальный кошелёк Solana-прототипа хранится отдельно от gateway.
+Before starting a separate Telegram agent, configure its own bot token,
+encryption key, wallet and operation databases, ports, and runtime directories.
+The original gateway defaults to some paths in the user's home directory;
+this repository does not yet override those paths automatically. Do not start
+this copy with the running Base bot's configuration. Secrets and databases from
+the original project have not been imported. The prototype Solana wallet is
+stored separately from the gateway.
 
----
-
-## Документация исходной версии SingIt
-
-# SingIt
+## Existing SingIt capabilities
 
 **Payments for AI agents, with spending limits and human approval.**
 
