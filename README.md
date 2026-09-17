@@ -11,9 +11,20 @@ See [HACKATHON.md](HACKATHON.md) for the existing SingIt foundation, recorded So
 
 - The full agent code has been imported from the committed `main` branch.
 - The Venice/x402 client for Solana mainnet lives in `solana-x402-service/`.
-- **The Telegram agent currently supports Base. Solana integration into the agent is still pending.**
+- **The agent now supports Solana wallet creation and balance reads. Solana payment and Venice chat integration are still pending.**
 - No real Solana payments or paid Venice model requests have been completed.
 - Public repository: [bubon-ik/singit-solana](https://github.com/bubon-ik/singit-solana).
+
+## Solana wallet commands
+
+- `/wallet solana` — create or show your managed Solana mainnet wallet.
+- `/balance solana` — read SOL and native-USDC balances.
+- `/wallet` and `/balance` — keep using Base by default.
+
+These commands are implemented and tested locally; they have not been deployed
+to the running Telegram bot. Solana keys are encrypted in the gateway store.
+Solana payments and withdrawals remain disabled. See
+[wallet integration checks](docs/solana-wallet-checks.md).
 
 ## Checking the Solana module
 
@@ -50,7 +61,7 @@ payment gateway handles wallet keys, spending controls, approvals and receipts.
 
 [Website](https://singitai.app) · [Telegram bot](https://t.me/SingIt0qk_bot) · [Documentation](docs/README.md)
 
-[![Security gate](https://github.com/bubon-ik/SingItAI/actions/workflows/security-gate.yml/badge.svg?branch=main)](https://github.com/bubon-ik/SingItAI/actions/workflows/security-gate.yml)
+[![Security gate](https://github.com/bubon-ik/singit-solana/actions/workflows/security-gate.yml/badge.svg?branch=main)](https://github.com/bubon-ik/singit-solana/actions/workflows/security-gate.yml)
 
 ## Features
 
@@ -100,8 +111,8 @@ Wallet commands run through the gateway without calling an LLM.
 
 | Command | Purpose |
 | --- | --- |
-| `/wallet` | Create or show your Base wallet. |
-| `/balance` | Check wallet balances. |
+| `/wallet [base\|solana]` | Create or show a wallet; defaults to Base. |
+| `/balance [base\|solana]` | Check wallet balances; defaults to Base. |
 | `/limits` | View or change spending limits. |
 | `/bitrefill` | Browse products and start a purchase. |
 | `/last_purchase` | Check the most recent purchase. |
@@ -117,8 +128,8 @@ supports Python 3.11 or later. Clone the full repository: the gateway imports
 shared code from sibling directories.
 
 ```bash
-git clone https://github.com/bubon-ik/SingItAI.git
-cd SingItAI
+git clone https://github.com/bubon-ik/singit-solana.git
+cd singit-solana
 python3.12 -m venv sign402-gateway/.venv
 sign402-gateway/.venv/bin/python -m pip install -e ./sign402-gateway
 ```
@@ -157,6 +168,7 @@ Hermes, and the chosen approval channel. Start with the
 | --- | --- |
 | `sign402-gateway/` | Python gateway: wallets, payment policy, approvals, orders and APIs. |
 | `hermes-plugins/sign402-wallet/` | Telegram wallet commands and purchase flows for Hermes. |
+| `solana-x402-service/` | Standalone Solana mainnet Venice/x402 client; payment integration into the agent is pending. |
 | `cdp-x402-service/` | Node.js payment and swap integration for Base through CDP and x402. |
 | `tools/ledger-approve/` | Local Ledger purchase-approval client. |
 | `singit-risk-check/` | SINGIT-paid x402 endpoint for payment-requirement risk analysis. |

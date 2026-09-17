@@ -10,7 +10,14 @@ Baseline: SingItAI/main `f39959059922b693f14c2a3e9bec97c87881e07b`.
 - Publish independently at `bubon-ik/singit-solana`; no production deployment is configured.
 - Added Node 24 CI for the Solana module. No funded payment has been made.
 
-## 1. Managed wallets and read-only Telegram flow
+## 1. Managed wallets and read-only Telegram flow — implemented locally
+
+The wallet store now adds `solana_user_wallets` beside the existing Base table.
+The Base table, ciphertext and access tokens are preserved. The gateway and
+Telegram plugin support explicit `base` / `solana` wallet and balance commands.
+This milestone has not been deployed to Telegram. See [verification](solana-wallet-checks.md).
+
+Original scope and acceptance criteria:
 
 Primary files: `sign402-gateway/sign402_gateway/user_wallets.py`,
 `sign402-gateway/sign402_gateway/server.py`,

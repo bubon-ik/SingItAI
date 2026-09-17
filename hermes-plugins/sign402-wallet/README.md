@@ -5,8 +5,8 @@ Telegram:
 
 ```text
 /start
-/wallet
-/balance
+/wallet [base|solana]
+/balance [base|solana]
 /connect_imessage
 /connect_whatsapp
 /limits
@@ -20,6 +20,20 @@ The commands do not call the configured LLM. The plugin binds each request
 to `MessageEvent.source.user_id`, lets Hermes apply its normal Telegram
 authorization, and then calls the protected Sign402 Gateway on localhost.
 Raw command arguments cannot select another Telegram user.
+
+## Solana wallets
+
+`/wallet solana` creates or shows a dedicated Solana mainnet wallet for the
+Telegram user. `/balance solana` shows SOL and native USDC. `/wallet`, `/balance`
+and their `base` variants keep the existing Base behavior; selecting Solana on
+one command does not change subsequent commands' network.
+
+Keys are encrypted with `SIGN402_WALLET_MASTER_KEY` in the gateway's wallet
+store. Configure `SIGN402_SOLANA_RPC_URL` on the gateway for mainnet balance
+reads. This stage supports wallet creation and balances only: Solana payments,
+withdrawals, spending policies and Venice chat routing are not enabled yet.
+The USDC balance includes all owned native-USDC accounts; the future payment
+adapter must separately check its source associated token account.
 
 ## Server Configuration
 

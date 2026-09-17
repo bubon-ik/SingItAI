@@ -87,6 +87,32 @@ class GatewayClientTests(GatewayClientFixture, unittest.TestCase):
         )
         self.assertEqual(response.requested_size, 65537)
 
+    def test_solana_network_is_forwarded_with_bound_identity_and_token(self):
+        opener = RecordingOpener(response=FakeResponse(b'{"telegramText":"Solana balance"}'))
+        client = self.make_client(opener)
+        client.execute("balance", TelegramIdentity(user_id="alice"), chain="solana", user_access_token="alice-token")
+        request, timeout = opener.requests[0]
+        self.assertEqual(json.loads(request.data), {"telegramUserId": "alice", "chain": "solana"})
+        self.assertEqual(request.get_header("X-sign402-user-token"), "alice-token")
+        self.assertEqual(timeout, 15.0)
+
+    def test_solana_cannot_request_legacy_base_purchase_history(self):
+        opener = RecordingOpener(response=FakeResponse(b'{"telegramText":"unused"}'))
+        with self.assertRaisesRegex(GatewayClientError, "not enabled on Solana"):
+            self.make_client(opener).execute("last-purchase", TelegramIdentity(user_id="alice"), chain="solana")
+        self.assertEqual(opener.requests, [])
+
+    def test_solana_create_and_unknown_network(self):
+        opener = RecordingOpener(response=FakeResponse(b'{"telegramText":"Solana wallet"}'))
+        client = self.make_client(opener)
+        client.create_wallet(TelegramIdentity(user_id="alice"), chain="solana")
+        self.assertEqual(json.loads(opener.requests[0][0].data), {"telegramUserId": "alice", "chain": "solana"})
+        for operation in [lambda: client.create_wallet(TelegramIdentity(user_id="alice"), chain="devnet"),
+                          lambda: client.execute("balance", TelegramIdentity(user_id="alice"), chain="devnet")]:
+            with self.assertRaises(GatewayClientError):
+                operation()
+        self.assertEqual(len(opener.requests), 1)
+
     def test_execute_maps_every_operation_to_expected_endpoint(self):
         cases = {
             "wallet": "/agent/wallet",

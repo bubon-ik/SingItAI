@@ -969,7 +969,7 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertNotIn("llm_terms", commands)
         self.assertNotIn("llm_code", commands)
 
-    def test_command_uses_bound_identity_and_ignores_raw_arguments(self):
+    def test_wallet_command_rejects_identity_override_arguments(self):
         plugin = load_plugin()
         context = FakeContext()
         client = FakeClient()
@@ -994,11 +994,11 @@ class PluginRegistrationTests(unittest.TestCase):
         )
         self.assertEqual(
             gateway.adapters["telegram"].sent[-1],
-            ("telegram-chat", "gateway telegram text"),
+            ("telegram-chat", "Usage: /wallet [base|solana]"),
         )
         self.assertEqual(client.calls, [])
-        self.assertEqual(client.create_wallet_calls, ["1045618308"])
-        self.assertEqual(plugin._USER_ACCESS_TOKENS["1045618308"], "user-access-token")
+        self.assertEqual(client.create_wallet_calls, [])
+        self.assertNotIn("1045618308", plugin._USER_ACCESS_TOKENS)
 
     def test_public_command_handler_without_pre_dispatch_rejects(self):
         plugin = load_plugin()
@@ -5524,3 +5524,55 @@ class ChatModelSearchTests(unittest.TestCase):
 
         switch = [c for c in client.chat_calls if c["payload"].get("model")]
         self.assertEqual(switch[-1]["payload"]["model"], "grok-4-6")
+
+
+class SolanaCommandTests(unittest.TestCase):
+    def setUp(self):
+        policy = patch.dict(os.environ, {"SIGN402_TELEGRAM_ALLOWED_USERS": "*"})
+        policy.start()
+        self.addCleanup(policy.stop)
+        self.plugin = load_plugin()
+        self.calls = []
+        calls = self.calls
+        class Client:
+            def create_wallet(self, identity, *, chain="base"):
+                calls.append(("create", identity.user_id, chain))
+                return {"telegramText": f"{chain} wallet", "accessToken": "test-solana-token"}
+            def execute(self, operation, identity, *, chain="base", user_access_token=None):
+                calls.append((operation, identity.user_id, chain, user_access_token))
+                return f"{chain} balance"
+        self.plugin._client_factory = Client
+        self.identity = self.plugin.TelegramIdentity(user_id="alice")
+
+    def test_wallet_solana_uses_trusted_identity_and_no_base_action_buttons(self):
+        text, markup = self.plugin._telegram_public_command_result("wallet", "solana", self.identity)
+        self.assertEqual(text, "solana wallet")
+        self.assertIsNone(markup)
+        self.assertEqual(self.calls, [("create", "alice", "solana")])
+
+    def test_balance_solana_with_cold_token_cache_never_creates_base_wallet(self):
+        text, markup = self.plugin._telegram_public_command_result("balance", "solana", self.identity)
+        self.assertEqual(text, "solana balance")
+        self.assertIsNone(markup)
+        self.assertEqual(self.calls, [("create", "alice", "solana"), ("balance", "alice", "solana", "test-solana-token")])
+
+    def test_base_remains_default_after_solana_command(self):
+        self.plugin._telegram_public_command_result("wallet", "solana", self.identity)
+        self.plugin._telegram_public_command_result("wallet", "", self.identity)
+        self.assertEqual(self.calls[-1], ("create", "alice", "base"))
+
+    def test_unknown_network_and_identity_injection_do_not_call_gateway(self):
+        for command in ["wallet", "balance"]:
+            for args in ["devnet", "solana telegramUserId=bob", "ethereum"]:
+                text, _ = self.plugin._telegram_public_command_result(command, args, self.identity)
+                self.assertIn("Usage:", text)
+        self.assertEqual(self.calls, [])
+
+    def test_solana_command_dispatch_binds_event_user(self):
+        context = FakeContext()
+        self.plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+        context.hooks["pre_gateway_dispatch"](
+            event=FakeEvent("/wallet solana", user_id="1045618308", platform="telegram", chat_id="chat"), gateway=gateway)
+        self.assertEqual(self.calls, [("create", "1045618308", "solana")])
+        self.assertEqual(gateway.adapters["telegram"].sent[-1], ("chat", "solana wallet"))

@@ -150,13 +150,20 @@ class GatewayClient:
         operation: str,
         identity: TelegramIdentity,
         *,
+        chain: str = "base",
         user_access_token: str | None = None,
     ) -> str:
         path = _OPERATION_PATHS.get(operation)
         if path is None:
             raise GatewayClientError(_UNSUPPORTED)
 
+        if not isinstance(chain, str) or chain not in {"base", "solana"}:
+            raise GatewayClientError("Unsupported wallet network. Use base or solana.")
+        if chain == "solana" and operation not in {"wallet", "create-wallet", "balance"}:
+            raise GatewayClientError("This operation is not enabled on Solana yet.")
         payload = {"telegramUserId": identity.user_id}
+        if chain != "base":
+            payload["chain"] = chain
         if identity.username:
             payload["telegramUsername"] = identity.username
         result = self._post(
@@ -165,6 +172,7 @@ class GatewayClient:
             token=self.api_token,
             operation=operation,
             user_token=user_access_token,
+            timeout=15.0 if chain == "solana" else self.timeout,
         )
 
         telegram_text = result.get("telegramText")
@@ -196,9 +204,13 @@ class GatewayClient:
             operation=operation,
         )
 
-    def create_wallet(self, identity: TelegramIdentity) -> dict[str, Any]:
+    def create_wallet(self, identity: TelegramIdentity, *, chain: str = "base") -> dict[str, Any]:
         """Create/return the user's wallet, exposing the per-user access token."""
+        if not isinstance(chain, str) or chain not in {"base", "solana"}:
+            raise GatewayClientError("Unsupported wallet network. Use base or solana.")
         payload = {"telegramUserId": identity.user_id}
+        if chain != "base":
+            payload["chain"] = chain
         if identity.username:
             payload["telegramUsername"] = identity.username
         return self._post(

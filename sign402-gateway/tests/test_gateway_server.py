@@ -2729,6 +2729,58 @@ class GatewayServerTests(unittest.TestCase):
         endpoints = self.response_json(handler)["endpoints"]
         self.assertIn("/agent/list-bitrefill-products", endpoints)
 
+    def test_solana_wallet_routes_with_real_store_and_user_auth(self):
+        from sign402_gateway.solana_wallets import ManagedWalletService
+        from sign402_gateway.user_wallets import UserWalletStore
+        with tempfile.TemporaryDirectory() as tmp, patch("sys.stderr", io.StringIO()):
+            server = DummyServer()
+            server.user_wallet_service = ManagedWalletService(
+                store=UserWalletStore(Path(tmp) / "wallets.db"),
+                master_key=Fernet.generate_key().decode(),
+                solana_balance_provider=lambda _: {"SOL": "0.000000000", "USDC": "0.000000"},
+            )
+            created = self.make_handler(
+                "/agent/create-wallet", {"telegramUserId": "solana-alice", "chain": "solana"},
+                server=server, headers=self.wallet_auth_headers(),
+            )
+            self.assertIn("200 OK", self.response_text(created))
+            body = self.response_json(created)
+            self.assertEqual(body["wallet"]["chain"], "solana")
+            self.assertNotIn("private", self.response_text(created).lower())
+            headers = self.llm_auth_headers(body["accessToken"])
+            for route in ["/agent/wallet", "/agent/wallet-balance"]:
+                with self.subTest(route=route):
+                    result = self.make_handler(route, {"telegramUserId": "solana-alice", "chain": "solana"}, server=server, headers=headers)
+                    self.assertIn("200 OK", self.response_text(result))
+                    self.assertEqual(self.response_json(result)["wallet"]["address"], body["wallet"]["address"])
+                    denied = self.make_handler(route, {"telegramUserId": "solana-bob", "chain": "solana"}, server=server, headers=headers)
+                    self.assertIn("401 Unauthorized", self.response_text(denied))
+                    missing = self.make_handler(route, {"telegramUserId": "solana-alice", "chain": "solana"}, server=server, headers=self.wallet_auth_headers())
+                    self.assertIn("401 Unauthorized", self.response_text(missing))
+            self.assertIsNone(server.user_wallet_service.store.get_wallet_by_telegram_user_id("solana-alice"))
+
+    def test_solana_cannot_fall_through_to_base_spending_routes(self):
+        for route in ["/agent/withdraw", "/agent/withdraw/tokens", "/agent/buy-tool"]:
+            with self.subTest(route=route), patch("sys.stderr", io.StringIO()), patch.object(gateway_server, "fetch_x402_payment_required") as fetch:
+                server = DummyServer()
+                server.user_wallet_service.resolve_telegram_user_id.return_value = "solana-alice"
+                result = self.make_handler(route, {"telegramUserId": "solana-alice", "chain": "solana", "tool": "crypto-news"}, server=server, headers=self.llm_auth_headers())
+                self.assertIn("not enabled on Solana", self.response_text(result))
+                server.user_wallet_service.withdrawable_tokens.assert_not_called()
+                server.user_wallet_service.decrypt_private_key_for_future_signing.assert_not_called()
+                server.user_x402_buyer.assert_not_called()
+                server.user_token_transfer_client.assert_not_called()
+                fetch.assert_not_called()
+
+    def test_wallet_routes_reject_unknown_chain_without_base_fallback(self):
+        for route, method in [("/agent/create-wallet", "create_wallet"), ("/agent/wallet", "wallet_status"), ("/agent/wallet-balance", "wallet_balance")]:
+            with self.subTest(route=route), patch("sys.stderr", io.StringIO()):
+                server = DummyServer()
+                server.user_wallet_service.resolve_telegram_user_id.return_value = "solana-alice"
+                result = self.make_handler(route, {"telegramUserId": "solana-alice", "chain": "devnet"}, server=server, headers=self.llm_auth_headers())
+                self.assertIn("400 Bad Request", self.response_text(result))
+                getattr(server.user_wallet_service, method).assert_not_called()
+
     def test_agent_create_wallet_requires_telegram_user_id(self):
         server = DummyServer()
 

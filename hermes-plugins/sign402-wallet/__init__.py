@@ -93,7 +93,7 @@ _TELEGRAM_PUBLIC_COMMAND_STARTED_MESSAGES = {
 _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "start", "description": "Set up your Sign402 wallet"},
     {"command": "help", "description": "Show Sign402 commands"},
-    {"command": "wallet", "description": "Show or create your Base wallet"},
+    {"command": "wallet", "description": "Show or create a wallet: base or solana"},
     {"command": "balance", "description": "Show wallet balances"},
     {"command": "connect_imessage", "description": "Select or link iMessage approvals"},
     {"command": "connect_whatsapp", "description": "Select or link WhatsApp approvals"},
@@ -192,8 +192,8 @@ _BITREFILL_COUNTRY_BUTTONS = (
     ("Other", "Back"),
 )
 _COMMANDS = {
-    "wallet": ("create-wallet", "Show your Base agent wallet"),
-    "balance": ("balance", "Show your managed Base wallet balance"),
+    "wallet": ("create-wallet", "Show your agent wallet: base or solana"),
+    "balance": ("balance", "Show your wallet balance: base or solana"),
     "last-purchase": ("last-purchase", "Show your latest Sign402 purchase"),
 }
 _IMESSAGE_COMMANDS = {
@@ -568,8 +568,8 @@ def _html_to_plain(text: str) -> str:
 def _help_text() -> str:
     return (
         "Sign402 commands\n\n"
-        "/wallet - Create or show your Base wallet\n"
-        "/balance - Show ETH, USDC, and SINGIT balances\n"
+        "/wallet [base|solana] - Create or show your wallet\n"
+        "/balance [base|solana] - Show balances on the selected network\n"
         "/connect_imessage - Select or link iMessage approvals\n"
         "/connect_whatsapp - Select or link WhatsApp approvals\n"
         "/limits - View or set spending limits\n"
@@ -1967,6 +1967,17 @@ def _telegram_public_command_result(
     identity: TelegramIdentity,
 ) -> tuple[str, dict | None]:
     client = _client_factory()
+    if command in {"wallet", "balance"}:
+        chain = str(args or "base").strip().lower()
+        if chain not in {"base", "solana"}:
+            return f"Usage: /{command} [base|solana]", None
+        text = _wallet_command_text(client, identity, command, chain)
+        if chain == "solana":
+            return text, None
+        if command == "balance":
+            text = f"{text}{_chat_budget_block(client, identity)}"
+        return text, (_telegram_wallet_menu_reply_markup() if command == "wallet"
+                      else _telegram_main_menu_reply_markup())
     if command == "start":
         text = _HtmlText(
             _start_text(
@@ -1974,16 +1985,12 @@ def _telegram_public_command_result(
                 support_id=identity.user_id,
             )
         )
-    elif command == "wallet":
-        text = _create_wallet_text(client, identity)
-    elif command in {"balance", "last-purchase"}:
+    elif command == "last-purchase":
         text = client.execute(
             command,
             identity,
             user_access_token=_user_access_token(client, identity),
         )
-        if command == "balance":
-            text = f"{text}{_chat_budget_block(client, identity)}"
     elif command in {"email", "forget-email"}:
         text = _buyer_email_text(client, identity, command, args)
     elif command in {"limits", "set-limits"}:
@@ -2138,16 +2145,12 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
             )
         elif command == "help":
             text = _help_text()
-        elif command == "wallet":
-            client = _client_factory()
-            text = _create_wallet_text(client, identity)
-        elif command == "balance":
-            client = _client_factory()
-            text = client.execute(
-                "balance",
-                identity,
-                user_access_token=_user_access_token(client, identity),
-            )
+        elif command in {"wallet", "balance"}:
+            chain = str(args or "base").strip().lower()
+            if chain not in {"base", "solana"}:
+                text = f"Usage: /{command} [base|solana]"
+            else:
+                text = _wallet_command_text(_client_factory(), identity, command, chain)
         elif command == "last-purchase":
             client = _client_factory()
             text = client.execute(
@@ -3458,21 +3461,21 @@ def _remember_user_access_token(identity: TelegramIdentity, result: object) -> s
     return token
 
 
-def _create_wallet_result(client, identity: TelegramIdentity) -> dict:
+def _create_wallet_result(client, identity: TelegramIdentity, *, chain: str = "base") -> dict:
     """Create or fetch the wallet once, and keep the caller's token.
 
-    Creating a wallet revokes any previously issued user token, so callers must
-    share one result rather than each asking for their own.
+    Access tokens identify the user across both networks; wallet lookup still
+    requires an explicit chain and never changes a user's default network.
     """
-    result = client.create_wallet(identity)
+    result = client.create_wallet(identity, **({"chain": chain} if chain != "base" else {}))
     _remember_user_access_token(identity, result)
     if not isinstance(result, dict):
         raise GatewayClientError(_INVALID_WALLET_RESPONSE)
     return result
 
 
-def _create_wallet_text(client, identity: TelegramIdentity) -> str:
-    result = _create_wallet_result(client, identity)
+def _create_wallet_text(client, identity: TelegramIdentity, *, chain: str = "base") -> str:
+    result = _create_wallet_result(client, identity, chain=chain)
     telegram_text = result.get("telegramText")
     if not isinstance(telegram_text, str) or not telegram_text.strip():
         raise GatewayClientError(_INVALID_WALLET_RESPONSE)
@@ -3488,7 +3491,7 @@ def _create_wallet_address(client, identity: TelegramIdentity) -> str:
     return address.strip()
 
 
-def _user_access_token(client, identity: TelegramIdentity) -> str | None:
+def _user_access_token(client, identity: TelegramIdentity, *, chain: str = "base") -> str | None:
     """Return the caller's per-user gateway token, minting one if unseen.
 
     Cached in-process across requests. A cold cache (for example after a
@@ -3510,7 +3513,7 @@ def _user_access_token(client, identity: TelegramIdentity) -> str | None:
         _USER_ACCESS_TOKENS.pop(user_id, None)
         _USER_ACCESS_TOKEN_ISSUED_AT.pop(user_id, None)
     try:
-        result = client.create_wallet(identity)
+        result = client.create_wallet(identity, **({"chain": chain} if chain != "base" else {}))
     except Exception:
         return None
     return _remember_user_access_token(identity, result) or None
@@ -4807,3 +4810,13 @@ def register(ctx) -> None:
             handler=_build_imessage_handler(operation),
             description=description,
         )
+
+
+def _wallet_command_text(client, identity: TelegramIdentity, command: str, chain: str) -> str:
+    if command == "wallet":
+        return _create_wallet_text(client, identity, chain=chain)
+    return client.execute(
+        "balance", identity,
+        user_access_token=_user_access_token(client, identity, chain=chain),
+        **({"chain": chain} if chain != "base" else {}),
+    )

@@ -16,7 +16,7 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Mapping
-from urllib.parse import parse_qs, quote
+from urllib.parse import parse_qs, quote, urlparse
 import urllib.request
 
 
@@ -139,6 +139,7 @@ from .web_search import (
     EXA_SEARCH_URL,
     build_web_search_from_env,
 )
+from .solana_wallets import validate_wallet_chain
 from .user_wallets import (
     BASE_NATIVE_ETH_ASSET_ID,
     DEFAULT_USER_WALLET_STORE_PATH,
@@ -466,6 +467,11 @@ PAID_TOOL_ALIASES = {
     "price": "anchor.token_price",
     "get_token_price": "anchor.token_price",
 }
+
+
+def _wallet_chain_kwargs(payload: dict) -> dict:
+    chain = validate_wallet_chain(payload.get("chain", "base"))
+    return {"chain": chain} if chain != "base" else {}
 
 
 class Sign402GatewayHandler(BaseHTTPRequestHandler):
@@ -820,6 +826,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             result = self.server.user_wallet_service.create_wallet(
                 telegram_user_id=telegram_user_id,
                 telegram_username=str(payload.get("telegramUsername", "") or ""),
+                **_wallet_chain_kwargs(payload),
             )
             self._send_json(_without_private_key_material(result), status=200)
         except WalletApiTokenNotConfiguredError as exc:
@@ -835,7 +842,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             result = self.server.user_wallet_service.wallet_status(
-                _require_authenticated_user(self, payload)
+                _require_authenticated_user(self, payload), **_wallet_chain_kwargs(payload)
             )
             status = 200 if bool(result.get("ok")) else 404
             self._send_json(_without_private_key_material(result), status=status)
@@ -852,7 +859,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             result = self.server.user_wallet_service.wallet_balance(
-                _require_authenticated_user(self, payload)
+                _require_authenticated_user(self, payload), **_wallet_chain_kwargs(payload)
             )
             status = 200 if bool(result.get("ok")) else 404
             self._send_json(_without_private_key_material(result), status=status)
@@ -1705,7 +1712,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         settled = False
         try:
             user_id = _require_authenticated_user(
-                self, {"telegramUserId": telegram_user_id}
+                self, {**payload, "telegramUserId": telegram_user_id}
             )
             ledger = getattr(self.server, "ledger_payments", None)
             if ledger is not None and user_id == ledger.config.owner:
@@ -5971,6 +5978,14 @@ def _require_authenticated_user(
     if not token:
         raise WalletApiAuthError("per-user access token is required")
     user_id = _authenticated_user_id(handler, payload)
+    if "chain" in payload:
+        chain = validate_wallet_chain(payload["chain"])
+        # Explicit Solana requests must not execute a legacy Base operation.
+        # Extend this allowlist only when that operation has a Solana adapter.
+        if chain == "solana" and urlparse(handler.path).path not in {
+            "/agent/wallet", "/agent/wallet-balance",
+        }:
+            raise ValueError("This operation is not enabled on Solana yet.")
     _enforce_user_request_rate(user_id)
     return user_id
 
