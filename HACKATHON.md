@@ -6,7 +6,8 @@
 - [Imported baseline](https://github.com/bubon-ik/singit-solana/tree/f39959059922b693f14c2a3e9bec97c87881e07b)
 - [Changes since the imported baseline](https://github.com/bubon-ik/singit-solana/compare/singit-base-baseline...main)
 - [Commit history](https://github.com/bubon-ik/singit-solana/commits/main/)
-- [Solana checks](solana-x402-service/CHECKS.md)
+- [Standalone Solana client checks](solana-x402-service/CHECKS.md)
+- [Managed wallet and Telegram command checks](docs/solana-wallet-checks.md)
 - [Integration plan](docs/solana-integration.md)
 
 ## Competition period and disclosure
@@ -28,13 +29,13 @@ The imported source already contains the Telegram/Hermes agent, managed Base wal
 | 2026-09-17 | [2f5c1b0](https://github.com/bubon-ik/singit-solana/commit/2f5c1b0) | Added the standalone Solana/Venice x402 client, tests, integration plan and CI workflow to the imported agent repository. | 34 local tests passed. Live Solana authentication and an unpaid Venice quote were checked. No real payment or paid model response was completed. The client was developed separately earlier in this work session and first committed here as a module; this is not a record of each individual implementation step. |
 | 2026-09-17 | [57ef9c3](https://github.com/bubon-ik/singit-solana/commit/57ef9c3) | Documented the separate public repository. | Documentation only. |
 | 2026-09-17 | [f0eaa0b](https://github.com/bubon-ik/singit-solana/commit/f0eaa0b) | Converted the root and Solana module README files to English. | Documentation only. |
+| 2026-09-17 | [eb10f40](https://github.com/bubon-ik/singit-solana/commit/eb10f40) | Added per-user encrypted Solana wallets, mainnet SOL/native-USDC balances, explicit network routing, and `/wallet solana` / `/balance solana` in the Telegram plugin. Preserved Base wallets and blocked Solana requests from entering legacy Base spending routes. | 1,234 gateway tests and 284 plugin tests passed. A temporary empty wallet was accepted by the Solana SDK; live mainnet RPC returned zero SOL and USDC. No production deployment, real Telegram transport run or payment. |
 
 The client implements Solana SIWX authentication, mainnet USDC quote validation, explicit quote approval, SDK transaction construction, durable payment attempts, duplicate prevention and read-only reconciliation. The funded payment path has only been exercised with mocked network responses. See the verification record for the distinction between offline and live checks.
 
 ## Pending work — not claimed as completed
 
-- Per-user managed Solana wallets with encrypted key storage.
-- Telegram wallet and balance commands for Solana.
+- Deploy and verify the implemented wallet commands with an isolated Telegram bot.
 - Integration of the Solana client into the agent's approval and spending flow.
 - A real mainnet Venice payment and paid response through the agent.
 - Verification and integration of a supported Bitrefill Solana purchase route.
