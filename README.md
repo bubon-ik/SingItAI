@@ -3,6 +3,10 @@
 A separate repository for adding Solana support to the SingIt Telegram agent.
 Based on `SingItAI/main` at commit `f39959059922b693f14c2a3e9bec97c87881e07b`.
 
+## Hackathon development record
+
+See [HACKATHON.md](HACKATHON.md) for the existing SingIt foundation, recorded Solana work, verification evidence, and pending milestones. [Compare changes with the imported baseline](https://github.com/bubon-ik/singit-solana/compare/singit-base-baseline...main).
+
 ## Current status
 
 - The full agent code has been imported from the committed `main` branch.

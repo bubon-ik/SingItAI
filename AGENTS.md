@@ -23,3 +23,9 @@
 ## Documentation language
 
 - Write all README files and future README updates in English.
+
+## Hackathon development history
+
+- Keep HACKATHON.md current when completing a feature: include its commit or PR, verification and limitations.
+- Distinguish imported SingIt functionality, new Solana work, and planned features. Preserve the published history and singit-base-baseline tag; do not rewrite dates.
+- The imported baseline is dated September 17, 2026, not the competition start. Never present it as a September 14 snapshot.
