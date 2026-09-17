@@ -26,7 +26,8 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 SIGN402_BRIDGE_DIR = ROOT_DIR / "sign402-bridge"
 PAYMENT_EXECUTOR_DIR = ROOT_DIR / "payment-executor"
 LIVE_DEMO_DIR = ROOT_DIR / "live-demo"
-DEMO_RESOURCE_SERVER_DIR = ROOT_DIR / "demo-resource-server"
+# Historical runtime paths: retained so existing deployments keep their orders
+# and state when the retired dashboard HTML is removed from the repository.
 DEFAULT_EVENT_STORE_PATH = ROOT_DIR / "demo-dashboard" / "latest-run.json"
 DEFAULT_AGENT_STATE_PATH = ROOT_DIR / "demo-dashboard" / "agent-state.json"
 DEFAULT_BITREFILL_COMMERCE_STORE_PATH = ROOT_DIR / "demo-dashboard" / "bitrefill-orders.sqlite3"
@@ -78,17 +79,16 @@ SPEND_RECORD_RETENTION_DAYS = 30
 MAX_BASE_RPC_RESPONSE_BYTES = 1024 * 1024
 COINBASE_NATIVE_TOKEN_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 
-for package_dir in (SIGN402_BRIDGE_DIR, PAYMENT_EXECUTOR_DIR, LIVE_DEMO_DIR, DEMO_RESOURCE_SERVER_DIR):
+for package_dir in (SIGN402_BRIDGE_DIR, PAYMENT_EXECUTOR_DIR, LIVE_DEMO_DIR):
     package_path = str(package_dir)
     if package_path not in sys.path:
         sys.path.insert(0, package_path)
 
-from sign402_live.flow import build_payment_commitment
+from sign402_live.flow import build_payment_commitment, encode_payment_proof
 from sign402_live.http_resource import X402ResourceClient
 from sign402_bridge.firefly import FireflyClient, find_firefly_port
 from sign402_bridge.policy import canonicalize_policy, hash_policy
 from sign402_executor.executor import build_x402_avm_payment_signature_header, execute_payment
-from x402_demo.core import encode_payment_proof
 
 from spending_memory.adapters.x402 import build_policy, to_payment
 

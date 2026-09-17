@@ -104,6 +104,13 @@ fixture checking that secrets do not reach logs. It is not a failure.
 
 ## Where state lives
 
+The retired dashboard HTML and demo resource server are no longer shipped.
+Existing files in `~/apps/sign402/demo-dashboard/` remain gateway runtime state:
+`bitrefill-orders.sqlite3`, `latest-run.json`, `agent-state.json` and
+`user-purchases.json`. Their default paths have not changed, and a normal Git
+update preserves these ignored files. Do not run `git clean -fdx` on a deployment.
+Backup and recovery scripts continue to use the historical locations.
+
 On the VPS, under `~/.sign402/`:
 
 | File | Contents |

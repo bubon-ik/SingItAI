@@ -25,9 +25,12 @@ The original project specification, roadmap, hardware-consent pitch and
 August proposal review are also archived in Git history. To restore any of
 these files locally, use `git restore --source=84d8ee8 -- <path>`.
 
-The original Firefly/Algorand prototype lives in `sign402-bridge/`,
-`payment-executor/`, `demo-resource-server/` and `live-demo/`. Its instructions
-include `DEMO_SCRIPT.md` and `scripts/start-local-demo.sh`. These are historical
-reference material, not the current production deployment guide. The gateway
-still imports shared code from all four directories at startup, so they remain
-runtime dependencies even when the original demo routes are not used.
+The demo resource server, HTML dashboard, presentation script and local demo
+launcher have been removed. They remain in
+[Git history](https://github.com/bubon-ik/SingItAI/tree/d4380f431b04633f27bc726178fd24a3836a7934).
+The gateway still imports shared code from `sign402-bridge/`,
+`payment-executor/` and `live-demo/`; these remain runtime dependencies.
+
+Existing state in the historical `demo-dashboard/` directory is deliberately
+preserved. Its database paths and backup/recovery commands are unchanged.
+The removed dashboard HTML is unrelated to retention of order records.

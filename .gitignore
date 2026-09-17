@@ -34,9 +34,8 @@ sign402-gateway/.bitrefill-api-key
 .demo-logs/
 .ledger-live/
 .graph-live/
-demo-dashboard/latest-run.json
-demo-dashboard/agent-state.json
-demo-dashboard/bitrefill-orders.sqlite3
+# Runtime data retained at its historical path; includes SQLite sidecar files.
+/demo-dashboard/
 
 # Generated presentation scratch workspace
 outputs/
@@ -67,7 +66,7 @@ Sign402 X Longform Post.md
 # Local editor files
 .vscode/
 .idea/
-demo-dashboard/user-purchases.json
+/.codex/
 
 # …but not its installed dependencies.
 tools/ledger-approve/node_modules/

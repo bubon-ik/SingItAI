@@ -89,12 +89,17 @@ service today.
 | `cdp-x402-service/` | Base Mainnet payments and swaps via CDP and x402 |
 | `website/` | The public site at singitai.app |
 | `singit-risk-check/` | SINGIT-paid x402 endpoint for payment-requirement risk analysis |
-| `demo-dashboard/` | Live trace view used for demos |
 
 Legacy components: `sign402-bridge` and `payment-executor` (the original
-Firefly/Algorand lane), `demo-resource-server`, and `live-demo`. The gateway
+Firefly/Algorand lane), and `live-demo`. The gateway
 still imports shared utilities from these directories at startup; keep them
 installed even when the legacy routes are unused.
+
+The bundled demo resource server, HTML dashboard and presentation script have
+been retired. Existing gateway data under the historical `demo-dashboard/`
+directory remains in place as ignored runtime state; do not delete that data
+when updating a deployment. Local `.codex/` settings are also ignored and are
+not required to run the service.
 
 ## Development
 

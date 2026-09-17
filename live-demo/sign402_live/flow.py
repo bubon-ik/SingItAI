@@ -1,7 +1,13 @@
+import base64
 import hashlib
 import json
 import time
 from typing import Any, Callable
+
+
+def encode_payment_proof(proof: dict[str, Any]) -> str:
+    payload = json.dumps(proof, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
 
 
 def build_payment_commitment(
