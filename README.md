@@ -125,9 +125,9 @@ uses that library; other agents can use it independently.
 
 ## What was built during the event
 
-Everything below is on the `ethonline` branch, dated 5 September 2026 or later.
-The diff that contains all of it, and nothing else, is
-[`1ca72b4..ethonline`](https://github.com/bubon-ik/SingItAI/compare/1ca72b4...ethonline)
+The event work below was developed on `ethonline`, now renamed to `main`.
+Its snapshot before the repository cleanup is pinned in
+[`1ca72b4..29670c2`](https://github.com/bubon-ik/SingItAI/compare/1ca72b4...29670c2ed644b584768dae7bb9dc629c26c52958)
 — starting at the phase 0 findings. The latest verified implementation commits
 are [Ledger `4ca9c2c`](https://github.com/bubon-ik/SingItAI/commit/4ca9c2c8289b91c4d92af10469d9d26a4a52bfb3)
 and [The Graph `d7d2030`](https://github.com/bubon-ik/SingItAI/commit/d7d2030f7273e9b110ae54eb1d1dbe193b9aa916).

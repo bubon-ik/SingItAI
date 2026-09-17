@@ -2,7 +2,7 @@ name: Security gate
 
 on:
   push:
-    branches: [main, x402Bnkr, ethonline]
+    branches: [main, x402Bnkr]
   pull_request:
   workflow_dispatch:
   schedule:

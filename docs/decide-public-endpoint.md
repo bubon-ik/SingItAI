@@ -58,10 +58,10 @@ b92f904  memory: decide with Spending Memory at the spend chokepoint    on the b
 1ca72b4  memory: honour the env mapping the caller passes, not the flag NOT on the box
 ```
 
-So deploying `ethonline` does not ship the payment-decision change — that
-shipped already. It adds `1ca72b4`, which only affects the path where an
-explicit environment mapping is passed in, plus two new modules (`decide.py`,
-`keyring.py`) and the routing for them. The diff to `server.py` is additive:
+At that point, deploying `ethonline` did not introduce the payment-decision
+change — that had shipped already. That revision added `1ca72b4`, which only
+affects the path where an explicit environment mapping is passed in, plus two
+new modules (`decide.py`, `keyring.py`) and their routing. The diff to `server.py` was additive:
 two routes, one policy built at start-up, and `install_master_key()`, which with
 the key ring off returns the value that was already in the environment.
 
@@ -74,9 +74,10 @@ The kill switch is the way back and it needs no deploy:
 SIGN402_SPENDING_MEMORY_ENABLED=0   # every payment asks its owner, as before
 ```
 
-```bash
-ssh -t hermes@164.68.104.44 'cd ~/apps/sign402 && git fetch && git checkout ethonline && git pull --ff-only && sudo systemctl restart sign402-gateway && sleep 5 && systemctl is-active sign402-gateway && curl -s -o /dev/null -w "health: HTTP %{http_code}\n" http://127.0.0.1:8099/health'
-```
+The branch is now named `main`. The account above records the original endpoint
+rollout, not the complete diff of today's branch. For current deployment,
+including preservation of local server changes and dependency installation,
+follow [the operations guide](operations.md#deploying).
 
 ## 2. Configure the decide endpoint
 

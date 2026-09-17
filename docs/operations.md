@@ -12,15 +12,17 @@ The gateway checkout is `~/apps/sign402` on the VPS `hermes@164.68.104.44`.
 Observed on 17 September 2026: production is on `fix-crypto-news-memory` at
 `21dc310f9b115198e4f320cf110add7ebb54f2e7`. Both service units are active and
 `/health` returns HTTP 200. This confirms service availability, not an end-to-end
-purchase. GitHub's default branch is `ethonline`; it is not the deployed branch.
+purchase. GitHub's default branch is `main` (formerly `ethonline`); it is not
+the deployed branch. The previous GitHub `main` is preserved as
+`archive/legacy-main`.
 
 The server checkout also has local edits in `cdp-x402-service/package-lock.json`
 and `hermes-plugins/sign402-wallet/__init__.py`, plus an untracked
 `hermes-plugins/sign402-wallet/graph_demo.py`. The Graph plugin additions already
-exist in `ethonline`; the lockfile edits remove six `peer` metadata flags without
+exist in `main`; the lockfile edits remove six `peer` metadata flags without
 changing package versions. Preserve and compare these edits before deployment.
-The reconciliation branch combines the production fixes with `ethonline`; it
-has not been deployed merely because these instructions changed.
+The production fixes and repository cleanup are merged into `main`; that
+version has not been deployed merely because these instructions changed.
 
 | Piece | How it runs | Notes |
 | --- | --- | --- |
@@ -96,8 +98,8 @@ For Node unit tests, from the repository root:
 The Ledger unit tests mock the device and do not need native USB install scripts.
 For actual device use, follow the Ledger runbook's full installation instructions.
 CI runs Node tests independently of dependency audits so an advisory does not
-hide the test results. The security gate runs on pushes to `ethonline`, `main`
-and `x402Bnkr`, on pull requests, weekly, and on manual dispatch.
+hide the test results. The security gate runs on pushes to `main` and
+`x402Bnkr`, on pull requests, weekly, and on manual dispatch.
 
 A `RuntimeError: WALLET-FUNDING-SECRET-MARKER` in the output is a deliberate
 fixture checking that secrets do not reach logs. It is not a failure.
