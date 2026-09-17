@@ -1,0 +1,28 @@
+name: Solana client
+on:
+  push:
+    paths:
+      - 'solana-x402-service/**'
+      - '.github/workflows/solana-client.yml'
+  pull_request:
+    paths:
+      - 'solana-x402-service/**'
+      - '.github/workflows/solana-client.yml'
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: solana-x402-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: solana-x402-service/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: npm test

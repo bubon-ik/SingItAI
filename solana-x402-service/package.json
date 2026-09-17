@@ -1,0 +1,19 @@
+{
+  "name": "singit-solana",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.mjs",
+  "description": "Solana mainnet x402 client for Venice, with explicit payment approval",
+  "engines": { "node": ">=24.0.0" },
+  "scripts": {
+    "start": "node src/cli.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check src/cli.mjs && node --check src/venice.mjs && node --check src/payments.mjs"
+  },
+  "dependencies": {
+    "@solana/kit": "5.5.1",
+    "@x402/core": "2.14.0",
+    "@x402/svm": "2.14.0"
+  }
+}
