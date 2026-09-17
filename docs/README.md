@@ -15,6 +15,8 @@ plan is not evidence that a feature is deployed.
 
 ## Historical material
 
+- [ETHOnline 2026 submission](ethonline-submission.md): event scope, implementation links and dated verification results.
+
 The 86 old implementation plans and design specifications have been removed
 from the working tree. They remain available in
 [Git history](https://github.com/bubon-ik/SingItAI/tree/29670c2ed644b584768dae7bb9dc629c26c52958/docs/superpowers).
