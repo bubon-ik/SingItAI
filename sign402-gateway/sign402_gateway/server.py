@@ -1734,7 +1734,11 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             # Reserving now decides too: a BLOCK raises SpendingBlocked and is
             # rendered below, and a PAY comes back holding its claim.
             reservation_id, decision, claim_id = _reserve_user_wallet_spend(
-                self.server, user_id, payment_requirements, resource_url=resource_url
+                self.server,
+                user_id,
+                payment_requirements,
+                resource_url=resource_url,
+                claim_scope=payload.get("requestId"),
             )
             payment = _payment_from_requirements(
                 payment_requirements, owner=user_id, resource_url=resource_url
@@ -2940,14 +2944,21 @@ def build_server(
             quote.get("totalUsd") or quote["priceUsd"]
         )
         reservation_id, decision, claim_id = _reserve_user_wallet_spend(
-            server, user_id, requirement
+            server,
+            user_id,
+            requirement,
+            # One quote is one purchase, and a resent order for the same quote
+            # is the retry this is here to catch.
+            claim_scope=str(quote.get("quoteId") or quote.get("id") or ""),
         )
+        _forget_stale_spending_memory_holds(server)
         server.spending_memory_holds[reservation_id] = {
             "owner": user_id,
             "decision": decision,
             "claimId": claim_id,
             "payment": _payment_from_requirements(requirement, owner=user_id),
             "requirement": requirement,
+            "heldAt": time.time(),
         }
         return reservation_id
 
@@ -7070,6 +7081,15 @@ def _enforce_user_wallet_spend_limits(
 
 SPENDING_MEMORY_ENABLED_ENV = "SIGN402_SPENDING_MEMORY_ENABLED"
 
+SPENDING_MEMORY_HOLD_TTL_SECONDS = 900
+"""How long a decision may wait for the purchase it belongs to.
+
+Generous on purpose — a Bitrefill order reserves, waits for a human, funds and
+fulfils, and none of that is fast. What it bounds is the other case: a purchase
+that died between reserving and settling leaves its verdict behind, and a
+verdict with no purchase must not be able to answer for the next one.
+"""
+
 
 def build_spending_policy_from_env(env: dict[str, str] | None = None):
     """The policy, or None when memory is switched off.
@@ -7197,6 +7217,35 @@ class SpendingBlocked(ValueError):
         self.decision = decision
 
 
+CLAIM_SCOPE_WINDOW_SECONDS = 120
+"""Fallback window when a caller does not identify its own request.
+
+Same length as the claim itself. A client that resends inside it is retrying;
+one that comes back later meant it. Callers that send a request id get exact
+semantics instead of this guess.
+"""
+
+
+def _claim_scope(request_id: Any) -> str:
+    """What tells two purchases of the same thing apart.
+
+    A claim is keyed on owner, merchant, payout address and amount, which is a
+    good identity when the amount distinguishes purchases. For a fixed-price
+    API it does not: every call costs the same cent to the same address, so
+    without a scope the first successful purchase settles that claim for ever
+    and every later one is refused as already in flight.
+
+    The caller's own request id is the honest answer — a retry carries the same
+    one, a new intention carries a new one. Without it, fall back to a window,
+    which keeps a redelivered request from paying twice while still letting the
+    same purchase happen again tomorrow.
+    """
+    scope = str(request_id or "").strip()[:128]
+    if scope:
+        return scope
+    return f"window-{int(time.time()) // CLAIM_SCOPE_WINDOW_SECONDS}"
+
+
 def _payment_from_requirements(
     payment_requirements: dict[str, Any],
     *,
@@ -7239,6 +7288,7 @@ def _reserve_user_wallet_spend(
     payment_requirements: dict[str, Any],
     *,
     resource_url: str | None = None,
+    claim_scope: str | None = None,
 ) -> tuple[str, Any, str | None]:
     """Check the caps, hold the amount, and ask memory what to do about it.
 
@@ -7267,12 +7317,20 @@ def _reserve_user_wallet_spend(
             # Memory is off. No decision means "ask the owner", which is what
             # every caller already does when the answer is not a clean PAY.
             return reservation_id, None, None
-        payment = _payment_from_requirements(
-            payment_requirements,
-            owner=telegram_user_id,
-            resource_url=resource_url,
-        )
-        decision, claim_id = server.spending_policy.authorise(payment)
+        try:
+            payment = _payment_from_requirements(
+                payment_requirements,
+                owner=telegram_user_id,
+                resource_url=resource_url,
+            )
+            decision, claim_id = server.spending_policy.authorise(
+                payment, claim_scope=_claim_scope(claim_scope)
+            )
+        except Exception:
+            # The caller has not received this id yet and cannot release it
+            # when mapping or memory fails before we return.
+            _release_user_wallet_spend(server, reservation_id)
+            raise
         if decision.action.value == "BLOCK":
             # Nothing was spent, so nothing may stay held — including on the
             # paths whose own error handling never learns a decision was taken.
@@ -7368,10 +7426,38 @@ def _memory_hold_for_owner(
     """
     if not telegram_user_id:
         return None
+    _forget_stale_spending_memory_holds(server)
     for held in server.spending_memory_holds.values():
         if held.get("owner") == telegram_user_id:
             return held
     return None
+
+
+def _forget_stale_spending_memory_holds(
+    server: Sign402GatewayServer, *, now: float | None = None
+) -> list[str]:
+    """Drop decisions whose purchase never came back, and say which.
+
+    A purchase that crashes between reserving and settling leaves its verdict
+    in the registry. Unbounded that is a slow leak, which is the small problem.
+    The real one is that the verdict is found by owner: the buyer's *next*
+    purchase would be waved through on the strength of a decision taken for a
+    different one. Age is what separates the two.
+    """
+    cutoff = (now or time.time()) - SPENDING_MEMORY_HOLD_TTL_SECONDS
+    stale = [
+        reservation_id
+        for reservation_id, held in server.spending_memory_holds.items()
+        if float(held.get("heldAt") or 0) < cutoff
+    ]
+    for reservation_id in stale:
+        server.spending_memory_holds.pop(reservation_id, None)
+    if stale:
+        logger.warning(
+            "dropped %d spending memory hold(s) whose purchase never finished",
+            len(stale),
+        )
+    return stale
 
 
 def _release_user_wallet_spend(

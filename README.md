@@ -11,14 +11,17 @@
 
 # SingIt
 
-An AI agent that buys things for you, where every payment needs a human to
-approve it on a second device.
+An AI agent that buys things for you, with spending limits and human approval
+on a separate device when the payment policy requires it.
 
 You talk to a Telegram bot. It holds a Base wallet for you, finds gift cards
-and top-ups on Bitrefill, and quotes an exact price. Nothing is paid until you
-approve that exact purchase from a separate channel — iMessage or WhatsApp —
-so a compromised agent, a bad prompt, or a wrong number cannot spend your money
-on its own.
+and top-ups on Bitrefill, and quotes an exact price. In strict mode, covered
+purchases require approval through iMessage or WhatsApp. With Spending Memory
+enabled, supported x402-tool and Bitrefill payments may proceed within the
+configured budget when the policy returns PAY; ESCALATE asks the owner and
+BLOCK refuses the payment. This is not a universal approval policy for every
+payment route: LLM credit purchases, Venice chat and web search have separate
+flows.
 
 Live at [singitai.app](https://singitai.app).
 
@@ -27,9 +30,11 @@ Live at [singitai.app](https://singitai.app).
 ```text
 Telegram          you pick a product and see an exact quote
    |
-Gateway           checks your spending limits, builds the payment
+Gateway           checks spending limits and the payment policy
    |
-iMessage /        you approve this exact purchase on your phone
+Policy            BLOCK stops; PAY proceeds; ESCALATE asks you
+   |
+iMessage /        when required, approve this purchase on your phone
 WhatsApp
    |
 Base              USDC payment settles on Base Mainnet
@@ -37,7 +42,7 @@ Base              USDC payment settles on Base Mainnet
 Bitrefill         the code is delivered
 ```
 
-The approval step is bound to one purchase: product, amount and recipient are
+When requested, the approval is bound to one purchase: product, amount and recipient are
 committed before you are asked, and the gateway refuses anything that does not
 match what you approved.
 
@@ -56,12 +61,13 @@ match what you approved.
 | `/llm_buy` | Top up LLM credits through Bankr |
 
 Buying runs through the menu: **Buy Bitrefill → Browse Catalog** or **Search
-Products**, then a quote, then approval on your phone.
+Products**, then a quote and the applicable policy/approval checks.
 
 ## What protects your money
 
-- **A separate approval channel.** The agent proposes; you approve somewhere
-  else. Telegram alone cannot spend.
+- **A separate approval channel.** Purchases requiring human approval are
+  confirmed outside Telegram. Policy-authorised payments can proceed without
+  another prompt within their configured limits.
 - **Spending limits** enforced by the gateway, not by the agent.
 - **Exact-purchase binding.** The approval covers one product at one price;
   a changed quote invalidates it.
@@ -91,8 +97,10 @@ original hackathon build), `demo-resource-server`, `live-demo`.
 
 ## Development
 
-Running the service, deploying, and the test commands are in
-[docs/operations.md](docs/operations.md).
+Running the service, the observed deployment version, and the test commands
+are in [docs/operations.md](docs/operations.md). The
+[documentation index](docs/README.md) separates current runbooks from historical
+plans and prototype documentation.
 
 ---
 

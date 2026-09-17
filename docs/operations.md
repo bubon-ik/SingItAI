@@ -7,8 +7,20 @@ product is, see the [README](../README.md). For incident recovery see
 
 ## Production layout
 
-Everything runs on one VPS as `hermes@164.68.104.44`, from the checkout at
-`~/apps/sign402` on branch `x402Bnkr`.
+The gateway checkout is `~/apps/sign402` on the VPS `hermes@164.68.104.44`.
+
+Observed on 17 September 2026: production is on `fix-crypto-news-memory` at
+`21dc310f9b115198e4f320cf110add7ebb54f2e7`. Both service units are active and
+`/health` returns HTTP 200. This confirms service availability, not an end-to-end
+purchase. GitHub's default branch is `ethonline`; it is not the deployed branch.
+
+The server checkout also has local edits in `cdp-x402-service/package-lock.json`
+and `hermes-plugins/sign402-wallet/__init__.py`, plus an untracked
+`hermes-plugins/sign402-wallet/graph_demo.py`. The Graph plugin additions already
+exist in `ethonline`; the lockfile edits remove six `peer` metadata flags without
+changing package versions. Preserve and compare these edits before deployment.
+The reconciliation branch combines the production fixes with `ethonline`; it
+has not been deployed merely because these instructions changed.
 
 | Piece | How it runs | Notes |
 | --- | --- | --- |
@@ -34,12 +46,20 @@ curl -s https://singitai.app | grep -c "some-string-from-your-change"
 
 **Gateway:** changes under `sign402-gateway/` do not travel on their own.
 
-```bash
-ssh -t hermes@164.68.104.44 'cd ~/apps/sign402 && git pull && sudo systemctl restart sign402-gateway && sleep 5 && systemctl is-active sign402-gateway && curl -s -o /dev/null -w "health: HTTP %{http_code}\n" http://127.0.0.1:8099/health'
-```
+Before updating, record the current commit and preserve local code changes.
+Back up runtime state using the recovery runbook. Deploy a reviewed commit that
+includes both the production fixes and the intended new features; do not replace
+the checkout with the default branch solely because it is the GitHub default.
+Install the dependencies from that commit with the interpreter used by the
+service. In particular, `git pull` alone does not update the pinned
+`spending-memory` package. Then restart the gateway during a quiet period.
 
-`ssh -t` is required: without a TTY `sudo` cannot prompt for the password and
-the command fails with "a terminal is required to read the password".
+`sudo systemctl restart sign402-gateway` requires a TTY when sudo needs a password;
+use `ssh -t` for that operator step. Verify after restarting:
+
+```bash
+ssh hermes@164.68.104.44 'systemctl is-active sign402-gateway && curl --fail --max-time 5 -s -o /dev/null -w "health: HTTP %{http_code}\n" http://127.0.0.1:8099/health'
+```
 
 **Telegram plugin:** changes under `hermes-plugins/` need the bot restarted:
 
@@ -51,24 +71,33 @@ Restarting the bot interrupts any purchase mid-flow. Prefer a quiet moment.
 
 ## Running the tests
 
-The gateway suite needs an interpreter that has `mcp`, `httpx`, `toons` and
-`cryptography`. The system `python3` does not, and `sign402-gateway/` has no
-virtualenv of its own — use the sibling project's:
+Create an environment for this checkout and install its declared dependencies.
+Use Python 3.12 to match CI. From the repository root:
 
 ```bash
-cd sign402-gateway
-../payment-executor/.venv/bin/python -m unittest \
-  tests.test_bankr_llm_purchase tests.test_bankr_swap tests.test_base_balances \
-  tests.test_bitrefill_client tests.test_bitrefill_config tests.test_bitrefill_mcp \
-  tests.test_bitrefill_quote tests.test_bitrefill_runner tests.test_commerce_store \
-  tests.test_diagnostics tests.test_discard_legacy_fulfillment_tokens \
-  tests.test_gateway_server tests.test_goplausible_adapter tests.test_imessage_approvals \
-  tests.test_real_rate_pricing tests.test_secure_state tests.test_user_wallets \
-  tests.test_whatsapp_cloud
+python3.12 -m venv sign402-gateway/.venv
+sign402-gateway/.venv/bin/python -m pip install -e ./sign402-gateway
+(cd sign402-gateway && .venv/bin/python -m unittest discover -s tests)
+(cd hermes-plugins/sign402-wallet && ../../sign402-gateway/.venv/bin/python -m unittest discover -s tests)
 ```
 
-`unittest discover -s tests` fails with "Start directory is not importable";
-list the modules explicitly. pytest is not installed.
+`unittest discover -s tests` works from each component directory; pytest is not
+required. An existing sibling environment can be reused only after installing
+this checkout's dependency versions into it.
+
+For Node unit tests, from the repository root:
+
+```bash
+(cd cdp-x402-service && npm ci --ignore-scripts && npm test)
+(cd singit-risk-check && npm ci --ignore-scripts && npm test)
+(cd tools/ledger-approve && npm ci --ignore-scripts && npm test)
+```
+
+The Ledger unit tests mock the device and do not need native USB install scripts.
+For actual device use, follow the Ledger runbook's full installation instructions.
+CI runs Node tests independently of dependency audits so an advisory does not
+hide the test results. The security gate runs on pushes to `ethonline`, `main`
+and `x402Bnkr`, on pull requests, weekly, and on manual dispatch.
 
 A `RuntimeError: WALLET-FUNDING-SECRET-MARKER` in the output is a deliberate
 fixture checking that secrets do not reach logs. It is not a failure.
@@ -115,11 +144,11 @@ The gateway runs locally against the same code:
 ```bash
 cd sign402-gateway
 SIGN402_APPROVAL_PROVIDER=disabled \
-  ../payment-executor/.venv/bin/python -m sign402_gateway --port 8099
+  .venv/bin/python -m sign402_gateway --port 8099
 ```
 
 `SIGN402_APPROVAL_PROVIDER` defaults to `firefly`, which looks for a serial
-device and fails without one. `disabled` is what production runs, and it makes
+device and fails without one. `disabled` makes
 the legacy `/approve-*` endpoints refuse rather than reach for hardware.
 
 To let the server-side bot reach a local gateway, expose only the gateway:

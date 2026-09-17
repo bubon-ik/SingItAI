@@ -1,14 +1,14 @@
 [project]
 name = "sign402-gateway"
 version = "0.1.0"
-description = "Unified local gateway for Hermes Sign402 Firefly approvals and Algorand payment execution"
+description = "SingIt gateway for managed wallets, payment policies, approvals and x402 purchases"
 requires-python = ">=3.11"
 dependencies = [
   "cryptography>=42.0.0",
   "eth-account>=0.13.0",
   "mcp>=1.27,<2",
   "pyserial>=3.5",
-  "spending-memory @ git+https://github.com/bubon-ik/spending-memory@cbc0739b2842e92f7d7c698580d48284a7063960",
+  "spending-memory @ git+https://github.com/bubon-ik/spending-memory@443743ea2d69ef765528bd70b28a7e2d8c80e564",
   "toons>=0.7,<1",
 ]
 

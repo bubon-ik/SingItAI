@@ -7,6 +7,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+*.egg-info/
 
 # Node
 node_modules/
@@ -44,6 +45,13 @@ tmp/
 SingIt-backgrounds.zip
 SingIt-presentation-assets/
 
+# Generated x402 survey exports; keep handwritten notes and patches visible.
+/out/*.csv
+/out/x402-services-live.md
+
+# Local brainstorming sessions and preview server state
+/.superpowers/
+
 # Local tooling and duplicated/scratch workspaces
 .tools/
 tools/*
@@ -60,7 +68,6 @@ Sign402 X Longform Post.md
 .vscode/
 .idea/
 demo-dashboard/user-purchases.json
-sign402-gateway/sign402_gateway.egg-info/
 
 # …but not its installed dependencies.
 tools/ledger-approve/node_modules/

@@ -536,6 +536,7 @@ class GatewayServerTests(unittest.TestCase):
             with ExitStack() as stack:
                 stack.enter_context(patch.dict(os.environ, {}, clear=True))
                 for target in (
+                    "sign402_gateway.server.BuyerEmailStore",
                     "sign402_gateway.server.build_approval_client_from_env",
                     "sign402_gateway.server.build_payment_executor",
                     (
@@ -5017,7 +5018,7 @@ class GatewayServerTests(unittest.TestCase):
             server.spending_policy.memory.remember_settlement(payment, tx_id="0xseed")
         return payment
 
-    def run_memory_buy(self, server, requirements):
+    def run_memory_buy(self, server, requirements, request_id=None):
         with patch("sys.stderr", io.StringIO()):
             with (
                 patch(
@@ -5031,7 +5032,11 @@ class GatewayServerTests(unittest.TestCase):
             ):
                 handler = self.make_handler(
                     "/agent/buy-tool",
-                    {"tool": "news", "telegramUserId": "1045618308"},
+                    {
+                        "tool": "news",
+                        "telegramUserId": "1045618308",
+                        **({"requestId": request_id} if request_id else {}),
+                    },
                     server=server,
                     headers=self.llm_auth_headers(),
                 )
@@ -5092,12 +5097,16 @@ class GatewayServerTests(unittest.TestCase):
         server = self.memory_server(requirements)
         payment = self.teach_memory(server, requirements)
 
-        # The first attempt takes the claim and never finishes.
-        first, claim_id = server.spending_policy.authorise(payment)
+        # The first attempt takes the claim and never finishes. Same request
+        # id as the retry below, because that is what makes it the same
+        # purchase rather than a new one.
+        first, claim_id = server.spending_policy.authorise(
+            payment, claim_scope=gateway_server._claim_scope("take-1")
+        )
         self.assertEqual(first.action.value, "PAY")
         self.assertIsNotNone(claim_id)
 
-        response, body = self.run_memory_buy(server, requirements)
+        response, body = self.run_memory_buy(server, requirements, request_id="take-1")
 
         self.assertIn("HTTP/1.0 400 Bad Request", response)
         self.assertFalse(body["ok"])
@@ -5108,6 +5117,75 @@ class GatewayServerTests(unittest.TestCase):
         server.user_spend_limit_store.release_reservation.assert_called_once_with(
             "hold_test"
         )
+        server.user_x402_buyer.assert_not_called()
+        server.imessage_approval_service.request_purchase_approval.assert_not_called()
+
+    def test_a_new_request_for_the_same_thing_is_not_a_replay(self):
+        """The defect this closes, end to end.
+
+        A fixed-price API is the same owner, merchant, address and amount every
+        time. Without a scope the first settled purchase made every later one
+        impossible — settled claims are permanent, which is the replay
+        protection — so asking again tomorrow was refused as a replay.
+        """
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+        payment = self.teach_memory(server, requirements)
+
+        first, claim_id = server.spending_policy.authorise(
+            payment, claim_scope=gateway_server._claim_scope("yesterday")
+        )
+        self.assertIsNotNone(claim_id)
+        server.spending_policy.memory.settle_claim(claim_id, tx_id="0xsettled")
+
+        response, body = self.run_memory_buy(server, requirements, request_id="today")
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertTrue(body["ok"])
+
+    def test_initial_approvals_do_not_block_a_successfully_paid_merchant(self):
+        """Three cold-start prompts followed by settlement, as in the incident."""
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+        payment = self.memory_payment(server, requirements)
+        for _ in range(3):
+            decision = server.spending_policy.decide(payment)
+            self.assertEqual(decision.rule, "unknown_merchant")
+        server.spending_policy.memory.remember_settlement(payment, tx_id="0xfirst")
+
+        response, body = self.run_memory_buy(server, requirements, request_id="repeat")
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertTrue(body["ok"])
+        server.imessage_approval_service.request_purchase_approval.assert_not_called()
+        server.user_x402_buyer.assert_called_once()
+
+    def test_repeated_price_spikes_still_block_a_paid_tool(self):
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+        self.teach_memory(server, requirements)
+        expensive = self.memory_payment(server, {**requirements, "amountAtomic": "10000"})
+        for _ in range(3):
+            self.assertEqual(server.spending_policy.decide(expensive).rule, "price_spike")
+
+        response, body = self.run_memory_buy(server, requirements, request_id="repeat")
+
+        self.assertIn("HTTP/1.0 400 Bad Request", response)
+        self.assertEqual(body["decision"], "blocked_by_memory")
+        self.assertEqual(body["rule"], "repeated_escalations")
+        self.assertTrue(body["telegramText"])
+        server.user_x402_buyer.assert_not_called()
+        server.imessage_approval_service.request_purchase_approval.assert_not_called()
+
+    def test_memory_failure_releases_the_budget_before_returning_a_reservation(self):
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+        with patch.object(server.spending_policy, "authorise", side_effect=RuntimeError("memory unavailable")):
+            response, body = self.run_memory_buy(server, requirements)
+
+        self.assertIn("HTTP/1.0 400 Bad Request", response)
+        self.assertFalse(body["ok"])
+        server.user_spend_limit_store.release_reservation.assert_called_once_with("hold_test")
         server.user_x402_buyer.assert_not_called()
         server.imessage_approval_service.request_purchase_approval.assert_not_called()
 
@@ -5176,6 +5254,69 @@ class GatewayServerTests(unittest.TestCase):
                     "SPENDING_MEMORY_AUTONOMY_CAP": "banana",
                 }
             )
+
+    def test_the_same_purchase_can_be_made_again_tomorrow(self):
+        """The defect a scope closes.
+
+        A fixed-price API costs the same cent to the same address every time,
+        so owner-merchant-address-amount is the same claim for every purchase
+        anyone ever makes of it. Settled claims are permanent — that is the
+        replay protection — so without a scope the first successful purchase
+        refuses every later one for ever.
+        """
+        scopes = {
+            gateway_server._claim_scope("request-1"),
+            gateway_server._claim_scope("request-2"),
+        }
+        self.assertEqual(len(scopes), 2)
+
+    def test_a_resent_request_is_the_same_purchase(self):
+        """The retry the claim exists to catch keeps its id, and its scope."""
+        self.assertEqual(
+            gateway_server._claim_scope("request-1"),
+            gateway_server._claim_scope("request-1"),
+        )
+
+    def test_a_caller_without_a_request_id_still_collapses_a_retry(self):
+        """No id means guessing, and the guess is a window, not for ever."""
+        with patch.object(gateway_server.time, "time", return_value=1_000.0):
+            first = gateway_server._claim_scope(None)
+            immediate_retry = gateway_server._claim_scope("")
+        self.assertEqual(first, immediate_retry)
+
+        with patch.object(gateway_server.time, "time", return_value=1_000.0 + 600):
+            later = gateway_server._claim_scope(None)
+        self.assertNotEqual(first, later)
+
+    def test_a_decision_whose_purchase_never_finished_stops_answering(self):
+        """The leak that matters is not the memory, it is the wrong answer.
+
+        Holds are found by owner, so a verdict left behind by a purchase that
+        died would wave through the buyer's next one — a purchase nobody
+        decided about, approved on the strength of an old decision.
+        """
+        server = DummyServer()
+        server.spending_memory_holds = {
+            "res-crashed": {
+                "owner": "1045618308",
+                "decision": object(),
+                "heldAt": time.time() - gateway_server.SPENDING_MEMORY_HOLD_TTL_SECONDS - 1,
+            },
+            "res-live": {
+                "owner": "2222222222",
+                "decision": object(),
+                "heldAt": time.time(),
+            },
+        }
+
+        self.assertIsNone(
+            gateway_server._memory_hold_for_owner(server, "1045618308")
+        )
+        self.assertNotIn("res-crashed", server.spending_memory_holds)
+
+        still_going = gateway_server._memory_hold_for_owner(server, "2222222222")
+        self.assertIsNotNone(still_going)
+        self.assertIn("res-live", server.spending_memory_holds)
 
     def test_agent_buy_tool_for_user_releases_the_hold_when_payment_fails(self):
         server = DummyServer()

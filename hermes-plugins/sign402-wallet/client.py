@@ -214,9 +214,16 @@ class GatewayClient:
         identity: TelegramIdentity,
         *,
         user_access_token: str | None = None,
+        request_id: str | None = None,
     ) -> str:
-        payload = {"tool": str(tool or "").strip(), "telegramUserId": identity.user_id,
-                   "requestId": str(uuid.uuid4())}
+        payload = {
+            "tool": str(tool or "").strip(),
+            "telegramUserId": identity.user_id,
+            # One id per request the buyer made. A resend of this same request
+            # carries it again and is refused as a duplicate; the next time
+            # they ask for the same thing, it is a new purchase and says so.
+            "requestId": request_id or str(uuid.uuid4()),
+        }
         if identity.username:
             payload["telegramUsername"] = identity.username
         result = self._post(
@@ -635,7 +642,8 @@ class GatewayClient:
         is_bitrefill = operation in {"quote-bitrefill", "buy-wallet-bitrefill"}
         is_llm = operation.startswith("llm-")
         is_imessage = operation in _IMESSAGE_OPERATION_PATHS
-        if not is_bitrefill and not is_llm and not is_imessage:
+        is_paid_tool = operation == "buy-tool"
+        if not is_bitrefill and not is_llm and not is_imessage and not is_paid_tool:
             return None
         try:
             body = exc.read(self.max_response_bytes + 1)
@@ -649,6 +657,18 @@ class GatewayClient:
             return None
         if not isinstance(payload, dict):
             return None
+        if is_paid_tool:
+            # These are deliberate policy/approval outcomes with text written
+            # for the buyer. Unexpected exceptions still use the fixed error;
+            # never forward a signer's stderr or an upstream response body.
+            if payload.get("decision") in {"blocked_by_memory", "rejected_by_imessage"}:
+                text = payload.get("telegramText")
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+            error = str(payload.get("error") or "").strip()
+            if error.startswith(_SPEND_LIMIT_PREFIX):
+                return f"{error}\n\n{_SPEND_LIMIT_HINT}"
+            return _GATEWAY_ERROR_TEXTS.get(error)
         if is_imessage:
             for key in ("imessageText", "telegramText"):
                 text = payload.get(key)
