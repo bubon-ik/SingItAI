@@ -7,7 +7,7 @@ Baseline: SingItAI/main `f39959059922b693f14c2a3e9bec97c87881e07b`.
 - Imported the committed main branch, preserving Git history.
 - Added the existing Venice/Solana client as `solana-x402-service/`.
 - Kept original project modifications, credentials and runtime state out of the import.
-- Removed the clone's remote: no push target or production deployment is configured.
+- Publish independently at `bubon-ik/singit-solana`; no production deployment is configured.
 - Added Node 24 CI for the Solana module. No funded payment has been made.
 
 ## 1. Managed wallets and read-only Telegram flow

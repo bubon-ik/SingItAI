@@ -9,7 +9,7 @@
 - Клиент Venice/x402 для Solana mainnet находится в `solana-x402-service/`.
 - **Telegram-агент пока работает с Base. Подключение Solana к агенту ещё впереди.**
 - Реальные Solana-платежи и платные ответы Venice ещё не выполнялись.
-- Репозиторий локальный; GitHub remote не настроен.
+- Публичный репозиторий: [bubon-ik/singit-solana](https://github.com/bubon-ik/singit-solana).
 
 ## Проверка Solana-модуля
 
