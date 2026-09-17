@@ -37,7 +37,7 @@ class RecordingOpener:
         return self.response
 
 
-class GatewayClientTests(unittest.TestCase):
+class GatewayClientFixture:
     def make_client(self, opener, **kwargs):
         return GatewayClient(
             base_url="http://127.0.0.1:8099",
@@ -47,6 +47,8 @@ class GatewayClientTests(unittest.TestCase):
             **kwargs,
         )
 
+
+class GatewayClientTests(GatewayClientFixture, unittest.TestCase):
     def test_execute_posts_trusted_identity_and_bearer_token(self):
         response = FakeResponse(
             json.dumps({"telegramText": "Wallet 0xabc"}).encode("utf-8")
@@ -1052,7 +1054,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class ChatClientTests(GatewayClientTests):
+class ChatClientTests(GatewayClientFixture, unittest.TestCase):
     def test_chat_start_posts_to_the_chat_route(self):
         opener = RecordingOpener(
             response=FakeResponse(

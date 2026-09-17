@@ -69,7 +69,7 @@
 
 Половина есть: Bankr-интеграция, лимиты, каналы подтверждения. Не хватает
 политики с периодом и триггера по остатку. Спека — в
-`docs/superpowers/specs/2026-08-11-recurring-policy-auto-topup-design.md`.
+[архивной спецификации](https://github.com/bubon-ik/SingItAI/blob/29670c2ed644b584768dae7bb9dc629c26c52958/docs/superpowers/specs/2026-08-11-recurring-policy-auto-topup-design.md).
 
 Это единственный сценарий, где агент объективно лучше человека с браузером,
 и единственный, где никто не конкурирует.

@@ -15,14 +15,19 @@ plan is not evidence that a feature is deployed.
 
 ## Historical material
 
-`superpowers/plans/` and `superpowers/specs/` retain implementation and design
-history. They can contain superseded decisions or unfinished proposals; use
-the current code, tests and operating instructions to establish feature status.
-Their paths are retained because other documents link to them.
+The 86 old implementation plans and design specifications have been removed
+from the working tree. They remain available in
+[Git history](https://github.com/bubon-ik/SingItAI/tree/29670c2ed644b584768dae7bb9dc629c26c52958/docs/superpowers).
+Those documents contain superseded decisions and unfinished proposals; use the
+current code, tests and operating instructions to establish feature status.
+
+The original project specification, roadmap, hardware-consent pitch and
+August proposal review are also archived in Git history. To restore any of
+these files locally, use `git restore --source=84d8ee8 -- <path>`.
 
 The original Firefly/Algorand prototype lives in `sign402-bridge/`,
 `payment-executor/`, `demo-resource-server/` and `live-demo/`. Its instructions
-include the root `DEMO_SCRIPT.md`, `Hermes Sign402 - Project Spec.md`,
-`Hermes Sign402 - Roadmap.md` and the local-demo scripts. These are historical
-reference material, not the current production deployment guide. Keep the
-modules in place until their imports and demo scripts have been separated.
+include `DEMO_SCRIPT.md` and `scripts/start-local-demo.sh`. These are historical
+reference material, not the current production deployment guide. The gateway
+still imports shared code from all four directories at startup, so they remain
+runtime dependencies even when the original demo routes are not used.

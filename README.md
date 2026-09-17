@@ -91,9 +91,10 @@ service today.
 | `singit-risk-check/` | SINGIT-paid x402 endpoint for payment-requirement risk analysis |
 | `demo-dashboard/` | Live trace view used for demos |
 
-Kept for reference, not used in production: `sign402-bridge` and
-`payment-executor` (Firefly hardware bridge and the Algorand lane from the
-original hackathon build), `demo-resource-server`, `live-demo`.
+Legacy components: `sign402-bridge` and `payment-executor` (the original
+Firefly/Algorand lane), `demo-resource-server`, and `live-demo`. The gateway
+still imports shared utilities from these directories at startup; keep them
+installed even when the legacy routes are unused.
 
 ## Development
 
