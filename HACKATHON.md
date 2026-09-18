@@ -8,6 +8,7 @@
 - [Commit history](https://github.com/bubon-ik/singit-solana/commits/main/)
 - [Standalone Solana client checks](solana-x402-service/CHECKS.md)
 - [Managed wallet and Telegram command checks](docs/solana-wallet-checks.md)
+- [First real Bitrefill Solana purchase](docs/bitrefill-solana-checks.md)
 - [Integration plan](docs/solana-integration.md)
 
 ## Competition period and disclosure
@@ -31,14 +32,20 @@ The imported source already contains the Telegram/Hermes agent, managed Base wal
 | 2026-09-17 | [f0eaa0b](https://github.com/bubon-ik/singit-solana/commit/f0eaa0b) | Converted the root and Solana module README files to English. | Documentation only. |
 | 2026-09-17 | [eb10f40](https://github.com/bubon-ik/singit-solana/commit/eb10f40) | Added per-user encrypted Solana wallets, mainnet SOL/native-USDC balances, explicit network routing, and `/wallet solana` / `/balance solana` in the Telegram plugin. Preserved Base wallets and blocked Solana requests from entering legacy Base spending routes. | 1,234 gateway tests and 284 plugin tests passed. A temporary empty wallet was accepted by the Solana SDK; live mainnet RPC returned zero SOL and USDC. No production deployment, real Telegram transport run or payment. |
 
-The client implements Solana SIWX authentication, mainnet USDC quote validation, explicit quote approval, SDK transaction construction, durable payment attempts, duplicate prevention and read-only reconciliation. The funded payment path has only been exercised with mocked network responses. See the verification record for the distinction between offline and live checks.
+The Venice client implements Solana SIWX authentication, mainnet USDC quote validation, explicit quote approval, SDK transaction construction, durable payment attempts, duplicate prevention and read-only reconciliation. Its Venice payment flow has only been exercised with mocked network responses.
+
+### September 18: first real Bitrefill purchase
+
+An operator-assisted Alza CZ 200 CZK purchase completed through the project Bitrefill MCP client and the Solana SDK payment wrapper. The final charge was 9.44 USDC, the exact transaction was confirmed on mainnet, and the actual gift-card code was retrieved using the paying wallet. [Evidence and limits](docs/bitrefill-solana-checks.md) · [Record history](https://github.com/bubon-ik/singit-solana/commits/main/docs/bitrefill-solana-checks.md).
+
+Temporary helpers coordinated this live check; it does not constitute a reusable Bitrefill Solana adapter or a deployed Telegram purchase flow. No redemption data, buyer email or payment credentials are published.
 
 ## Pending work — not claimed as completed
 
 - Deploy and verify the implemented wallet commands with an isolated Telegram bot.
 - Integration of the Solana client into the agent's approval and spending flow.
 - A real mainnet Venice payment and paid response through the agent.
-- Verification and integration of a supported Bitrefill Solana purchase route.
+- Integration of the verified Bitrefill Solana route into the per-user agent, approvals and durable recovery.
 - A custom x402 stock-purchase endpoint.
 
 ## Evidence to maintain during development

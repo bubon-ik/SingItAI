@@ -12,7 +12,8 @@ See [HACKATHON.md](HACKATHON.md) for the existing SingIt foundation, recorded So
 - The full agent code has been imported from the committed `main` branch.
 - The Venice/x402 client for Solana mainnet lives in `solana-x402-service/`.
 - **The agent now supports Solana wallet creation and balance reads. Solana payment and Venice chat integration are still pending.**
-- No real Solana payments or paid Venice model requests have been completed.
+- A real Bitrefill purchase was completed with USDC on Solana: [Alza CZ 200 CZK, live verification](docs/bitrefill-solana-checks.md). This was an operator-assisted run; agent purchasing integration remains pending.
+- No real Venice top-up or paid Venice model request has been completed.
 - Public repository: [bubon-ik/singit-solana](https://github.com/bubon-ik/singit-solana).
 
 ## Solana wallet commands

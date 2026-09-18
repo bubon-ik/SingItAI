@@ -8,7 +8,7 @@ Baseline: SingItAI/main `f39959059922b693f14c2a3e9bec97c87881e07b`.
 - Added the existing Venice/Solana client as `solana-x402-service/`.
 - Kept original project modifications, credentials and runtime state out of the import.
 - Publish independently at `bubon-ik/singit-solana`; no production deployment is configured.
-- Added Node 24 CI for the Solana module. No funded payment has been made.
+- Added Node 24 CI for the Solana module. The first funded Bitrefill purchase was verified on September 18; see [live checks](bitrefill-solana-checks.md).
 
 ## 1. Managed wallets and read-only Telegram flow — implemented locally
 
@@ -72,10 +72,16 @@ newly created per-user managed wallet.
 
 ## 4. Bitrefill
 
-Verify live Solana payment support in the actual project MCP purchase route
-before implementing it. Respect the repository's Bitrefill skill and exact
-purchase-confirmation rules. Provider support is a prerequisite, not an
-assumption. A working Venice payment does not establish Bitrefill support.
+Provider support was verified with a real Alza CZ 200 CZK purchase on
+September 18, 2026: the project MCP client created the order, a 9.44 USDC
+Solana x402 payment confirmed, and the code was retrieved. See
+[the scope and evidence](bitrefill-solana-checks.md).
+
+Next, implement this route in the per-user agent approval and spending flow,
+with durable invoice recovery and duplicate-payment prevention. Preserve
+the existing Base flow and the repository's purchase-confirmation rules.
+The successful operator-assisted purchase does not establish Telegram
+integration or production readiness.
 
 ## Later
 
