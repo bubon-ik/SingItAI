@@ -75,6 +75,25 @@ python -m unittest discover -s sign402-gateway/tests
 python -m unittest discover -s hermes-plugins/sign402-wallet/tests
 ```
 
-CI installs the Telegram test dependency explicitly. A live visual and transport
-check still needs an isolated bot token and independent runtime state. The
-running Base bot and the original repository were not modified.
+CI installs the Telegram test dependency explicitly. The implementation checks
+above were completed before deployment, without modifying the running bot.
+
+## Existing VPS bot replacement
+
+On September 18 the owner explicitly requested replacing the existing bot.
+Release `6b3c2f575d3ce3c06a08c5712d282688ea50afb1` was deployed in place after
+private code/configuration/state backups. The original local Base repository
+was not modified. The VPS checkout now tracks the separate Solana repository.
+
+- On the VPS: 1,245 gateway tests, 302 plugin tests using installed PTB 22.6,
+  and 46 CDP helper tests passed before switching.
+- The gateway and existing Telegram bot restarted successfully; health returned
+  HTTP 200 and Telegram `getMe` succeeded. No queued Telegram updates or startup
+  tracebacks were observed in the post-restart check.
+- Existing Base wallet addresses and encrypted keys, bot configuration and
+  stored purchase history were verified unchanged.
+- The new purchase-history route returned HTTP 401 without authentication.
+- No purchase or code reveal was performed. A user still needs to send `/start`
+  and check Home, Settings, Wallet, Purchases and inline navigation in Telegram.
+- Solana wallet creation and balance reads are available; purchases and
+  withdrawals through the Telegram bot remain on Base.

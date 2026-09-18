@@ -42,9 +42,22 @@ An operator-assisted Alza CZ 200 CZK purchase completed through the project Bitr
 
 Temporary helpers coordinated this live check; it does not constitute a reusable Bitrefill Solana adapter or a deployed Telegram purchase flow. No redemption data, buyer email or payment credentials are published.
 
+### September 18: existing Telegram bot updated
+
+At the owner's explicit request, release
+[`6b3c2f5`](https://github.com/bubon-ik/singit-solana/commit/6b3c2f5) replaced the
+existing VPS bot after private backups. It retained the existing bot identity,
+Base wallets, configuration and purchase history. Before switching, 1,245
+gateway tests, 302 plugin tests with the server's installed Telegram library,
+and 46 CDP helper tests passed. Both services started, gateway health and
+Telegram authentication succeeded, and unauthenticated purchase-history access
+was rejected. Manual Telegram navigation and a purchase through the refreshed
+UI remain unverified. This deployment does not enable Solana spending through
+the bot. [Deployment checks](docs/telegram-ui-checks.md#existing-vps-bot-replacement).
+
 ## Pending work — not claimed as completed
 
-- Deploy and verify the implemented wallet commands with an isolated Telegram bot.
+- Manually verify the deployed wallet commands and refreshed navigation in Telegram.
 - Integration of the Solana client into the agent's approval and spending flow.
 - A real mainnet Venice payment and paid response through the agent.
 - Integration of the verified Bitrefill Solana route into the per-user agent, approvals and durable recovery.
