@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
+from types import SimpleNamespace
 import json
 import logging
 import os
@@ -17,6 +19,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .client import GatewayClient, GatewayClientError
+from .telegram_ui import ButtonSessions, MessageCard, actions, plain_markup, product_label, package_label
 from .graph_demo import handle_graph_demo
 from .identity import (
     TelegramIdentity,
@@ -57,15 +60,16 @@ _USER_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 5 * 60
 _USER_ACCESS_TOKEN_CACHE_MAX_USERS = 4096
 _TELEGRAM_OPERATION_MAX_USERS = 4096
 _TELEGRAM_PAID_TOOL_STARTED_MESSAGE = (
-    "Sign402 purchase started. I'll post the result here."
+    "SingIt purchase started. I'll post the result here."
 )
 # Deliberately does not promise an approval prompt. This line is sent before
 # the gateway is called, so it cannot know whether one is coming: memory may
 # settle a known merchant with nobody asked. Promising a prompt that never
 # arrives reads as the product not knowing what it does.
 _TELEGRAM_BITREFILL_STARTED_MESSAGE = (
-    "Bitrefill purchase started. Approve it in your selected approval channel; "
-    "I'll post the result here."
+    "Preparing your order…\n"
+    "Review the final quote in your approval channel when it arrives.\n"
+    "This card will update with the result."
 )
 _TELEGRAM_LLM_STARTED_MESSAGE = (
     "Bankr LLM purchase started. Approve it in your selected approval channel; "
@@ -80,6 +84,10 @@ _TELEGRAM_PUBLIC_COMMAND_STARTED_MESSAGES = {
     "wallet": "Loading wallet…",
     "balance": "Checking balance…",
     "last-purchase": "Loading last purchase…",
+    "purchases": "Loading purchases…",
+    "purchase": "Loading purchase…",
+    "reveal": "Retrieving your code…",
+    "deposit": "Loading deposit address…",
     "limits": "Loading spending limits…",
     "email": "Loading delivery email…",
     "forget-email": "Forgetting delivery email…",
@@ -91,8 +99,10 @@ _TELEGRAM_PUBLIC_COMMAND_STARTED_MESSAGES = {
     "llm-credits": "Checking LLM credits…",
 }
 _TELEGRAM_PUBLIC_COMMAND_MENU = (
-    {"command": "start", "description": "Set up your Sign402 wallet"},
-    {"command": "help", "description": "Show Sign402 commands"},
+    {"command": "start", "description": "Open SingIt"},
+    {"command": "help", "description": "Help with SingIt"},
+    {"command": "purchases", "description": "Your purchase history"},
+    {"command": "settings", "description": "Email, approvals and limits"},
     {"command": "wallet", "description": "Show or create a wallet: base or solana"},
     {"command": "balance", "description": "Show wallet balances"},
     {"command": "connect_imessage", "description": "Select or link iMessage approvals"},
@@ -109,29 +119,29 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
 # the approval channel and the limits are housekeeping that only matters once a
 # purchase is in progress. Labels must stay in sync with
 # _TELEGRAM_BUTTON_COMMANDS below, which is keyed on the lowercased label.
-# Grouped by intent: what you can spend on, where your money is, settings.
-# Everything that is housekeeping — approvals, withdrawals, receipts, agent
-# credits — lives one level down, inside Wallet.
+# Main navigation stays persistent. Context-specific controls appear inline.
+# Approval channels, delivery email and limits live in Settings.
 _TELEGRAM_MAIN_MENU_BUTTONS = (
-    ("🎁 Buy Gift Cards", "💰 Balance"),
-    ("👛 Wallet", "⚙️ Limits"),
-    ("❓ Help",),
+    ("🛍 Shop", "👛 Wallet"),
+    ("🧾 Purchases", "⚙️ Settings"),
 )
 _TELEGRAM_MAIN_MENU_WITH_CHAT = (
-    ("💬 Talk to AI", "🎁 Buy Gift Cards"),
-    ("💰 Balance", "👛 Wallet"),
-    ("⚙️ Limits", "❓ Help"),
+    ("💬 Chat", "🛍 Shop"),
+    ("👛 Wallet", "🧾 Purchases"),
+    ("⚙️ Settings",),
 )
-# "Talk to AI" is this bot answering, paid per message. "AI Credits" tops up
-# the user's own Bankr agent. They are different products, so they never share
-# a screen and no longer share a word.
-_WALLET_MENU_BUTTONS = (
-    ("🤖 AI Credits", "💸 Withdraw"),
-    ("🧾 Last Purchase",),
+_WALLET_MENU_BUTTONS = (("Base", "Solana"), ("Back",))
+_SETTINGS_MENU_BUTTONS = (
+    ("⚙️ Limits", "✉️ Delivery email"),
     ("📱 Connect iMessage", "📱 Connect WhatsApp"),
+    ("🤖 AI Credits", "❓ Help"),
     ("Back",),
 )
 _TELEGRAM_BUTTON_COMMANDS = {
+    "shop": "bitrefill",
+    "settings": "settings",
+    "purchases": "purchases",
+    "delivery email": "email",
     "wallet": "wallet",
     "balance": "balance",
     "connect imessage": "connect-imessage",
@@ -194,16 +204,16 @@ _BITREFILL_COUNTRY_BUTTONS = (
 _COMMANDS = {
     "wallet": ("create-wallet", "Show your agent wallet: base or solana"),
     "balance": ("balance", "Show your wallet balance: base or solana"),
-    "last-purchase": ("last-purchase", "Show your latest Sign402 purchase"),
+    "last-purchase": ("last-purchase", "Show your latest SingIt purchase"),
 }
 _IMESSAGE_COMMANDS = {
     "connect-imessage": (
         "connect-imessage",
-        "Link your iMessage number for Sign402 approvals",
+        "Link your iMessage number for SingIt approvals",
     ),
     "connect-whatsapp": (
         "connect-whatsapp",
-        "Link your WhatsApp number for Sign402 approvals",
+        "Link your WhatsApp number for SingIt approvals",
     ),
 }
 _IMESSAGE_PUBLIC_LINE_ENV_NAMES = (
@@ -263,6 +273,176 @@ _TELEGRAM_OPERATION_LOCK = threading.RLock()
 _TELEGRAM_DELIVERY_LOOP: asyncio.AbstractEventLoop | None = None
 _TELEGRAM_DELIVERY_LOOP_LOCK = threading.RLock()
 _TELEGRAM_SEND_TAILS: dict[str, asyncio.Task] = {}
+_BUTTON_SESSIONS = ButtonSessions()
+_TEXT_BUTTON_ACTIONS: dict[tuple[str, str], dict[str, str]] = {}
+
+
+def _operation_source(source):
+    result = SimpleNamespace(**vars(source))
+    result._singit_card = getattr(source, "_singit_card", None) or MessageCard()
+    return result
+
+
+def _install_telegram_buttons(gateway, source):
+    adapter = _telegram_adapter(gateway, source)
+    app = getattr(adapter, "_app", None)
+    if app is None or getattr(adapter, "_singit_buttons_app", None) is app:
+        return
+    try:
+        from telegram.ext import CallbackQueryHandler, ApplicationHandlerStop
+    except ImportError:
+        return
+
+    async def callback(update, context):
+        query = update.callback_query
+        try:
+            message = getattr(query, "message", None)
+            actor = getattr(query, "from_user", None)
+            chat = getattr(message, "chat", None)
+            if not actor or not message or getattr(chat, "type", None) != "private":
+                await query.answer("Open SingIt in a private chat.")
+                return
+            source_now = SimpleNamespace(platform=getattr(source, "platform", "telegram"),
+                                         user_id=str(actor.id), chat_id=str(chat.id),
+                                         chat_type="dm", user_name=getattr(actor, "username", None))
+            if not _sign402_telegram_user_authorized(source_now):
+                await query.answer("This button is unavailable.")
+                return
+            claimed = _BUTTON_SESSIONS.claim(actor.id, chat.id, message.message_id, query.data)
+            if claimed is None:
+                await query.answer("This screen expired. Send /start to open the menu.")
+                return
+            action, _original_source = claimed
+            # A revealed code must remain in chat after navigating away.
+            preserve = getattr(_original_source, "_singit_protect_card", False)
+            source_now._singit_card = MessageCard(None if preserve else message.message_id)
+            await query.answer()
+            event = SimpleNamespace(text=action, source=source_now,
+                                    get_command=lambda: action[1:].split()[0] if action.startswith("/") else None)
+            handle_pre_gateway_dispatch(event=event, gateway=gateway)
+        except Exception as exc:
+            logger.warning("SingIt button failed error=%s", type(exc).__name__)
+        finally:
+            # Do not let the generic Hermes callback handler process our payload.
+            raise ApplicationHandlerStop
+
+    app.add_handler(CallbackQueryHandler(callback, pattern=r"^singit:"), group=-10)
+    adapter._singit_buttons_app = app
+
+
+def _prepare_telegram_markup(gateway, source, markup):
+    if not _is_telegram_source(source):
+        return plain_markup(markup)
+    key = (str(getattr(source, "user_id", "")), str(getattr(source, "chat_id", "")))
+    if not markup:
+        return None
+    _BUTTON_SESSIONS.invalidate(*key)
+    _TEXT_BUTTON_ACTIONS.pop(key, None)
+    if "keyboard" not in markup:
+        return markup
+    if "_actions" not in markup:
+        markup = dict(markup, _actions=[[button["text"] for button in row] for row in markup["keyboard"]])
+    adapter = _telegram_adapter(gateway, source)
+    is_home = markup.get("keyboard") in (_telegram_main_menu_reply_markup()["keyboard"], _reply_keyboard(_TELEGRAM_CHAT_BUTTONS)["keyboard"])
+    if not is_home and (getattr(adapter, "_app", None) is not None and getattr(adapter, "_singit_buttons_app", None) is adapter._app) and getattr(source, "chat_type", "dm") in {"dm", "private"}:
+        return _BUTTON_SESSIONS.render(*key, markup, source)
+    # Hermes versions without PTB application access keep a working text menu.
+    if len(_TEXT_BUTTON_ACTIONS) >= _TELEGRAM_OPERATION_MAX_USERS:
+        _TEXT_BUTTON_ACTIONS.pop(next(iter(_TEXT_BUTTON_ACTIONS)))
+    _TEXT_BUTTON_ACTIONS[key] = {
+        button["text"]: markup["_actions"][r][c]
+        for r, row in enumerate(markup["keyboard"]) for c, button in enumerate(row)
+    }
+    return plain_markup(markup)
+
+
+def _wallet_network_buttons():
+    return actions([(("Base", "/wallet base"), ("Solana", "/wallet solana")), (("Home", "/start"),)])
+
+
+def _product_buttons(products, *, has_previous=False, has_next=False):
+    rows = [((f"{i}. {product_label(product)}", str(i)),) for i, product in enumerate(products, 1)]
+    pagination = []
+    if has_previous:
+        pagination.append(("Previous", "Previous"))
+    if has_next:
+        pagination.append(("Next", "Next"))
+    if pagination:
+        rows.append(tuple(pagination))
+    rows.append((("Search Products", "Search Products"), ("Back", "Back")))
+    return actions(rows)
+
+
+def _package_buttons(product, packages):
+    rows = [((f"{i}. {package_label(product, package)}", str(i)),) for i, package in enumerate(packages, 1)]
+    rows.append((("Back", "Back"),))
+    return actions(rows)
+
+
+def _payment_token_buttons(tokens):
+    rows = []
+    for index, token in enumerate(tokens, 1):
+        label = f"{index}. {token['symbol']} · {token['balance']} available"
+        if not token.get("verified"):
+            label += f" · {_short_address(token['contractAddress'])}"
+        rows.append(((label, str(index)),))
+    rows.append((("Back", "Back"),))
+    return actions(rows)
+
+
+def _purchase_screen(client, identity, command, args):
+    token = _user_access_token(client, identity)
+    if command == "purchases":
+        try:
+            offset = max(0, int(args or 0))
+        except ValueError:
+            offset = 0
+        result = client.purchases(identity, offset=offset, user_access_token=token)
+        items = result.get("purchases", [])
+        rows = []
+        for index, item in enumerate(items, offset + 1):
+            label = f"{index}. {item['name']} · {item.get('denomination') or item.get('network', '')}"
+            rows.append(((label[:64], f"/purchase {item['id']}"),))
+        nav = []
+        if offset:
+            nav.append(("Previous", f"/purchases {max(0, offset - 6)}"))
+        if result.get("hasNext"):
+            nav.append(("Next", f"/purchases {offset + 6}"))
+        if nav:
+            rows.append(tuple(nav))
+        rows.append((("Shop", "/bitrefill"), ("Home", "/start")))
+        text = "<b>Purchases</b>\nChoose an order to see its receipt. Codes stay hidden until you request them."
+        if not items:
+            text = "<b>Purchases</b>\nNo saved purchases yet. Open Shop to find your first gift card."
+        text += "\n\nYour latest 100 saved orders."
+        return _HtmlText(text), actions(rows)
+    purchase_id = str(args).strip()
+    if not re.fullmatch(r"[a-f0-9]{24}", purchase_id):
+        return "Open Purchases and choose an order.", actions([(("Purchases", "/purchases"),)])
+    result = client.purchases(identity, purchase_id=purchase_id, reveal=command == "reveal", user_access_token=token)
+    if command == "reveal":
+        return result["telegramText"], actions([(("Receipt", f"/purchase {purchase_id}"), ("Purchases", "/purchases"))])
+    item = result["purchase"]
+    lines = [f"<b>{_html_escape(item['name'])}</b>"]
+    if item.get("denomination"):
+        lines.append(_html_escape(item["denomination"]))
+    lines.extend(["", f"Status: {_html_escape(item['status'])}", f"Network: {_html_escape(item['network'])}"])
+    if item.get("paid"):
+        lines.append(f"Paid: {_html_escape(item['paid'])}")
+    if item.get("recordedAt"):
+        lines.append(f"Saved: {_html_escape(item['recordedAt'])}")
+    # The gateway constructs explorer URLs from validated transaction hashes.
+    if item.get("transactionUrl"):
+        lines.append(f'<a href="{_html_escape(item["transactionUrl"])}">View transaction</a>')
+    rows = []
+    if item.get("canReveal"):
+        rows.append((("Show code · once", f"/reveal {purchase_id}"),))
+    elif item.get("isBitrefill"):
+        lines.append("\nCode already requested. Check your delivery email or the earlier code message.")
+    if item.get("isBitrefill"):
+        lines.append("\nHow to use: follow the merchant instructions delivered with your code. Check its country and terms before redeeming.")
+    rows.append((("Purchases", "/purchases"), ("Home", "/start")))
+    return _HtmlText("\n".join(lines)), actions(rows)
 
 
 def _default_background_runner(callback: Callable[[], None]) -> None:
@@ -505,27 +685,15 @@ def _start_text(wallet_address: str, *, support_id: str = "") -> str:
     or a dash in dynamic text cannot make Telegram reject the whole message.
     Paths that cannot set parse_mode render this through `_html_to_plain`.
     """
-    address = _html_escape(str(wallet_address or "").strip())
     support = _html_escape(str(support_id or "").strip())
-    support_block = (
-        f"\n\nSupport ID: <code>{support}</code> — quote it if you contact support."
-        if support
-        else ""
-    )
-    # Two actions and nothing else. Everything a new user needs to set up —
-    # funding, spending limits, the approval channel — is asked for by the
-    # action that actually needs it, not demanded up front by a checklist.
+    chat = "\n<b>Chat</b> · Talk to AI using your wallet." if _ai_chat_enabled() else ""
     return (
-        "<b>SingIt</b> — gift cards, eSIMs and mobile top-ups in 180+ countries, "
-        "paid with crypto.\n\n"
-        "<b>Buy Bitrefill</b> — browse the catalogue and pay from your wallet.\n"
-        "<b>Chat</b> — ask an AI anything, paid from your wallet.\n\n"
-        "<b>Your Base wallet</b>\n"
-        f"<code>{address}</code>\n"
-        "Tap to copy. Add ETH for gas, and USDC or SINGIT to pay with."
-        f"{support_block}"
+        "<b>SingIt</b>\nYour wallet. Everyday purchases.\n\n"
+        "<b>Shop</b> · Gift cards, eSIMs and mobile top-ups."
+        f"{chat}\n<b>Purchases</b> · Orders, codes and receipts.\n\n"
+        "Open <b>Wallet</b> to choose a network and add funds."
+        + (f"\nSupport ID: <code>{support}</code>" if support else "")
     )
-
 
 class _HtmlText(str):
     """A message body already formatted as Telegram HTML.
@@ -567,8 +735,11 @@ def _html_to_plain(text: str) -> str:
 
 def _help_text() -> str:
     return (
-        "Sign402 commands\n\n"
-        "/wallet [base|solana] - Create or show your wallet\n"
+        "SingIt commands\n\n"
+        "/wallet [base|solana] - Choose a network or show its balance\n"
+        "/deposit [base|solana] - Show your deposit address\n"
+        "/purchases - Browse orders and reveal a code\n"
+        "/settings - Delivery email, approvals and limits\n"
         "/balance [base|solana] - Show balances on the selected network\n"
         "/connect_imessage - Select or link iMessage approvals\n"
         "/connect_whatsapp - Select or link WhatsApp approvals\n"
@@ -596,7 +767,7 @@ def _telegram_imessage_pairing_text(
         return text
     channel_label = _approval_channel_label(channel)
     return (
-        f"To link {channel_label} approvals, send the code below to the Sign402 {channel_label} line:\n"
+        f"To link {channel_label} approvals, send the code below to the SingIt {channel_label} line:\n"
         f"{line}\n\n"
         f"{text}"
     )
@@ -745,9 +916,9 @@ def _imessage_phone_prompt(*, channel: str = "imessage") -> str:
     # number and made onboarding look broken.
     public_line = "" if _photon_auto_register_users_enabled() else _imessage_public_line()
     channel_label = _approval_channel_label(channel)
-    target = f"\n\nSign402 {channel_label} line: {public_line}" if public_line else ""
+    target = f"\n\nSingIt {channel_label} line: {public_line}" if public_line else ""
     assignment_note = (
-        "\n\nAfter you send it, Sign402 will show your private pairing line and code."
+        "\n\nAfter you send it, SingIt will show your private pairing line and code."
         if _photon_auto_register_users_enabled()
         else ""
     )
@@ -898,6 +1069,15 @@ def handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
             # Silently drop callers outside the Sign402-specific policy so a broad
             # Hermes setting can never turn them into general-agent users.
             return dict(_SKIP_RESULT)
+        if is_telegram:
+            _install_telegram_buttons(gateway, source)
+            key = (str(source.user_id), str(source.chat_id))
+            _BUTTON_SESSIONS.invalidate(*key)
+            text_actions = _TEXT_BUTTON_ACTIONS.pop(key, {})
+            replacement = text_actions.get(str(getattr(event, "text", "") or "").strip())
+            if replacement:
+                event = copy.copy(event)
+                event.text = replacement
         return _handle_pre_gateway_dispatch(event=event, gateway=gateway, **kwargs)
     except Exception as exc:
         logger.warning(
@@ -1775,7 +1955,7 @@ def _sign402_telegram_user_authorized(source) -> bool:
 
 def _sign402_only_fallback_text() -> str:
     return (
-        "Use the Sign402 menu: Wallet, Balance, Buy Bitrefill, Limits, or Withdraw."
+        "Open SingIt: Shop, Wallet, Purchases or Settings."
     )
 
 
@@ -1793,7 +1973,7 @@ def _handle_telegram_global_navigation_message(*, event, source, gateway):
     _send_fixed_reply(
         gateway,
         source,
-        "Back to Sign402 main menu.",
+        "Back to SingIt main menu.",
         reply_markup=_telegram_main_menu_reply_markup(),
     )
     return dict(_SKIP_RESULT)
@@ -1817,7 +1997,7 @@ def _handle_telegram_imessage_registration_message(*, event, source, gateway):
         _send_fixed_reply(
             gateway,
             source,
-            "Back to Sign402 main menu.",
+            "Back to SingIt main menu.",
             reply_markup=_telegram_main_menu_reply_markup(),
         )
         return dict(_SKIP_RESULT)
@@ -1873,6 +2053,11 @@ def _start_telegram_background_operation(
         return dict(_SKIP_RESULT)
     if prepare is not None:
         prepare(generation)
+    source = _operation_source(source)
+    preserve_result = action in {"command:reveal", "command:last-purchase", "command:llm-buy", "command:llm-terms"}
+    if preserve_result:
+        source._singit_card = MessageCard()
+        source._singit_protect_card = True
     _send_fixed_reply(gateway, source, started_text)
 
     def execute() -> None:
@@ -1892,6 +2077,12 @@ def _start_telegram_background_operation(
             )
             text, reply_markup = _UNEXPECTED_ERROR_MESSAGE, None
         if not _finish_telegram_operation(user_id, generation):
+            if preserve_result:
+                # Delivery may consume a one-use capability; a navigation change
+                # must never discard the code after the gateway has returned it.
+                detached = SimpleNamespace(**{k: v for k, v in vars(source).items() if k != "_singit_card"})
+                _send_fixed_reply(gateway, detached, text)
+                return
             logger.debug(
                 "Discarding stale Sign402 Telegram action result action=%s user=%s",
                 action,
@@ -1967,17 +2158,27 @@ def _telegram_public_command_result(
     identity: TelegramIdentity,
 ) -> tuple[str, dict | None]:
     client = _client_factory()
-    if command in {"wallet", "balance"}:
+    if command in {"wallet", "balance", "deposit"}:
         chain = str(args or "base").strip().lower()
         if chain not in {"base", "solana"}:
-            return f"Usage: /{command} [base|solana]", None
-        text = _wallet_command_text(client, identity, command, chain)
-        if chain == "solana":
-            return text, None
-        if command == "balance":
-            text = f"{text}{_chat_budget_block(client, identity)}"
-        return text, (_telegram_wallet_menu_reply_markup() if command == "wallet"
-                      else _telegram_main_menu_reply_markup())
+            return f"Usage: /{command} [base|solana]", _wallet_network_buttons()
+        if command == "wallet":
+            _create_wallet_result(client, identity, chain=chain)
+        operation = "wallet" if command == "deposit" else "balance"
+        text = _wallet_command_text(client, identity, operation, chain)
+        if command != "deposit":
+            text = re.sub(r"^(?:Base agent|Solana mainnet) wallet: [^\n]+\n*", "", text)
+            text = f"{chain.title()} wallet\n\n{text}"
+            if chain == "base":
+                text += _chat_budget_block(client, identity)
+        rows = [(("Base", "/wallet base"), ("Solana", "/wallet solana")),
+                (("Deposit address", f"/deposit {chain}"), ("Refresh", f"/balance {chain}"))]
+        if chain == "base":
+            rows.append((("Withdraw", "/withdraw"),))
+        rows.append((("Home", "/start"),))
+        return text, actions(rows)
+    if command in {"purchases", "purchase", "reveal"}:
+        return _purchase_screen(client, identity, command, args)
     if command == "start":
         text = _HtmlText(
             _start_text(
@@ -2100,6 +2301,31 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
     identity = consume_gateway_identity() or _identity_from_telegram_source(source)
     if identity is None:
         _send_fixed_reply(gateway, source, _TELEGRAM_ONLY_MESSAGE)
+        return dict(_SKIP_RESULT)
+    if command in {"purchases", "purchase", "reveal"} and getattr(source, "chat_type", "dm") not in {"dm", "private"}:
+        _send_fixed_reply(gateway, source, "Open Purchases in your private chat with SingIt.")
+        return dict(_SKIP_RESULT)
+    if command == "withdraw" and _TELEGRAM_ACTIVE_OPERATIONS.get(str(identity.user_id), (None, ""))[1] == "withdraw:tokens":
+        return dict(_SKIP_RESULT)
+    if command in {"purchases", "withdraw", "chat"} or (command == "bitrefill" and not args.strip()):
+        _invalidate_telegram_operation(str(identity.user_id))
+        _BITREFILL_SESSIONS.pop(str(identity.user_id), None)
+        _WITHDRAW_SESSIONS.pop(str(identity.user_id), None)
+        _IMESSAGE_CONNECT_SESSIONS.pop(str(identity.user_id), None)
+    if command in {"start", "settings"} or (command == "wallet" and not args.strip()):
+        _invalidate_telegram_operation(str(identity.user_id))
+        _BITREFILL_SESSIONS.pop(str(identity.user_id), None)
+        _WITHDRAW_SESSIONS.pop(str(identity.user_id), None)
+        _IMESSAGE_CONNECT_SESSIONS.pop(str(identity.user_id), None)
+        if command == "start":
+            text, markup = _HtmlText(_start_text("", support_id=identity.user_id)), _telegram_main_menu_reply_markup()
+        elif command == "settings":
+            text = _HtmlText("<b>Settings</b>\nManage delivery email, payment approvals and spending limits.")
+            markup = _reply_keyboard(_SETTINGS_MENU_BUTTONS)
+        else:
+            text = _HtmlText("<b>Wallet</b>\nChoose a network to see its balance.\n\nSolana deposits and balances are available. Shop payments currently use Base.")
+            markup = _wallet_network_buttons()
+        _send_fixed_reply(gateway, source, text, reply_markup=markup)
         return dict(_SKIP_RESULT)
     if command == "chat":
         if _handle_telegram_chat_entry(
@@ -2381,8 +2607,8 @@ def _handle_telegram_bitrefill_wizard_message(*, event, source, gateway):
                         int(previous.get("start") or 0),
                         products,
                     ),
-                    reply_markup=_bitrefill_catalog_reply_keyboard(
-                        len(products),
+                    reply_markup=_product_buttons(
+                        products,
                         has_previous=bool(previous.get("hasPrevious")),
                         has_next=bool(previous.get("hasNext")),
                     ),
@@ -2397,7 +2623,7 @@ def _handle_telegram_bitrefill_wizard_message(*, event, source, gateway):
                         str(previous.get("country") or _bitrefill_country(user_id)),
                         products,
                     ),
-                    reply_markup=_numbered_reply_keyboard(len(products)),
+                    reply_markup=_product_buttons(products),
                 )
             elif previous_stage == "select-package":
                 packages = _normalize_bitrefill_packages(previous.get("packages"))
@@ -2406,7 +2632,7 @@ def _handle_telegram_bitrefill_wizard_message(*, event, source, gateway):
                     gateway,
                     source,
                     _format_bitrefill_packages(product, packages),
-                    reply_markup=_numbered_reply_keyboard(len(packages)),
+                    reply_markup=_package_buttons(product, packages),
                 )
             return dict(_SKIP_RESULT)
         if stage in {"select-category", "select-product"} and session.get("source") == "catalog":
@@ -2419,7 +2645,7 @@ def _handle_telegram_bitrefill_wizard_message(*, event, source, gateway):
             _send_fixed_reply(
                 gateway,
                 source,
-                "Back to Sign402 main menu.",
+                "Back to SingIt main menu.",
                 reply_markup=_telegram_main_menu_reply_markup(),
             )
         return dict(_SKIP_RESULT)
@@ -2504,6 +2730,16 @@ def _handle_telegram_bitrefill_wizard_message(*, event, source, gateway):
                 source=source,
                 gateway=gateway,
             )
+        if stage == "review-purchase":
+            if normalized != "request approval":
+                _send_fixed_reply(gateway, source, "Review the order, then choose Request approval or Back.",
+                                  reply_markup=actions([(("Request approval", "Request approval"), ("Back", "Back"))]))
+                return dict(_SKIP_RESULT)
+            _start_bitrefill_purchase_from_wizard(
+                identity=identity, product=session["product"], package=session["package"],
+                country=session["country"], recipient=session.get("recipient", {}),
+                payment_token=session["paymentToken"], source=source, gateway=gateway)
+            return dict(_SKIP_RESULT)
         if stage == "awaiting-buyer-email":
             return _handle_bitrefill_buyer_email_input(
                 identity=identity,
@@ -2665,7 +2901,7 @@ def _handle_bitrefill_search_input(*, identity: TelegramIdentity, query: str, so
         }
         return (
             _format_bitrefill_search_results(clean_query, country, limited),
-            _numbered_reply_keyboard(len(limited)),
+            _product_buttons(limited),
         )
 
     def recover(_generation: int) -> None:
@@ -2793,8 +3029,8 @@ def _send_bitrefill_catalog_page(
         }
         return (
             _format_bitrefill_catalog_page(country, category, start, products),
-            _bitrefill_catalog_reply_keyboard(
-                len(products),
+            _product_buttons(
+                products,
                 has_previous=has_previous,
                 has_next=has_next,
             ),
@@ -2828,8 +3064,8 @@ def _handle_bitrefill_product_choice(*, identity: TelegramIdentity, text: str, s
         _send_fixed_reply(
             gateway,
             source,
-            "Reply with a product number from the list.",
-            reply_markup=_numbered_reply_keyboard(len(products)),
+            "Choose a product below, or send its number.",
+            reply_markup=_product_buttons(products),
         )
         return dict(_SKIP_RESULT)
     product = products[index]
@@ -2872,7 +3108,7 @@ def _handle_bitrefill_product_choice(*, identity: TelegramIdentity, text: str, s
         }
         return (
             _format_bitrefill_packages(details, limited_packages),
-            _numbered_reply_keyboard(len(limited_packages)),
+            _package_buttons(details, limited_packages),
         )
 
     def recover(_generation: int) -> None:
@@ -2898,8 +3134,8 @@ def _handle_bitrefill_package_choice(*, identity: TelegramIdentity, text: str, s
         _send_fixed_reply(
             gateway,
             source,
-            "Reply with an amount number from the list.",
-            reply_markup=_numbered_reply_keyboard(len(packages)),
+            "Choose an amount below, or send its number.",
+            reply_markup=_package_buttons(session.get("product", {}), packages),
         )
         return dict(_SKIP_RESULT)
     product = session.get("product") if isinstance(session.get("product"), dict) else {}
@@ -3023,7 +3259,7 @@ def _open_bitrefill_payment_token_selection(
         }
         return (
             _format_bitrefill_payment_tokens(tokens),
-            _withdraw_reply_keyboard(tokens),
+            _payment_token_buttons(tokens),
         )
 
     def recover(_generation: int) -> None:
@@ -3053,21 +3289,21 @@ def _handle_bitrefill_payment_token_choice(
             gateway,
             source,
             "Reply with a payment token number from the list.",
-            reply_markup=_withdraw_reply_keyboard(tokens),
+            reply_markup=_payment_token_buttons(tokens),
         )
         return dict(_SKIP_RESULT)
     product = session.get("product") if isinstance(session.get("product"), dict) else {}
     package = session.get("package") if isinstance(session.get("package"), dict) else {}
-    _start_bitrefill_purchase_from_wizard(
-        identity=identity,
-        product=product,
-        package=package,
-        country=str(session.get("country") or _bitrefill_country(user_id)),
-        recipient=dict(session.get("recipient") or {}),
-        payment_token=tokens[index],
-        source=source,
-        gateway=gateway,
-    )
+    payment_token = tokens[index]
+    _BITREFILL_SESSIONS[user_id] = {**session, "stage": "review-purchase", "paymentToken": payment_token}
+    name = _html_escape(str(product.get("name") or "Bitrefill order"))
+    amount = _html_escape(package_label(product, package))
+    symbol = _html_escape(str(payment_token.get("symbol") or "wallet token"))
+    recipient = "".join(f"\n{_html_escape(str(k))}: {_html_escape(str(v))}" for k, v in session.get("recipient", {}).items())
+    _send_fixed_reply(gateway, source, _HtmlText(
+        f"<b>Review order</b>\n{name}\n{amount}\n\nNetwork: Base\nPay with: {symbol}{recipient}\n\n"
+        "Request a fresh quote. Review the final total and approve in your selected approval channel."
+    ), reply_markup=actions([(("Request approval", "Request approval"),), (("Back", "Back"),)]))
     return dict(_SKIP_RESULT)
 
 
@@ -3204,7 +3440,7 @@ def _format_bitrefill_search_results(query: str, country: str, products: list[di
         suffix = f" - {category}" if category else ""
         lines.append(f"{index}. {name}{country_suffix}{suffix}")
     lines.append("")
-    lines.append("Reply with a number.")
+    lines.append("Choose below, or send a number.")
     return "\n".join(lines)
 
 
@@ -3223,7 +3459,7 @@ def _format_bitrefill_catalog_page(
         suffix = _bitrefill_product_country_suffix(name, product_country, country)
         lines.append(f"{index}. {name}{suffix}")
     lines.append("")
-    lines.append("Reply with a number.")
+    lines.append("Choose below, or send a number.")
     return "\n".join(lines)
 
 
@@ -3239,19 +3475,12 @@ def _bitrefill_product_country_suffix(name: str, product_country: str, user_coun
 
 def _format_bitrefill_packages(product: dict, packages: list[dict]) -> str:
     name = str(product.get("name") or "this product").strip()
-    currency = str(product.get("currency") or "").strip().upper()
     lines = [f"Choose amount for {name}:"]
     for index, package in enumerate(packages, start=1):
-        value = str(package.get("value") or package.get("packageId") or "").strip()
-        price_usd = str(package.get("priceUsd") or "").strip()
-        if currency and currency != "USD":
-            amount = f"{value} {currency}"
-        else:
-            suffix = f" (${price_usd})" if price_usd else ""
-            amount = f"{value}{suffix}"
-        lines.append(f"{index}. {amount}")
+        lines.append(f"{index}. {package_label(product, package)}")
+    lines.append("The approval request shows the final total and payment token.")
     lines.append("")
-    lines.append("Reply with a number.")
+    lines.append("Choose below, or send a number.")
     return "\n".join(lines)
 
 
@@ -3631,7 +3860,7 @@ def _format_withdraw_tokens(tokens: list[dict]) -> str:
             line += f" ({_short_address(str(token.get('contractAddress') or ''))})"
         lines.append(line)
     lines.append("")
-    lines.append("Reply with a number.")
+    lines.append("Choose below, or send a number.")
     return "\n".join(lines)
 
 
@@ -3789,6 +4018,7 @@ def _execute_telegram_bitrefill_request(
     operation_generation: int | None = None,
 ) -> None:
     user_id = str(identity.user_id)
+    source = _operation_source(source)
     try:
         client = _client_factory()
         token = _user_access_token(client, identity)
@@ -3819,9 +4049,17 @@ def _execute_telegram_bitrefill_request(
             payment_token=payment_token,
             user_access_token=token,
         )
-        _BITREFILL_SESSIONS.pop(user_id, None)
-        _send_fixed_reply(gateway, source, text)
+        current = operation_generation is None or _telegram_operation_is_current(user_id, operation_generation)
+        if current:
+            _BITREFILL_SESSIONS.pop(user_id, None)
+        else:
+            source = SimpleNamespace(**{k: v for k, v in vars(source).items() if k != "_singit_card"})
+        _send_fixed_reply(gateway, source, text, reply_markup=actions([(("Purchases", "/purchases"), ("Home", "/start"))]) if current else None)
     except GatewayClientError as exc:
+        if operation_generation is not None and not _telegram_operation_is_current(user_id, operation_generation):
+            detached = SimpleNamespace(**{k: v for k, v in vars(source).items() if k != "_singit_card"})
+            _send_fixed_reply(gateway, detached, exc.user_message)
+            return
         session = _BITREFILL_SESSIONS.get(user_id, {})
         previous_session = (
             session.get("previousSession")
@@ -4022,6 +4260,7 @@ def _imessage_text(result: dict) -> str:
 
 
 def _send_fixed_reply(gateway, source, text: str, *, reply_markup: dict | None = None) -> None:
+    reply_markup = _prepare_telegram_markup(gateway, source, reply_markup)
     if _is_telegram_source(source) and _schedule_telegram_reply(
         gateway,
         source,
@@ -4173,14 +4412,31 @@ async def _send_telegram_reply_async(
     if callable(send_message):
         markup = _telegram_reply_markup_object(reply_markup)
         extra = {"parse_mode": parse_mode} if parse_mode else {}
-        for chunk in _telegram_message_chunks(body):
-            await send_message(
-                chat_id=chat_id,
-                text=chunk,
-                reply_markup=markup,
-                disable_web_page_preview=True,
-                **extra,
+        card = getattr(source, "_singit_card", None)
+        chunks = _telegram_message_chunks(body)
+        can_edit = card is not None and card.message_id and len(chunks) == 1 and (
+            not reply_markup or "inline_keyboard" in reply_markup)
+        edit = getattr(bot, "edit_message_text", None)
+        if can_edit and callable(edit):
+            try:
+                await edit(chat_id=chat_id, message_id=card.message_id, text=body,
+                           reply_markup=markup, disable_web_page_preview=True, **extra)
+                _BUTTON_SESSIONS.bind(source.user_id, chat_id, reply_markup, card.message_id)
+                return
+            except Exception as exc:
+                if "message is not modified" in str(exc).lower():
+                    _BUTTON_SESSIONS.bind(source.user_id, chat_id, reply_markup, card.message_id)
+                    return
+                logger.warning("Telegram card edit failed error=%s", type(exc).__name__)
+        for chunk in chunks:
+            message = await send_message(
+                chat_id=chat_id, text=chunk, reply_markup=markup,
+                disable_web_page_preview=True, **extra,
             )
+            message_id = getattr(message, "message_id", None)
+            if card is not None:
+                card.message_id = message_id
+            _BUTTON_SESSIONS.bind(source.user_id, chat_id, reply_markup, message_id)
         return
     sent = await asyncio.to_thread(
         _send_telegram_reply_direct,
@@ -4202,9 +4458,12 @@ def _telegram_reply_markup_object(reply_markup: dict | None):
     if reply_markup is None:
         return None
     try:
-        from telegram import ReplyKeyboardMarkup
+        from telegram import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
     except ImportError:
         return reply_markup
+    if "inline_keyboard" in reply_markup:
+        return InlineKeyboardMarkup([[InlineKeyboardButton(**button) for button in row]
+                                     for row in reply_markup["inline_keyboard"]])
     keyboard = [
         [
             str(button.get("text", ""))
@@ -4279,11 +4538,7 @@ def _send_telegram_reply_direct(
 
 
 def _telegram_main_menu_buttons() -> tuple[tuple[str, ...], ...]:
-    """The main menu, plus Chat when the feature is on.
-
-    Gated so the flag-off menu stays byte-for-byte what it is today: a button
-    leading to a disabled feature is worse than no button.
-    """
+    """Keep the Chat entry hidden until the feature is enabled."""
     if not _ai_chat_enabled():
         return _TELEGRAM_MAIN_MENU_BUTTONS
     return _TELEGRAM_MAIN_MENU_WITH_CHAT
@@ -4291,13 +4546,13 @@ def _telegram_main_menu_buttons() -> tuple[tuple[str, ...], ...]:
 
 def _telegram_wallet_menu_reply_markup() -> dict:
     return _reply_keyboard(
-        _WALLET_MENU_BUTTONS, placeholder="Your wallet and approvals"
+        _WALLET_MENU_BUTTONS, placeholder="Choose a network"
     )
 
 
 def _telegram_main_menu_reply_markup() -> dict:
     return _reply_keyboard(
-        _telegram_main_menu_buttons(), placeholder="Choose a Sign402 action"
+        _telegram_main_menu_buttons(), placeholder="Choose a SingIt action"
     )
 
 
@@ -4517,6 +4772,11 @@ def _telegram_public_command(event, source) -> str | None:
         "wallet",
         "balance",
         "last-purchase",
+        "purchases",
+        "purchase",
+        "reveal",
+        "settings",
+        "deposit",
         "limits",
         "set-limits",
         "email",
@@ -4749,19 +5009,19 @@ def _looks_like_pairing_code(value: str) -> bool:
 
 
 def register(ctx) -> None:
-    """Register trusted Telegram identity capture and Sign402 commands."""
+    """Register trusted Telegram identity capture and SingIt commands."""
 
     _schedule_telegram_public_command_menu_refresh()
     ctx.register_hook("pre_gateway_dispatch", handle_pre_gateway_dispatch)
     ctx.register_command(
         "start",
         handler=_build_start_handler(),
-        description="Start Sign402 wallet onboarding",
+        description="Start SingIt wallet onboarding",
     )
     ctx.register_command(
         "help",
         handler=_build_help_handler(),
-        description="Show Sign402 commands",
+        description="Show SingIt commands",
     )
     for command, (operation, description) in _COMMANDS.items():
         ctx.register_command(
@@ -4772,12 +5032,12 @@ def register(ctx) -> None:
     ctx.register_command(
         "limits",
         handler=_build_limits_handler("limits"),
-        description="Show or set Sign402 spending limits",
+        description="Show or set SingIt spending limits",
     )
     ctx.register_command(
         "set-limits",
         handler=_build_limits_handler("set-limits"),
-        description="Set Sign402 spending limits",
+        description="Set SingIt spending limits",
     )
     ctx.register_command(
         "bitrefill",

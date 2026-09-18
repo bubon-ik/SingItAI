@@ -118,6 +118,7 @@ from .keyring import install_master_key
 from .numeric import format_decimal
 from .goplausible import fetch_x402_paid_resource, fetch_x402_payment_required, normalize_x402_payment_required
 from .real_rate_pricing import RealRateSingitPricer
+from .purchase_history import UserPurchaseStore, purchase_id
 from .secure_state import (
     SensitiveStateCipher,
     SensitiveStateConfigurationError,
@@ -493,6 +494,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 "/agent/create-wallet",
                 "/agent/wallet-balance",
                 "/agent/last-purchase",
+                "/agent/purchases",
                 "/agent/spending-limits",
                 "/agent/withdraw/tokens",
                 "/agent/withdraw",
@@ -650,6 +652,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if path == "/agent/wallet-balance":
             self._handle_agent_wallet_balance()
+            return
+        if path == "/agent/purchases":
+            self._handle_agent_purchases()
             return
         if path == "/agent/last-purchase":
             self._handle_agent_last_purchase()
@@ -1084,6 +1089,39 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             # `user_emails` never quotes the address into its errors, so this
             # message is safe to return.
             self._send_json({"ok": False, "telegramText": str(exc)}, status=400)
+
+    def _handle_agent_purchases(self) -> None:
+        try:
+            payload = self._read_json()
+            user_id = _require_authenticated_user(self, payload)
+            store = self.server.user_event_store
+            record_id = str(payload.get("purchaseId") or "")
+            summaries = store.summaries(user_id)
+            if record_id:
+                item = next((item for item in summaries if item["id"] == record_id), None)
+                if item is None:
+                    self._send_json({"ok": False, "telegramText": "Purchase not found."}, status=404)
+                    return
+                if payload.get("reveal") is True:
+                    store.preflight_write()
+                    event = store.read(user_id, record_id)
+                    result = _last_bitrefill_purchase_response(self.server, event, user_id)
+                    if result is None:
+                        result = {"ok": True, "telegramText": "This purchase has no gift card code."}
+                    self._send_json(result)
+                else:
+                    self._send_json({"ok": True, "purchase": item})
+                return
+            offset = max(0, int(payload.get("offset") or 0))
+            self._send_json({"ok": True, "purchases": summaries[offset:offset + 6],
+                             "hasNext": len(summaries) > offset + 6})
+        except WalletApiTokenNotConfiguredError:
+            self._send_json({"ok": False, "telegramText": "Wallet service is not configured."}, status=503)
+        except WalletApiAuthError:
+            self._send_json({"ok": False, "telegramText": "Wallet authentication failed."}, status=401)
+        except Exception as exc:
+            logger.warning("Purchase history request failed error=%s", type(exc).__name__)
+            self._send_json({"ok": False, "telegramText": "Purchase history is temporarily unavailable."}, status=503)
 
     def _handle_agent_last_purchase(self) -> None:
         try:
@@ -5160,115 +5198,6 @@ class LatestEventStore:
             return event
 
 
-class UserPurchaseStore:
-    """Per-user latest purchase, kept OUT of the public global event store.
-
-    Purchases made from a user's managed wallet carry their telegram id, wallet
-    address and payment details. The global LatestEventStore is served
-    unauthenticated by /events/latest (the demo dashboard), so per-user
-    purchases are persisted here instead, keyed by telegram user id, and read
-    back only through the token-gated /agent/last-purchase.
-    """
-
-    def __init__(
-        self,
-        path: Path,
-        *,
-        cipher: SensitiveStateCipher | None = None,
-    ) -> None:
-        self.path = path
-        self.lock = threading.Lock()
-        self.cipher = cipher
-
-    def _read_all_unlocked(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return {}
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
-        return payload if isinstance(payload, dict) else {}
-
-    @staticmethod
-    def _assert_no_legacy_tokens(data: dict[str, Any]) -> None:
-        if any(
-            isinstance(item, dict) and "fulfillmentToken" in item
-            for item in data.values()
-        ):
-            raise SensitiveStateError(
-                "legacy plaintext fulfillment tokens must be migrated "
-                "before updating user purchase state"
-            )
-
-    def _persisted_event(self, event: dict[str, Any]) -> dict[str, Any]:
-        persisted = dict(event)
-        persisted.pop("encryptedFulfillmentToken", None)
-        if "fulfillmentToken" in persisted:
-            if self.cipher is None:
-                raise SensitiveStateConfigurationError(
-                    "SIGN402_WALLET_MASTER_KEY is required "
-                    "to persist fulfillment tokens"
-                )
-            token = str(persisted.pop("fulfillmentToken"))
-            persisted["encryptedFulfillmentToken"] = self.cipher.encrypt_text(token)
-        return persisted
-
-    def preflight_write(self) -> None:
-        with self.lock:
-            if self.cipher is None:
-                raise SensitiveStateConfigurationError(
-                    "SIGN402_WALLET_MASTER_KEY is required "
-                    "to persist user purchase state"
-                )
-            self._assert_no_legacy_tokens(self._read_all_unlocked())
-
-    def write(
-        self,
-        telegram_user_id: str,
-        event: dict[str, Any],
-    ) -> dict[str, Any]:
-        key = str(telegram_user_id)
-        with self.lock:
-            data = self._read_all_unlocked()
-            data[key] = self._persisted_event(event)
-            self._assert_no_legacy_tokens(data)
-            atomic_write_private_json(self.path, data)
-            return event
-
-    def read(self, telegram_user_id: str) -> dict[str, Any] | None:
-        with self.lock:
-            value = self._read_all_unlocked().get(str(telegram_user_id))
-            if not isinstance(value, dict):
-                return None
-            event = dict(value)
-            if "encryptedFulfillmentToken" in event:
-                encrypted = event.pop("encryptedFulfillmentToken")
-                if self.cipher is None:
-                    raise SensitiveStateConfigurationError(
-                        "SIGN402_WALLET_MASTER_KEY is required "
-                        "to read encrypted fulfillment tokens"
-                    )
-                event.pop("fulfillmentToken", None)
-                event["fulfillmentToken"] = self.cipher.decrypt_text(str(encrypted))
-            return event
-
-    def clear_fulfillment_token(self, telegram_user_id: str) -> None:
-        key = str(telegram_user_id)
-        with self.lock:
-            data = self._read_all_unlocked()
-            event = data.get(key)
-            if not isinstance(event, dict):
-                return
-            if (
-                "fulfillmentToken" not in event
-                and "encryptedFulfillmentToken" not in event
-            ):
-                return
-            cleaned = dict(event)
-            cleaned.pop("fulfillmentToken", None)
-            cleaned.pop("encryptedFulfillmentToken", None)
-            data[key] = cleaned
-            self._assert_no_legacy_tokens(data)
-            atomic_write_private_json(self.path, data)
-
-
 class UserSpendLimitStore:
     """Successful per-user wallet spends for enforcing daily caps."""
 
@@ -8002,7 +7931,7 @@ def _last_bitrefill_purchase_response(
         "status": order.get("status"),
     }
     if has_redemption and has_reveal_text:
-        server.user_event_store.clear_fulfillment_token(telegram_user_id)
+        server.user_event_store.clear_fulfillment_token(telegram_user_id, purchase_id(event))
     return response
 
 

@@ -669,8 +669,9 @@ class WelcomeScreenTests(unittest.TestCase):
     def test_it_uses_the_name_on_the_bot(self):
         self.assertNotIn("Sign402", self.text)
 
-    def test_it_makes_the_address_copyable(self):
-        self.assertIn(f"<code>{WALLET_ADDRESS}</code>", self.text)
+    def test_deposit_address_lives_in_wallet_instead_of_welcome(self):
+        self.assertNotIn(WALLET_ADDRESS, self.text)
+        self.assertIn("Wallet", self.text)
 
     def test_it_does_not_warn_about_how_much_to_fund(self):
         # "a small amount only" reads as a warning that the wallet is unsafe.
@@ -686,9 +687,9 @@ class WelcomeScreenTests(unittest.TestCase):
         self.assertIn("1045618308", self.text)
         self.assertIn("support", self.text.casefold())
 
-    def test_it_names_the_tokens_to_fund(self):
-        for token in ("ETH", "USDC", "SINGIT"):
-            self.assertIn(token, self.text)
+    def test_it_points_to_network_specific_funding(self):
+        self.assertIn("choose a network", self.text)
+        self.assertIn("add funds", self.text)
 
 
 class HtmlToPlainTests(unittest.TestCase):
@@ -717,7 +718,8 @@ class HtmlToPlainTests(unittest.TestCase):
         )
 
         self.assertNotIn("<", plain)
-        self.assertIn(WALLET_ADDRESS, plain)
+        self.assertNotIn(WALLET_ADDRESS, plain)
+        self.assertIn("Support ID: 1045618308", plain)
         self.assertIn("SingIt", plain)
 
 
@@ -950,6 +952,8 @@ class PluginRegistrationTests(unittest.TestCase):
             [
                 "start",
                 "help",
+                "purchases",
+                "settings",
                 "wallet",
                 "balance",
                 "connect_imessage",
@@ -1536,7 +1540,7 @@ class PluginRegistrationTests(unittest.TestCase):
         )
         self.assertEqual(len(photon_requests), 3)
 
-    def test_start_creates_wallet_and_returns_onboarding_text(self):
+    def test_start_returns_menu_without_creating_a_wallet(self):
         plugin = load_plugin()
         context = FakeContext()
         client = FakeClient(result="Your Base agent wallet:\n0xabc")
@@ -1563,15 +1567,15 @@ class PluginRegistrationTests(unittest.TestCase):
         # This adapter cannot set parse_mode, so the markup must be gone.
         self.assertNotIn("<", text)
         self.assertIn("SingIt", text)
-        self.assertIn("0xabc", text)
+        self.assertNotIn("0xabc", text)
         self.assertIn("Support ID: 1045618308", text)
         # Task 5 replaced the onboarding checklist with the two actions a new
         # user can take without setting anything up first.
-        self.assertIn("Buy Bitrefill", text)
-        self.assertIn("Chat", text)
+        self.assertIn("Shop", text)
+        self.assertIn("Purchases", text)
         self.assertNotIn("Connect WhatsApp", text)
         self.assertEqual(client.calls, [])
-        self.assertEqual(client.create_wallet_calls, ["1045618308"])
+        self.assertEqual(client.create_wallet_calls, [])
 
     def test_start_is_answered_in_pre_dispatch(self):
         plugin = load_plugin()
@@ -1595,7 +1599,7 @@ class PluginRegistrationTests(unittest.TestCase):
             result,
             {"action": "skip", "reason": "sign402-imessage-handled"},
         )
-        self.assertEqual(client.create_wallet_calls, ["1045618308"])
+        self.assertEqual(client.create_wallet_calls, [])
         self.assertIn("SingIt", gateway.adapters["telegram"].sent[-1][1])
 
     def test_help_is_answered_with_pilot_commands(self):
@@ -1619,7 +1623,7 @@ class PluginRegistrationTests(unittest.TestCase):
             {"action": "skip", "reason": "sign402-imessage-handled"},
         )
         text = gateway.adapters["telegram"].sent[0][1]
-        self.assertIn("Sign402 commands", text)
+        self.assertIn("SingIt commands", text)
         self.assertIn("/wallet", text)
         self.assertIn("/connect_imessage", text)
         self.assertIn("/bitrefill", text)
@@ -1769,7 +1773,7 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertEqual(result, plugin._SKIP_RESULT)
         self.assertEqual(len(gateway.adapters["telegram"].sent), 1)
         text = gateway.adapters["telegram"].sent[0][1]
-        self.assertIn("Use the Sign402 menu", text)
+        self.assertIn("Open SingIt", text)
         self.assertIn("Wallet", text)
 
     def test_public_mode_requires_explicit_sign402_access_policy(self):
@@ -1827,7 +1831,7 @@ class PluginRegistrationTests(unittest.TestCase):
             )
 
         self.assertEqual(result, plugin._SKIP_RESULT)
-        self.assertEqual(client.create_wallet_calls, ["8538252718"])
+        self.assertEqual(client.create_wallet_calls, [])
 
     def test_telegram_pre_dispatch_exception_fails_closed(self):
         plugin = load_plugin()
@@ -1933,7 +1937,7 @@ class PluginRegistrationTests(unittest.TestCase):
             )
 
         self.assertEqual(result, plugin._SKIP_RESULT)
-        self.assertIn("Use the Sign402 menu", gateway.adapters["telegram"].sent[0][1])
+        self.assertIn("Open SingIt", gateway.adapters["telegram"].sent[0][1])
 
     def test_missing_telegram_access_policy_blocks_by_default(self):
         plugin = load_plugin()
@@ -1982,7 +1986,7 @@ class PluginRegistrationTests(unittest.TestCase):
             )
 
         self.assertEqual(result, plugin._SKIP_RESULT)
-        self.assertEqual(client.create_wallet_calls, ["8538252718"])
+        self.assertEqual(client.create_wallet_calls, [])
 
     def test_bitrefill_command_quotes_and_buys_with_trusted_identity(self):
         plugin = load_plugin()
@@ -2268,6 +2272,8 @@ class PluginRegistrationTests(unittest.TestCase):
 
         self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
         self.assertEqual(client.bitrefill_calls, [])
+        self.assertEqual(len(callbacks), 0)
+        self.assertEqual(dispatch("Request approval"), plugin._SKIP_RESULT)
         self.assertEqual(len(callbacks), 1)
 
         self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
@@ -2318,6 +2324,9 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertEqual(client.withdraw_tokens_calls, [("1045618308", "user-access-token")])
 
         dispatch("2")
+        self.assertEqual(client.bitrefill_calls, [])
+        self.assertIn("Review order", gateway.adapters["telegram"].sent[-1][1])
+        dispatch("Request approval")
 
         self.assertEqual(client.bitrefill_calls[-1][6]["symbol"], "OTHER")
 
@@ -2349,6 +2358,7 @@ class PluginRegistrationTests(unittest.TestCase):
         dispatch("1")
         dispatch("1")
         dispatch("1")
+        dispatch("Request approval")
 
         self.assertEqual(client.bitrefill_calls, [])
         self.assertIn("email", gateway.adapters["telegram"].sent[-1][1].casefold())
@@ -2385,6 +2395,7 @@ class PluginRegistrationTests(unittest.TestCase):
         dispatch("1")
         dispatch("1")
         dispatch("1")
+        dispatch("Request approval")
         dispatch("buyer@example.com")
 
         self.assertIn(("set", "buyer@example.com"), client.buyer_email_calls)
@@ -2452,6 +2463,8 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
         self.assertIn("Choose a token to pay with", gateway.adapters["telegram"].sent[-1][1])
         self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
+        self.assertEqual(client.bitrefill_calls, [])
+        context.hooks["pre_gateway_dispatch"](event=FakeEvent("Request approval", "1045618308", username="AlpskyKnedlik", chat_id="telegram-chat"), gateway=gateway)
         self.assertEqual(
             gateway.adapters["telegram"].sent[-2:],
             [
@@ -2726,7 +2739,7 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertIn("current live purchase limit", gateway.adapters["telegram"].sent[-1][1])
 
         self.assertEqual(dispatch("Back"), plugin._SKIP_RESULT)
-        self.assertIn("Back to Sign402 main menu.", gateway.adapters["telegram"].sent[-1][1])
+        self.assertIn("Back to SingIt main menu.", gateway.adapters["telegram"].sent[-1][1])
 
     def test_withdraw_button_collects_token_amount_and_destination(self):
         plugin = load_plugin()
@@ -2961,6 +2974,8 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
         self.assertIn("Choose a token to pay with", gateway.adapters["telegram"].sent[-1][1])
         self.assertEqual(dispatch("1"), plugin._SKIP_RESULT)
+        self.assertEqual(client.bitrefill_calls, [])
+        dispatch("Request approval")
         self.assertEqual(
             client.bitrefill_calls[-1],
             (
@@ -3027,6 +3042,8 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertIn("Choose a token to pay with", gateway.adapters["telegram"].sent[-1][1])
         dispatch("1")
 
+        self.assertEqual(client.bitrefill_calls, [])
+        dispatch("Request approval")
         self.assertEqual(
             client.bitrefill_calls[-1],
             (
@@ -4267,7 +4284,7 @@ class ChatModeTests(unittest.TestCase):
 
         self.assertEqual(client.chat_calls, [])
         self.assertIn(
-            "Use the Sign402 menu", gateway.adapters["telegram"].sent[0][1]
+            "Open SingIt", gateway.adapters["telegram"].sent[0][1]
         )
 
     def test_flag_off_leaves_the_command_parser_in_charge(self):
@@ -4324,7 +4341,7 @@ class ChatModeTests(unittest.TestCase):
             ]
         self.assertEqual(keyboard, expected)
         # Leaving chat lands back on the full menu, Talk to AI included.
-        self.assertIn("Talk to AI", keyboard[0][0]["text"])
+        self.assertIn("Chat", keyboard[0][0]["text"])
 
     def test_chat_mode_keyboard_offers_only_stop_and_model(self):
         plugin, _context, _client, _gateway = self.make()
@@ -4370,7 +4387,7 @@ class ChatModeTests(unittest.TestCase):
         self.dispatch(plugin, context, gateway, "hello, what can you do?")
 
         text = gateway.adapters["telegram"].sent[0][1]
-        self.assertIn("Use the Sign402 menu", text)
+        self.assertIn("Open SingIt", text)
 
     def test_sign402_only_mode_does_not_swallow_text_in_chat_mode(self):
         plugin, context, client, gateway = self.make()
@@ -4380,7 +4397,7 @@ class ChatModeTests(unittest.TestCase):
 
         self.assertEqual(client.chat_calls[-1]["operation"], "message")
         sent = "\n".join(entry[1] for entry in gateway.adapters["telegram"].sent)
-        self.assertNotIn("Use the Sign402 menu", sent)
+        self.assertNotIn("Open SingIt", sent)
 
     # -- footer (Step 3) -------------------------------------------------
 
@@ -4490,8 +4507,9 @@ class DeferredApprovalChannelGateTests(unittest.TestCase):
         plugin = load_plugin()
         text = plugin._html_to_plain(plugin._start_text("0xabc"))
 
-        self.assertIn("Buy Bitrefill", text)
-        self.assertIn("Chat", text)
+        self.assertIn("Shop", text)
+        self.assertIn("Purchases", text)
+        self.assertNotIn("Chat", text)
 
     def test_the_channel_status_line_lives_in_the_wallet_view(self):
         # The gateway already writes it into the wallet text; /start must not
@@ -4628,8 +4646,8 @@ class ChatMenuButtonTests(unittest.TestCase):
         off = json.dumps(self.markup(plugin, ""))
         on = json.dumps(self.markup(plugin, "1"))
 
-        self.assertNotIn("Talk to AI", off)
-        self.assertIn("Talk to AI", on)
+        self.assertNotIn("Chat", off)
+        self.assertIn("Chat", on)
 
     def test_the_chat_button_maps_to_a_command(self):
         plugin = load_plugin()
@@ -4709,21 +4727,21 @@ class RegroupedMenuTests(unittest.TestCase):
     def enabled(self, plugin):
         return patch.dict(plugin.os.environ, {"SIGN402_AI_CHAT_ENABLED": "1"})
 
-    def test_the_main_menu_is_six_entries_in_three_rows(self):
+    def test_the_main_menu_is_five_entries_in_three_rows(self):
         plugin = load_plugin()
         with self.enabled(plugin):
             rows = plugin._telegram_main_menu_buttons()
 
         self.assertEqual(len(rows), 3)
-        self.assertTrue(all(len(row) == 2 for row in rows))
+        self.assertEqual([len(row) for row in rows], [2, 2, 1])
 
     def test_the_main_menu_leads_with_the_two_things_you_can_spend_on(self):
         plugin = load_plugin()
         with self.enabled(plugin):
             first = plugin._telegram_main_menu_buttons()[0]
 
-        self.assertIn("Talk to AI", first[0])
-        self.assertIn("Gift Cards", first[1])
+        self.assertIn("Chat", first[0])
+        self.assertIn("Shop", first[1])
 
     def test_housekeeping_is_not_on_the_main_menu(self):
         plugin = load_plugin()
@@ -4733,13 +4751,13 @@ class RegroupedMenuTests(unittest.TestCase):
         for hidden in ("Connect iMessage", "Connect WhatsApp", "Withdraw", "Last Purchase"):
             self.assertNotIn(hidden, " ".join(flat))
 
-    def test_the_wallet_submenu_holds_what_moved_off_the_main_menu(self):
+    def test_settings_holds_approval_and_delivery_preferences(self):
         plugin = load_plugin()
         flat = " ".join(
-            label for row in plugin._WALLET_MENU_BUTTONS for label in row
+            label for row in plugin._SETTINGS_MENU_BUTTONS for label in row
         )
 
-        for moved in ("AI Credits", "Withdraw", "Last Purchase", "Connect iMessage", "Connect WhatsApp"):
+        for moved in ("AI Credits", "Limits", "Delivery email", "Connect iMessage", "Connect WhatsApp"):
             self.assertIn(moved, flat)
         self.assertIn("Back", flat)
 
@@ -4749,7 +4767,7 @@ class RegroupedMenuTests(unittest.TestCase):
             flat = " ".join(
                 label for row in plugin._telegram_main_menu_buttons() for label in row
             )
-        self.assertNotIn("Talk to AI", flat)
+        self.assertNotIn("Chat", flat)
 
     def test_the_two_ai_entries_never_share_a_screen(self):
         # The whole point of the rename: support should not have to explain
@@ -4760,13 +4778,13 @@ class RegroupedMenuTests(unittest.TestCase):
                 label for row in plugin._telegram_main_menu_buttons() for label in row
             )
         wallet = " ".join(
-            label for row in plugin._WALLET_MENU_BUTTONS for label in row
+            label for row in plugin._SETTINGS_MENU_BUTTONS for label in row
         )
 
-        self.assertIn("Talk to AI", main)
+        self.assertIn("Chat", main)
         self.assertNotIn("AI Credits", main)
         self.assertIn("AI Credits", wallet)
-        self.assertNotIn("Talk to AI", wallet)
+        self.assertNotIn("Chat", wallet)
 
 
 class CachedKeyboardCompatibilityTests(unittest.TestCase):
@@ -4866,9 +4884,10 @@ class WalletSubmenuTests(unittest.TestCase):
         keyboard = self.keyboard_of(self.press(plugin, context, gateway, "👛 Wallet"))
 
         flat = " ".join(button["text"] for row in keyboard for button in row)
-        self.assertIn("AI Credits", flat)
-        self.assertIn("Withdraw", flat)
-        self.assertIn("Back", flat)
+        self.assertIn("Base", flat)
+        self.assertIn("Solana", flat)
+        self.assertIn("Home", flat)
+        self.assertNotIn("Withdraw", flat)
 
     def test_the_old_wallet_label_opens_it_too(self):
         plugin, context, client, gateway = self.make()
@@ -4876,7 +4895,7 @@ class WalletSubmenuTests(unittest.TestCase):
         keyboard = self.keyboard_of(self.press(plugin, context, gateway, "Wallet"))
 
         flat = " ".join(button["text"] for row in keyboard for button in row)
-        self.assertIn("AI Credits", flat)
+        self.assertIn("Solana", flat)
 
     def test_back_returns_to_the_main_menu(self):
         plugin, context, client, gateway = self.make()
@@ -4885,14 +4904,14 @@ class WalletSubmenuTests(unittest.TestCase):
         keyboard = self.keyboard_of(self.press(plugin, context, gateway, "Back"))
 
         flat = " ".join(button["text"] for row in keyboard for button in row)
-        self.assertIn("Buy Gift Cards", flat)
+        self.assertIn("Shop", flat)
         self.assertNotIn("AI Credits", flat)
 
-    def test_the_wallet_text_still_comes_from_the_gateway(self):
+    def test_wallet_picker_waits_for_network_before_creating_wallet(self):
         plugin, context, client, gateway = self.make()
         self.press(plugin, context, gateway, "👛 Wallet")
 
-        self.assertEqual(client.create_wallet_calls, ["1045618308"])
+        self.assertEqual(client.create_wallet_calls, [])
 
 
 class ChatBudgetViewTests(unittest.TestCase):
@@ -4951,7 +4970,7 @@ class ChatBudgetViewTests(unittest.TestCase):
     def test_wallet_balances_are_still_there(self):
         _plugin, _client, text = self.make()
         self.assertIn("USDC", text)
-        self.assertIn("0xabc", text)
+        self.assertNotIn("0xabc", text)
 
     def test_a_paused_chat_says_so(self):
         status = dict(self.STATUS, paused=True, pauseReason="MERCHANT_CHANGED")
@@ -4989,7 +5008,7 @@ class ChatBudgetViewTests(unittest.TestCase):
 
         text = gateway.adapters["telegram"].sent[-1][1]
         self.assertIn("USDC", text)
-        self.assertIn("0xabc", text)
+        self.assertNotIn("0xabc", text)
 
 
 class PolicyApprovalFlowTests(unittest.TestCase):
@@ -5546,20 +5565,22 @@ class SolanaCommandTests(unittest.TestCase):
 
     def test_wallet_solana_uses_trusted_identity_and_no_base_action_buttons(self):
         text, markup = self.plugin._telegram_public_command_result("wallet", "solana", self.identity)
-        self.assertEqual(text, "solana wallet")
-        self.assertIsNone(markup)
-        self.assertEqual(self.calls, [("create", "alice", "solana")])
+        self.assertEqual(text, "Solana wallet\n\nsolana balance")
+        self.assertNotIn("Withdraw", str(markup))
+        self.assertIn("/deposit solana", str(markup))
+        self.assertEqual(self.calls, [("create", "alice", "solana"), ("balance", "alice", "solana", "test-solana-token")])
 
     def test_balance_solana_with_cold_token_cache_never_creates_base_wallet(self):
         text, markup = self.plugin._telegram_public_command_result("balance", "solana", self.identity)
-        self.assertEqual(text, "solana balance")
-        self.assertIsNone(markup)
+        self.assertEqual(text, "Solana wallet\n\nsolana balance")
+        self.assertNotIn("Withdraw", str(markup))
+        self.assertIn("/deposit solana", str(markup))
         self.assertEqual(self.calls, [("create", "alice", "solana"), ("balance", "alice", "solana", "test-solana-token")])
 
     def test_base_remains_default_after_solana_command(self):
         self.plugin._telegram_public_command_result("wallet", "solana", self.identity)
         self.plugin._telegram_public_command_result("wallet", "", self.identity)
-        self.assertEqual(self.calls[-1], ("create", "alice", "base"))
+        self.assertEqual(self.calls[-2:], [("create", "alice", "base"), ("balance", "alice", "base", "test-solana-token")])
 
     def test_unknown_network_and_identity_injection_do_not_call_gateway(self):
         for command in ["wallet", "balance"]:
@@ -5574,5 +5595,5 @@ class SolanaCommandTests(unittest.TestCase):
         gateway = FakeGateway(adapter_key="telegram")
         context.hooks["pre_gateway_dispatch"](
             event=FakeEvent("/wallet solana", user_id="1045618308", platform="telegram", chat_id="chat"), gateway=gateway)
-        self.assertEqual(self.calls, [("create", "1045618308", "solana")])
-        self.assertEqual(gateway.adapters["telegram"].sent[-1], ("chat", "solana wallet"))
+        self.assertEqual(self.calls, [("create", "1045618308", "solana"), ("balance", "1045618308", "solana", "test-solana-token")])
+        self.assertEqual(gateway.adapters["telegram"].sent[-1], ("chat", "Solana wallet\n\nsolana balance"))

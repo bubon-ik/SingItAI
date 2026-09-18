@@ -180,6 +180,16 @@ class GatewayClient:
             raise GatewayClientError(_INVALID_RESPONSE)
         return telegram_text.strip()
 
+    def purchases(self, identity: TelegramIdentity, *, purchase_id: str = "",
+                  offset: int = 0, reveal: bool = False,
+                  user_access_token: str | None = None) -> dict[str, Any]:
+        payload = {"telegramUserId": identity.user_id, "offset": offset}
+        if purchase_id:
+            payload.update(purchaseId=purchase_id, reveal=reveal)
+        return self._post("/agent/purchases", payload, token=self.api_token,
+                          operation="purchases", user_token=user_access_token,
+                          timeout=self.purchase_timeout if reveal else self.timeout)
+
     def execute_imessage(
         self,
         operation: str,

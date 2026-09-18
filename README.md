@@ -13,14 +13,17 @@ See [HACKATHON.md](HACKATHON.md) for the existing SingIt foundation, recorded So
 - The Venice/x402 client for Solana mainnet lives in `solana-x402-service/`.
 - **The agent now supports Solana wallet creation and balance reads. Solana payment and Venice chat integration are still pending.**
 - A real Bitrefill purchase was completed with USDC on Solana: [Alza CZ 200 CZK, live verification](docs/bitrefill-solana-checks.md). This was an operator-assisted run; agent purchasing integration remains pending.
+- Native Telegram navigation, inline shopping controls and private purchase history are implemented: [UI checks and limitations](docs/telegram-ui-checks.md). This update has not been deployed to the running bot.
 - No real Venice top-up or paid Venice model request has been completed.
 - Public repository: [bubon-ik/singit-solana](https://github.com/bubon-ik/singit-solana).
 
 ## Solana wallet commands
 
-- `/wallet solana` — create or show your managed Solana mainnet wallet.
+- `/wallet` — choose Base or Solana.
+- `/wallet solana` — ensure your managed Solana wallet exists and show its balance.
+- `/deposit solana` — show its deposit address.
 - `/balance solana` — read SOL and native-USDC balances.
-- `/wallet` and `/balance` — keep using Base by default.
+- `/balance` — show Base balances by default; explicit network commands never change that default.
 
 These commands are implemented and tested locally; they have not been deployed
 to the running Telegram bot. Solana keys are encrypted in the gateway store.
@@ -112,7 +115,10 @@ Wallet commands run through the gateway without calling an LLM.
 
 | Command | Purpose |
 | --- | --- |
-| `/wallet [base\|solana]` | Create or show a wallet; defaults to Base. |
+| `/wallet [base\|solana]` | Choose a network, or show its wallet balance. |
+| `/deposit [base\|solana]` | Show a deposit address; defaults to Base. |
+| `/purchases` | Browse saved receipts and explicitly reveal a code. |
+| `/settings` | Delivery email, approvals and spending limits. |
 | `/balance [base\|solana]` | Check wallet balances; defaults to Base. |
 | `/limits` | View or change spending limits. |
 | `/bitrefill` | Browse products and start a purchase. |
@@ -132,7 +138,7 @@ shared code from sibling directories.
 git clone https://github.com/bubon-ik/singit-solana.git
 cd singit-solana
 python3.12 -m venv sign402-gateway/.venv
-sign402-gateway/.venv/bin/python -m pip install -e ./sign402-gateway
+sign402-gateway/.venv/bin/python -m pip install -e ./sign402-gateway python-telegram-bot==22.5
 ```
 
 Run the Python unit tests from the repository root:

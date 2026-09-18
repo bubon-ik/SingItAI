@@ -24,6 +24,8 @@ jobs:
       - name: Gateway unit tests
         working-directory: sign402-gateway
         run: python -m unittest discover -s tests
+      - name: Install Telegram adapter test dependency
+        run: pip install python-telegram-bot==22.5
       - name: Hermes plugin unit tests
         working-directory: hermes-plugins/sign402-wallet
         run: python -m unittest discover -s tests

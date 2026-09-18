@@ -4160,7 +4160,7 @@ class GatewayServerTests(unittest.TestCase):
             fulfillment_token="reveal_secret_1",
         )
         server.user_event_store.clear_fulfillment_token.assert_called_once_with(
-            "1045618308"
+            "1045618308", gateway_server.purchase_id(server.user_event_store.read.return_value)
         )
 
     def test_agent_last_purchase_does_not_clear_token_for_empty_redemption(self):

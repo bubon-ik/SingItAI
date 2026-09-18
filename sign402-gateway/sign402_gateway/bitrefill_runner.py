@@ -1260,6 +1260,7 @@ class WalletBitrefillPurchaseRunner:
             "paymentCommitment": commitment,
             "fulfillmentToken": fulfillment_token,
             "walletCheckout": wallet_checkout,
+            "receipt": _bitrefill_receipt(execution_quote, wallet_checkout, bitrefill_result),
             "bitrefill": bitrefill_result,
             "telegramText": _bitrefill_purchase_telegram_text(
                 execution_quote,
@@ -1655,6 +1656,20 @@ def _bitrefill_denomination_text(quote: dict[str, Any]) -> str:
     return f" {package_value} {currency}"
 
 
+def _bitrefill_receipt(quote: dict[str, Any], checkout: dict[str, Any], provider: dict[str, Any]) -> dict[str, str]:
+    funding = checkout.get("userFunding")
+    transfer = funding.get("transfer") if isinstance(funding, dict) else None
+    amount = str(quote.get("actualPaymentTokenAmount") or quote.get("paymentTokenAmount") or quote.get("singitAmount") or "")
+    symbol = str(quote.get("paymentTokenSymbol") or "SINGIT")
+    return {
+        "name": str(quote.get("productName") or quote.get("productId") or "Bitrefill order"),
+        "denomination": _bitrefill_denomination_text(quote).strip(),
+        "network": "Base", "status": str(provider.get("status") or "Paid"),
+        "paid": f"{_format_amount(amount)} {symbol}" if amount else "",
+        "txId": str(transfer.get("txId") or "") if isinstance(transfer, dict) else "",
+    }
+
+
 def _bitrefill_purchase_telegram_text(
     quote: dict[str, Any],
     *,
@@ -1664,7 +1679,6 @@ def _bitrefill_purchase_telegram_text(
 ) -> str:
     product_name = str(quote.get("productName") or quote.get("productId") or "Your item")
     value_text = _bitrefill_denomination_text(quote)
-    source_text = f" Paid from {_short_address(source_wallet)}." if source_wallet else ""
     payment_symbol = str(quote.get("paymentTokenSymbol") or "SINGIT")
     payment_amount = str(
         quote.get("actualPaymentTokenAmount")
@@ -1672,20 +1686,14 @@ def _bitrefill_purchase_telegram_text(
         or singit_spent
         or ""
     ).strip()
-    spent_text = (
-        f"\nSpent: {_format_amount(payment_amount)} {payment_symbol}"
-        if payment_amount
-        else ""
-    )
+    lines = [f"✅ {product_name}{value_text}", "Payment complete · Base"]
+    if payment_amount:
+        lines.append(f"Spent: {_format_amount(payment_amount)} {payment_symbol}")
     tx_url = _base_tx_url(transfer_tx_id)
-    tx_text = f"\nTransfer tx: {tx_url}" if tx_url else ""
-    return (
-        f"✅ {product_name}{value_text} is ready. "
-        f"The purchase was paid with {payment_symbol}.{source_text} "
-        "Use /last_purchase to reveal your code."
-        f"{spent_text}"
-        f"{tx_text}"
-    )
+    if tx_url:
+        lines.append(f"Transaction: {tx_url}")
+    lines.extend(["", "Open /purchases for your receipt and code. /last_purchase also reveals the latest code."])
+    return "\n".join(lines)
 
 
 def _bitrefill_approval_context_lines(

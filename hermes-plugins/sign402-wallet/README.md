@@ -1,4 +1,4 @@
-# Sign402 Wallet Hermes Plugin
+# SingIt Wallet Hermes Plugin
 
 This Hermes plugin exposes deterministic managed-wallet commands in
 Telegram:
@@ -7,6 +7,9 @@ Telegram:
 /start
 /wallet [base|solana]
 /balance [base|solana]
+/deposit [base|solana]
+/purchases
+/settings
 /connect_imessage
 /connect_whatsapp
 /limits
@@ -21,12 +24,22 @@ to `MessageEvent.source.user_id`, lets Hermes apply its normal Telegram
 authorization, and then calls the protected Sign402 Gateway on localhost.
 Raw command arguments cannot select another Telegram user.
 
+## Native Telegram interface
+
+Home offers Shop, Wallet, Purchases and Settings, plus Chat when enabled.
+Contextual inline buttons name products, amounts and payment tokens. A review
+step precedes the existing approval/purchase flow. History shows receipts and
+keeps redemption codes hidden until requested; code messages remain in chat.
+The main menu uses a persistent Telegram keyboard. No Mini App is required.
+
+[Interface behavior, storage migration and verification](../../docs/telegram-ui-checks.md).
+
 ## Solana wallets
 
-`/wallet solana` creates or shows a dedicated Solana mainnet wallet for the
-Telegram user. `/balance solana` shows SOL and native USDC. `/wallet`, `/balance`
-and their `base` variants keep the existing Base behavior; selecting Solana on
-one command does not change subsequent commands' network.
+`/wallet` opens the Base/Solana network selector. `/wallet solana` ensures a
+managed Solana mainnet wallet exists and shows its balance; `/deposit solana`
+shows the address. `/balance solana` shows SOL and native USDC. `/balance` and
+`/deposit` default to Base. Selecting Solana does not change later commands' network.
 
 Keys are encrypted with `SIGN402_WALLET_MASTER_KEY` in the gateway's wallet
 store. Configure `SIGN402_SOLANA_RPC_URL` on the gateway for mainnet balance

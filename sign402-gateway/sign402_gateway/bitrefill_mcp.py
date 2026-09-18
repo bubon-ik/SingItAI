@@ -1636,11 +1636,17 @@ class McpBitrefillClient:
                 # Bitrefill lists some denominations at $0. They cannot be
                 # quoted, so offering them only produces a dead end.
                 continue
+            display_usd = package.get("price_usd") or package.get("priceUsd")
+            if not display_usd and str(package.get("payment_currency") or package.get("paymentCurrency") or "").upper() == "USD":
+                display_usd = package.get("payment_price") or package.get("paymentPrice")
             normalized.append(
                 {
                     "packageId": package_id,
                     "value": value,
                     "priceUsd": price_usd,
+                    # Generic price/payment_price may be satoshis or local currency.
+                    # Only explicitly USD-labelled fields are safe to show as dollars.
+                    "displayPriceUsd": _money(display_usd) if display_usd else "",
                 }
             )
         product_range = raw.get("range")
