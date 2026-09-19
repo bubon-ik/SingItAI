@@ -74,3 +74,20 @@ milestones; this interface does not claim integrated Solana purchases. The
 existing Venice inference request remains per-question; this change does not
 add multi-turn model memory. Drafts are neither durable nor replayed after a
 restart. A restart invalidates old inline controls; `/start` restores navigation.
+
+
+## Existing VPS bot updated
+
+On September 19 the existing `@SingIt0qk_bot` was updated in place to
+[`a2ac835`](https://github.com/bubon-ik/singit-solana/commit/a2ac835).
+Before switching, 1,246 gateway tests and 332 plugin tests passed using the
+server's installed interpreters and PTB 22.6. No dependency files changed.
+
+A private backup was created before switching. All 95 encrypted wallet records,
+bot configuration and purchase history were verified unchanged. Gateway and bot
+services are active; health returned HTTP 200. Unauthenticated chat-status and
+purchase-history requests returned HTTP 401. Telegram `getMe` confirmed the
+existing bot, and `getMyCommands` / `getChatMenuButton` confirmed the six-command
+native Menu. AI chat remains enabled. No startup tracebacks or automatic bot
+restarts were observed. No live message, inference or purchase was sent during
+verification; the manual navigation steps above remain a user check.

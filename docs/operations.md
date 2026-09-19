@@ -9,11 +9,14 @@ product is, see the [README](../README.md). For incident recovery see
 
 The gateway checkout is `~/apps/sign402` on the VPS `hermes@164.68.104.44`.
 
-Updated on 18 September 2026 at the owner's explicit request: the existing bot
+Updated on 19 September 2026 at the owner's explicit request: the existing bot
 runs this repository's `codex/telegram-ui` release at
-`6b3c2f575d3ce3c06a08c5712d282688ea50afb1`. The runtime code is pinned to this
+`a2ac8359e3a20ad6a991302740d3faeb9fe9e3cc`. The runtime code is pinned to this
 commit; later documentation commits do not imply a new deployment. Both service
 units are active, `/health` returns HTTP 200, and Telegram `getMe` succeeds.
+The native six-command Menu is confirmed through the Telegram API. The latest
+release passed 1,246 gateway and 332 plugin tests on the server. See the
+[conversation deployment checks](conversation-ui-checks.md#existing-vps-bot-updated).
 Manual navigation in Telegram still needs a user check; these probes do not
 establish an end-to-end purchase.
 
