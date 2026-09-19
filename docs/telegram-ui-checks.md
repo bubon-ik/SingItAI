@@ -1,5 +1,8 @@
 # Telegram interface refresh — September 18, 2026
 
+The September 19 [conversation update](conversation-ui-checks.md) supersedes the
+persistent Home keyboard described below.
+
 This milestone changes the native Telegram bot in the separate Solana repository.
 It does not add a Mini App, web frontend or Solana payment execution.
 

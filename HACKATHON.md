@@ -10,6 +10,7 @@
 - [Managed wallet and Telegram command checks](docs/solana-wallet-checks.md)
 - [First real Bitrefill Solana purchase](docs/bitrefill-solana-checks.md)
 - [Native Telegram UI and purchase history checks](docs/telegram-ui-checks.md)
+- [Conversation and Telegram Menu checks](docs/conversation-ui-checks.md)
 - [Integration plan](docs/solana-integration.md)
 
 ## Competition period and disclosure
@@ -33,6 +34,8 @@ The imported source already contains the Telegram/Hermes agent, managed Base wal
 | 2026-09-17 | [f0eaa0b](https://github.com/bubon-ik/singit-solana/commit/f0eaa0b) | Converted the root and Solana module README files to English. | Documentation only. |
 | 2026-09-17 | [eb10f40](https://github.com/bubon-ik/singit-solana/commit/eb10f40) | Added per-user encrypted Solana wallets, mainnet SOL/native-USDC balances, explicit network routing, and `/wallet solana` / `/balance solana` in the Telegram plugin. Preserved Base wallets and blocked Solana requests from entering legacy Base spending routes. | 1,234 gateway tests and 284 plugin tests passed. A temporary empty wallet was accepted by the Solana SDK; live mainnet RPC returned zero SOL and USDC. No production deployment, real Telegram transport run or payment. |
 | 2026-09-18 | [19ae280](https://github.com/bubon-ik/singit-solana/commit/19ae280) | Refreshed native Telegram navigation, added named inline shopping controls and order review, editable operation cards, a Base/Solana wallet selector, and private purchase history with selected-order code reveal. | 1,245 gateway tests and 302 plugin tests passed, including actual PTB handler/markup construction with mocked transport. Existing Base approvals and spending policy remain in place. No Mini App, live bot deployment or Solana payment integration. [Details](docs/telegram-ui-checks.md). |
+
+| 2026-09-19 | [37f7863](https://github.com/bubon-ik/singit-solana/commit/37f7863) | Replaced persistent Telegram navigation with native Menu and inline controls; added free-text AI entry, model/budget review and approval before the saved first question, payment-aware settings, safe cancellation and catalog search shortcuts. | 1,246 gateway and 332 plugin tests passed locally. Payments and transport were mocked; agent spending remains on Base. [Details](docs/conversation-ui-checks.md). |
 
 The Venice client implements Solana SIWX authentication, mainnet USDC quote validation, explicit quote approval, SDK transaction construction, durable payment attempts, duplicate prevention and read-only reconciliation. Its Venice payment flow has only been exercised with mocked network responses.
 
