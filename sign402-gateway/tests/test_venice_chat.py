@@ -960,6 +960,25 @@ class ChatServiceTests(unittest.TestCase):
         self.assertTrue(result["hasPolicy"])
         self.assertEqual(result["dailyCapAtomic"], 10_000_000)
 
+    def test_status_exposes_model_prices_and_expiry_without_spending(self):
+        from sign402_gateway.venice_chat import build_chat_policy
+        service = self.make_service()
+        model = service._catalogue().resolve(service.default_model)
+        self.store.approve_policy("u1", build_chat_policy(
+            pay_to=BOUND_PAY_TO, network=NETWORK, asset=USDC,
+            daily_cap_atomic=5_000_000, expires_at=DAY_ONE_NOON + 1,
+        ))
+        active = service.start("u1")
+        self.assertEqual(active["inputUsdPerMTok"], model.input_usd_per_mtok)
+        self.assertEqual(active["outputUsdPerMTok"], model.output_usd_per_mtok)
+        self.assertFalse(active["policyExpired"])
+        self.store.now = lambda: DAY_ONE_NOON + 2
+        expired = service.start("u1")
+        self.assertTrue(expired["hasPolicy"])
+        self.assertTrue(expired["policyExpired"])
+        self.assertEqual(self.client.sent, [])
+        self.assertEqual(self.decrypt_calls, [])
+
     def test_send_passes_the_users_own_wallet_address(self):
         service = self.make_service()
 

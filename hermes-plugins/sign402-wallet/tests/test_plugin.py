@@ -525,7 +525,7 @@ class TelegramAsyncReplyTests(unittest.IsolatedAsyncioTestCase):
 
         plugin._send_fixed_reply(gateway, source_b, "other chat")
         await asyncio.wait_for(bot.started_event("chat-b").wait(), timeout=0.2)
-        self.assertIn(("chat-b", "other chat", None), bot.calls)
+        self.assertIn(("chat-b", "other chat"), [call[:2] for call in bot.calls])
 
         bot.release_event("chat-b").set()
         bot.release_event("chat-a").set()
@@ -915,13 +915,14 @@ class PluginRegistrationTests(unittest.TestCase):
         plugin._sleep = lambda _delay: None
         plugin._TELEGRAM_COMMAND_MENU_REFRESH_DELAYS_SECONDS = (0,)
 
-        with patch.dict(plugin.os.environ, {"TELEGRAM_BOT_TOKEN": "telegram-token"}):
+        with patch.dict(plugin.os.environ, {"TELEGRAM_BOT_TOKEN": "telegram-token", "SIGN402_AI_CHAT_ENABLED": "1"}):
             plugin.register(context)
             self.assertEqual(len(callbacks), 1)
             callbacks[0]()
 
-        self.assertEqual(len(requests), 2)
-        request, timeout = requests[0]
+        self.assertEqual(len(requests), 3)
+        self.assertTrue(requests[0][0].full_url.endswith("/setChatMenuButton"))
+        request, timeout = requests[1]
         self.assertEqual(timeout, plugin._TELEGRAM_COMMAND_MENU_TIMEOUT_SECONDS)
         self.assertEqual(
             request.full_url,
@@ -932,7 +933,7 @@ class PluginRegistrationTests(unittest.TestCase):
             json.loads(payload["commands"][0]),
             list(plugin._TELEGRAM_PUBLIC_COMMAND_MENU),
         )
-        private_payload = parse_qs(requests[1][0].data.decode("utf-8"))
+        private_payload = parse_qs(requests[2][0].data.decode("utf-8"))
         self.assertEqual(
             json.loads(private_payload["commands"][0]),
             list(plugin._TELEGRAM_PUBLIC_COMMAND_MENU),
@@ -949,23 +950,7 @@ class PluginRegistrationTests(unittest.TestCase):
 
         self.assertEqual(
             commands,
-            [
-                "start",
-                "help",
-                "purchases",
-                "settings",
-                "wallet",
-                "balance",
-                "connect_imessage",
-                "connect_whatsapp",
-                "limits",
-                "email",
-                "withdraw",
-                "bitrefill",
-                "last_purchase",
-                "llm_buy",
-                "llm_credits",
-            ],
+            ["shop", "chat", "wallet", "purchases", "settings", "help"],
         )
         self.assertNotIn("create_wallet", commands)
         self.assertNotIn("set_limits", commands)
@@ -4217,6 +4202,8 @@ class ChatModeTests(unittest.TestCase):
             )
             if client.chat_error:
                 raise client.chat_error
+            if operation == "start":
+                return {"ok": True, "hasPolicy": True, "policyExpiresAt": 4102444800}
             return client.chat_result
 
         client.execute_chat = execute_chat
@@ -4240,16 +4227,12 @@ class ChatModeTests(unittest.TestCase):
 
     # -- interception ----------------------------------------------------
 
-    def test_text_in_chat_mode_goes_to_gateway_not_command_parser(self):
+    def test_navigation_stays_available_during_chat(self):
         plugin, context, client, gateway = self.make()
         plugin._enter_chat_mode("1045618308")
-
         self.dispatch(plugin, context, gateway, "balance")
-
-        self.assertEqual(client.chat_calls[-1]["operation"], "message")
-        self.assertEqual(client.chat_calls[-1]["payload"]["text"], "balance")
-        # The balance command must not have run.
-        self.assertEqual(client.calls, [])
+        self.assertNotIn("message", [c["operation"] for c in client.chat_calls])
+        self.assertEqual([call[0] for call in client.calls], ["balance"])
 
     def test_flag_off_never_intercepts_even_with_chat_mode_set(self):
         # The hard constraint: with SIGN402_AI_CHAT_ENABLED unset the bot must
@@ -4302,12 +4285,12 @@ class ChatModeTests(unittest.TestCase):
         self.assertEqual(client.chat_calls, [])
         self.assertEqual([call[0] for call in client.calls], ["balance"])
 
-    def test_text_outside_chat_mode_is_unchanged(self):
+    def test_text_outside_chat_mode_uses_approved_chat(self):
         plugin, context, client, gateway = self.make()
 
         self.dispatch(plugin, context, gateway, "hello, what can you do?")
 
-        self.assertEqual(client.chat_calls, [])
+        self.assertEqual([c["operation"] for c in client.chat_calls], ["start", "message"])
 
     def test_exit_button_leaves_chat_mode_and_restores_main_menu(self):
         plugin, context, client, gateway = self.make()
@@ -4347,16 +4330,16 @@ class ChatModeTests(unittest.TestCase):
         plugin, _context, _client, _gateway = self.make()
         keyboard = plugin._telegram_chat_reply_markup()["keyboard"]
         self.assertEqual(
-            keyboard, [[{"text": "Stop chat"}, {"text": "Model"}]]
+            keyboard, [[{"text": "AI settings"}, {"text": "Model"}]]
         )
 
-    def test_leaving_chat_mode_tells_the_gateway(self):
+    def test_cancel_is_local_and_does_not_revoke_policy(self):
         plugin, context, client, gateway = self.make()
         plugin._enter_chat_mode("1045618308")
 
         self.dispatch(plugin, context, gateway, plugin._TELEGRAM_CHAT_EXIT_BUTTON)
 
-        self.assertEqual(client.chat_calls[-1]["operation"], "end")
+        self.assertEqual(client.chat_calls, [])
 
     def test_chat_mode_is_per_user(self):
         plugin, context, client, gateway = self.make()
@@ -4381,13 +4364,13 @@ class ChatModeTests(unittest.TestCase):
 
     # -- the pre-dispatch hook (Step 4) ----------------------------------
 
-    def test_sign402_only_mode_still_returns_the_menu_outside_chat_mode(self):
+    def test_sign402_only_mode_routes_free_text_to_approved_chat(self):
         plugin, context, client, gateway = self.make()
 
         self.dispatch(plugin, context, gateway, "hello, what can you do?")
 
-        text = gateway.adapters["telegram"].sent[0][1]
-        self.assertIn("Open SingIt", text)
+        text = gateway.adapters["telegram"].sent[-1][1]
+        self.assertIn("an answer", text)
 
     def test_sign402_only_mode_does_not_swallow_text_in_chat_mode(self):
         plugin, context, client, gateway = self.make()
@@ -4412,7 +4395,7 @@ class ChatModeTests(unittest.TestCase):
         self.assertIn("$0.003", text)
         self.assertIn("$4.99", text)
 
-    def test_the_eighty_percent_warning_appears_once_per_window(self):
+    def test_credit_is_never_misreported_as_daily_topup_spending(self):
         plugin, context, client, gateway = self.make(
             chat_result={
                 "ok": True,
@@ -4434,7 +4417,7 @@ class ChatModeTests(unittest.TestCase):
             for entry in gateway.adapters["telegram"].sent
             if "You've used" in entry[1]
         ]
-        self.assertEqual(len(warnings), 1)
+        self.assertEqual(len(warnings), 0)
 
     def test_no_warning_below_the_threshold(self):
         plugin, context, client, gateway = self.make()
@@ -4517,7 +4500,7 @@ class DeferredApprovalChannelGateTests(unittest.TestCase):
         plugin = load_plugin()
         self.assertNotIn("approval", plugin._start_text("0xabc").lower())
 
-    def test_free_messages_need_no_approval_channel_or_wallet(self):
+    def test_setup_needs_no_approval_channel_or_wallet(self):
         plugin = load_plugin()
         context = FakeContext()
         client = FakeClient()
@@ -4552,7 +4535,7 @@ class DeferredApprovalChannelGateTests(unittest.TestCase):
             )
 
         # No approval-channel round trip was needed to answer.
-        self.assertEqual(client.chat_calls, ["message"])
+        self.assertEqual(client.chat_calls, ["start"])
         self.assertEqual(client.approval_calls, [])
         self.assertEqual(client.imessage_calls, [])
 
@@ -4691,7 +4674,7 @@ class ChatMenuButtonTests(unittest.TestCase):
                 gateway=gateway,
             )
 
-        self.assertTrue(plugin._in_chat_mode("1045618308"))
+        self.assertIn("AI settings", gateway.adapters["telegram"].sent[-1][1])
         self.assertEqual(client.chat_calls, ["start"])
 
     def test_pressing_chat_with_the_flag_off_is_not_a_chat(self):
@@ -4732,8 +4715,8 @@ class RegroupedMenuTests(unittest.TestCase):
         with self.enabled(plugin):
             rows = plugin._telegram_main_menu_buttons()
 
-        self.assertEqual(len(rows), 3)
-        self.assertEqual([len(row) for row in rows], [2, 2, 1])
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([len(row) for row in rows], [2, 1])
 
     def test_the_main_menu_leads_with_the_two_things_you_can_spend_on(self):
         plugin = load_plugin()
@@ -5060,7 +5043,8 @@ class PolicyApprovalFlowTests(unittest.TestCase):
     def test_without_a_budget_it_offers_the_choices(self):
         plugin, context, client, gateway = self.make(has_policy=False)
 
-        text = self.press(plugin, context, gateway, "💬 Talk to AI")
+        self.press(plugin, context, gateway, "/chat_budget")
+        text = self.press(plugin, context, gateway, "Use this model")
 
         self.assertIn("$5", text)
         self.assertIn("$10", text)
@@ -5069,16 +5053,19 @@ class PolicyApprovalFlowTests(unittest.TestCase):
     def test_the_offer_never_includes_an_unworkable_budget(self):
         plugin, context, client, gateway = self.make(has_policy=False)
 
-        text = self.press(plugin, context, gateway, "💬 Talk to AI")
+        self.press(plugin, context, gateway, "/chat_budget")
+        text = self.press(plugin, context, gateway, "Use this model")
 
         # $1/day could never fund a $5 top-up.
         self.assertNotIn("$1 ", text)
 
     def test_choosing_a_budget_asks_for_approval(self):
         plugin, context, client, gateway = self.make(has_policy=False)
-        self.press(plugin, context, gateway, "💬 Talk to AI")
+        self.press(plugin, context, gateway, "/chat_budget")
+        self.press(plugin, context, gateway, "Use this model")
 
         self.press(plugin, context, gateway, "$5 / day")
+        self.press(plugin, context, gateway, "Request budget approval")
 
         approve = [c for c in client.chat_calls if c["operation"] == "approve-policy"]
         self.assertEqual(len(approve), 1)
@@ -5087,9 +5074,11 @@ class PolicyApprovalFlowTests(unittest.TestCase):
 
     def test_an_approved_budget_opens_the_chat(self):
         plugin, context, client, gateway = self.make(has_policy=False)
-        self.press(plugin, context, gateway, "💬 Talk to AI")
+        self.press(plugin, context, gateway, "/chat_budget")
+        self.press(plugin, context, gateway, "Use this model")
 
         self.press(plugin, context, gateway, "$5 / day")
+        self.press(plugin, context, gateway, "Request budget approval")
 
         self.assertTrue(plugin._in_chat_mode("1045618308"))
 
@@ -5098,23 +5087,20 @@ class PolicyApprovalFlowTests(unittest.TestCase):
             has_policy=False,
             approve={"ok": False, "approved": False, "telegramText": "Not confirmed."},
         )
-        self.press(plugin, context, gateway, "💬 Talk to AI")
+        self.press(plugin, context, gateway, "/chat_budget")
+        self.press(plugin, context, gateway, "Use this model")
 
-        text = self.press(plugin, context, gateway, "$5 / day")
+        self.press(plugin, context, gateway, "$5 / day")
+        text = self.press(plugin, context, gateway, "Request budget approval")
 
         self.assertFalse(plugin._in_chat_mode("1045618308"))
         self.assertIn("Not confirmed", text)
 
-    def test_with_a_budget_it_goes_straight_into_the_chat(self):
+    def test_with_a_budget_a_question_is_answered_without_setup(self):
         plugin, context, client, gateway = self.make(has_policy=True)
-
-        self.press(plugin, context, gateway, "💬 Talk to AI")
-
-        self.assertTrue(plugin._in_chat_mode("1045618308"))
-        self.assertEqual(
-            [c["operation"] for c in client.chat_calls if c["operation"] == "approve-policy"],
-            [],
-        )
+        text = self.press(plugin, context, gateway, "hello")
+        self.assertIn("an answer", text)
+        self.assertEqual([c["operation"] for c in client.chat_calls], ["start", "message"])
 
 
 class PolicyApprovalRunsOffTheHookTests(unittest.TestCase):
@@ -5161,9 +5147,11 @@ class PolicyApprovalRunsOffTheHookTests(unittest.TestCase):
 
     def test_choosing_a_budget_returns_before_the_approval_is_requested(self):
         plugin, context, client, gateway = self.make()
-        self.press(plugin, context, gateway, "💬 Talk to AI")
+        self.press(plugin, context, gateway, "/chat_budget")
+        self.press(plugin, context, gateway, "Use this model")
 
         self.press(plugin, context, gateway, "$5 / day")
+        self.press(plugin, context, gateway, "Request budget approval")
 
         # The hook is already done, and the approval has not been asked for yet.
         self.assertNotIn("approve-policy", client.chat_calls)
@@ -5171,8 +5159,10 @@ class PolicyApprovalRunsOffTheHookTests(unittest.TestCase):
 
     def test_the_approval_happens_once_the_background_work_runs(self):
         plugin, context, client, gateway = self.make()
-        self.press(plugin, context, gateway, "💬 Talk to AI")
+        self.press(plugin, context, gateway, "/chat_budget")
+        self.press(plugin, context, gateway, "Use this model")
         self.press(plugin, context, gateway, "$5 / day")
+        self.press(plugin, context, gateway, "Request budget approval")
 
         for callback in list(self.scheduled):  # the background runner fires
             callback()
@@ -5182,9 +5172,11 @@ class PolicyApprovalRunsOffTheHookTests(unittest.TestCase):
 
     def test_the_user_is_told_the_approval_is_on_its_way(self):
         plugin, context, client, gateway = self.make()
-        self.press(plugin, context, gateway, "💬 Talk to AI")
+        self.press(plugin, context, gateway, "/chat_budget")
+        self.press(plugin, context, gateway, "Use this model")
 
         self.press(plugin, context, gateway, "$5 / day")
+        self.press(plugin, context, gateway, "Request budget approval")
 
         text = gateway.adapters["telegram"].sent[-1][1].lower()
         self.assertTrue("approve" in text or "phone" in text, text)
@@ -5279,6 +5271,8 @@ class ChatModelPickerTests(unittest.TestCase):
         def execute_chat(operation, identity, *, payload=None, user_access_token):
             payload = dict(payload or {})
             client.chat_calls.append({"op": operation, "payload": payload})
+            if operation == "start":
+                return {"ok": True, "hasPolicy": True, "policyExpiresAt": 4102444800}
             if operation != "models":
                 return {"ok": True, "text": "an answer", "costAtomic": 3_000,
                         "outstandingAtomic": 4_900_000}
@@ -5380,7 +5374,7 @@ class ChatModelPickerTests(unittest.TestCase):
 
         self.press(plugin, context, gateway, "GLM 5.2")
 
-        self.assertEqual([c["op"] for c in client.chat_calls], ["message"])
+        self.assertEqual([c["op"] for c in client.chat_calls], ["start", "message"])
 
     def test_text_that_is_not_a_button_falls_through_to_the_model(self):
         plugin, context, client, gateway = self.make()
@@ -5409,7 +5403,7 @@ class ChatNamesTheModelTests(unittest.TestCase):
     def test_it_still_reads_when_the_model_is_unknown(self):
         plugin = load_plugin()
         text = plugin._chat_start_text({"hasPolicy": True, "dailyCapUsdc": "5.00"})
-        self.assertIn("Ask me anything", text)
+        self.assertIn("Send a question", text)
 
     def test_the_picker_lists_real_model_names(self):
         import sys
@@ -5448,6 +5442,8 @@ class ChatModelSearchTests(unittest.TestCase):
         def execute_chat(operation, identity, *, payload=None, user_access_token):
             payload = dict(payload or {})
             client.chat_calls.append({"op": operation, "payload": payload})
+            if operation == "start":
+                return {"ok": True, "hasPolicy": True, "policyExpiresAt": 4102444800}
             if operation != "models":
                 return {"ok": True, "text": "an answer", "costAtomic": 3_000,
                         "outstandingAtomic": 4_900_000}
@@ -5519,7 +5515,7 @@ class ChatModelSearchTests(unittest.TestCase):
 
         self.press(plugin, context, gateway, "which model are you?")
 
-        self.assertEqual([c["op"] for c in client.chat_calls], ["message"])
+        self.assertEqual([c["op"] for c in client.chat_calls], ["start", "message"])
 
     # -- typing inside the picker ------------------------------------------
 

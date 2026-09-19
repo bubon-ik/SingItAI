@@ -126,7 +126,7 @@ class TelegramAdapterUiTests(unittest.IsolatedAsyncioTestCase):
         self.client = FakeClient()
         self.plugin._client_factory = lambda: self.client
         self.app = Application.builder().token("123:offline-test").build()
-        self.bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=42)), edit_message_text=AsyncMock())
+        self.bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=42)), edit_message_text=AsyncMock(), edit_message_reply_markup=AsyncMock())
         self.adapter = FakeAdapter(self.bot)
         self.adapter._app = self.app
         self.gateway = FakeGateway(adapter_key="telegram", adapter=self.adapter)
@@ -161,6 +161,7 @@ class TelegramAdapterUiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin._BUTTON_SESSIONS.claim("123", "123", 42, data)[0], "/wallet solana")
 
     async def test_deleted_message_falls_back_to_a_fresh_message(self):
+        self.plugin._TELEGRAM_KEYBOARD_REMOVED.add("123")
         self.bot.edit_message_text.side_effect = RuntimeError("message to edit not found")
         source = self.plugin._operation_source(self.source)
         source._singit_card.message_id = 12
@@ -168,6 +169,30 @@ class TelegramAdapterUiTests(unittest.IsolatedAsyncioTestCase):
         await self.drain()
         self.bot.send_message.assert_awaited_once()
         self.assertEqual(source._singit_card.message_id, 42)
+
+    async def test_home_removes_old_keyboard_and_attaches_inline_controls(self):
+        from telegram import ReplyKeyboardRemove
+        self.plugin._send_fixed_reply(self.gateway, self.source, "Welcome", reply_markup=self.plugin._telegram_main_menu_reply_markup())
+        await self.drain()
+        first = self.bot.send_message.call_args.kwargs
+        self.assertIsInstance(first["reply_markup"], ReplyKeyboardRemove)
+        attached = self.bot.edit_message_reply_markup.call_args.kwargs
+        self.assertEqual(attached["message_id"], 42)
+        self.assertIsInstance(attached["reply_markup"], InlineKeyboardMarkup)
+        self.assertIn("Shop", attached["reply_markup"].inline_keyboard[0][0].text)
+        self.plugin._send_fixed_reply(self.gateway, self.source, "Again", reply_markup=self.plugin._telegram_main_menu_reply_markup())
+        await self.drain()
+        self.assertIsInstance(self.bot.send_message.call_args.kwargs["reply_markup"], InlineKeyboardMarkup)
+        self.bot.edit_message_reply_markup.assert_awaited_once()
+
+    async def test_inline_attach_failure_keeps_controls_on_a_new_message(self):
+        self.bot.edit_message_reply_markup.side_effect = RuntimeError("temporary failure")
+        self.plugin._send_fixed_reply(self.gateway, self.source, "Welcome", reply_markup=self.plugin._telegram_main_menu_reply_markup())
+        await self.drain()
+        self.assertEqual(self.bot.send_message.await_count, 2)
+        markup = self.bot.send_message.call_args.kwargs["reply_markup"]
+        self.assertIsInstance(markup, InlineKeyboardMarkup)
+        self.assertIsNotNone(self.plugin._BUTTON_SESSIONS.claim("123", "123", 42, markup.inline_keyboard[0][0].callback_data))
 
     async def test_callback_rechecks_policy_and_dispatches_only_its_saved_action(self):
         markup = self.plugin._prepare_telegram_markup(self.gateway, self.source, self.plugin._wallet_network_buttons())

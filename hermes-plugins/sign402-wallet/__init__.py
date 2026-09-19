@@ -13,6 +13,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, InvalidOperation
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -99,37 +100,16 @@ _TELEGRAM_PUBLIC_COMMAND_STARTED_MESSAGES = {
     "llm-credits": "Checking LLM credits…",
 }
 _TELEGRAM_PUBLIC_COMMAND_MENU = (
-    {"command": "start", "description": "Open SingIt"},
+    {"command": "shop", "description": "Gift cards, eSIMs and top-ups"},
+    {"command": "chat", "description": "AI model, credit and top-up budget"},
+    {"command": "wallet", "description": "Wallets and balances"},
+    {"command": "purchases", "description": "Orders, codes and receipts"},
+    {"command": "settings", "description": "Delivery email and approvals"},
     {"command": "help", "description": "Help with SingIt"},
-    {"command": "purchases", "description": "Your purchase history"},
-    {"command": "settings", "description": "Email, approvals and limits"},
-    {"command": "wallet", "description": "Show or create a wallet: base or solana"},
-    {"command": "balance", "description": "Show wallet balances"},
-    {"command": "connect_imessage", "description": "Select or link iMessage approvals"},
-    {"command": "connect_whatsapp", "description": "Select or link WhatsApp approvals"},
-    {"command": "limits", "description": "Show or set spending limits"},
-    {"command": "email", "description": "Show or set your delivery email"},
-    {"command": "withdraw", "description": "Withdraw Base assets"},
-    {"command": "bitrefill", "description": "Buy Bitrefill with a wallet token"},
-    {"command": "last_purchase", "description": "Reveal latest purchase"},
-    {"command": "llm_buy", "description": "Buy Bankr LLM credits"},
-    {"command": "llm_credits", "description": "Show Bankr LLM credits"},
 )
-# Ordered by what people open the bot to do. Buying is the product; the wallet,
-# the approval channel and the limits are housekeeping that only matters once a
-# purchase is in progress. Labels must stay in sync with
-# _TELEGRAM_BUTTON_COMMANDS below, which is keyed on the lowercased label.
-# Main navigation stays persistent. Context-specific controls appear inline.
-# Approval channels, delivery email and limits live in Settings.
-_TELEGRAM_MAIN_MENU_BUTTONS = (
-    ("🛍 Shop", "👛 Wallet"),
-    ("🧾 Purchases", "⚙️ Settings"),
-)
-_TELEGRAM_MAIN_MENU_WITH_CHAT = (
-    ("💬 Chat", "🛍 Shop"),
-    ("👛 Wallet", "🧾 Purchases"),
-    ("⚙️ Settings",),
-)
+# Home and contextual controls are inline; Telegram's native Menu is navigation.
+_TELEGRAM_MAIN_MENU_BUTTONS = (("🛍 Shop", "👛 Wallet"),)
+_TELEGRAM_MAIN_MENU_WITH_CHAT = (("💬 Chat", "🛍 Shop"), ("👛 Wallet",))
 _WALLET_MENU_BUTTONS = (("Base", "Solana"), ("Back",))
 _SETTINGS_MENU_BUTTONS = (
     ("⚙️ Limits", "✉️ Delivery email"),
@@ -151,6 +131,9 @@ _TELEGRAM_BUTTON_COMMANDS = {
     "buy bitrefill": "bitrefill",
     "buy llm credits": "llm-buy",
     "chat": "chat",
+    "ai settings": "chat",
+    "model": "model",
+    "stop chat": "cancel",
     # New labels. The old ones above stay: Telegram keeps a client's keyboard
     # until the bot sends a new one, so a user who has not been handed the
     # regrouped menu is still pressing the previous buttons.
@@ -252,13 +235,18 @@ _BITREFILL_USER_COUNTRIES: dict[str, str] = {}
 _TELEGRAM_CHAT_BUTTON = "Chat"
 _TELEGRAM_CHAT_EXIT_BUTTON = "Stop chat"
 _TELEGRAM_CHAT_MODEL_BUTTON = "Model"
-_TELEGRAM_CHAT_BUTTONS = ((_TELEGRAM_CHAT_EXIT_BUTTON, _TELEGRAM_CHAT_MODEL_BUTTON),)
-# Users picking a model are still in chat mode; this marks who is choosing.
-_CHAT_MODEL_PENDING: dict[str, list] = {}
+_TELEGRAM_CHAT_BUTTONS = (("AI settings", "Model"),)
+# The current model picker, independent of free-text chat routing.
+_CHAT_MODEL_PENDING: dict[str, dict] = {}
 # Bounded like the other per-user maps: a public bot must not grow state
 # without limit.
 _CHAT_MODE_USERS: dict[str, dict] = {}
-_CHAT_WARNING_THRESHOLD = 0.8
+# Draft questions never leave process memory before consent, and expire promptly.
+_CHAT_SETUP: dict[str, dict] = {}
+_CHAT_SETUP_TTL = 15 * 60
+_CHAT_INFLIGHT: set[str] = set()
+_CHAT_STATE_LOCK = threading.RLock()
+_TELEGRAM_KEYBOARD_REMOVED: set[str] = set()
 
 _BITREFILL_SESSIONS: dict[str, dict] = {}
 _WITHDRAW_SESSIONS: dict[str, dict] = {}
@@ -343,8 +331,7 @@ def _prepare_telegram_markup(gateway, source, markup):
     if "_actions" not in markup:
         markup = dict(markup, _actions=[[button["text"] for button in row] for row in markup["keyboard"]])
     adapter = _telegram_adapter(gateway, source)
-    is_home = markup.get("keyboard") in (_telegram_main_menu_reply_markup()["keyboard"], _reply_keyboard(_TELEGRAM_CHAT_BUTTONS)["keyboard"])
-    if not is_home and (getattr(adapter, "_app", None) is not None and getattr(adapter, "_singit_buttons_app", None) is adapter._app) and getattr(source, "chat_type", "dm") in {"dm", "private"}:
+    if (getattr(adapter, "_app", None) is not None and getattr(adapter, "_singit_buttons_app", None) is adapter._app) and getattr(source, "chat_type", "dm") in {"dm", "private"}:
         return _BUTTON_SESSIONS.render(*key, markup, source)
     # Hermes versions without PTB application access keep a working text menu.
     if len(_TEXT_BUTTON_ACTIONS) >= _TELEGRAM_OPERATION_MAX_USERS:
@@ -686,12 +673,12 @@ def _start_text(wallet_address: str, *, support_id: str = "") -> str:
     Paths that cannot set parse_mode render this through `_html_to_plain`.
     """
     support = _html_escape(str(support_id or "").strip())
-    chat = "\n<b>Chat</b> · Talk to AI using your wallet." if _ai_chat_enabled() else ""
+    chat = "\n<b>AI chat</b> · Just write a question. Choose a model and approve a budget before your first paid answer." if _ai_chat_enabled() else ""
     return (
         "<b>SingIt</b>\nYour wallet. Everyday purchases.\n\n"
         "<b>Shop</b> · Gift cards, eSIMs and mobile top-ups."
         f"{chat}\n<b>Purchases</b> · Orders, codes and receipts.\n\n"
-        "Open <b>Wallet</b> to choose a network and add funds."
+        "Use <b>Menu</b> for purchases and settings. Open <b>Wallet</b> to choose a network and add funds."
         + (f"\nSupport ID: <code>{support}</code>" if support else "")
     )
 
@@ -736,6 +723,10 @@ def _html_to_plain(text: str) -> str:
 def _help_text() -> str:
     return (
         "SingIt commands\n\n"
+        "/chat - AI model, Venice credit and top-up budget\n"
+        "/model [name] - Choose an AI model\n"
+        "/cancel - Cancel a draft (existing approvals remain active)\n"
+        "/shop - Browse gift cards, eSIMs and top-ups\n"
         "/wallet [base|solana] - Choose a network or show its balance\n"
         "/deposit [base|solana] - Show your deposit address\n"
         "/purchases - Browse orders and reveal a code\n"
@@ -1106,24 +1097,6 @@ def _handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
     if graph_demo:
         return graph_demo
 
-    # Chat mode runs before button and command dispatch: while it is on, the
-    # user is talking to a model, not to the menu.
-    budget_result = _handle_telegram_chat_budget_choice(
-        event=event,
-        source=source,
-        gateway=gateway,
-    )
-    if budget_result:
-        return budget_result
-
-    chat_result = _handle_telegram_chat_message(
-        event=event,
-        source=source,
-        gateway=gateway,
-    )
-    if chat_result:
-        return chat_result
-
     telegram_command = _telegram_public_command(event, source)
     if telegram_command:
         return _handle_telegram_public_command_request(
@@ -1172,6 +1145,14 @@ def _handle_pre_gateway_dispatch(*, event, gateway=None, **kwargs):
             source=source,
             gateway=gateway,
         )
+
+    shortcut = _handle_telegram_shop_shortcut(event=event, source=source, gateway=gateway)
+    if shortcut:
+        return shortcut
+
+    chat_result = _handle_telegram_chat_message(event=event, source=source, gateway=gateway)
+    if chat_result:
+        return chat_result
 
     sign402_only_result = _handle_telegram_sign402_only_fallback(
         event=event,
@@ -1240,8 +1221,7 @@ def _enter_chat_mode(user_id: str) -> None:
         user_key not in _CHAT_MODE_USERS
         and len(_CHAT_MODE_USERS) >= _TELEGRAM_OPERATION_MAX_USERS
     ):
-        # Drop the oldest entry rather than refuse: chat mode is recoverable
-        # state, and the evicted user simply gets the main menu back.
+        # Compatibility state only; routing checks gateway authorization each turn.
         _CHAT_MODE_USERS.pop(next(iter(_CHAT_MODE_USERS)), None)
     _CHAT_MODE_USERS[user_key] = {"warned": False}
 
@@ -1252,7 +1232,7 @@ def _leave_chat_mode(user_id: str) -> None:
 
 def _telegram_chat_reply_markup() -> dict:
     return _reply_keyboard(
-        _TELEGRAM_CHAT_BUTTONS, placeholder="Ask anything, or stop the chat"
+        _TELEGRAM_CHAT_BUTTONS, placeholder="Ask a question"
     )
 
 
@@ -1296,13 +1276,13 @@ def _chat_budget_block(client, identity) -> str:
     if status.get("hasPolicy"):
         lines.append(f"- Credit left: ${status.get('outstandingUsdc', '0.00')}")
         lines.append(
-            f"- Spendable today: ${status.get('remainingWindowUsdc', '0.00')}"
+            f"- Top-up allowance today: ${status.get('remainingWindowUsdc', '0.00')}"
             f" of ${status.get('dailyCapUsdc', '0.00')}"
         )
     else:
         lines.append("- No daily budget approved yet.")
     if status.get("paused"):
-        lines.append("- Chat is paused until you approve it again.")
+        lines.append("- Chat is paused; open /chat to review its status.")
     return "\n".join(lines) + "\n"
 
 
@@ -1328,204 +1308,230 @@ def _chat_answer_text(user_id: str, result: dict) -> str:
     if web:
         footer = f"{web}\n{footer}"
 
-    warning = ""
-    cap = result.get("dailyCapAtomic")
-    state = _CHAT_MODE_USERS.get(str(user_id))
-    if cap and state is not None and not state.get("warned"):
-        try:
-            spent = int(cap) - int(remaining_atomic)
-            if int(cap) > 0 and spent / int(cap) >= _CHAT_WARNING_THRESHOLD:
-                state["warned"] = True
-                warning = (
-                    f"\n\nYou've used {_usd_from_atomic(spent)} of today's "
-                    f"{_usd_from_atomic(cap)}."
-                )
-        except (TypeError, ValueError, ZeroDivisionError):
-            warning = ""
-
-    return f"{text}\n\n{footer}{warning}"
+    return f"{text}\n\n{footer} · Venice credit"
 
 
-def _chat_start_text(result: dict) -> str:
-    """The message shown on entering chat mode.
-
-    Says what it costs in the user's terms: a daily limit they approve once.
-    None of the plumbing vocabulary appears.
-    """
-    cap = str(result.get("dailyCapUsdc") or "").strip()
-    model = str(result.get("modelLabel") or "").strip()
-    opening = "Ask me anything."
-    if model:
-        opening = f"Ask me anything. You're talking to {model}."
-    if cap:
-        opening += f" Daily limit ${cap}."
-    return f"{opening}\n\nTap Stop chat when you're done."
-
-
-# The smallest workable budget is one prefund chunk: a smaller daily cap would
-# be approved and then never fund a top-up. $1/day, which the design sketched,
-# is not offered for exactly that reason.
-_CHAT_BUDGET_CHOICES = (
-    ("$5 / day", 5_000_000),
-    ("$10 / day", 10_000_000),
-    ("$20 / day", 20_000_000),
-)
-_CHAT_BUDGET_DAYS = 30
-_CHAT_BUDGET_BUTTONS = (
-    tuple(label for label, _ in _CHAT_BUDGET_CHOICES),
-    ("Back",),
-)
-_CHAT_BUDGET_PENDING: dict[str, bool] = {}
-
-
-def _telegram_chat_budget_reply_markup() -> dict:
-    return _reply_keyboard(
-        _CHAT_BUDGET_BUTTONS, placeholder="Pick a daily budget"
-    )
-
-
-def _chat_budget_offer_text(status: dict) -> str:
-    lines = ["AI chat without an account and without logs."]
-    lines += [
-        "",
-        "Approve one daily budget. After that you chat without "
-        "confirming every message, until the budget or the approval runs out.",
-        "",
-        # Spelled out, not only on the keyboard: some clients do not render a
-        # reply keyboard, and the amounts are the whole decision.
-        "Daily budget: " + " · ".join(label for label, _ in _CHAT_BUDGET_CHOICES),
-        "",
-        "The approval arrives on your linked phone channel, not here.",
-    ]
+def _chat_start_text(status: dict) -> str:
+    expires = status.get("policyExpiresAt")
+    try:
+        expiry = datetime.fromtimestamp(int(expires), timezone.utc).strftime("%d %b %Y, %H:%M UTC") if expires else "not approved"
+    except (TypeError, ValueError, OverflowError, OSError):
+        expiry = "unavailable"
+    lines = ["AI settings", f"Model: {status.get('modelLabel') or status.get('model') or 'not selected'}"]
+    if status.get("inputUsdPerMTok") is not None and status.get("outputUsdPerMTok") is not None:
+        lines.append(f"Per 1M tokens: ${status['inputUsdPerMTok']} input · ${status['outputUsdPerMTok']} output")
+    lines += ["", f"Venice credit (last checked): ${status.get('outstandingUsdc', '0.00')}",
+              f"Top-up allowance today: ${status.get('remainingWindowUsdc', '0.00')} of ${status.get('dailyCapUsdc', '0.00')}",
+              f"Approval expires: {expiry}", "Payments: USDC on Base via x402."]
+    if status.get("paused"):
+        lines.append("Chat paused: " + str(status.get("pauseReason") or "review required"))
+    elif status.get("policyExpired"):
+        lines.append("Your approval expired. Renew it to continue.")
+    lines += ["", "Answers use prepaid Venice credit. The daily limit caps new top-ups, not use of existing credit.",
+              "Send a question here. Menu is always available."]
     return "\n".join(lines)
 
 
-def _handle_telegram_chat_entry(*, identity, source, gateway) -> bool:
-    """Enter chat mode, or offer a budget first. False when the feature is off."""
+_CHAT_BUDGET_CHOICES = (("$5 / day", 5_000_000), ("$10 / day", 10_000_000), ("$20 / day", 20_000_000))
+_CHAT_BUDGET_DAYS = 30
+_CHAT_BUDGET_BUTTONS = (tuple(label for label, _ in _CHAT_BUDGET_CHOICES), ("Back",))
+_CHAT_BUDGET_PENDING: dict[str, bool] = {}
+
+
+def _chat_setup(user_id, source):
+    with _CHAT_STATE_LOCK:
+        now = time.monotonic()
+        for key, value in list(_CHAT_SETUP.items()):
+            if value["expires"] <= now:
+                _CHAT_SETUP.pop(key, None)
+                _CHAT_BUDGET_PENDING.pop(key, None)
+                _CHAT_MODEL_PENDING.pop(key, None)
+        flow = _CHAT_SETUP.get(str(user_id))
+        return flow if flow and flow["chat_id"] == str(source.chat_id) else None
+
+
+def _cancel_chat_setup(user_id):
+    with _CHAT_STATE_LOCK:
+        _CHAT_SETUP.pop(str(user_id), None)
+        _CHAT_BUDGET_PENDING.pop(str(user_id), None)
+        _CHAT_MODEL_PENDING.pop(str(user_id), None)
+
+
+def _new_chat_setup(identity, source, status, prompt=""):
+    with _CHAT_STATE_LOCK:
+        _cancel_chat_setup(identity.user_id)
+        if len(_CHAT_SETUP) >= _TELEGRAM_OPERATION_MAX_USERS:
+            _cancel_chat_setup(next(iter(_CHAT_SETUP)))
+        flow = {"chat_id": str(source.chat_id), "expires": time.monotonic() + _CHAT_SETUP_TTL,
+                "status": status, "prompt": prompt[:12000], "phase": "model"}
+        _CHAT_SETUP[str(identity.user_id)] = flow
+        return flow
+
+
+def _chat_model_offer(flow):
+    status = flow["status"]
+    text = "Set up AI chat\n\nChoose a model before sending your first question.\n"
+    text += f"Model: {status.get('modelLabel') or status.get('model') or 'default'}"
+    if status.get("inputUsdPerMTok") is not None and status.get("outputUsdPerMTok") is not None:
+        text += f"\nPer 1M tokens: ${status['inputUsdPerMTok']} input · ${status['outputUsdPerMTok']} output"
+    text += "\n\nChoosing a model is free. Next: review the top-up budget."
+    if flow.get("prompt"):
+        text += "\nYour question is saved here for 15 minutes and will be sent after approval."
+    return text, actions([(("Use this model", "Use this model"), ("Choose model", "/model")), (("Cancel", "/cancel"),)])
+
+
+def _telegram_chat_budget_reply_markup():
+    return _reply_keyboard(_CHAT_BUDGET_BUTTONS, placeholder="Choose a top-up limit")
+
+
+def _chat_budget_offer_text(status):
+    return ("Choose a daily top-up limit\n\n"
+            "Answers spend prepaid Venice credit. When more credit is needed, the bot can top up with USDC on Base via x402, within this limit.\n\n"
+            "Choose $5 / day, $10 / day or $20 / day. Approval lasts 30 days; the limit resets at 00:00 UTC.\n"
+            "You will review the terms before requesting approval on your linked phone channel.")
+
+
+def _chat_policy_active(status):
+    if not status.get("hasPolicy") or status.get("paused") or status.get("policyExpired"):
+        return False
+    expiry = status.get("policyExpiresAt")
+    return not expiry or int(expiry) > time.time()
+
+
+def _handle_telegram_chat_entry(*, identity, source, gateway):
     if not _ai_chat_enabled():
         return False
-    client = _client_factory()
-    try:
-        result = client.execute_chat(
-            "start",
-            identity,
-            user_access_token=_user_access_token(client, identity),
-        )
-    except Exception:
-        _send_fixed_reply(
-            gateway,
-            source,
-            "Chat is unavailable right now. Try again in a moment.",
-            reply_markup=_telegram_main_menu_reply_markup(),
-        )
+    if getattr(source, "chat_type", "dm") not in {"dm", "private"}:
+        _send_fixed_reply(gateway, source, "Open AI chat in your private chat with SingIt.")
         return True
 
-    status = result if isinstance(result, dict) else {}
-    if not status.get("hasPolicy"):
-        # Nothing is approved yet, so paid messages would be refused. Offer the
-        # budget instead of letting the user walk into a refusal.
-        _remember_chat_budget_pending(str(identity.user_id))
-        _send_fixed_reply(
-            gateway,
-            source,
-            _chat_budget_offer_text(status),
-            reply_markup=_telegram_chat_budget_reply_markup(),
-        )
-        return True
-
-    _enter_chat_mode(str(identity.user_id))
-    _send_fixed_reply(
-        gateway,
-        source,
-        _chat_start_text(status),
-        reply_markup=_telegram_chat_reply_markup(),
-    )
+    def work(generation):
+        client = _client_factory()
+        status = client.execute_chat("start", identity, user_access_token=_user_access_token(client, identity))
+        if not isinstance(status, dict) or not status.get("ok"):
+            return "Chat is unavailable right now. Try again in a moment.", _telegram_main_menu_reply_markup()
+        if not _telegram_operation_is_current(str(identity.user_id), generation):
+            return "", None
+        rows = [(("Change model", "/model"), ("Review budget", "/chat_budget")), (("Home", "/start"),)]
+        return _chat_start_text(status), actions(rows)
+    _start_telegram_background_operation(identity=identity, action="chat:settings", started_text="Loading AI settings…", source=source, gateway=gateway, work=work)
     return True
 
 
-def _remember_chat_budget_pending(user_id: str) -> None:
-    if (
-        user_id not in _CHAT_BUDGET_PENDING
-        and len(_CHAT_BUDGET_PENDING) >= _TELEGRAM_OPERATION_MAX_USERS
-    ):
+def _remember_chat_budget_pending(user_id):
+    if len(_CHAT_BUDGET_PENDING) >= _TELEGRAM_OPERATION_MAX_USERS:
         _CHAT_BUDGET_PENDING.pop(next(iter(_CHAT_BUDGET_PENDING)), None)
     _CHAT_BUDGET_PENDING[user_id] = True
 
 
+def _show_chat_budget(identity, source, gateway, flow):
+    flow["phase"] = "budget"
+    _remember_chat_budget_pending(str(identity.user_id))
+    _send_fixed_reply(gateway, source, _chat_budget_offer_text(flow["status"]), reply_markup=_telegram_chat_budget_reply_markup())
+    return dict(_SKIP_RESULT)
+
+
 def _handle_telegram_chat_budget_choice(*, event, source, gateway):
-    """Read a budget choice from the offer screen."""
-    if not _ai_chat_enabled() or not _is_telegram_source(source):
-        return None
     identity = _identity_from_telegram_source(source)
     if identity is None:
         return None
     user_id = str(identity.user_id)
-    if not _CHAT_BUDGET_PENDING.get(user_id):
+    flow = _chat_setup(user_id, source)
+    if flow is None:
         return None
-
     text = str(getattr(event, "text", "") or "").strip()
     normalized = _normalize_button_text(text)
     if normalized == "back":
-        _CHAT_BUDGET_PENDING.pop(user_id, None)
-        _send_fixed_reply(
-            gateway, source, "Cancelled.",
-            reply_markup=_telegram_main_menu_reply_markup(),
-        )
+        _cancel_chat_setup(user_id)
+        _send_fixed_reply(gateway, source, "Setup cancelled. Your saved question was discarded.", reply_markup=_telegram_main_menu_reply_markup())
+        return dict(_SKIP_RESULT)
+    if flow["phase"] == "model" and normalized == "use this model":
+        return _show_chat_budget(identity, source, gateway, flow)
+    chosen = next((amount for label, amount in _CHAT_BUDGET_CHOICES if _normalize_button_text(label) == normalized), None)
+    if flow["phase"] == "budget" and chosen:
+        flow.update(phase="review", cap=chosen)
+        return _chat_budget_review(identity, source, gateway, flow)
+    if flow["phase"] == "review" and normalized == "change budget":
+        return _show_chat_budget(identity, source, gateway, flow)
+    if flow["phase"] != "review" or normalized != "request budget approval":
+        _send_fixed_reply(gateway, source, "Finish AI setup with the buttons, or /cancel to discard it.", reply_markup=_chat_flow_markup(flow))
         return dict(_SKIP_RESULT)
 
-
-    chosen = next(
-        (
-            atomic
-            for label, atomic in _CHAT_BUDGET_CHOICES
-            if _normalize_button_text(label) == normalized
-        ),
-        None,
-    )
-    if chosen is None:
-        return None
-
-    _CHAT_BUDGET_PENDING.pop(user_id, None)
-
-    # The gateway blocks for up to two minutes waiting for the YES, and that
-    # YES arrives over WhatsApp — which is delivered through this very hook.
-    # Waiting here would hold the thread that has to deliver the decision, so
-    # the approval could never arrive and would always time out. Every other
-    # money action in this plugin runs off the hook for the same reason.
-    def work(_generation: int) -> tuple[str, dict | None]:
+    flow["phase"] = "approving"
+    def work(generation):
+        with _CHAT_STATE_LOCK:
+            if _chat_setup(user_id, source) is not flow or not _telegram_operation_is_current(user_id, generation):
+                return "Setup cancelled before the approval request was sent.", None
         client = _client_factory()
-        result = client.execute_chat(
-            "approve-policy",
-            identity,
-            payload={"dailyCapAtomic": chosen, "days": _CHAT_BUDGET_DAYS},
-            user_access_token=_user_access_token(client, identity),
-        )
-        if not isinstance(result, dict) or not result.get("ok"):
-            # Declined, timed out or refused: no budget, no chat, no money.
-            return (
-                str(
-                    (result or {}).get("telegramText")
-                    or "The budget was not approved."
-                ),
-                _telegram_main_menu_reply_markup(),
-            )
-        _enter_chat_mode(user_id)
-        return (
-            str(result.get("telegramText") or "Approved.") + "\n\nGo ahead.",
-            _telegram_chat_reply_markup(),
-        )
+        result = client.execute_chat("approve-policy", identity, payload={"dailyCapAtomic": flow["cap"], "days": _CHAT_BUDGET_DAYS}, user_access_token=_user_access_token(client, identity))
+        if not isinstance(result, dict) or not result.get("ok") or not result.get("approved"):
+            if _chat_setup(user_id, source) is flow:
+                _cancel_chat_setup(user_id)
+            return str((result or {}).get("telegramText") or "The budget was not approved."), _telegram_chat_reply_markup()
+        # Navigation/expiry cancels the deferred question, never an already submitted payment.
+        with _CHAT_STATE_LOCK:
+            if _chat_setup(user_id, source) is not flow or not _telegram_operation_is_current(user_id, generation):
+                return "Budget approved. Your saved question was cancelled; send a new question when ready.", None
+            prompt = flow.pop("prompt", "")
+            _cancel_chat_setup(user_id)
+            _enter_chat_mode(user_id)
+        if prompt:
+            return _chat_paid_answer(client, identity, prompt), _telegram_chat_reply_markup()
+        return "Budget approved. Send a question here whenever you're ready.", _telegram_chat_reply_markup()
 
-    return _start_telegram_background_operation(
-        identity=identity,
-        action="chat:approve-policy",
-        started_text=(
-            "Approve the daily budget on your phone — it is waiting there now."
-        ),
-        source=source,
-        gateway=gateway,
-        work=work,
-    )
+    return _start_chat_operation(identity=identity, action="chat:approve-policy", started_text="Requesting budget approval on your linked phone channel…\nUse /cancel to discard the saved question. An approval already sent can still complete.", source=source, gateway=gateway, work=work)
 
+
+def _chat_flow_markup(flow):
+    if flow["phase"] == "model":
+        return _chat_model_offer(flow)[1]
+    if flow["phase"] == "budget":
+        return _telegram_chat_budget_reply_markup()
+    if flow["phase"] == "review":
+        return actions([(("Request budget approval", "Request budget approval"),), (("Change budget", "Change budget"), ("Cancel", "/cancel"))])
+    return actions([(("Cancel saved question", "/cancel"),)])
+
+
+def _chat_budget_review(identity, source, gateway, flow):
+    model = flow["status"].get("modelLabel") or flow["status"].get("model") or "default"
+    text = (f"Review AI chat\n\nModel: {model}\nTop-ups: up to {_usd_from_atomic(flow['cap'])} / day\n"
+            f"Valid for: {_CHAT_BUDGET_DAYS} days · resets 00:00 UTC\nPayment: USDC on Base via x402\n\n"
+            "Approval itself does not move money. Your next question may trigger a Venice top-up. Answers then use prepaid credit at the selected model's token rates.\n"
+            "This is a top-up limit, not a subscription or a cap on spending existing Venice credit.")
+    status = flow["status"]
+    if status.get("inputUsdPerMTok") is not None and status.get("outputUsdPerMTok") is not None:
+        text += f"\n\nPer 1M tokens: ${status['inputUsdPerMTok']} input · ${status['outputUsdPerMTok']} output."
+    _send_fixed_reply(gateway, source, text, reply_markup=_chat_flow_markup(flow))
+    return dict(_SKIP_RESULT)
+
+
+def _start_chat_operation(*, identity, work, **kwargs):
+    user_id = str(identity.user_id)
+    with _CHAT_STATE_LOCK:
+        if user_id in _CHAT_INFLIGHT:
+            _send_fixed_reply(kwargs["gateway"], kwargs["source"], "Your previous AI request is still running. Please wait for its result.")
+            return dict(_SKIP_RESULT)
+        if len(_CHAT_INFLIGHT) >= _TELEGRAM_OPERATION_MAX_USERS:
+            _send_fixed_reply(kwargs["gateway"], kwargs["source"], "Chat is busy. Try again in a moment.")
+            return dict(_SKIP_RESULT)
+        _CHAT_INFLIGHT.add(user_id)
+    def guarded(generation):
+        try:
+            return work(generation)
+        finally:
+            with _CHAT_STATE_LOCK:
+                _CHAT_INFLIGHT.discard(user_id)
+    return _start_telegram_background_operation(identity=identity, work=guarded, release=lambda: _CHAT_INFLIGHT.discard(user_id), **kwargs)
+
+
+def _chat_paid_answer(client, identity, text):
+    result = client.execute_chat("message", identity, payload={"text": text}, user_access_token=_user_access_token(client, identity))
+    if not isinstance(result, dict) or not result.get("ok"):
+        if isinstance(result, dict) and result.get("state") == "MERCHANT_CHANGED":
+            _leave_chat_mode(str(identity.user_id))
+        return str((result or {}).get("telegramText") or "The chat could not answer that.")
+    _enter_chat_mode(str(identity.user_id))
+    return _chat_answer_text(str(identity.user_id), result)
 
 
 _CHAT_MODEL_MORE = "More"
@@ -1574,6 +1580,10 @@ def _handle_chat_model_command(*, identity, client, source, gateway, query):
                 reply_markup=_telegram_chat_reply_markup(),
             )
             return dict(_SKIP_RESULT)
+        flow = _chat_setup(str(identity.user_id), source)
+        if flow:
+            flow["status"].update(model=chosen["id"], modelLabel=chosen["label"], inputUsdPerMTok=chosen.get("inputUsdPerMTok"), outputUsdPerMTok=chosen.get("outputUsdPerMTok"))
+            return _show_chat_budget(identity, source, gateway, flow)
         _send_fixed_reply(
             gateway, source, f"Switched to {chosen['label']}. Ask away.",
             reply_markup=_telegram_chat_reply_markup(),
@@ -1740,6 +1750,10 @@ def _handle_chat_model_choice(
             reply_markup=_telegram_chat_reply_markup(),
         )
         return dict(_SKIP_RESULT)
+    flow = _chat_setup(user_id, source)
+    if flow:
+        flow["status"].update(model=chosen["id"], modelLabel=chosen["label"], inputUsdPerMTok=chosen.get("inputUsdPerMTok"), outputUsdPerMTok=chosen.get("outputUsdPerMTok"))
+        return _show_chat_budget(identity, source, gateway, flow)
     _send_fixed_reply(
         gateway, source, f"Switched to {chosen['label']}. Ask away.",
         reply_markup=_telegram_chat_reply_markup(),
@@ -1774,122 +1788,77 @@ def _chat_model_text(models: list) -> str:
     return "\n".join(lines).strip()
 
 
-def _handle_telegram_chat_message(*, event, source, gateway):
-    """Route text to Venice while the user is in chat mode.
+def _handle_telegram_shop_shortcut(*, event, source, gateway):
+    if not _is_telegram_source(source) or getattr(source, "chat_type", "dm") not in {"dm", "private"}:
+        return None
+    identity = _identity_from_telegram_source(source)
+    if identity is None or _chat_setup(str(identity.user_id), source):
+        return None
+    text = str(getattr(event, "text", "") or "").strip()
+    match = re.fullmatch(r"(?:buy|shop for|купить|хочу купить)\s+([^?\n]{2,80})", text, re.IGNORECASE)
+    if not match:
+        return None
+    query = match.group(1).strip()
+    # A denomination is selected from the provider's catalog, never inferred.
+    query = re.sub(r"\s+(?:for\s+|на\s+)?\d+(?:[.,]\d+)?\s*(?:czk|kč|крон|usd|eur)\s*$", "", query, flags=re.IGNORECASE).strip()
+    if not query:
+        return None
+    _cancel_chat_setup(str(identity.user_id))
+    return _handle_bitrefill_search_input(identity=identity, query=query, source=source, gateway=gateway)
 
-    This runs before button and command dispatch, so ordinary words like
-    "balance" reach the model instead of the command parser. The exit button is
-    the one thing still read as a command.
-    """
+
+def _handle_telegram_chat_message(*, event, source, gateway):
+    """Free text enters AI only after explicit commands and input forms."""
     if not _ai_chat_enabled() or not _is_telegram_source(source):
         return None
     identity = _identity_from_telegram_source(source)
-    if identity is None:
+    if identity is None or getattr(source, "chat_type", "dm") not in {"dm", "private"}:
         return None
-    user_id = str(identity.user_id)
-    if not _in_chat_mode(user_id):
-        return None
-
     text = str(getattr(event, "text", "") or "").strip()
-    if not text:
+    if not text or text.startswith("/"):
         return None
-
+    if len(text) > 12000:
+        _send_fixed_reply(gateway, source, "Please shorten your question to 12,000 characters.")
+        return dict(_SKIP_RESULT)
+    user_id = str(identity.user_id)
     client = _client_factory()
-
-    normalized = _normalize_button_text(text)
-
-    # `/model` and `/model <name>`: read from the raw text, because the button
-    # normaliser keeps the leading slash.
-    command = text.strip()
-    if command.lower() == "/model" or command.lower().startswith("/model "):
-        _, _, argument = command.partition(" ")
-        return _handle_chat_model_command(
-            identity=identity, client=client, source=source, gateway=gateway,
-            query=argument.strip(),
-        )
-
     pending = _CHAT_MODEL_PENDING.get(user_id)
-    if pending is not None:
-        handled = _handle_chat_model_choice(
-            identity=identity, client=client, source=source, gateway=gateway,
-            pending=pending, normalized=normalized, typed=text,
-        )
-        if handled is not None:
-            return handled
-
-    if normalized == _normalize_button_text(_TELEGRAM_CHAT_MODEL_BUTTON):
-        return _show_chat_model_categories(
-            identity=identity, client=client, source=source, gateway=gateway
-        )
-
-    if normalized in {
-        _normalize_button_text(_TELEGRAM_CHAT_EXIT_BUTTON),
-        "back",
-    }:
-        _leave_chat_mode(user_id)
-        _CHAT_MODEL_PENDING.pop(user_id, None)
-        try:
-            client.execute_chat(
-                "end",
-                identity,
-                user_access_token=_user_access_token(client, identity),
-            )
-        except Exception:
-            # Leaving is a local decision; a gateway hiccup must not trap the
-            # user in a mode they asked to leave.
-            pass
-        _send_fixed_reply(
-            gateway,
-            source,
-            "Chat ended.",
-            reply_markup=_telegram_main_menu_reply_markup(),
-        )
-        return dict(_SKIP_RESULT)
-
-    try:
-        result = client.execute_chat(
-            "message",
-            identity,
-            payload={"text": text},
-            user_access_token=_user_access_token(client, identity),
-        )
-    except Exception:
-        _send_fixed_reply(
-            gateway,
-            source,
-            "The chat is unavailable right now. Try again in a moment.",
-            reply_markup=_telegram_chat_reply_markup(),
-        )
-        return dict(_SKIP_RESULT)
-
-    if not isinstance(result, dict) or not result.get("ok"):
-        message = str(
-            (result or {}).get("telegramText", "")
-            or "The chat could not answer that."
-        )
-        # A merchant change is not a transient refusal: it needs a fresh
-        # approval, so put the user back on the main menu.
-        if str((result or {}).get("state", "")) == "MERCHANT_CHANGED":
-            _leave_chat_mode(user_id)
-            _send_fixed_reply(
-                gateway,
-                source,
-                message,
-                reply_markup=_telegram_main_menu_reply_markup(),
-            )
+    if pending:
+        if _normalize_button_text(text) == "back":
+            _CHAT_MODEL_PENDING.pop(user_id, None)
+            flow = _chat_setup(user_id, source)
+            if flow:
+                message, markup = _chat_model_offer(flow)
+                _send_fixed_reply(gateway, source, message, reply_markup=markup)
+            else:
+                _handle_telegram_chat_entry(identity=identity, source=source, gateway=gateway)
             return dict(_SKIP_RESULT)
-        _send_fixed_reply(
-            gateway, source, message, reply_markup=_telegram_chat_reply_markup()
-        )
+        handled = _handle_chat_model_choice(identity=identity, client=client, source=source, gateway=gateway, pending=pending, normalized=_normalize_button_text(text), typed=text)
+        if handled:
+            return handled
+    flow = _chat_setup(user_id, source)
+    if flow:
+        return _handle_telegram_chat_budget_choice(event=event, source=source, gateway=gateway)
+    reserved = {"use this model", "request budget approval", "change budget"}
+    reserved.update(_normalize_button_text(label) for label, _ in _CHAT_BUDGET_CHOICES)
+    if _normalize_button_text(text) in reserved:
+        _send_fixed_reply(gateway, source, "This AI setup has expired. Open /chat to review your settings.")
         return dict(_SKIP_RESULT)
 
-    _send_fixed_reply(
-        gateway,
-        source,
-        _chat_answer_text(user_id, result),
-        reply_markup=_telegram_chat_reply_markup(),
-    )
-    return dict(_SKIP_RESULT)
+    def work(generation):
+        status = client.execute_chat("start", identity, user_access_token=_user_access_token(client, identity))
+        if not isinstance(status, dict) or not status.get("ok"):
+            return "Chat is unavailable right now. Try again in a moment.", _telegram_chat_reply_markup()
+        with _CHAT_STATE_LOCK:
+            if not _telegram_operation_is_current(user_id, generation):
+                return "Your unsent question was cancelled.", None
+            if status.get("paused"):
+                return _chat_start_text(status), actions([(("AI settings", "/chat"),)])
+            if not _chat_policy_active(status):
+                flow = _new_chat_setup(identity, source, status, text)
+                return _chat_model_offer(flow)
+        return _chat_paid_answer(client, identity, text), _telegram_chat_reply_markup()
+    return _start_chat_operation(identity=identity, action="chat:message", started_text="Checking AI chat…", source=source, gateway=gateway, work=work)
 
 
 def _handle_telegram_sign402_only_fallback(*, event, source, gateway):
@@ -1965,6 +1934,8 @@ def _handle_telegram_global_navigation_message(*, event, source, gateway):
         return None
     text = str(getattr(event, "text", "") or "").strip()
     if _normalize_button_text(text) != "back":
+        return None
+    if _chat_setup(str(identity.user_id), source) or str(identity.user_id) in _CHAT_MODEL_PENDING:
         return None
     _invalidate_telegram_operation(str(identity.user_id))
     _BITREFILL_SESSIONS.pop(str(identity.user_id), None)
@@ -2046,15 +2017,18 @@ def _start_telegram_background_operation(
     work: Callable[[int], tuple[str, dict | None]],
     prepare: Callable[[int], None] | None = None,
     recover: Callable[[int], None] | None = None,
+    release: Callable[[], None] | None = None,
 ) -> dict:
     user_id = str(identity.user_id)
     generation = _reserve_telegram_operation(user_id, action)
     if generation is None:
+        if release:
+            release()
         return dict(_SKIP_RESULT)
     if prepare is not None:
         prepare(generation)
     source = _operation_source(source)
-    preserve_result = action in {"command:reveal", "command:last-purchase", "command:llm-buy", "command:llm-terms"}
+    preserve_result = action in {"chat:message", "chat:approve-policy", "command:reveal", "command:last-purchase", "command:llm-buy", "command:llm-terms"}
     if preserve_result:
         source._singit_card = MessageCard()
         source._singit_protect_card = True
@@ -2099,6 +2073,8 @@ def _start_telegram_background_operation(
     try:
         _run_in_background(execute)
     except Exception as exc:
+        if release:
+            release()
         _finish_telegram_operation(user_id, generation)
         logger.warning(
             "Could not schedule Sign402 Telegram action action=%s error=%s",
@@ -2304,6 +2280,40 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
         return dict(_SKIP_RESULT)
     if command in {"purchases", "purchase", "reveal"} and getattr(source, "chat_type", "dm") not in {"dm", "private"}:
         _send_fixed_reply(gateway, source, "Open Purchases in your private chat with SingIt.")
+        return dict(_SKIP_RESULT)
+    user_id = str(identity.user_id)
+    if command != "model":
+        _cancel_chat_setup(user_id)
+    if command in {"model", "chat-budget", "cancel"}:
+        if getattr(source, "chat_type", "dm") not in {"dm", "private"}:
+            _send_fixed_reply(gateway, source, "Open AI chat in your private chat with SingIt.")
+            return dict(_SKIP_RESULT)
+        _invalidate_telegram_operation(user_id)
+        for sessions in (_BITREFILL_SESSIONS, _WITHDRAW_SESSIONS, _IMESSAGE_CONNECT_SESSIONS):
+            sessions.pop(user_id, None)
+        if command == "cancel":
+            _leave_chat_mode(user_id)
+            _send_fixed_reply(gateway, source, "Draft cancelled. A request already sent may still finish.\nYour approved budget and Venice credit are unchanged.", reply_markup=_telegram_main_menu_reply_markup())
+            return dict(_SKIP_RESULT)
+        if not _ai_chat_enabled():
+            _send_fixed_reply(gateway, source, "AI chat is not enabled.", reply_markup=_telegram_main_menu_reply_markup())
+            return dict(_SKIP_RESULT)
+        if user_id in _CHAT_INFLIGHT:
+            _send_fixed_reply(gateway, source, "Your previous AI request is still running. Please wait for its result.")
+            return dict(_SKIP_RESULT)
+        client = _client_factory()
+        if command == "model":
+            return _handle_chat_model_command(identity=identity, client=client, source=source, gateway=gateway, query=args)
+        status = client.execute_chat("start", identity, user_access_token=_user_access_token(client, identity))
+        if not isinstance(status, dict) or not status.get("ok"):
+            _send_fixed_reply(gateway, source, "Could not load AI settings. Try again later.")
+            return dict(_SKIP_RESULT)
+        if status.get("paused") and status.get("pauseReason") != "MERCHANT_CHANGED":
+            _send_fixed_reply(gateway, source, "Chat needs a payment status check before its budget can be renewed. Open /chat for its status.")
+            return dict(_SKIP_RESULT)
+        flow = _new_chat_setup(identity, source, status)
+        message, markup = _chat_model_offer(flow)
+        _send_fixed_reply(gateway, source, message, reply_markup=markup)
         return dict(_SKIP_RESULT)
     if command == "withdraw" and _TELEGRAM_ACTIVE_OPERATIONS.get(str(identity.user_id), (None, ""))[1] == "withdraw:tokens":
         return dict(_SKIP_RESULT)
@@ -4410,11 +4420,16 @@ async def _send_telegram_reply_async(
     bot = getattr(adapter, "_bot", None)
     send_message = getattr(bot, "send_message", None)
     if callable(send_message):
+        # A reply keyboard survives bot upgrades. Remove it on the first private
+        # reply, then attach the inline controls to that same message.
+        remove_keyboard = (getattr(source, "chat_type", "dm") in {"dm", "private"}
+                           and chat_id not in _TELEGRAM_KEYBOARD_REMOVED
+                           and (not reply_markup or "inline_keyboard" in reply_markup))
         markup = _telegram_reply_markup_object(reply_markup)
         extra = {"parse_mode": parse_mode} if parse_mode else {}
         card = getattr(source, "_singit_card", None)
         chunks = _telegram_message_chunks(body)
-        can_edit = card is not None and card.message_id and len(chunks) == 1 and (
+        can_edit = not remove_keyboard and card is not None and card.message_id and len(chunks) == 1 and (
             not reply_markup or "inline_keyboard" in reply_markup)
         edit = getattr(bot, "edit_message_text", None)
         if can_edit and callable(edit):
@@ -4430,10 +4445,23 @@ async def _send_telegram_reply_async(
                 logger.warning("Telegram card edit failed error=%s", type(exc).__name__)
         for chunk in chunks:
             message = await send_message(
-                chat_id=chat_id, text=chunk, reply_markup=markup,
+                chat_id=chat_id, text=chunk,
+                reply_markup=_telegram_reply_markup_object({"remove_keyboard": True}) if remove_keyboard else markup,
                 disable_web_page_preview=True, **extra,
             )
             message_id = getattr(message, "message_id", None)
+            if remove_keyboard:
+                if len(_TELEGRAM_KEYBOARD_REMOVED) >= _TELEGRAM_OPERATION_MAX_USERS:
+                    _TELEGRAM_KEYBOARD_REMOVED.pop()
+                _TELEGRAM_KEYBOARD_REMOVED.add(chat_id)
+                remove_keyboard = False
+                if markup:
+                    try:
+                        await bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=markup)
+                    except Exception as exc:
+                        logger.warning("Telegram inline controls failed error=%s", type(exc).__name__)
+                        message = await send_message(chat_id=chat_id, text="Choose an action:", reply_markup=markup)
+                        message_id = getattr(message, "message_id", None)
             if card is not None:
                 card.message_id = message_id
             _BUTTON_SESSIONS.bind(source.user_id, chat_id, reply_markup, message_id)
@@ -4458,9 +4486,11 @@ def _telegram_reply_markup_object(reply_markup: dict | None):
     if reply_markup is None:
         return None
     try:
-        from telegram import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
+        from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
     except ImportError:
         return reply_markup
+    if reply_markup.get("remove_keyboard"):
+        return ReplyKeyboardRemove()
     if "inline_keyboard" in reply_markup:
         return InlineKeyboardMarkup([[InlineKeyboardButton(**button) for button in row]
                                      for row in reply_markup["inline_keyboard"]])
@@ -4567,8 +4597,8 @@ def _reply_keyboard(
             for row in rows
         ],
         "resize_keyboard": True,
-        "is_persistent": True,
-        "one_time_keyboard": False,
+        "is_persistent": False,
+        "one_time_keyboard": True,
         "input_field_placeholder": placeholder,
     }
 
@@ -4591,6 +4621,20 @@ def _configure_telegram_public_command_menu() -> None:
     if not token:
         return
 
+    request = Request(
+        f"https://api.telegram.org/bot{token}/setChatMenuButton",
+        data=urlencode({"menu_button": json.dumps({"type": "commands"})}).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST",
+    )
+    try:
+        response = _telegram_api_opener(request, timeout=_TELEGRAM_COMMAND_MENU_TIMEOUT_SECONDS)
+        try:
+            response.read()
+        finally:
+            response.close()
+    except (HTTPError, TimeoutError, URLError, OSError) as exc:
+        logger.warning("Could not configure Telegram Menu button error=%s", type(exc).__name__)
+
     scopes: tuple[dict[str, str] | None, ...] = (
         None,
         {"type": "all_private_chats"},
@@ -4598,7 +4642,7 @@ def _configure_telegram_public_command_menu() -> None:
     for scope in scopes:
         payload_fields = {
             "commands": json.dumps(
-                list(_TELEGRAM_PUBLIC_COMMAND_MENU),
+                [item for item in _TELEGRAM_PUBLIC_COMMAND_MENU if item["command"] != "chat" or _ai_chat_enabled()],
                 separators=(",", ":"),
             )
         }
@@ -4766,6 +4810,7 @@ def _telegram_public_command(event, source) -> str | None:
             return None
         command = button_command
     normalized = command.strip().lower().replace("_", "-")
+    normalized = {"shop": "bitrefill", "menu": "start"}.get(normalized, normalized)
     if normalized in {
         "start",
         "help",
@@ -4790,6 +4835,9 @@ def _telegram_public_command(event, source) -> str | None:
         "llm-code",
         "llm-credits",
         "chat",
+        "model",
+        "chat-budget",
+        "cancel",
     }:
         return normalized
     return None
