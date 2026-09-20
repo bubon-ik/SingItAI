@@ -10,7 +10,7 @@ product is, see the [README](../README.md). For incident recovery see
 The gateway checkout is `~/apps/sign402` on the VPS `hermes@164.68.104.44`.
 
 Updated on 20 September 2026 at the owner's explicit request: the existing bot
-runs this repository's `codex/telegram-ui` release at
+runs this repository's `telegram-ui` release at
 `858a11e8ebd04b77e7135de4fe0f73f1d2857858`. The runtime code is pinned to this
 commit; later documentation commits do not imply a new deployment. Both service
 units are active, `/health` returns HTTP 200, and Telegram `getMe` succeeds.
