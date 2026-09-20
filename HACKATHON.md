@@ -40,6 +40,21 @@ An operator-assisted Alza CZ 200 CZK purchase completed through the project Bitr
 
 Temporary helpers coordinated this live check; it does not constitute a reusable Bitrefill Solana adapter or a deployed Telegram purchase flow. No redemption data, buyer email or payment credentials are published.
 
+### September 20: optional natural-language routing (local verification)
+
+[619ec8c](https://github.com/bubon-ik/singit-solana/commit/619ec8c) adds a
+TypeSafe-based entry point to the imported Telegram plugin. Ordinary messages
+can select existing catalog and read-only wallet workflows without first
+opening Venice chat. Direct delivery, physical-goods and booking requests
+offer gift cards only as a separately accepted alternative. This is application
+routing work, not a new Solana payment integration.
+
+All 313 plugin tests passed locally (284 existing plus 29 new), using mocked
+provider responses. No live TypeSafe request, bot deployment or purchase was
+performed. The feature is disabled by default. Semantic accuracy, product
+matching beyond catalog categories, and reconciliation with the deployed bot
+remain unverified. See [setup and limitations](docs/natural-language-assistant.md).
+
 ## Pending work — not claimed as completed
 
 - Deploy and verify the implemented wallet commands with an isolated Telegram bot.
