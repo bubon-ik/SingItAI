@@ -72,7 +72,8 @@ attempts or replace the managed wallet with a CLI wallet to unblock a payment.
 
 ## Verification
 
-Offline gateway, Telegram and Node suites cover exact approvals, declines,
+The local suites pass 1,289 gateway, 343 Telegram and 39 Node tests. They cover
+exact approvals, declines,
 expiry, changed terms, wrong users/wallets/networks, duplicates, insufficient
 funds, lost responses, restart, day rollover, delayed credit, pause controls and
 Base regressions. The Node fixture exercises real Ed25519 signatures and SVM

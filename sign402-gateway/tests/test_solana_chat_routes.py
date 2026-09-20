@@ -1,5 +1,7 @@
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
+from sign402_gateway.server import _require_authenticated_user
 import test_chat_endpoints as endpoints
 
 
@@ -72,3 +74,32 @@ class SolanaChatRouteTests(unittest.TestCase):
         self.assertEqual(self.response_json(response)['state'], 'NETWORK_UNAVAILABLE')
         server.chat_service.send.assert_not_called()
         server.solana_chat_service.handle.assert_not_called()
+
+    @patch('sign402_gateway.server._enforce_user_request_rate')
+    def test_real_auth_guard_allows_only_integrated_solana_chat_routes(self, rate):
+        for operation in ('start', 'end', 'models', 'network', 'approve-policy', 'message', 'quote', 'pay', 'payment'):
+            with self.subTest(operation=operation):
+                server = self.server()
+                server.user_wallet_service.resolve_telegram_user_id.return_value = endpoints.USER_ID
+                response = self.make_handler('/agent/chat/' + operation,
+                    {'telegramUserId': endpoints.USER_ID, 'chain': 'solana'}, server=server)
+                self.assertTrue(self.response_json(response).get('ok'), self.response_json(response))
+                server.solana_chat_service.handle.assert_called_once()
+
+    @patch('sign402_gateway.server._enforce_user_request_rate')
+    def test_real_auth_guard_rejects_user_substitution(self, rate):
+        server = self.server()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = endpoints.USER_ID
+        response = self.make_handler('/agent/chat/pay', {'telegramUserId': 'other', 'chain': 'solana'}, server=server)
+        self.assertEqual(self.status_of(response), 401)
+        server.solana_chat_service.handle.assert_not_called()
+
+    def test_real_auth_guard_still_blocks_solana_legacy_shop_calls(self):
+        server = self.server()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = endpoints.USER_ID
+        handler = SimpleNamespace(server=server, path='/agent/buy-bitrefill', headers={
+            'Authorization': 'Bearer ' + endpoints.WALLET_TOKEN,
+            'X-Sign402-User-Token': endpoints.USER_TOKEN,
+        })
+        with self.assertRaisesRegex(ValueError, 'not enabled on Solana'):
+            _require_authenticated_user(handler, {'chain': 'solana', 'telegramUserId': endpoints.USER_ID})

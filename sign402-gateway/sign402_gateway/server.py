@@ -5953,6 +5953,10 @@ def _require_authenticated_user(
         # Extend this allowlist only when that operation has a Solana adapter.
         if chain == "solana" and urlparse(handler.path).path not in {
             "/agent/wallet", "/agent/wallet-balance",
+            "/agent/chat/start", "/agent/chat/end", "/agent/chat/models",
+            "/agent/chat/network", "/agent/chat/approve-policy",
+            "/agent/chat/message", "/agent/chat/quote", "/agent/chat/pay",
+            "/agent/chat/payment",
         }:
             raise ValueError("This operation is not enabled on Solana yet.")
     _enforce_user_request_rate(user_id)
