@@ -677,11 +677,9 @@ class WelcomeScreenTests(unittest.TestCase):
         # "a small amount only" reads as a warning that the wallet is unsafe.
         self.assertNotIn("small amount", self.text)
 
-    def test_it_does_not_demand_an_approval_channel_up_front(self):
-        # Task 5 moved this to the first action that moves money: a new user
-        # can chat and browse without ever being asked for a phone number.
-        self.assertNotIn("WhatsApp", self.text)
-        self.assertNotIn("iMessage", self.text)
+    def test_it_explains_phone_linking_before_the_first_payment(self):
+        for term in ("Before your first payment", "Settings", "phone number", "WhatsApp", "iMessage", "approval requests"):
+            self.assertIn(term, self.text)
 
     def test_it_says_what_the_support_id_is_for(self):
         self.assertIn("1045618308", self.text)
@@ -4494,11 +4492,11 @@ class DeferredApprovalChannelGateTests(unittest.TestCase):
         self.assertIn("Purchases", text)
         self.assertNotIn("Chat", text)
 
-    def test_the_channel_status_line_lives_in_the_wallet_view(self):
-        # The gateway already writes it into the wallet text; /start must not
-        # duplicate it.
+    def test_start_explains_approvals_without_claiming_a_linked_phone(self):
         plugin = load_plugin()
-        self.assertNotIn("approval", plugin._start_text("0xabc").lower())
+        text = plugin._start_text("0xabc").lower()
+        self.assertIn("approval requests", text)
+        self.assertNotIn("your phone is linked", text)
 
     def test_setup_needs_no_approval_channel_or_wallet(self):
         plugin = load_plugin()
@@ -4710,13 +4708,15 @@ class RegroupedMenuTests(unittest.TestCase):
     def enabled(self, plugin):
         return patch.dict(plugin.os.environ, {"SIGN402_AI_CHAT_ENABLED": "1"})
 
-    def test_the_main_menu_is_five_entries_in_three_rows(self):
+    def test_the_main_menu_has_settings_beside_wallet(self):
         plugin = load_plugin()
         with self.enabled(plugin):
             rows = plugin._telegram_main_menu_buttons()
 
         self.assertEqual(len(rows), 2)
-        self.assertEqual([len(row) for row in rows], [2, 1])
+        self.assertEqual([len(row) for row in rows], [2, 2])
+        self.assertIn("Wallet", rows[1][0])
+        self.assertIn("Settings", rows[1][1])
 
     def test_the_main_menu_leads_with_the_two_things_you_can_spend_on(self):
         plugin = load_plugin()
@@ -4742,6 +4742,8 @@ class RegroupedMenuTests(unittest.TestCase):
 
         for moved in ("AI Credits", "Limits", "Delivery email", "Connect iMessage", "Connect WhatsApp"):
             self.assertIn(moved, flat)
+        self.assertIn("Connect WhatsApp", plugin._SETTINGS_MENU_BUTTONS[0][0])
+        self.assertIn("Connect iMessage", plugin._SETTINGS_MENU_BUTTONS[0][1])
         self.assertIn("Back", flat)
 
     def test_talk_to_ai_appears_only_when_chat_is_enabled(self):

@@ -108,12 +108,12 @@ _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "help", "description": "Help with SingIt"},
 )
 # Home and contextual controls are inline; Telegram's native Menu is navigation.
-_TELEGRAM_MAIN_MENU_BUTTONS = (("🛍 Shop", "👛 Wallet"),)
-_TELEGRAM_MAIN_MENU_WITH_CHAT = (("💬 Chat", "🛍 Shop"), ("👛 Wallet",))
+_TELEGRAM_MAIN_MENU_BUTTONS = (("🛍 Shop", "👛 Wallet"), ("⚙️ Settings",))
+_TELEGRAM_MAIN_MENU_WITH_CHAT = (("💬 Chat", "🛍 Shop"), ("👛 Wallet", "⚙️ Settings"))
 _WALLET_MENU_BUTTONS = (("Base", "Solana"), ("Back",))
 _SETTINGS_MENU_BUTTONS = (
+    ("📱 Connect WhatsApp", "📱 Connect iMessage"),
     ("⚙️ Limits", "✉️ Delivery email"),
-    ("📱 Connect iMessage", "📱 Connect WhatsApp"),
     ("🤖 AI Credits", "❓ Help"),
     ("Back",),
 )
@@ -678,7 +678,10 @@ def _start_text(wallet_address: str, *, support_id: str = "") -> str:
         "<b>SingIt</b>\nYour wallet. Everyday purchases.\n\n"
         "<b>Shop</b> · Gift cards, eSIMs and mobile top-ups."
         f"{chat}\n<b>Purchases</b> · Orders, codes and receipts.\n\n"
-        "Use <b>Menu</b> for purchases and settings. Open <b>Wallet</b> to choose a network and add funds."
+        "<b>Before your first payment</b>\n"
+        "Open <b>Settings</b> and link your phone number via <b>WhatsApp</b> or <b>iMessage</b>. "
+        "Payment approval requests arrive there.\n\n"
+        "Open <b>Wallet</b> to choose a network and add funds. Find orders in <b>Menu → Purchases</b>."
         + (f"\nSupport ID: <code>{support}</code>" if support else "")
     )
 
@@ -1388,7 +1391,8 @@ def _chat_budget_offer_text(status):
     return ("Choose a daily top-up limit\n\n"
             "Answers spend prepaid Venice credit. When more credit is needed, the bot can top up with USDC on Base via x402, within this limit.\n\n"
             "Choose $5 / day, $10 / day or $20 / day. Approval lasts 30 days; the limit resets at 00:00 UTC.\n"
-            "You will review the terms before requesting approval on your linked phone channel.")
+            "You will review the terms before requesting approval in WhatsApp or iMessage. "
+            "Link your phone number in Settings first if you haven't already.")
 
 
 def _chat_policy_active(status):
@@ -2330,7 +2334,12 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
         if command == "start":
             text, markup = _HtmlText(_start_text("", support_id=identity.user_id)), _telegram_main_menu_reply_markup()
         elif command == "settings":
-            text = _HtmlText("<b>Settings</b>\nManage delivery email, payment approvals and spending limits.")
+            text = _HtmlText(
+                "<b>Settings</b>\n\n<b>Payment approvals</b>\n"
+                "Connect your phone number using <b>WhatsApp</b> or <b>iMessage</b> below. "
+                "You'll receive payment approval requests in the app you choose.\n\n"
+                "You can also manage your delivery email and spending limits here."
+            )
             markup = _reply_keyboard(_SETTINGS_MENU_BUTTONS)
         else:
             text = _HtmlText("<b>Wallet</b>\nChoose a network to see its balance.\n\nSolana deposits and balances are available. Shop payments currently use Base.")

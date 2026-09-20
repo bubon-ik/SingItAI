@@ -91,3 +91,14 @@ existing bot, and `getMyCommands` / `getChatMenuButton` confirmed the six-comman
 native Menu. AI chat remains enabled. No startup tracebacks or automatic bot
 restarts were observed. No live message, inference or purchase was sent during
 verification; the manual navigation steps above remain a user check.
+
+
+## September 20: make phone setup discoverable
+
+Home now includes **Settings** beside Wallet. Its **Before your first payment**
+section explains that users link their phone number through WhatsApp or iMessage
+in Settings to receive payment approval requests. Settings puts the two connection
+buttons first and explains where approvals arrive. The AI budget offer repeats
+this setup step. Existing phone verification and payment controls are unchanged.
+All 332 plugin tests passed locally after updating the existing layout and copy
+expectations. UI and documentation remain in English.
