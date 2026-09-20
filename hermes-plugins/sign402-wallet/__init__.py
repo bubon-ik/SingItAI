@@ -1292,6 +1292,10 @@ def _chat_budget_block(client, identity) -> str:
 def _chat_answer_text(user_id: str, result: dict) -> str:
     """Answer plus the footer: what this message cost and what is left today."""
     text = str(result.get("text", "") or "").strip()
+    if result.get("chain") == "solana":
+        credit = result.get("outstandingAtomic")
+        footer = f"{_usd_from_atomic(credit)} Venice credit left" if credit is not None else "Venice credit balance unavailable"
+        return f"{text}\n\n{footer} · Solana"
     cost = _usd_from_atomic(result.get("costAtomic", 0), rounding=ROUND_HALF_UP)
     # Credit, not the daily window. The window caps top-ups and reads zero for
     # the rest of the day after one; the credit is what answers messages, and
@@ -1315,6 +1319,8 @@ def _chat_answer_text(user_id: str, result: dict) -> str:
 
 
 def _chat_start_text(status: dict) -> str:
+    if status.get("walletRequired"):
+        return "AI network: Solana\n\nCreate your personal Solana wallet first using the button below."
     expires = status.get("policyExpiresAt")
     try:
         expiry = datetime.fromtimestamp(int(expires), timezone.utc).strftime("%d %b %Y, %H:%M UTC") if expires else "not approved"
@@ -1325,7 +1331,11 @@ def _chat_start_text(status: dict) -> str:
         lines.append(f"Per 1M tokens: ${status['inputUsdPerMTok']} input · ${status['outputUsdPerMTok']} output")
     lines += ["", f"Venice credit (last checked): ${status.get('outstandingUsdc', '0.00')}",
               f"Top-up allowance today: ${status.get('remainingWindowUsdc', '0.00')} of ${status.get('dailyCapUsdc', '0.00')}",
-              f"Approval expires: {expiry}", "Payments: USDC on Base via x402."]
+              f"Approval expires: {expiry}", f"Payments: USDC on {_chat_network_label(status)} via x402."]
+    if status.get("chain") == "solana":
+        lines.append("Each top-up requires approval of its exact quote on your linked phone.")
+        if not status.get("creditFresh"):
+            lines.append("Live Venice balance is unavailable; the credit above may be out of date.")
     if status.get("paused"):
         lines.append("Chat paused: " + str(status.get("pauseReason") or "review required"))
     elif status.get("policyExpired"):
@@ -1333,6 +1343,98 @@ def _chat_start_text(status: dict) -> str:
     lines += ["", "Answers use prepaid Venice credit. The daily limit caps new top-ups, not use of existing credit.",
               "Send a question here. Menu is always available."]
     return "\n".join(lines)
+
+
+_CHAT_NETWORKS = {}
+
+
+def _chat_network_label(status):
+    return "Solana" if status.get("chain") == "solana" else "Base"
+
+
+def _remember_chat_network(identity, status):
+    chain = status.get("chain")
+    if chain in {"base", "solana"}:
+        if len(_CHAT_NETWORKS) >= _TELEGRAM_OPERATION_MAX_USERS:
+            _CHAT_NETWORKS.pop(next(iter(_CHAT_NETWORKS)), None)
+        _CHAT_NETWORKS[str(identity.user_id)] = chain
+
+
+def _chat_network_payload(identity, status=None):
+    chain = (status or {}).get("chain") or _CHAT_NETWORKS.get(str(identity.user_id))
+    return {"chain": chain} if chain else {}
+
+
+def _chat_settings_markup(status):
+    rows = []
+    if "solana" in status.get("availableChains", []):
+        rows.append((("Base", "/chat_network base"), ("Solana", "/chat_network solana")))
+    if status.get("walletRequired"):
+        rows.append((("Create Solana wallet", "/wallet solana"),))
+    else:
+        rows.append((("Change model", "/model"), ("Review budget", "/chat_budget")))
+        if status.get("chain") == "solana":
+            rows.append((("Top up Venice", "/chat_topup"), ("Payment status", "/chat_payment")))
+    rows.append((("Home", "/start"),))
+    return actions(rows)
+
+
+def _chat_payment_markup():
+    return actions([(("Payment status", "/chat_payment"),), (("AI settings", "/chat"),)])
+
+
+def _handle_solana_chat_command(*, command, args, identity, source, gateway):
+    if getattr(source, "chat_type", "dm") not in {"dm", "private"}:
+        _send_fixed_reply(gateway, source, "Open AI chat in your private chat with SingIt.")
+        return dict(_SKIP_RESULT)
+    if not _ai_chat_enabled():
+        _send_fixed_reply(gateway, source, "AI chat is not enabled.")
+        return dict(_SKIP_RESULT)
+    _invalidate_telegram_operation(str(identity.user_id))
+    for sessions in (_BITREFILL_SESSIONS, _WITHDRAW_SESSIONS, _IMESSAGE_CONNECT_SESSIONS):
+        sessions.pop(str(identity.user_id), None)
+    operation = {"chat-network": "network", "chat-topup": "quote", "chat-pay": "pay", "chat-payment": "payment"}[command]
+    payload = {"chain": "solana"}
+    if operation == "network":
+        if args.strip() not in {"base", "solana"}:
+            _send_fixed_reply(gateway, source, "Usage: /chat_network base|solana")
+            return dict(_SKIP_RESULT)
+        payload = {"chain": args.strip()}
+    elif operation == "pay":
+        parts = args.split()
+        if len(parts) != 2:
+            _send_fixed_reply(gateway, source, "Use the approval button on a fresh Venice quote.")
+            return dict(_SKIP_RESULT)
+        payload.update(quoteId=parts[0], approvalHash=parts[1])
+    elif operation == "payment" and args.strip():
+        parts = args.split()
+        if len(parts) != 2:
+            _send_fixed_reply(gateway, source, "Usage: /chat_payment QUOTE_ID TRANSACTION_SIGNATURE")
+            return dict(_SKIP_RESULT)
+        payload.update(quoteId=parts[0], transaction=parts[1])
+
+    def work(generation):
+        if not _telegram_operation_is_current(str(identity.user_id), generation):
+            return "Request cancelled before it started.", None
+        client = _client_factory()
+        result = client.execute_chat(operation, identity, payload=payload, user_access_token=_user_access_token(client, identity))
+        if not isinstance(result, dict):
+            return "Venice request is unavailable. Check payment status before another top-up.", _chat_payment_markup()
+        if operation == "network" and result.get("ok"):
+            _remember_chat_network(identity, result)
+            return _chat_start_text(result), _chat_settings_markup(result)
+        quote = result.get("quote")
+        if result.get("ok") and quote:
+            text = (f"Review Venice top-up\n\nTotal: {quote['amountUsdc']} USDC\nNetwork: Solana mainnet · x402\n"
+                    f"From your wallet: {quote['payer']}\nTo Venice: {quote['recipient']}\n"
+                    f"USDC mint: {quote['asset']}\nNetwork fee: sponsored\nExpires: {quote['expiresAt']}\n\n"
+                    "Request approval below, then confirm on your linked phone. This buys prepaid AI credit; answers use the selected model's token rates.\n"
+                    "After the top-up, send your question again.")
+            return text, actions([(("Request top-up approval", f"/chat_pay {quote['quoteId']} {quote['approvalHash']}"),), (("Cancel", "/chat"),)])
+        return str(result.get("telegramText") or "Open AI settings to continue."), _chat_payment_markup()
+
+    message = "Requesting exact top-up approval on your linked phone…" if operation == "pay" else "Checking Venice on Solana…"
+    return _start_chat_operation(identity=identity, action="chat:pay" if operation == "pay" else "chat:solana", started_text=message, source=source, gateway=gateway, work=work)
 
 
 _CHAT_BUDGET_CHOICES = (("$5 / day", 5_000_000), ("$10 / day", 10_000_000), ("$20 / day", 20_000_000))
@@ -1389,7 +1491,8 @@ def _telegram_chat_budget_reply_markup():
 
 def _chat_budget_offer_text(status):
     return ("Choose a daily top-up limit\n\n"
-            "Answers spend prepaid Venice credit. When more credit is needed, the bot can top up with USDC on Base via x402, within this limit.\n\n"
+            f"Answers spend prepaid Venice credit. Top-ups use USDC on {_chat_network_label(status)} via x402, within this limit. "
+            + ("Each Solana top-up also needs exact quote approval.\n\n" if status.get("chain") == "solana" else "\n\n") +
             "Choose $5 / day, $10 / day or $20 / day. Approval lasts 30 days; the limit resets at 00:00 UTC.\n"
             "You will review the terms before requesting approval in WhatsApp or iMessage. "
             "Link your phone number in Settings first if you haven't already.")
@@ -1416,8 +1519,8 @@ def _handle_telegram_chat_entry(*, identity, source, gateway):
             return "Chat is unavailable right now. Try again in a moment.", _telegram_main_menu_reply_markup()
         if not _telegram_operation_is_current(str(identity.user_id), generation):
             return "", None
-        rows = [(("Change model", "/model"), ("Review budget", "/chat_budget")), (("Home", "/start"),)]
-        return _chat_start_text(status), actions(rows)
+        _remember_chat_network(identity, status)
+        return _chat_start_text(status), _chat_settings_markup(status)
     _start_telegram_background_operation(identity=identity, action="chat:settings", started_text="Loading AI settings…", source=source, gateway=gateway, work=work)
     return True
 
@@ -1467,7 +1570,7 @@ def _handle_telegram_chat_budget_choice(*, event, source, gateway):
             if _chat_setup(user_id, source) is not flow or not _telegram_operation_is_current(user_id, generation):
                 return "Setup cancelled before the approval request was sent.", None
         client = _client_factory()
-        result = client.execute_chat("approve-policy", identity, payload={"dailyCapAtomic": flow["cap"], "days": _CHAT_BUDGET_DAYS}, user_access_token=_user_access_token(client, identity))
+        result = client.execute_chat("approve-policy", identity, payload={"dailyCapAtomic": flow["cap"], "days": _CHAT_BUDGET_DAYS, **_chat_network_payload(identity, flow["status"])}, user_access_token=_user_access_token(client, identity))
         if not isinstance(result, dict) or not result.get("ok") or not result.get("approved"):
             if _chat_setup(user_id, source) is flow:
                 _cancel_chat_setup(user_id)
@@ -1480,7 +1583,7 @@ def _handle_telegram_chat_budget_choice(*, event, source, gateway):
             _cancel_chat_setup(user_id)
             _enter_chat_mode(user_id)
         if prompt:
-            return _chat_paid_answer(client, identity, prompt), _telegram_chat_reply_markup()
+            return _chat_paid_answer(client, identity, prompt, flow["status"])
         return "Budget approved. Send a question here whenever you're ready.", _telegram_chat_reply_markup()
 
     return _start_chat_operation(identity=identity, action="chat:approve-policy", started_text="Requesting budget approval on your linked phone channel…\nUse /cancel to discard the saved question. An approval already sent can still complete.", source=source, gateway=gateway, work=work)
@@ -1499,10 +1602,12 @@ def _chat_flow_markup(flow):
 def _chat_budget_review(identity, source, gateway, flow):
     model = flow["status"].get("modelLabel") or flow["status"].get("model") or "default"
     text = (f"Review AI chat\n\nModel: {model}\nTop-ups: up to {_usd_from_atomic(flow['cap'])} / day\n"
-            f"Valid for: {_CHAT_BUDGET_DAYS} days · resets 00:00 UTC\nPayment: USDC on Base via x402\n\n"
+            f"Valid for: {_CHAT_BUDGET_DAYS} days · resets 00:00 UTC\nPayment: USDC on {_chat_network_label(flow['status'])} via x402\n\n"
             "Approval itself does not move money. Your next question may trigger a Venice top-up. Answers then use prepaid credit at the selected model's token rates.\n"
             "This is a top-up limit, not a subscription or a cap on spending existing Venice credit.")
     status = flow["status"]
+    if status.get("chain") == "solana":
+        text += "\nEach Solana top-up also requires separate approval of its exact quote."
     if status.get("inputUsdPerMTok") is not None and status.get("outputUsdPerMTok") is not None:
         text += f"\n\nPer 1M tokens: ${status['inputUsdPerMTok']} input · ${status['outputUsdPerMTok']} output."
     _send_fixed_reply(gateway, source, text, reply_markup=_chat_flow_markup(flow))
@@ -1528,14 +1633,20 @@ def _start_chat_operation(*, identity, work, **kwargs):
     return _start_telegram_background_operation(identity=identity, work=guarded, release=lambda: _CHAT_INFLIGHT.discard(user_id), **kwargs)
 
 
-def _chat_paid_answer(client, identity, text):
-    result = client.execute_chat("message", identity, payload={"text": text}, user_access_token=_user_access_token(client, identity))
+def _chat_paid_answer(client, identity, text, status=None):
+    result = client.execute_chat("message", identity, payload={"text": text, **_chat_network_payload(identity, status)}, user_access_token=_user_access_token(client, identity))
     if not isinstance(result, dict) or not result.get("ok"):
         if isinstance(result, dict) and result.get("state") == "MERCHANT_CHANGED":
             _leave_chat_mode(str(identity.user_id))
-        return str((result or {}).get("telegramText") or "The chat could not answer that.")
+        markup = _telegram_chat_reply_markup()
+        if isinstance(result, dict) and result.get("chain") == "solana":
+            if result.get("state") == "TOP_UP_REQUIRED":
+                markup = actions([(("Review Solana top-up", "/chat_topup"),), (("AI settings", "/chat"),)])
+            else:
+                markup = _chat_payment_markup()
+        return str((result or {}).get("telegramText") or "The chat could not answer that."), markup
     _enter_chat_mode(str(identity.user_id))
-    return _chat_answer_text(str(identity.user_id), result)
+    return _chat_answer_text(str(identity.user_id), result), _telegram_chat_reply_markup()
 
 
 _CHAT_MODEL_MORE = "More"
@@ -1545,7 +1656,7 @@ def _chat_models_request(client, identity, **payload):
     return client.execute_chat(
         "models",
         identity,
-        payload=payload or None,
+        payload={**payload, **_chat_network_payload(identity)} or None,
         user_access_token=_user_access_token(client, identity),
     )
 
@@ -1853,15 +1964,16 @@ def _handle_telegram_chat_message(*, event, source, gateway):
         status = client.execute_chat("start", identity, user_access_token=_user_access_token(client, identity))
         if not isinstance(status, dict) or not status.get("ok"):
             return "Chat is unavailable right now. Try again in a moment.", _telegram_chat_reply_markup()
+        _remember_chat_network(identity, status)
         with _CHAT_STATE_LOCK:
             if not _telegram_operation_is_current(user_id, generation):
                 return "Your unsent question was cancelled.", None
-            if status.get("paused"):
-                return _chat_start_text(status), actions([(("AI settings", "/chat"),)])
+            if status.get("paused") or status.get("walletRequired"):
+                return _chat_start_text(status), _chat_settings_markup(status)
             if not _chat_policy_active(status):
                 flow = _new_chat_setup(identity, source, status, text)
                 return _chat_model_offer(flow)
-        return _chat_paid_answer(client, identity, text), _telegram_chat_reply_markup()
+        return _chat_paid_answer(client, identity, text, status)
     return _start_chat_operation(identity=identity, action="chat:message", started_text="Checking AI chat…", source=source, gateway=gateway, work=work)
 
 
@@ -2032,7 +2144,7 @@ def _start_telegram_background_operation(
     if prepare is not None:
         prepare(generation)
     source = _operation_source(source)
-    preserve_result = action in {"chat:message", "chat:approve-policy", "command:reveal", "command:last-purchase", "command:llm-buy", "command:llm-terms"}
+    preserve_result = action in {"chat:pay", "chat:message", "chat:approve-policy", "command:reveal", "command:last-purchase", "command:llm-buy", "command:llm-terms"}
     if preserve_result:
         source._singit_card = MessageCard()
         source._singit_protect_card = True
@@ -2288,6 +2400,8 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
     user_id = str(identity.user_id)
     if command != "model":
         _cancel_chat_setup(user_id)
+    if command in {"chat-network", "chat-topup", "chat-pay", "chat-payment"}:
+        return _handle_solana_chat_command(command=command, args=args, identity=identity, source=source, gateway=gateway)
     if command in {"model", "chat-budget", "cancel"}:
         if getattr(source, "chat_type", "dm") not in {"dm", "private"}:
             _send_fixed_reply(gateway, source, "Open AI chat in your private chat with SingIt.")
@@ -2314,6 +2428,10 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
             return dict(_SKIP_RESULT)
         if status.get("paused") and status.get("pauseReason") != "MERCHANT_CHANGED":
             _send_fixed_reply(gateway, source, "Chat needs a payment status check before its budget can be renewed. Open /chat for its status.")
+            return dict(_SKIP_RESULT)
+        _remember_chat_network(identity, status)
+        if status.get("walletRequired"):
+            _send_fixed_reply(gateway, source, _chat_start_text(status), reply_markup=_chat_settings_markup(status))
             return dict(_SKIP_RESULT)
         flow = _new_chat_setup(identity, source, status)
         message, markup = _chat_model_offer(flow)
@@ -4846,6 +4964,10 @@ def _telegram_public_command(event, source) -> str | None:
         "chat",
         "model",
         "chat-budget",
+        "chat-network",
+        "chat-topup",
+        "chat-pay",
+        "chat-payment",
         "cancel",
     }:
         return normalized

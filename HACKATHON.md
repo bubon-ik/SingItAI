@@ -11,6 +11,7 @@
 - [First real Bitrefill Solana purchase](docs/bitrefill-solana-checks.md)
 - [Native Telegram UI and purchase history checks](docs/telegram-ui-checks.md)
 - [Conversation and Telegram Menu checks](docs/conversation-ui-checks.md)
+- [Venice/Solana agent integration](docs/venice-solana-agent.md)
 - [Integration plan](docs/solana-integration.md)
 
 ## Competition period and disclosure
@@ -36,6 +37,8 @@ The imported source already contains the Telegram/Hermes agent, managed Base wal
 | 2026-09-18 | [19ae280](https://github.com/bubon-ik/singit-solana/commit/19ae280) | Refreshed native Telegram navigation, added named inline shopping controls and order review, editable operation cards, a Base/Solana wallet selector, and private purchase history with selected-order code reveal. | 1,245 gateway tests and 302 plugin tests passed, including actual PTB handler/markup construction with mocked transport. Existing Base approvals and spending policy remain in place. No Mini App, live bot deployment or Solana payment integration. [Details](docs/telegram-ui-checks.md). |
 | 2026-09-19 | [37f7863](https://github.com/bubon-ik/singit-solana/commit/37f7863) | Replaced persistent Telegram navigation with native Menu and inline controls; added free-text AI entry, model/budget review and approval before the saved first question, payment-aware settings, safe cancellation and catalog search shortcuts. | 1,246 gateway and 332 plugin tests passed locally and on the VPS. Deployed to the existing bot at `a2ac835`; native Telegram Menu verified via API. Payments and transport tests were mocked; agent spending remains on Base. [Details](docs/conversation-ui-checks.md). |
 | 2026-09-20 | [858a11e](https://github.com/bubon-ik/singit-solana/commit/858a11e) | Added Settings beside Wallet on Home, explained phone linking before payment, and put WhatsApp/iMessage connection first in Settings. | 332 plugin tests passed locally and on the VPS. Deployed to the existing bot; 95 wallet records and purchase history preserved. Existing phone verification and payment controls are unchanged. |
+
+| 2026-09-20 | [venice-solana branch](https://github.com/bubon-ik/singit-solana/tree/venice-solana) | Integrated Venice into managed Solana wallets, added an AI network selector, separate per-network models/budgets, exact-quote phone approval, persistent payment holds and read-only recovery. | Offline gateway, Telegram and real-signature Node fixture tests pass. A fresh unpaid live quote was verified; no live Venice payment or paid Solana answer has been completed. [Flow and limits](docs/venice-solana-agent.md). |
 
 The Venice client implements Solana SIWX authentication, mainnet USDC quote validation, explicit quote approval, SDK transaction construction, durable payment attempts, duplicate prevention and read-only reconciliation. Its Venice payment flow has only been exercised with mocked network responses.
 
@@ -70,7 +73,6 @@ No live inference or purchase was performed for verification.
 ## Pending work — not claimed as completed
 
 - Manually verify the deployed wallet commands and refreshed navigation in Telegram.
-- Integration of the Solana client into the agent's approval and spending flow.
 - A real mainnet Venice payment and paid response through the agent.
 - Integration of the verified Bitrefill Solana route into the per-user agent, approvals and durable recovery.
 - A custom x402 stock-purchase endpoint.

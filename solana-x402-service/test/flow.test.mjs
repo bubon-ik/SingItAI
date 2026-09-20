@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { dispatch } from '../src/gateway.mjs';
 import assert from 'node:assert/strict';
 import { rmSync } from 'node:fs';
 import { getBase58Encoder, getBase58Decoder, getTransactionDecoder, getBase64EncodedWireTransaction } from '@solana/kit';
@@ -6,7 +7,7 @@ import { SolanaChain, VeniceClient, Store, Payments, NETWORK, USDC } from '../sr
 import { TOKEN_PROGRAM } from '../src/config.mjs';
 import { directory, testWallet, challenge, jsonResponse } from './helpers.mjs';
 
-test('full client flow: quote → exact approval → signed payment → chain proof → credit → chat, entirely offline', async t => {
+for (const gateway of [false, true]) test(`full ${gateway ? 'gateway bridge' : 'client'} flow: quote → approval → payment → chain proof → credit → chat, offline`, async t => {
   const wallet = await testWallet(), sponsor = await testWallet(), merchant = await testWallet();
   const dir = directory(), store = new Store(dir);
   const originalFetch = globalThis.fetch;
@@ -54,14 +55,19 @@ test('full client flow: quote → exact approval → signed payment → chain pr
   };
   globalThis.fetch = fetcher;
   const venice = new VeniceClient({ wallet, fetcher });
-  const payments = new Payments({ wallet, venice, chain: new SolanaChain('https://rpc.invalid/'), store });
+  const context = { wallet, venice, chain: new SolanaChain('https://rpc.invalid/'), store };
+  const payments = gateway ? {
+    prepare: () => dispatch({ operation: 'quote', payer: wallet.address }, context),
+    pay: (quoteId, approvalHash) => dispatch({ operation: 'pay', payer: wallet.address, quoteId, approvalHash }, context),
+  } : new Payments(context);
   const quote = await payments.prepare();
   assert.equal(paidRequests, 0);
   await assert.rejects(payments.pay(quote.quoteId, '0'.repeat(64)), { code: 'APPROVAL_REQUIRED' });
   const result = await payments.pay(quote.quoteId, quote.approvalHash);
   assert.equal(result.state, 'confirmed');
   assert.equal(result.veniceBalance.balanceUsd, 5);
-  assert.equal((await venice.chat({ model: 'fixture-model', message: 'hello' })).text, 'Solana client works.');
+  const reply = gateway ? await dispatch({ operation: 'chat', payer: wallet.address, model: 'fixture-model', message: 'hello' }, context) : await venice.chat({ model: 'fixture-model', message: 'hello' });
+  assert.equal(reply.text, 'Solana client works.');
   await assert.rejects(payments.pay(quote.quoteId, quote.approvalHash), { code: 'ALREADY_ATTEMPTED' });
   assert.equal(paidRequests, 1);
 });

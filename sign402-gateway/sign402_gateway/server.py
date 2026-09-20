@@ -126,6 +126,7 @@ from .secure_state import (
     atomic_write_private_json,
 )
 from .user_emails import BuyerEmailStore, mask_email
+from .solana_chat import build_solana_chat
 from .venice_chat import (
     ChatError,
     UnknownModel,
@@ -518,6 +519,10 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                         "/agent/chat/end",
                         "/agent/chat/approve-policy",
                         "/agent/chat/models",
+                        "/agent/chat/network",
+                        "/agent/chat/quote",
+                        "/agent/chat/pay",
+                        "/agent/chat/payment",
                     ]
                 )
             if _test_endpoints_enabled():
@@ -641,6 +646,10 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             "/agent/chat/end",
             "/agent/chat/approve-policy",
             "/agent/chat/models",
+            "/agent/chat/network",
+            "/agent/chat/quote",
+            "/agent/chat/pay",
+            "/agent/chat/payment",
         ):
             self._handle_agent_chat(path)
             return
@@ -893,6 +902,27 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             telegram_user_id = _require_authenticated_user(self, payload)
+            solana = vars(self.server).get("solana_chat_service")
+            chain = solana.store.chain(telegram_user_id) if solana else "base"
+            requested_chain = payload.get("chain")
+            if path == "/agent/chat/network":
+                if not solana or requested_chain not in {"base", "solana"} or (requested_chain == "solana" and solana.enabled is False):
+                    self._send_json({"ok": False, "telegramText": "This AI network is unavailable."}, status=200)
+                    return
+                chain = solana.store.chain(telegram_user_id, requested_chain)
+                path = "/agent/chat/start"
+            elif requested_chain is not None and requested_chain != chain:
+                self._send_json({"ok": False, "state": "NETWORK_CHANGED", "telegramText": "AI network changed. Open /chat and review the current settings."}, status=200)
+                return
+            if chain == "solana" and solana.enabled is False:
+                self._send_json({"ok": False, "state": "NETWORK_UNAVAILABLE", "telegramText": "Solana AI is temporarily disabled. Choose Base explicitly in /chat_network base to switch."}, status=200)
+                return
+            if chain == "solana":
+                self._send_json(solana.handle(path, telegram_user_id, payload), status=200)
+                return
+            if path in {"/agent/chat/quote", "/agent/chat/pay", "/agent/chat/payment"}:
+                self._send_json({"ok": False, "telegramText": "Select Solana in AI settings for this operation."}, status=200)
+                return
             chat_service = getattr(self.server, "chat_service", None)
             if chat_service is None:
                 self._send_json(
@@ -901,7 +931,10 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/agent/chat/start":
-                self._send_json(chat_service.start(telegram_user_id), status=200)
+                status = chat_service.start(telegram_user_id)
+                if solana:
+                    status.update(chain="base", availableChains=["base"] if solana.enabled is False else ["base", "solana"])
+                self._send_json(status, status=200)
                 return
             if path == "/agent/chat/end":
                 self._send_json(chat_service.end(telegram_user_id), status=200)
@@ -3181,6 +3214,7 @@ def build_server(
     )
     server.chat_service = None
     server.chat_policy_service = None
+    server.solana_chat_service = None
     server.payto_watcher = None
     if _ai_chat_enabled():
         # Only built when the flag is on: with it unset the server has no chat
@@ -3238,6 +3272,12 @@ def build_server(
                 store=server.chat_service.store,
                 bound_pay_to=server.chat_service.client.config.bound_pay_to,
             )
+        # Keep network preferences even while Solana is disabled: turning off
+        # a capability must never silently send a Solana user's payment on Base.
+        server.solana_chat_service = build_solana_chat(
+            wallets=user_wallet_service, approvals=imessage_approval_service,
+            base_chat=server.chat_service, purchases_paused=_purchases_paused,
+        )
     return server
 
 

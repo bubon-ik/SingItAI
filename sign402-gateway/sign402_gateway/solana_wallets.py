@@ -12,7 +12,7 @@ from .solana_keys import generate_keypair, keypair_address
 from .user_wallets import ManagedBaseWalletService, WalletEncryptionError, _require_telegram_user_id
 
 SOLANA_NETWORK = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
-_DISABLED = "Solana payments and withdrawals are not enabled yet."
+_DISABLED = "Solana shop payments and withdrawals are not enabled. Open Chat to check AI payment networks."
 
 
 def validate_wallet_chain(chain: object) -> str:

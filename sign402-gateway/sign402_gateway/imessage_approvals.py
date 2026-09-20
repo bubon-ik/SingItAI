@@ -831,6 +831,7 @@ class ImessageApprovalService:
         action_type: str,
         commitment_hash: str,
         context_lines: list[str],
+        wallet_chain: str = "base",
     ) -> dict[str, Any]:
         user_id = _require_telegram_user_id(telegram_user_id)
         normalized_hash = str(commitment_hash or "").strip().lower()
@@ -839,7 +840,10 @@ class ImessageApprovalService:
         # Flatten before anything stores, hashes, or displays these lines, so
         # the recorded approval matches exactly what the approver was shown.
         safe_context_lines = _sanitize_context_lines(context_lines)
-        wallet_status = self.wallet_service.wallet_status(user_id)
+        if wallet_chain not in {"base", "solana"}:
+            raise ValueError("Unsupported approval wallet chain")
+        wallet_status = (self.wallet_service.wallet_status(user_id, chain="solana")
+                         if wallet_chain == "solana" else self.wallet_service.wallet_status(user_id))
         if not wallet_status.get("ok"):
             return {
                 "ok": False,
@@ -1898,6 +1902,9 @@ def _decision_text(action_type: str, final_status: str) -> str:
         if final_status == "approved":
             return "✅ Payment approved. Your purchase is being processed."
         return "Payment declined. No funds were moved."
+    if action_type == "sign402_solana_chat_policy":
+        return ("✅ Solana AI budget approved. Each top-up still requires approval of its exact quote."
+                if final_status == "approved" else "Solana AI budget declined. No funds were moved.")
     if action_type == "sign402_chat_policy":
         if final_status == "approved":
             # A standing allowance, so say so: this one approval covers every
