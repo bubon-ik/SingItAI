@@ -91,6 +91,13 @@ ordinary Telegram text that is not a Sign402 command or wizard response and
 returns the Sign402 menu instead of letting the message fall through to the
 general Hermes LLM chat.
 
+Optional [natural-language routing](../../docs/natural-language-assistant.md)
+uses TypeSafe to send ordinary requests to existing shopping and read-only
+wallet workflows before this menu fallback. It is disabled by default and
+does not require a user's Venice setup. Direct delivery/booking requests offer
+gift cards only as an explicitly accepted alternative; they do not claim to
+place the underlying order.
+
 `SIGN402_TELEGRAM_ALLOWED_USERS=*` opens only the Sign402 plugin to every
 Telegram user. Keep `TELEGRAM_ALLOWED_USERS` restricted to the operator and do
 not set `TELEGRAM_ALLOW_ALL_USERS` or `GATEWAY_ALLOW_ALL_USERS`; the plugin
