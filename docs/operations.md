@@ -10,16 +10,18 @@ product is, see the [README](../README.md). For incident recovery see
 The gateway checkout is `~/apps/sign402` on the VPS `hermes@164.68.104.44`.
 
 Updated on 20 September 2026 at the owner's explicit request: the existing bot
-runs this repository's `telegram-ui` release at
-`858a11e8ebd04b77e7135de4fe0f73f1d2857858`. The runtime code is pinned to this
-commit; later documentation commits do not imply a new deployment. Both service
-units are active, `/health` returns HTTP 200, and Telegram `getMe` succeeds.
-The native six-command Menu is confirmed through the Telegram API. The September 20 UI-only update passed 332 plugin tests on the server and
-restarted only the Telegram bot. The unchanged gateway code previously passed
-1,246 tests. See the
-[conversation deployment checks](conversation-ui-checks.md#existing-vps-bot-updated).
-Manual navigation in Telegram still needs a user check; these probes do not
-establish an end-to-end purchase.
+runs this repository's `venice-solana` release at
+`337e77785edd658146b42149f2068335ddef5cdf`. Later documentation commits do not
+imply a new runtime deployment. Both service units are active, health returns
+HTTP 200, and Telegram confirms the existing bot identity and native Menu.
+
+Before switching, 1,289 gateway, 343 Telegram and 39 Solana tests passed on the
+VPS. The dedicated Solana runtime is Node 24.21.0 at
+`~/.local/share/singit-node24/bin/node`; Hermes retains its existing Node 22.
+All 95 Base wallets, the Solana wallet and purchase history were preserved.
+Authenticated AI network selection and a live Venice balance signed by the
+owner's managed Solana wallet passed. No real Venice payment was submitted.
+[Deployment evidence and remaining acceptance](venice-solana-agent.md#existing-vps-bot-updated--september-20-2026).
 
 The checkout's `origin` is now `https://github.com/bubon-ik/singit-solana.git`;
 the former remote is retained as `base-origin`. The previous deployment was
@@ -35,7 +37,7 @@ JSON files (including `user-purchases.json`), bot configuration and the gateway'
 effective environment. Keep these backups private. This was a replacement of
 the existing deployment, not a second instance sharing its wallet state.
 
-Before switching, the VPS passed 1,245 gateway tests, 302 plugin tests with its
+For the earlier September 18 replacement, the VPS passed 1,245 gateway tests, 302 plugin tests with its
 installed PTB 22.6, and 46 CDP helper tests. The existing `spending-memory`
 installation already matched the pinned revision. After switching, the Base
 wallet records and purchase history were verified unchanged, and the new

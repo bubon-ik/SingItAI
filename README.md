@@ -45,7 +45,11 @@ npm start -- --help
 Quote and payment instructions: [Solana service](solana-x402-service/README.md).
 Next steps and acceptance criteria: [integration plan](docs/solana-integration.md).
 
-## Isolated deployment
+## Deployment
+
+The existing VPS bot runs the approved `venice-solana` release. See
+[deployment evidence and runtime setup](docs/venice-solana-agent.md). A real
+Venice top-up and paid Solana answer remain the next live acceptance step.
 
 Before starting a separate Telegram agent, configure its own bot token,
 encryption key, wallet and operation databases, ports, and runtime directories.

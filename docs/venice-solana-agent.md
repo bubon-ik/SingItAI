@@ -72,7 +72,7 @@ attempts or replace the managed wallet with a CLI wallet to unblock a payment.
 
 ## Verification
 
-The local suites pass 1,289 gateway, 343 Telegram and 39 Node tests. They cover
+The local and VPS suites pass 1,289 gateway, 343 Telegram and 39 Node tests. They cover
 exact approvals, declines,
 expiry, changed terms, wrong users/wallets/networks, duplicates, insufficient
 funds, lost responses, restart, day rollover, delayed credit, pause controls and
@@ -88,3 +88,30 @@ Remaining live acceptance: approved top-up from the user's managed wallet,
 confirmed chain receipt, usable Venice credit and selected-model answer. Solana
 shopping, withdrawals, paid search and on-chain data tools are outside this
 adapter; no implicit Base fallback is allowed for those Solana chat requests.
+
+
+## Existing VPS bot updated — September 20, 2026
+
+Release [`337e777`](https://github.com/bubon-ik/singit-solana/commit/337e777)
+replaced the existing bot at the owner's request. The checkout uses the
+`venice-solana` branch; documentation-only commits after this release do not
+imply another runtime deployment. [PR #3](https://github.com/bubon-ik/singit-solana/pull/3)
+is stacked on the existing UI pull request.
+
+- All three suites passed under the actual server interpreters and Node 24.21.0.
+  All seven GitHub checks passed on the release commit, including dependency audits.
+- A dedicated Node 24 runtime was downloaded from nodejs.org and its SHA-256
+  verified. Hermes' existing Node 22 runtime was retained.
+- A private backup was made before switching. Both wallet tables were compared:
+  **95 Base wallets and 1 Solana wallet**, including encrypted keys, are unchanged.
+  Bot credentials and purchase history hashes also match.
+- Both services are active; gateway health returns 200. All new authenticated
+  chat routes reject unauthenticated requests with 401.
+- Telegram confirms the existing bot identity and six-command native Menu.
+  Startup logs have no tracebacks.
+- An authenticated probe selected Solana for the owner, retrieved a **live SIWX
+  balance from Venice using the managed wallet**, and read the model catalog.
+  The previous AI network selection, Base, was restored afterward.
+- No phone approval was requested, no top-up was submitted and no paid inference
+  was performed by deployment checks. The first funded flow still needs the
+  user's explicit approval of the current quote in Telegram and on their phone.
