@@ -102,3 +102,13 @@ buttons first and explains where approvals arrive. The AI budget offer repeats
 this setup step. Existing phone verification and payment controls are unchanged.
 All 332 plugin tests passed locally after updating the existing layout and copy
 expectations. UI and documentation remain in English.
+
+
+Release [`858a11e`](https://github.com/bubon-ik/singit-solana/commit/858a11e)
+was deployed to the existing bot on September 20 after the same 332 tests passed
+with the server's installed dependencies. The Telegram service restarted; the
+unchanged gateway stayed running. A private backup was created, and all 95 wallet
+records, bot configuration and purchase history were verified unchanged. Both
+services are active and unauthenticated chat/history requests return HTTP 401.
+Send `/start` to receive the updated Home message; existing Telegram messages
+are not rewritten automatically.
