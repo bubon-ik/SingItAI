@@ -189,7 +189,7 @@ context transitions, not production accuracy across arbitrary conversations,
 live catalog coverage or real Telegram delivery. No purchases were submitted.
 
 Context fix [`b371841`](https://github.com/bubon-ik/singit-solana/commit/b371841)
-is now deployed on `release/typesafe-context-fix-20260921`. All six GitHub checks
+was deployed on `release/typesafe-context-fix-20260921`. All six GitHub checks
 passed. A new private backup preceded a Telegram-only restart. Both services
 are active and gateway health returns 200. The gateway process, all 95 Base
 wallets, the Solana wallet, configuration values and purchase history were
@@ -226,3 +226,11 @@ not a production accuracy benchmark. Live tests make paid TypeSafe requests but
 never create purchases or send Telegram messages. The offline regression tests
 run automatically in the existing GitHub plugin test job. Real Telegram delivery
 and provider/catalog outages still require operational observation.
+
+Audit release [`2015199`](https://github.com/bubon-ik/singit-solana/commit/2015199)
+is deployed on `release/typesafe-conversation-audit-20260921`. All six GitHub
+checks passed. A fresh private backup preceded a Telegram-only restart; both
+services are active and gateway health returns 200. The unchanged gateway
+process, 95 Base wallets, one Solana wallet, configuration values and purchase
+history were verified preserved. The prior context-fix branch remains available
+for code rollback.

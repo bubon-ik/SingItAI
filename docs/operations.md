@@ -8,16 +8,17 @@ product is, see the [README](../README.md). For incident recovery see
 ## Production layout
 
 **September 21, 2026 update:** the existing bot now runs
-[`b371841`](https://github.com/bubon-ik/singit-solana/commit/b371841) on
-`release/typesafe-context-fix-20260921`, adding optional TypeSafe routing before
-Venice onboarding, focused clarification, task switching and pending-task context.
+[`2015199`](https://github.com/bubon-ik/singit-solana/commit/2015199) on
+`release/typesafe-conversation-audit-20260921`, adding optional TypeSafe routing
+before Venice onboarding, contextual clarification, task switching and recovery
+after classifier failure.
 The operator enabled it in the private Hermes environment.
 Only the Telegram service restarted; the payment gateway code and process
 were unchanged. All 95 Base wallets, 1 Solana wallet, configuration values and
-purchase history were verified intact after a private backup. All 391 plugin
-tests and six GitHub checks passed. A live TypeSafe harness replayed the reported
-conversations successfully with fake catalog/wallet handlers, including the
-US-food follow-up and balance interruption of a country question.
+purchase history were verified intact after a private backup. All 414 plugin
+tests and six GitHub checks passed. All 18 live TypeSafe conversation checks
+passed with fake Telegram/catalog/wallet handlers. The transition matrix is in
+the existing CI job; the live provider harness is opt-in.
 See [deployment details and limits](natural-language-assistant.md#existing-bot-deployment--september-21-2026).
 The following September 20 account records the underlying Solana-chat release.
 

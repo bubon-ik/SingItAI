@@ -156,6 +156,12 @@ arbitrary-language accuracy or verification of real Telegram delivery. No
 purchase or wallet payment was made. All 414 plugin tests passed in the VPS
 runtime. See the [verification instructions](docs/natural-language-assistant.md#conversation-regression-audit).
 
+Release [`2015199`](https://github.com/bubon-ik/singit-solana/commit/2015199)
+was deployed after all six GitHub checks passed. A fresh private backup and
+post-restart comparison verified preservation of 95 Base wallets, the Solana
+wallet, configuration and purchase history. Only Telegram restarted; both
+services are active and the payment gateway process stayed unchanged.
+
 ## Pending work — not claimed as completed
 
 - Manually verify the deployed wallet commands and refreshed navigation in Telegram.
