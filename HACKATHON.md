@@ -115,6 +115,12 @@ internet, Czech food, gift-card and repeated Base-balance messages with fake
 catalog/wallet handlers. Actual Telegram delivery and catalog availability after
 this fix remain manual checks; no purchases or wallet payments were made.
 
+Fix [`0647997`](https://github.com/bubon-ik/singit-solana/commit/0647997) was then
+deployed to the existing bot after all six GitHub checks passed and a fresh
+private backup was created. Only Telegram restarted; both services are active.
+All 95 Base wallets, the Solana wallet, configuration values and purchase history
+were verified preserved.
+
 ## Pending work — not claimed as completed
 
 - Manually verify the deployed wallet commands and refreshed navigation in Telegram.

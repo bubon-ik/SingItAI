@@ -122,8 +122,8 @@ Sources: [TypeSafe API](https://docs.typesafe.ai/api),
 
 ## Existing bot deployment — September 21, 2026
 
-Release [`adca498`](https://github.com/bubon-ik/singit-solana/commit/adca498)
-is installed in the existing VPS checkout on `release/typesafe-20260921`.
+Initial release [`adca498`](https://github.com/bubon-ik/singit-solana/commit/adca498)
+was installed in the existing VPS checkout on `release/typesafe-20260921`.
 [PR #4](https://github.com/bubon-ik/singit-solana/pull/4) is stacked on
 `venice-solana`; it remains a draft and has not been merged to `main`.
 The operator supplied the TypeSafe key through the private Hermes environment.
@@ -156,3 +156,10 @@ the live TypeSafe API and fake catalog/wallet handlers replayed the exact intern
 Czech food, food-gift-card and repeated Base-balance messages successfully.
 This verifies classification and dispatch, not live wallet balances, eSIM
 availability or Telegram delivery after the fix. No purchase was submitted.
+
+Fix [`0647997`](https://github.com/bubon-ik/singit-solana/commit/0647997) is now
+deployed on `release/typesafe-routing-fix-20260921`. All six GitHub checks passed.
+A fresh private backup preceded the Telegram-only restart. Both services are
+active; the payment gateway process, all 95 Base wallets, the Solana wallet,
+configuration values and purchase history were verified preserved. The previous
+`release/typesafe-20260921` branch remains available for code rollback.
