@@ -51,6 +51,65 @@ class AssistantTests(unittest.TestCase):
         self.assertFalse(self.client.bitrefill_calls)
         self.assertFalse(self.plugin._CHAT_MODE_USERS)
 
+    def test_borderline_esim_asks_targeted_question_and_remembers_country(self):
+        with self.decision("clarify", country="DE", suggested_action="esim"):
+            self.dispatch("i need internet in Germany")
+        self.assertIn("travel internet", self.messages())
+        self.assertNotIn("Other actions require", self.messages())
+        self.assertFalse(self.client.bitrefill_search_calls)
+        with patch.object(self.router, "classify") as classify:
+            self.dispatch("Yes")
+        classify.assert_not_called()
+        self.assertEqual(self.client.bitrefill_search_calls[0][1], "DE")
+        self.assertFalse(self.client.bitrefill_calls)
+
+    def test_screenshot_sequence_can_switch_from_food_catalog_to_balance(self):
+        with self.decision("esim", country="DE"):
+            self.dispatch("i need internet in Germany")
+        with self.decision("food", country="CZ"):
+            self.dispatch("i wanna order a food in CZ")
+        with self.decision("gift_card", country="CZ", category="food"):
+            self.dispatch("ok, witch gift card for food u have in CZ?")
+        self.assertEqual(self.client.bitrefill_list_calls[-1][:2], ("CZ", "food"))
+        self.assertEqual(self.plugin._BITREFILL_SESSIONS["1045618308"]["stage"], "select-product")
+        with self.decision("balance", network="base"):
+            self.dispatch("how much USDC on base on my wallet?")
+            self.dispatch("how much USDC on base on my wallet?")
+        self.assertEqual([call[0] for call in self.client.calls], ["balance", "balance"])
+        self.assertNotIn("1045618308", self.plugin._BITREFILL_SESSIONS)
+        self.assertNotIn("Choose a category from the buttons", self.messages())
+        self.assertFalse(self.client.bitrefill_calls)
+
+    def test_balance_can_interrupt_category_menu(self):
+        self.plugin._BITREFILL_SESSIONS["1045618308"] = {"stage": "select-category", "source": "catalog"}
+        with self.decision("balance", network="solana"):
+            self.dispatch("How much USDC do I have on Solana?")
+        self.assertEqual(self.client.calls[0][2], "solana")
+        self.assertNotIn("1045618308", self.plugin._BITREFILL_SESSIONS)
+
+    def test_numeric_product_selection_stays_in_wizard(self):
+        self.plugin._BITREFILL_SESSIONS["1045618308"] = {
+            "stage": "select-product", "country": "CZ", "products": [{"productId": "wolt-cz", "name": "Wolt", "country": "CZ"}]}
+        with patch.object(self.router, "classify") as classify:
+            self.dispatch("1")
+        classify.assert_not_called()
+        self.assertEqual(self.client.bitrefill_product_calls[0], ("wolt-cz", "CZ"))
+
+    def test_checkout_forms_never_send_their_values_to_classifier(self):
+        for stage in ("awaiting-recipient", "awaiting-buyer-email", "select-payment-token", "review-purchase", "purchasing"):
+            self.plugin._BITREFILL_SESSIONS["1045618308"] = {"stage": stage}
+            event = FakeEvent("private user supplied checkout value", "1045618308")
+            with patch.object(self.router, "classify") as classify:
+                result = self.plugin._natural_assistant.handle(event=event, source=event.source, gateway=self.gateway, api=self.plugin)
+            self.assertIsNone(result)
+            classify.assert_not_called()
+
+    def test_failed_classification_preserves_catalog_for_retry(self):
+        self.plugin._BITREFILL_SESSIONS["1045618308"] = {"stage": "select-category", "country": "CZ"}
+        with patch.object(self.router, "classify", side_effect=self.router.RouterUnavailable()):
+            self.dispatch("how much USDC on base on my wallet?")
+        self.assertEqual(self.plugin._BITREFILL_SESSIONS["1045618308"]["stage"], "select-category")
+
     def test_food_requires_opt_in_before_gift_card_catalog(self):
         with self.decision("food", country="CZ", language="ru"):
             self.dispatch("я хочу закать еду в Чехии")
@@ -256,6 +315,13 @@ class ProviderContractTests(unittest.TestCase):
     def test_low_confidence_requests_clarification(self):
         self.answers["intent"]["confidence"] = 0.2
         self.assertEqual(self.classify().action, "clarify")
+
+    def test_observed_point79_keeps_esim_candidate(self):
+        self.answers["intent"]["confidence"] = 0.79
+        result = self.classify("i need internet in Germany")
+        self.assertEqual(result.action, "clarify")
+        self.assertEqual(result.suggested_action, "esim")
+        self.assertEqual(result.country, "DE")
 
     def test_low_network_confidence_does_not_default_base(self):
         self.answers["network"]["confidence"] = 0.1

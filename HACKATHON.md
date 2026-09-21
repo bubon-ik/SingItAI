@@ -104,6 +104,17 @@ the payment gateway remained running. An initial formatting-only `.env`
 difference triggered a code rollback; a second attempt verified parsed values
 and completed successfully. Real Telegram conversations remain a manual check.
 
+### September 21: conversation routing corrections
+
+[PR #4](https://github.com/bubon-ik/singit-solana/pull/4) also fixes two failures
+reported in Telegram screenshots: a borderline eSIM classification now prompts
+a focused confirmation, and catalog browsing no longer traps new balance
+questions. Checkout fields retain their existing input handling. All 382 plugin
+tests passed in the server runtime. A live TypeSafe harness replayed the exact
+internet, Czech food, gift-card and repeated Base-balance messages with fake
+catalog/wallet handlers. Actual Telegram delivery and catalog availability after
+this fix remain manual checks; no purchases or wallet payments were made.
+
 ## Pending work — not claimed as completed
 
 - Manually verify the deployed wallet commands and refreshed navigation in Telegram.

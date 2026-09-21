@@ -16,8 +16,10 @@ model or Venice credit balance.
   alternative and wait for the user to accept before browsing.
 - Balance, last-purchase and limit-view requests use existing authenticated
   handlers. Explicit Solana balance requests retain the Solana network.
-- Existing commands, buttons, purchase/withdrawal wizards and pending Venice
-  setup/model selection retain priority. Genuine conversation requests enter
+- Existing commands, buttons, private checkout/withdrawal forms and pending Venice
+  setup/model selection retain priority. Catalog browsing accepts a new task,
+  such as a balance question, while numeric selections and navigation stay local.
+  Genuine conversation requests enter
   the existing Venice policy and setup flow. Unknown actions do not reach Hermes's general
   tool-using agent. Free text never becomes an approval or payment instruction.
 - Uncertain classifications, provider errors and requests for unsupported
@@ -55,8 +57,10 @@ Requests have a five-second timeout and bounded input/output size. In-memory
 limits allow at most 12 classifications per user and 120 per process per
 minute. Pending clarification state is bounded and expires after 15 minutes.
 These are per-process limits, not a durable account-wide spending budget.
-The initial confidence cutoff is 0.8 (language selection uses 0.5); it must be
-evaluated against labeled examples before a public rollout.
+The automatic routing confidence cutoff is 0.8. Supported action candidates
+with confidence from 0.5 to below 0.8 receive a focused yes/no clarification,
+retaining the detected country and network. Language selection uses 0.5.
+These cutoffs still require evaluation against labeled examples.
 
 ## Verification and rollout
 
@@ -91,8 +95,9 @@ rollout if the provider makes that version available.
 This is a routing foundation, not a universal autonomous shopping agent.
 It opens existing catalogs; it does not extract arbitrary merchant names,
 compare packages by duration/data/budget, verify eSIM device compatibility,
-rank products or perform direct food delivery and bookings. Free-form control
-inside existing purchase wizards is unchanged. Assistant replies are Russian
+rank products or perform direct food delivery and bookings. Catalog menus allow
+task switching; checkout forms retain their existing input rules. Short keywords
+in the explicit search-input step remain catalog queries. Assistant replies are Russian
 or English; downstream catalog screens retain their existing language.
 
 Country-scoped eSIM search reduces unrelated results, but country placement in
@@ -137,6 +142,17 @@ the parsed environment values instead of requiring byte-identical formatting.
 Both private backups remain on the VPS. The prior `venice-solana` branch still
 points to the previous runtime release for a code-only rollback.
 
-The live TypeSafe smoke checks above test the provider adapter; a real user
-conversation through Telegram and subsequent catalog results still need manual
-verification. Start with `/start`, then a mobile-internet or food request.
+### Follow-up: reported conversation failures
+
+The user's Telegram screenshots exposed two failures: the exact phrase
+`i need internet in Germany` produced an eSIM confidence of 0.79, below the
+automatic 0.8 cutoff, and catalog menus consumed subsequent balance questions.
+The fix clarifies travel-internet criteria, retains medium-confidence candidates
+for focused confirmation, and lets new natural-language tasks interrupt browsing.
+Private checkout fields remain excluded from classification.
+
+All 382 plugin tests passed in the server runtime. A sequential harness using
+the live TypeSafe API and fake catalog/wallet handlers replayed the exact internet,
+Czech food, food-gift-card and repeated Base-balance messages successfully.
+This verifies classification and dispatch, not live wallet balances, eSIM
+availability or Telegram delivery after the fix. No purchase was submitted.

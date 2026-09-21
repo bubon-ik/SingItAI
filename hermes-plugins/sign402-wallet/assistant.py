@@ -28,6 +28,27 @@ class Assistant:
                 self.pending.pop(next(iter(self.pending)))
             self.pending[user_id] = (time.monotonic() + 900, intent, stage)
 
+    @staticmethod
+    def wizard_owns_text(session, text, api):
+        """Keep selections and private checkout input local; menus do not own every sentence."""
+        stage = session.get("stage")
+        browsing = {"menu", "select-category", "select-product", "awaiting-country",
+                    "awaiting-search", "loading-catalog", "loading-search", "loading-product"}
+        if stage not in browsing:
+            return True
+        normalized = api._canonical_button_text(text)
+        controls = {"back", "next", "previous", "change country", "browse catalog", "search products"}
+        if normalized in controls or normalized in api._BITREFILL_CATEGORY_VALUES:
+            return True
+        if text.isdecimal():
+            return True
+        if stage == "awaiting-country" and (text.upper() in intent_router.COUNTRIES or normalized == "other"):
+            return True
+        if stage == "awaiting-search" and len(text.split()) < 4 and "?" not in text:
+            # Preserve short catalog keywords and merchant names.
+            return True
+        return False
+
     def handle(self, *, event, source, gateway, api):
         if not intent_router.enabled() or not api._is_telegram_source(source):
             return None
@@ -38,11 +59,17 @@ class Assistant:
         if identity is None or not text or text.startswith("/"):
             return None
         user_id = str(identity.user_id)
-        # Existing wizards own their replies even when they do not recognize them.
+        # Private form values never go to the classifier. Browsing menus only
+        # retain their actual selections, allowing a new task to interrupt them.
         if (api._chat_setup(user_id, source)
-                or user_id in api._CHAT_MODEL_PENDING or user_id in api._BITREFILL_SESSIONS
+                or user_id in api._CHAT_MODEL_PENDING
                 or user_id in api._WITHDRAW_SESSIONS
                 or user_id in api._IMESSAGE_CONNECT_SESSIONS):
+            return None
+        browsing_session = api._BITREFILL_SESSIONS.get(user_id)
+        if browsing_session is not None and self.wizard_owns_text(browsing_session, text, api):
+            return None
+        if api._canonical_button_text(text) == "back":
             return None
 
         def send(message, buttons=None):
@@ -55,9 +82,10 @@ class Assistant:
         if pending and pending[0] > time.monotonic():
             _, intent, stage = pending
             ru = intent.language == "ru"
-            if stage == "alternative":
+            if stage in {"alternative", "confirm-intent"}:
                 if text.casefold() in {"yes", "да", "show gift cards", "показать подарочные карты"}:
-                    self.advance(replace(intent, action="gift_card"), identity, source, gateway, api, send)
+                    chosen = replace(intent, action="gift_card") if stage == "alternative" else intent
+                    self.advance(chosen, identity, source, gateway, api, send)
                 elif text.casefold() in {"no", "нет"}:
                     send("Хорошо. Напиши другую задачу или выбери действие в меню." if ru else
                          "Okay. Tell me another task or choose an action from the menu.")
@@ -104,6 +132,8 @@ class Assistant:
                     send("Не получилось определить задачу. Выбери действие в меню — оно работает без AI-чата."
                          if ru else "I couldn't identify the task. Choose an action from the menu; no AI chat setup is needed.")
                 else:
+                    if browsing_session is not None:
+                        api._BITREFILL_SESSIONS.pop(user_id, None)
                     if country_intent is not None:
                         intent = replace(country_intent, country=intent.country)
                     self.advance(intent, identity, source, gateway, api, send, original_text=text)
@@ -118,6 +148,23 @@ class Assistant:
     def advance(self, intent, identity, source, gateway, api, send, original_text=None):
         user_id = str(identity.user_id)
         ru = intent.language == "ru"
+        if intent.action == "clarify" and intent.suggested_action:
+            descriptions = {
+                "esim": ("Нужен мобильный интернет через eSIM для поездки?", "Are you looking for travel internet through an eSIM?"),
+                "topup": ("Нужно пополнить существующий мобильный номер?", "Do you want to top up an existing mobile number?"),
+                "gift_card": ("Проверить доступные подарочные карты?", "Would you like me to check available gift cards?"),
+                "balance": ("Показать баланс кошелька?", "Would you like to see your wallet balance?"),
+                "order_status": ("Показать последнюю покупку?", "Would you like to see your latest purchase?"),
+                "limits": ("Показать текущие лимиты расходов?", "Would you like to see your current spending limits?"),
+                "food": ("Ты хочешь заказать еду или продукты?", "Are you looking to order food or groceries?"),
+                "goods": ("Ты хочешь купить физический товар?", "Are you looking to buy a physical product?"),
+                "travel": ("Нужно бронирование поездки или проживания?", "Are you looking to book travel or accommodation?"),
+            }
+            if intent.suggested_action in descriptions:
+                self.remember(user_id, replace(intent, action=intent.suggested_action, suggested_action=None), "confirm-intent")
+                send(descriptions[intent.suggested_action][0 if ru else 1],
+                     (("Да", "Нет"), ("Back",)) if ru else (("Yes", "No"), ("Back",)))
+                return
         if intent.action in {"balance", "order_status", "limits"}:
             if intent.action == "balance" and intent.network == "other":
                 send("Какой баланс показать? Используй /balance base или /balance solana." if ru else

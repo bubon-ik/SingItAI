@@ -23,7 +23,9 @@ WS YE YT ZA ZM ZW
 """.split())
 
 INTENTS = {
-    "esim": "Find or obtain mobile internet/data for a trip or an eSIM, not home broadband.",
+    "esim": "Find internet access/data in a destination country, travel connectivity, mobile internet or an eSIM. "
+            "A general request such as 'I need internet in Germany' belongs here for discovery, even without "
+            "the word eSIM. Explicit home broadband installation belongs to unsupported.",
     "topup": "Top up an existing mobile phone/SIM balance.",
     "gift_card": "Explicitly find or buy a gift card or voucher.",
     "food": "Order food, groceries or restaurant delivery, not an explicit gift-card request.",
@@ -52,6 +54,7 @@ class Intent:
     category: str = "all"
     network: str = "unspecified"
     language: str = "en"
+    suggested_action: str | None = None
 
 
 def enabled() -> bool:
@@ -118,13 +121,16 @@ def classify(text: str, *, opener=urlopen) -> Intent:
         answers = json.loads(raw)["answers"]
         if not isinstance(answers, dict):
             raise RouterUnavailable("invalid-response")
+        action = _choice(answers, "intent", INTENTS) or "clarify"
+        suggestion = _choice(answers, "intent", INTENTS, 0.5) if action == "clarify" else None
         return Intent(
-            action=_choice(answers, "intent", INTENTS) or "clarify",
+            action=action,
             country=_choice(answers, "country", COUNTRIES | {"unknown"}),
             category=_choice(answers, "category", CATEGORIES) or "all",
             # Uncertainty must not silently select the default Base wallet.
             network=_choice(answers, "network", {"base", "solana", "unspecified", "other"}) or "other",
             language=_choice(answers, "language", {"en", "ru"}, 0.5) or "en",
+            suggested_action=suggestion if suggestion not in {"clarify", "unsupported", "chat"} else None,
         )
     except Exception:
         raise RouterUnavailable("classification-unavailable") from None

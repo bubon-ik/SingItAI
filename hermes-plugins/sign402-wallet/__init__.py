@@ -2713,6 +2713,12 @@ def _handle_telegram_bitrefill_wizard_message(*, event, source, gateway):
     if not session:
         return None
 
+    assistant_result = _natural_assistant.handle(
+        event=event, source=source, gateway=gateway, api=sys.modules[__name__],
+    )
+    if assistant_result:
+        return assistant_result
+
     text = str(getattr(event, "text", "") or "").strip()
     if not text:
         return None
