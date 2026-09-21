@@ -134,6 +134,12 @@ conversation, balance interruption during country clarification, and a country
 name completing an eSIM request. Post-fix Telegram delivery remains a manual
 check; no wallet payment or purchase was made.
 
+Context fix [`b371841`](https://github.com/bubon-ik/singit-solana/commit/b371841)
+was deployed after all six GitHub checks passed. A fresh private backup and
+post-restart comparison verified all 95 Base wallets, the Solana wallet,
+configuration and purchase history intact. Only Telegram restarted; both
+services are active and the payment gateway process stayed unchanged.
+
 ## Pending work — not claimed as completed
 
 - Manually verify the deployed wallet commands and refreshed navigation in Telegram.

@@ -160,7 +160,7 @@ Czech food, food-gift-card and repeated Base-balance messages successfully.
 This verifies classification and dispatch, not live wallet balances, eSIM
 availability or Telegram delivery after the fix. No purchase was submitted.
 
-Fix [`0647997`](https://github.com/bubon-ik/singit-solana/commit/0647997) is now
+Fix [`0647997`](https://github.com/bubon-ik/singit-solana/commit/0647997) was
 deployed on `release/typesafe-routing-fix-20260921`. All six GitHub checks passed.
 A fresh private backup preceded the Telegram-only restart. Both services are
 active; the payment gateway process, all 95 Base wallets, the Solana wallet,
@@ -185,3 +185,10 @@ of a standalone country question by two Base-balance requests, and a German
 country-name reply completing an eSIM request. This verifies dispatch and
 context transitions, not production accuracy across arbitrary conversations,
 live catalog coverage or real Telegram delivery. No purchases were submitted.
+
+Context fix [`b371841`](https://github.com/bubon-ik/singit-solana/commit/b371841)
+is now deployed on `release/typesafe-context-fix-20260921`. All six GitHub checks
+passed. A new private backup preceded a Telegram-only restart. Both services
+are active and gateway health returns 200. The gateway process, all 95 Base
+wallets, the Solana wallet, configuration values and purchase history were
+verified preserved. The previous routing-fix branch remains available for rollback.
