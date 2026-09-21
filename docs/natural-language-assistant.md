@@ -114,3 +114,29 @@ change the existing Venice funding/approval policy or Solana chat integration.
 Sources: [TypeSafe API](https://docs.typesafe.ai/api),
 [confidence](https://docs.typesafe.ai/confidence),
 [intent routing](https://docs.typesafe.ai/patterns/intent-routing).
+
+## Existing bot deployment — September 21, 2026
+
+Release [`adca498`](https://github.com/bubon-ik/singit-solana/commit/adca498)
+is installed in the existing VPS checkout on `release/typesafe-20260921`.
+[PR #4](https://github.com/bubon-ik/singit-solana/pull/4) is stacked on
+`venice-solana`; it remains a draft and has not been merged to `main`.
+The operator supplied the TypeSafe key through the private Hermes environment.
+All six applicable GitHub checks and all 375 server-runtime plugin tests passed.
+
+A private state/configuration backup was made before the update. The Telegram
+service was restarted; the unchanged payment gateway was not. Both services
+are active and gateway health returns 200. All 95 Base wallet records, the
+Solana wallet record, bot configuration values and purchase history were
+verified preserved. No purchase or wallet payment was submitted by this work.
+
+The first installation attempt automatically rolled back because Hermes
+reformatted `.env` during startup. Comparing parsed settings confirmed that
+no key was added, removed or changed. The successful second attempt verified
+the parsed environment values instead of requiring byte-identical formatting.
+Both private backups remain on the VPS. The prior `venice-solana` branch still
+points to the previous runtime release for a code-only rollback.
+
+The live TypeSafe smoke checks above test the provider adapter; a real user
+conversation through Telegram and subsequent catalog results still need manual
+verification. Start with `/start`, then a mobile-internet or food request.

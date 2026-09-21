@@ -95,6 +95,15 @@ intents; it is not a production accuracy benchmark. No purchase or wallet
 payment was performed. Pending chat setup and genuine Venice conversation
 remain supported. See [verification details](docs/natural-language-assistant.md).
 
+Release [`adca498`](https://github.com/bubon-ik/singit-solana/commit/adca498),
+[PR #4](https://github.com/bubon-ik/singit-solana/pull/4), is now installed on the
+existing bot. All six applicable CI checks passed. Private backups and state
+comparison confirmed preservation of 95 Base wallets, 1 Solana wallet, bot
+configuration values and purchase history. Only the Telegram service restarted;
+the payment gateway remained running. An initial formatting-only `.env`
+difference triggered a code rollback; a second attempt verified parsed values
+and completed successfully. Real Telegram conversations remain a manual check.
+
 ## Pending work — not claimed as completed
 
 - Manually verify the deployed wallet commands and refreshed navigation in Telegram.

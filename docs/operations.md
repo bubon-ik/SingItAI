@@ -7,6 +7,17 @@ product is, see the [README](../README.md). For incident recovery see
 
 ## Production layout
 
+**September 21, 2026 update:** the existing bot now runs
+[`adca498`](https://github.com/bubon-ik/singit-solana/commit/adca498) on
+`release/typesafe-20260921`, adding optional TypeSafe routing before Venice
+onboarding. The operator enabled it in the private Hermes environment.
+Only the Telegram service restarted; the payment gateway code and process
+were unchanged. All 95 Base wallets, 1 Solana wallet, configuration values and
+purchase history were verified intact after a private backup. All 375 plugin
+tests passed in the server runtime, and seven live TypeSafe smoke cases passed.
+See [deployment details and limits](natural-language-assistant.md#existing-bot-deployment--september-21-2026).
+The following September 20 account records the underlying Solana-chat release.
+
 The gateway checkout is `~/apps/sign402` on the VPS `hermes@164.68.104.44`.
 
 Updated on 20 September 2026 at the owner's explicit request: the existing bot
