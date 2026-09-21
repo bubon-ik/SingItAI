@@ -140,6 +140,22 @@ post-restart comparison verified all 95 Base wallets, the Solana wallet,
 configuration and purchase history intact. Only Telegram restarted; both
 services are active and the payment gateway process stayed unchanged.
 
+### September 21: conversation regression audit
+
+[PR #4](https://github.com/bubon-ik/singit-solana/pull/4) expands the checks from
+reported phrases to browsing/pending-state transitions, cancellation, duplicate
+and delayed messages, expiry and provider failures. Fixes add bounded enum
+context to classification, natural follow-up replies, network clarification,
+short wallet-task interruption of search, explicit all-category changes and
+recovery of cancelled loading screens. Private checkout input stays local.
+
+A repeatable opt-in live classifier harness covers 18 synthetic conversations
+with fake Telegram/catalog/wallet handlers. The first run failed five cases;
+all 18 passed after correction. This is regression coverage, not a guarantee of
+arbitrary-language accuracy or verification of real Telegram delivery. No
+purchase or wallet payment was made. All 414 plugin tests passed in the VPS
+runtime. See the [verification instructions](docs/natural-language-assistant.md#conversation-regression-audit).
+
 ## Pending work — not claimed as completed
 
 - Manually verify the deployed wallet commands and refreshed navigation in Telegram.

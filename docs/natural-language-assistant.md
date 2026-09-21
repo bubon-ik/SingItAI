@@ -49,10 +49,11 @@ Venice balance. Keep the key in the deployment's private environment file.
 Leave the enable flag unset or set it to `0` to retain the previous behavior.
 The public bot's existing access policies still apply.
 
-The HTTP endpoint is `https://api.typesafe.ai/v1/systemone`. Only the current
-message is sent: no wallet keys, receipts, account history, user identifier or
-gateway access token is included by the adapter. A country follow-up is sent
-on its own. Message text and provider responses are not written to logs.
+The HTTP endpoint is `https://api.typesafe.ai/v1/systemone`. The current message
+and, during a follow-up, validated enum context (stage, action, country, category,
+network) are sent. No wallet keys, receipts, account history, user identifier,
+product records, checkout fields or gateway access token is included by the
+adapter. Message text and provider responses are not written to application logs.
 As with any external classifier, the user's message itself may contain
 personal information. Reflect this data flow in deployment privacy notices.
 
@@ -99,8 +100,9 @@ This is a routing foundation, not a universal autonomous shopping agent.
 It opens existing catalogs; it does not extract arbitrary merchant names,
 compare packages by duration/data/budget, verify eSIM device compatibility,
 rank products or perform direct food delivery and bookings. Catalog menus allow
-task switching; checkout forms retain their existing input rules. Short keywords
-in the explicit search-input step remain catalog queries. Assistant replies are Russian
+task switching, including package selection; private checkout forms retain their
+existing input rules. The classifier distinguishes merchant search terms from
+short wallet questions in the search-input step. Assistant replies are Russian
 or English; downstream catalog screens retain their existing language.
 
 Country-scoped eSIM search reduces unrelated results, but country placement in
@@ -192,3 +194,35 @@ passed. A new private backup preceded a Telegram-only restart. Both services
 are active and gateway health returns 200. The gateway process, all 95 Base
 wallets, the Solana wallet, configuration values and purchase history were
 verified preserved. The previous routing-fix branch remains available for rollback.
+
+### Conversation regression audit
+
+The audit adds a transition matrix covering nine browsing states, four pending
+question states, Base/Solana switching, explicit category changes, natural
+acceptance/decline, context expiry, private forms, cancellation and provider
+failure. Duplicate in-flight messages are coalesced before rate accounting;
+a rate-limited newer task invalidates an older response. A failed classifier
+restores cancelled catalog loading screens to usable input states.
+
+Contextual replies are classified separately from task intent. An uncertain
+reply retains the pending question and its original expiry. A recognized wallet
+request can interrupt it. Network clarification accepts Base/Solana replies.
+Explicit requests for all categories no longer inherit an old food filter.
+Merchant names in a search step remain searches even when their inferred
+business category is food. Checkout fields remain outside the classifier.
+
+The repeatable, opt-in live check uses only synthetic messages and fake catalog,
+Telegram and wallet handlers:
+
+```sh
+# Supply TYPESAFE_API_KEY through the private process environment.
+python3 scripts/check-intent-conversations.py --live
+```
+
+All 414 plugin tests passed in the VPS runtime, including native Telegram tests.
+All 18 live conversation cases passed after the audit fixes. The initial run
+failed five cases, which informed the corrections; 18/18 is a regression result,
+not a production accuracy benchmark. Live tests make paid TypeSafe requests but
+never create purchases or send Telegram messages. The offline regression tests
+run automatically in the existing GitHub plugin test job. Real Telegram delivery
+and provider/catalog outages still require operational observation.

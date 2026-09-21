@@ -33,6 +33,8 @@ class Assistant:
         """Inherit missing slots only when continuing the pending task."""
         if not pending or pending[0] <= time.monotonic():
             return intent
+        if intent.reply == "new_task":
+            return intent
         _, previous, stage = pending
         action = intent.suggested_action if intent.action == "clarify" else intent.action
         continues = (
@@ -43,7 +45,7 @@ class Assistant:
             return replace(
                 intent,
                 country=intent.country if intent.country in intent_router.COUNTRIES else previous.country,
-                category=previous.category if intent.category == "all" else intent.category,
+                category=previous.category if intent.category == "all" and not intent.category_explicit else intent.category,
                 network=previous.network if intent.network == "unspecified" else intent.network,
             )
         if (stage == "country" and intent.action == "clarify"
@@ -54,10 +56,28 @@ class Assistant:
         return intent
 
     @staticmethod
+    def merge_slots(previous, reply):
+        return replace(previous,
+            country=reply.country if reply.country in intent_router.COUNTRIES else previous.country,
+            category=reply.category if reply.category_explicit or reply.category != "all" else previous.category,
+            category_explicit=reply.category_explicit or previous.category_explicit,
+            network=previous.network if reply.network == "unspecified" else reply.network)
+
+    def repeat_pending(self, pending, identity, source, gateway, api, send):
+        expires, intent, stage = pending
+        prompt = replace(intent, action="clarify", suggested_action=intent.action) if stage == "confirm-intent" else intent
+        self.advance(prompt, identity, source, gateway, api, send)
+        # Repeating a question must not keep abandoned context alive forever.
+        with self.lock:
+            current = self.pending.get(str(identity.user_id))
+            if current:
+                self.pending[str(identity.user_id)] = (expires, current[1], current[2])
+
+    @staticmethod
     def wizard_owns_text(session, text, api):
         """Keep selections and private checkout input local; menus do not own every sentence."""
         stage = session.get("stage")
-        browsing = {"menu", "select-category", "select-product", "awaiting-country",
+        browsing = {"menu", "select-category", "select-product", "select-package", "awaiting-country",
                     "awaiting-search", "loading-catalog", "loading-search", "loading-product"}
         if stage not in browsing:
             return True
@@ -68,9 +88,6 @@ class Assistant:
         if text.isdecimal():
             return True
         if stage == "awaiting-country" and (text.upper() in intent_router.COUNTRIES or normalized == "other"):
-            return True
-        if stage == "awaiting-search" and len(text.split()) < 4 and "?" not in text:
-            # Preserve short catalog keywords and merchant names.
             return True
         return False
 
@@ -101,6 +118,23 @@ class Assistant:
             api._send_fixed_reply(gateway, source, message, reply_markup=(
                 api._reply_keyboard(buttons) if buttons else api._telegram_main_menu_reply_markup()))
 
+        def recover_browsing():
+            # Starting classification cancels an older catalog fetch. If the
+            # classifier fails, do not leave a cancelled loading screen active.
+            if not browsing_session or api._BITREFILL_SESSIONS.get(user_id) is not browsing_session:
+                return
+            stage = browsing_session.get("stage")
+            if stage in {"loading-catalog", "loading-search", "loading-product"}:
+                previous = browsing_session.get("returnSession")
+                if stage == "loading-product" and isinstance(previous, dict):
+                    api._BITREFILL_SESSIONS[user_id] = previous
+                else:
+                    api._BITREFILL_SESSIONS[user_id] = {
+                        "stage": {"loading-catalog": "select-category", "loading-search": "awaiting-search",
+                                  "loading-product": "menu"}[stage],
+                        "country": browsing_session.get("country", api._bitrefill_country(user_id)),
+                    }
+
         with self.lock:
             pending = self.pending.get(user_id)
         if pending and pending[0] <= time.monotonic():
@@ -129,24 +163,42 @@ class Assistant:
                     self.clear(user_id)
                     self.advance(replace(intent, country=country), identity, source, gateway, api, send)
                     return dict(api._SKIP_RESULT)
+            elif stage == "network" and text.casefold() in {"base", "solana"}:
+                api._invalidate_telegram_operation(user_id)
+                self.clear(user_id)
+                self.advance(replace(intent, network=text.casefold()), identity, source, gateway, api, send)
+                return dict(api._SKIP_RESULT)
+
+        context = None
+        if pending:
+            context = {name: getattr(pending[1], name) for name in ("action", "country", "category", "network")}
+            context["stage"] = pending[2]
+        elif browsing_session:
+            context = {name: browsing_session.get(name) for name in ("stage", "country", "category")}
+            context["action"] = "esim" if browsing_session.get("query") == "esim" else "catalog"
 
         now = time.monotonic()
+        action = "assistant:classify:" + hashlib.sha256(text.encode()).hexdigest()[:16]
+        with api._TELEGRAM_OPERATION_LOCK:
+            if api._TELEGRAM_ACTIVE_OPERATIONS.get(user_id, (None, None))[1] == action:
+                return dict(api._SKIP_RESULT)
         with self.lock:
             self.attempts = [(at, uid) for at, uid in self.attempts if now - at < 60]
             allowed = len(self.attempts) < 120 and sum(uid == user_id for _, uid in self.attempts) < 12
             if allowed:
                 self.attempts.append((now, user_id))
         if not allowed:
+            api._invalidate_telegram_operation(user_id)
+            recover_browsing()
             send("Please use the menu for now, or try your message again in a minute.")
             return dict(api._SKIP_RESULT)
-        action = "assistant:classify:" + hashlib.sha256(text.encode()).hexdigest()[:16]
         generation = api._reserve_telegram_operation(user_id, action)
         if generation is None:
             return dict(api._SKIP_RESULT)
 
         def work():
             try:
-                intent = intent_router.classify(text)
+                intent = intent_router.classify(text, context=context)
             except intent_router.RouterUnavailable:
                 intent = None
             # Cancellation and new commands win over a late model response.
@@ -154,10 +206,63 @@ class Assistant:
                 if not api._finish_telegram_operation(user_id, generation):
                     return
                 if intent is None:
+                    recover_browsing()
                     ru = bool(re.search("[А-Яа-яЁё]", text))
                     send("Не получилось определить задачу. Выбери действие в меню — оно работает без AI-чата."
                          if ru else "I couldn't identify the task. Choose an action from the menu; no AI chat setup is needed.")
                 else:
+                    live_pending = pending if pending and pending[0] > time.monotonic() else None
+                    requested_action = intent.suggested_action if intent.action == "clarify" else intent.action
+                    # Independent wallet/unsupported tasks must not be swallowed
+                    # by a low-confidence relation-to-context answer.
+                    if (intent.reply != "cancel" and requested_action in {"balance", "order_status", "limits", "unsupported"}
+                            and not (live_pending and live_pending[2] == "network" and requested_action == "balance")):
+                        intent = replace(intent, reply="new_task")
+                    elif (live_pending and intent.action not in {"clarify", "chat"}
+                          and intent.reply not in {"cancel", "decline"}):
+                        related = (intent.action == live_pending[1].action
+                                   or live_pending[2] == "alternative" and intent.action == "gift_card")
+                        intent = replace(intent, reply=None if related else "new_task")
+                    if intent.reply in {"cancel", "decline"}:
+                        self.clear(user_id)
+                        api._BITREFILL_SESSIONS.pop(user_id, None)
+                        send("Хорошо, поиск отменён. Напиши другую задачу." if intent.language == "ru" else
+                             "Okay, cancelled. Tell me another task.")
+                        return
+                    if live_pending and intent.reply in {"accept", "continue", "unclear"}:
+                        previous = live_pending[1]
+                        stage = live_pending[2]
+                        updated = self.merge_slots(previous, intent)
+                        if ((intent.reply == "accept" and stage in {"alternative", "confirm-intent"})
+                                or (intent.reply == "continue" and stage == "alternative" and requested_action == "gift_card")):
+                            intent = replace(updated, action="gift_card" if stage == "alternative" else previous.action)
+                        elif intent.reply == "continue" and stage == "country" and updated.country in intent_router.COUNTRIES:
+                            intent = updated
+                        elif intent.reply == "continue" and stage == "network" and updated.network in {"base", "solana"}:
+                            intent = updated
+                        else:
+                            retained = updated if intent.reply == "continue" else previous
+                            self.repeat_pending((live_pending[0], retained, stage), identity, source, gateway, api, send)
+                            return
+                    elif browsing_session and intent.reply in {"continue", "accept", "unclear"}:
+                        stage = browsing_session.get("stage")
+                        if intent.reply == "continue" and stage == "awaiting-search":
+                            api._handle_bitrefill_search_input(identity=identity, query=text, source=source,
+                                                              gateway=gateway, search_all_countries=False)
+                            return
+                        if intent.reply == "continue" and stage == "awaiting-country" and intent.country in intent_router.COUNTRIES:
+                            api._handle_bitrefill_country_input(identity=identity, text=intent.country, source=source, gateway=gateway)
+                            return
+                        if (intent.reply == "continue" and stage != "awaiting-country"
+                                and (intent.country in intent_router.COUNTRIES or intent.category_explicit)):
+                            previous = intent_router.Intent("esim" if browsing_session.get("query") == "esim" else "gift_card",
+                                country=browsing_session.get("country"), category=browsing_session.get("category", "all"))
+                            intent = self.merge_slots(previous, intent)
+                        else:
+                            recover_browsing()
+                            send("Уточни запрос или выбери вариант из текущего списка." if intent.language == "ru" else
+                                 "Please clarify your request or choose an option from the current list.")
+                            return
                     self.clear(user_id)
                     if browsing_session is not None:
                         api._BITREFILL_SESSIONS.pop(user_id, None)
@@ -168,6 +273,7 @@ class Assistant:
             api._run_in_background(work)
         except Exception:
             api._finish_telegram_operation(user_id, generation)
+            recover_browsing()
             send("Please choose an action from the menu.")
         return dict(api._SKIP_RESULT)
 
@@ -193,8 +299,10 @@ class Assistant:
                 return
         if intent.action in {"balance", "order_status", "limits"}:
             if intent.action == "balance" and intent.network == "other":
-                send("Какой баланс показать? Используй /balance base или /balance solana." if ru else
-                     "Which balance? Use /balance base or /balance solana.")
+                self.remember(user_id, intent, "network")
+                send("В какой сети показать баланс? Выбери Base или Solana; также работают /balance base и /balance solana." if ru else
+                     "Which network balance? Choose Base or Solana; /balance base and /balance solana also work.",
+                     (("Base", "Solana"), ("Back",)))
                 return
             command = {"balance": "balance", "order_status": "last-purchase", "limits": "limits"}[intent.action]
             args = intent.network if intent.action == "balance" and intent.network in {"base", "solana"} else ""
