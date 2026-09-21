@@ -1161,3 +1161,22 @@ class ChatClientTests(GatewayClientFixture, unittest.TestCase):
                 user_access_token="user-token-1",
             )
         self.assertEqual(opener.requests, [])
+
+
+class PurchaseHistoryClientTests(GatewayClientFixture, unittest.TestCase):
+    def test_history_is_bound_to_user_token_and_returns_structured_data(self):
+        opener = RecordingOpener(response=FakeResponse(b'{"ok":true,"purchases":[],"hasNext":false}'))
+        result = self.make_client(opener).purchases(TelegramIdentity("alice"), offset=6, user_access_token="alice-token")
+        request, _ = opener.requests[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8099/agent/purchases")
+        self.assertEqual(request.get_header("X-sign402-user-token"), "alice-token")
+        self.assertEqual(json.loads(request.data), {"telegramUserId": "alice", "offset": 6})
+        self.assertEqual(result["purchases"], [])
+
+    def test_reveal_is_explicit_and_targets_one_record(self):
+        opener = RecordingOpener(response=FakeResponse(b'{"ok":true,"telegramText":"Code: fixture"}'))
+        self.make_client(opener).purchases(TelegramIdentity("alice"), purchase_id="a" * 24, reveal=True, user_access_token="alice-token")
+        request, timeout = opener.requests[0]
+        self.assertEqual(json.loads(request.data)["purchaseId"], "a" * 24)
+        self.assertIs(json.loads(request.data)["reveal"], True)
+        self.assertEqual(timeout, 180)

@@ -76,6 +76,10 @@ _CHAT_OPERATION_PATHS = {
     "end": "/agent/chat/end",
     "approve-policy": "/agent/chat/approve-policy",
     "models": "/agent/chat/models",
+    "network": "/agent/chat/network",
+    "quote": "/agent/chat/quote",
+    "pay": "/agent/chat/pay",
+    "payment": "/agent/chat/payment",
 }
 _MAX_RESPONSE_BYTES = 64 * 1024
 _NOT_CONFIGURED = "Wallet service is not configured. Please contact the operator."
@@ -179,6 +183,16 @@ class GatewayClient:
         if not isinstance(telegram_text, str) or not telegram_text.strip():
             raise GatewayClientError(_INVALID_RESPONSE)
         return telegram_text.strip()
+
+    def purchases(self, identity: TelegramIdentity, *, purchase_id: str = "",
+                  offset: int = 0, reveal: bool = False,
+                  user_access_token: str | None = None) -> dict[str, Any]:
+        payload = {"telegramUserId": identity.user_id, "offset": offset}
+        if purchase_id:
+            payload.update(purchaseId=purchase_id, reveal=reveal)
+        return self._post("/agent/purchases", payload, token=self.api_token,
+                          operation="purchases", user_token=user_access_token,
+                          timeout=self.purchase_timeout if reveal else self.timeout)
 
     def execute_imessage(
         self,

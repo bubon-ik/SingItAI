@@ -2,6 +2,7 @@ import io
 import json
 import os
 import sys
+import time
 import unittest
 from unittest.mock import patch
 
@@ -175,6 +176,29 @@ class AssistantTests(unittest.TestCase):
         self.client.execute_chat = lambda *_a, **_k: {"ok": True, "text": "chat response"}
         with patch.object(self.router, "classify") as classify:
             self.dispatch("internet in Germany")
+        classify.assert_not_called()
+
+    def test_pending_chat_setup_is_not_reclassified(self):
+        self.plugin._CHAT_SETUP["1045618308"] = {
+            "expires": time.monotonic() + 900, "chat_id": "chat-1", "phase": "model",
+        }
+        with patch.object(self.plugin, "_handle_telegram_chat_message", return_value=self.plugin._SKIP_RESULT) as chat:
+            with patch.object(self.router, "classify") as classify:
+                self.dispatch("Use this model")
+        classify.assert_not_called()
+        chat.assert_called_once()
+
+    def test_genuine_chat_keeps_existing_venice_flow(self):
+        with self.decision("chat"):
+            with patch.object(self.plugin, "_handle_telegram_chat_message", return_value=self.plugin._SKIP_RESULT) as chat:
+                self.dispatch("Explain how Solana works")
+        self.assertEqual(chat.call_args.kwargs["event"].text, "Explain how Solana works")
+
+    def test_group_text_is_not_sent_to_typesafe(self):
+        event = FakeEvent("internet Germany", "1045618308")
+        event.source.chat_type = "group"
+        with patch.object(self.router, "classify") as classify:
+            self.context.hooks["pre_gateway_dispatch"](event=event, gateway=self.gateway)
         classify.assert_not_called()
 
     def test_provider_failure_offers_menu_not_venice(self):

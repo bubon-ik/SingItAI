@@ -7,15 +7,15 @@ Baseline: SingItAI/main `f39959059922b693f14c2a3e9bec97c87881e07b`.
 - Imported the committed main branch, preserving Git history.
 - Added the existing Venice/Solana client as `solana-x402-service/`.
 - Kept original project modifications, credentials and runtime state out of the import.
-- Publish independently at `bubon-ik/singit-solana`; no production deployment is configured.
+- Published independently at `bubon-ik/singit-solana`; the owner authorized replacing the existing VPS bot on September 18.
 - Added Node 24 CI for the Solana module. The first funded Bitrefill purchase was verified on September 18; see [live checks](bitrefill-solana-checks.md).
 
-## 1. Managed wallets and read-only Telegram flow — implemented locally
+## 1. Managed wallets and read-only Telegram flow — deployed
 
 The wallet store now adds `solana_user_wallets` beside the existing Base table.
 The Base table, ciphertext and access tokens are preserved. The gateway and
 Telegram plugin support explicit `base` / `solana` wallet and balance commands.
-This milestone has not been deployed to Telegram. See [verification](solana-wallet-checks.md).
+This milestone is deployed to the existing Telegram bot. See [verification](solana-wallet-checks.md).
 
 Original scope and acceptance criteria:
 
@@ -40,7 +40,12 @@ Tests: existing-wallet migration, independent wallets per user/network,
 idempotent and concurrent creation, user isolation, encryption, correct
 address casing and native-USDC mint, authorization and Base regression checks.
 
-## 2. Venice adapter and approved payment
+## 2. Venice adapter and approved payment — implemented
+
+The `venice-solana` branch adds the private Node bridge, separate per-user AI
+network/model/budget state, exact-quote phone approval, durable reservations and
+read-only recovery. [Current flow and verification](venice-solana-agent.md).
+A real funded Venice payment remains the next acceptance check.
 
 Primary integration points: `sign402-gateway/sign402_gateway/venice_chat.py`,
 `sign402-gateway/sign402_gateway/server.py`, `solana-x402-service/src/index.mjs`.
@@ -60,10 +65,12 @@ Tests: denied/expired/changed approval, wrong user/network, budget rejection,
 lost response and restart, duplicate submission, provider errors, confirmed
 payment with delayed credit, Base Venice regression checks.
 
-## 3. Isolated Telegram run and one mainnet payment
+## 3. Existing Telegram deployment and one mainnet payment
 
-Use a separate bot configuration and databases. First exercise wallet and
-balance without funds. Obtain a fresh Venice quote, fund the correct managed
+The owner chose to update the existing VPS bot, preserving its identity and state.
+Back up both wallet tables, approval state, chat state and payment journals before
+replacing code; verify state digests after restart. First exercise wallet and
+balance without moving funds. Obtain a fresh Venice quote, fund the correct managed
 wallet, and get explicit approval before one real payment. Verify transaction,
 Venice credit and a selected model's paid response through the agent.
 

@@ -7,6 +7,7 @@ import hashlib
 import threading
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 
 from . import intent_router
 
@@ -30,13 +31,16 @@ class Assistant:
     def handle(self, *, event, source, gateway, api):
         if not intent_router.enabled() or not api._is_telegram_source(source):
             return None
+        if getattr(source, "chat_type", "dm") not in {"dm", "private"}:
+            return None
         identity = api._identity_from_telegram_source(source)
         text = str(getattr(event, "text", "") or "").strip()
         if identity is None or not text or text.startswith("/"):
             return None
         user_id = str(identity.user_id)
         # Existing wizards own their replies even when they do not recognize them.
-        if (api._in_chat_mode(user_id) or user_id in api._BITREFILL_SESSIONS
+        if (api._in_chat_mode(user_id) or api._chat_setup(user_id, source)
+                or user_id in api._CHAT_MODEL_PENDING or user_id in api._BITREFILL_SESSIONS
                 or user_id in api._WITHDRAW_SESSIONS
                 or user_id in api._IMESSAGE_CONNECT_SESSIONS):
             return None
@@ -102,7 +106,7 @@ class Assistant:
                 else:
                     if country_intent is not None:
                         intent = replace(country_intent, country=intent.country)
-                    self.advance(intent, identity, source, gateway, api, send)
+                    self.advance(intent, identity, source, gateway, api, send, original_text=text)
 
         try:
             api._run_in_background(work)
@@ -111,7 +115,7 @@ class Assistant:
             send("Please choose an action from the menu.")
         return dict(api._SKIP_RESULT)
 
-    def advance(self, intent, identity, source, gateway, api, send):
+    def advance(self, intent, identity, source, gateway, api, send, original_text=None):
         user_id = str(identity.user_id)
         ru = intent.language == "ru"
         if intent.action in {"balance", "order_status", "limits"}:
@@ -174,6 +178,10 @@ class Assistant:
                     start=0, source=source, gateway=gateway)
             return
         if intent.action == "chat":
+            if original_text and api._ai_chat_enabled():
+                api._handle_telegram_chat_message(
+                    event=SimpleNamespace(text=original_text), source=source, gateway=gateway)
+                return
             send("Для разговора выбери Chat. Для действий я могу найти eSIM, пополнение или подарочную карту, "
                  "показать баланс и последний заказ." if ru else
                  "Choose Chat for a conversation. I can help find eSIMs, mobile top-ups and gift cards, "

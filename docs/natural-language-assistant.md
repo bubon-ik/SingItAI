@@ -16,8 +16,9 @@ model or Venice credit balance.
   alternative and wait for the user to accept before browsing.
 - Balance, last-purchase and limit-view requests use existing authenticated
   handlers. Explicit Solana balance requests retain the Solana network.
-- Existing commands, buttons, purchase/withdrawal wizards and explicitly opened
-  Venice chat retain priority. Unknown actions do not reach Hermes's general
+- Existing commands, buttons, purchase/withdrawal wizards and pending Venice
+  setup/model selection retain priority. Genuine conversation requests enter
+  the existing Venice policy and setup flow. Unknown actions do not reach Hermes's general
   tool-using agent. Free text never becomes an approval or payment instruction.
 - Uncertain classifications, provider errors and requests for unsupported
   actions return clarification or the working menu. The router has no payment,
@@ -66,8 +67,17 @@ python3 -m unittest discover -s hermes-plugins/sign402-wallet/tests
 Local tests use fake TypeSafe and catalog responses. They verify routing,
 country follow-ups, alternative consent, network preservation, cancellation,
 authorization, provider failure, response validation and the off switch.
-They do **not** establish Jev's real classification accuracy, latency, cost,
-catalog coverage or Telegram deployment behavior.
+They do **not** establish production classification accuracy, catalog coverage
+or end-to-end Telegram behavior.
+
+On September 21, all 375 plugin tests passed with the existing VPS bot's Python
+and Telegram library, including the eight native Telegram checks skipped by
+the local environment. Seven live TypeSafe requests using synthetic Russian
+and English messages returned the expected intent/country/network decisions:
+German mobile data, a German eSIM, a misspelled Czech food request, Solana
+balance, an explanatory question, a Czech food gift card, and an unsupported
+transfer. Calls took 0.60–0.71 seconds. These seven examples are a smoke check,
+not a measured accuracy benchmark. No wallet payment was performed.
 
 Before enabling publicly, test an isolated bot with real TypeSafe credentials
 on Russian and English shopping requests, typos, questions versus purchase
@@ -94,11 +104,12 @@ Solana purchasing integration remains pending. Requests explicitly selecting
 Solana or another unsupported payment network do not enter the Base purchase
 wizard. This patch adds no payment capabilities or approval exceptions.
 
-The implementation targets this repository's `main` baseline at `b518307`.
-That version falls back to the public menu for unrecognized text outside chat.
-A deployment which automatically opens Venice onboarding for all free text
-has additional/different routing; reconcile that deployment before rollout.
-This change has not been deployed or tested against a live TypeSafe account.
+The initial implementation targeted `main` at `b518307`. It has now been
+integrated with the existing bot's `venice-solana` code at `337e777` and the
+subsequent documentation commit `8a5de52`. The classifier runs before automatic
+Venice onboarding and before broad shop shortcuts; an active chat setup still
+owns its replies. Group messages are not sent to TypeSafe. This does not
+change the existing Venice funding/approval policy or Solana chat integration.
 
 Sources: [TypeSafe API](https://docs.typesafe.ai/api),
 [confidence](https://docs.typesafe.ai/confidence),
