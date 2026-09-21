@@ -29,6 +29,31 @@ class Assistant:
             self.pending[user_id] = (time.monotonic() + 900, intent, stage)
 
     @staticmethod
+    def resolve_followup(intent, pending):
+        """Inherit missing slots only when continuing the pending task."""
+        if not pending or pending[0] <= time.monotonic():
+            return intent
+        _, previous, stage = pending
+        action = intent.suggested_action if intent.action == "clarify" else intent.action
+        continues = (
+            stage == "alternative" and action == "gift_card"
+            or stage in {"country", "confirm-intent"} and action == previous.action
+        )
+        if continues:
+            return replace(
+                intent,
+                country=intent.country if intent.country in intent_router.COUNTRIES else previous.country,
+                category=previous.category if intent.category == "all" else intent.category,
+                network=previous.network if intent.network == "unspecified" else intent.network,
+            )
+        if (stage == "country" and intent.action == "clarify"
+                and intent.suggested_action is None and intent.country in intent_router.COUNTRIES):
+            return replace(previous, country=intent.country)
+        # A balance request, another product task or an unsupported action must
+        # never be rewritten as an answer to the previous country question.
+        return intent
+
+    @staticmethod
     def wizard_owns_text(session, text, api):
         """Keep selections and private checkout input local; menus do not own every sentence."""
         stage = session.get("stage")
@@ -77,30 +102,33 @@ class Assistant:
                 api._reply_keyboard(buttons) if buttons else api._telegram_main_menu_reply_markup()))
 
         with self.lock:
-            pending = self.pending.pop(user_id, None)
-        country_intent = None
+            pending = self.pending.get(user_id)
+        if pending and pending[0] <= time.monotonic():
+            self.clear(user_id)
+            pending = None
         if pending and pending[0] > time.monotonic():
             _, intent, stage = pending
             ru = intent.language == "ru"
             if stage in {"alternative", "confirm-intent"}:
                 if text.casefold() in {"yes", "да", "show gift cards", "показать подарочные карты"}:
+                    api._invalidate_telegram_operation(user_id)
+                    self.clear(user_id)
                     chosen = replace(intent, action="gift_card") if stage == "alternative" else intent
                     self.advance(chosen, identity, source, gateway, api, send)
+                    return dict(api._SKIP_RESULT)
                 elif text.casefold() in {"no", "нет"}:
+                    api._invalidate_telegram_operation(user_id)
+                    self.clear(user_id)
                     send("Хорошо. Напиши другую задачу или выбери действие в меню." if ru else
                          "Okay. Tell me another task or choose an action from the menu.")
-                else:
-                    # A different task is a new request, not consent to the alternative.
-                    pending = None
-                if pending:
                     return dict(api._SKIP_RESULT)
             elif stage == "country":
                 country = text.upper()
                 if country in intent_router.COUNTRIES:
+                    api._invalidate_telegram_operation(user_id)
+                    self.clear(user_id)
                     self.advance(replace(intent, country=country), identity, source, gateway, api, send)
                     return dict(api._SKIP_RESULT)
-                else:
-                    country_intent = intent
 
         now = time.monotonic()
         with self.lock:
@@ -126,16 +154,14 @@ class Assistant:
                 if not api._finish_telegram_operation(user_id, generation):
                     return
                 if intent is None:
-                    if country_intent is not None:
-                        self.remember(user_id, country_intent, "country")
                     ru = bool(re.search("[А-Яа-яЁё]", text))
                     send("Не получилось определить задачу. Выбери действие в меню — оно работает без AI-чата."
                          if ru else "I couldn't identify the task. Choose an action from the menu; no AI chat setup is needed.")
                 else:
+                    self.clear(user_id)
                     if browsing_session is not None:
                         api._BITREFILL_SESSIONS.pop(user_id, None)
-                    if country_intent is not None:
-                        intent = replace(country_intent, country=intent.country)
+                    intent = self.resolve_followup(intent, pending)
                     self.advance(intent, identity, source, gateway, api, send, original_text=text)
 
         try:

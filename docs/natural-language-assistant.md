@@ -11,6 +11,9 @@ model or Venice credit balance.
   country. Mobile top-ups and gift cards open existing catalog categories.
 - A missing country triggers a follow-up. Country names are classified by Jev;
   ISO country-code buttons work without another model call.
+- Follow-ups retain the pending task's country, category and network when the
+  user continues it in their own words. Explicit replacements take precedence.
+  A newly recognized task can interrupt a country or intent clarification.
 - Food delivery, physical goods and travel booking requests explain that direct
   fulfillment is unavailable. They offer gift cards as an explicitly different
   alternative and wait for the user to accept before browsing.
@@ -163,3 +166,22 @@ A fresh private backup preceded the Telegram-only restart. Both services are
 active; the payment gateway process, all 95 Base wallets, the Solana wallet,
 configuration values and purchase history were verified preserved. The previous
 `release/typesafe-20260921` branch remains available for code rollback.
+
+### Follow-up context correction
+
+A later screenshot exposed context loss after `i need somesing for food in US`
+followed by `show me a giftcards`: the fresh classification omitted the already
+known country and category. The resulting country question then overwrote the
+intent of `what my ballance USDC in base?` with the previous shopping task.
+
+The fix merges missing fields only for a continuation of the pending task or
+acceptance of its gift-card alternative. Recognized new tasks keep their own
+intent and fields. Provider failure preserves pending context until its original
+expiry; explicit local answers cancel an older in-flight classification.
+
+All 391 plugin tests passed with the VPS runtime. A live TypeSafe harness with
+fake catalog/wallet handlers passed the exact US-food conversation, interruption
+of a standalone country question by two Base-balance requests, and a German
+country-name reply completing an eSIM request. This verifies dispatch and
+context transitions, not production accuracy across arbitrary conversations,
+live catalog coverage or real Telegram delivery. No purchases were submitted.

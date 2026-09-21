@@ -121,6 +121,19 @@ private backup was created. Only Telegram restarted; both services are active.
 All 95 Base wallets, the Solana wallet, configuration values and purchase history
 were verified preserved.
 
+### September 21: pending-task context correction
+
+[PR #4](https://github.com/bubon-ik/singit-solana/pull/4) additionally fixes the
+reported US-food conversation: free-form gift-card follow-ups retain the pending
+country/category, and a newly recognized task can interrupt a country question.
+Expired context is not reused; explicit new fields replace previous fields.
+Provider failure preserves pending context and local cancellation rejects late
+classification results. All 391 plugin tests passed in the VPS runtime. Live
+TypeSafe checks with fake catalog/wallet handlers passed the exact reported
+conversation, balance interruption during country clarification, and a country
+name completing an eSIM request. Post-fix Telegram delivery remains a manual
+check; no wallet payment or purchase was made.
+
 ## Pending work — not claimed as completed
 
 - Manually verify the deployed wallet commands and refreshed navigation in Telegram.

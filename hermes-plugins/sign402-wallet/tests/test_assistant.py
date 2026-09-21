@@ -135,6 +135,108 @@ class AssistantTests(unittest.TestCase):
             self.dispatch("Германия")
         self.assertEqual(self.client.bitrefill_search_calls[0][1], "DE")
 
+    def test_us_food_screenshot_followup_keeps_country_and_category(self):
+        with self.decision("food", country="US"):
+            self.dispatch("i need somesing for food in US")
+        with self.decision("gift_card", country="unknown"):
+            self.dispatch("show me a giftcards")
+        self.assertEqual(self.client.bitrefill_list_calls[-1][:2], ("US", "food"))
+        self.assertNotIn("Which country will you use it in?", self.messages())
+        with self.decision("balance", network="base"):
+            self.dispatch("what my ballance USDC in base?")
+            self.dispatch("what my ballance USDC in base?")
+        self.assertEqual([(call[0], call[2]) for call in self.client.calls],
+                         [("balance", "base"), ("balance", "base")])
+        self.assertFalse(self.client.bitrefill_calls)
+
+    def test_new_tasks_interrupt_country_question(self):
+        for action, kwargs in (("balance", {"network": "base"}),
+                               ("balance", {"network": "solana"}),
+                               ("order_status", {}), ("limits", {}),
+                               ("esim", {"country": "DE"}), ("unsupported", {})):
+            with self.subTest(action=action, kwargs=kwargs):
+                with self.decision("gift_card", category="food"):
+                    self.dispatch("show me a giftcards")
+                before = len(self.client.calls)
+                with self.decision(action, **kwargs):
+                    self.dispatch("what my ballance USDC in base?")
+                self.assertNotIn("1045618308", self.plugin._natural_assistant.pending)
+                if action in {"balance", "order_status"}:
+                    self.assertEqual(len(self.client.calls), before + 1)
+                if action == "balance":
+                    self.assertEqual(self.client.calls[-1][2], kwargs["network"])
+                if action == "limits":
+                    self.assertEqual(len(self.client.limits_calls), 1)
+                self.plugin._natural_assistant.attempts.clear()
+                self.plugin._BITREFILL_SESSIONS.clear()
+        self.assertFalse(self.client.bitrefill_calls)
+
+    def test_followup_explicit_slots_override_previous_context(self):
+        with self.decision("food", country="US"):
+            self.dispatch("food in US")
+        with self.decision("gift_card", country="CZ", category="games"):
+            self.dispatch("actually show gaming gift cards in Czechia")
+        self.assertEqual(self.client.bitrefill_list_calls[-1][:2], ("CZ", "games"))
+
+    def test_followup_never_drops_unsupported_payment_network(self):
+        for previous_network, new_network in (("solana", "unspecified"), ("unspecified", "solana"),
+                                              ("base", "other")):
+            with self.subTest(previous=previous_network, new=new_network):
+                with self.decision("food", country="US", network=previous_network):
+                    self.dispatch("food request")
+                with self.decision("gift_card", network=new_network):
+                    self.dispatch("show me gift cards")
+                self.assertFalse(self.client.bitrefill_list_calls)
+                self.assertFalse(self.client.bitrefill_calls)
+
+    def test_new_task_does_not_inherit_country_or_network_from_alternative(self):
+        with self.decision("food", country="US", network="solana"):
+            self.dispatch("food in US with Solana")
+        with self.decision("esim"):
+            self.dispatch("actually I need mobile internet")
+        pending = self.plugin._natural_assistant.pending["1045618308"]
+        self.assertEqual(pending[1].action, "esim")
+        self.assertIsNone(pending[1].country)
+        self.assertEqual(pending[1].network, "unspecified")
+
+    def test_failed_followup_keeps_context_for_retry(self):
+        with self.decision("food", country="US"):
+            self.dispatch("food in US")
+        with patch.object(self.router, "classify", side_effect=self.router.RouterUnavailable()):
+            self.dispatch("show me a giftcards")
+        with self.decision("gift_card"):
+            self.dispatch("show me a giftcards")
+        self.assertEqual(self.client.bitrefill_list_calls[-1][:2], ("US", "food"))
+
+    def test_expired_followup_does_not_inherit_old_country(self):
+        self.plugin._natural_assistant.pending["1045618308"] = (
+            0, self.router.Intent("food", country="US", category="food"), "alternative")
+        with self.decision("gift_card"):
+            self.dispatch("show me a giftcards")
+        self.assertFalse(self.client.bitrefill_list_calls)
+        self.assertIsNone(self.plugin._natural_assistant.pending["1045618308"][1].country)
+
+    def test_no_cancels_delayed_alternative_followup(self):
+        with self.decision("food", country="US"):
+            self.dispatch("food in US")
+        jobs = []
+        self.plugin._background_runner = jobs.append
+        self.dispatch("show me a giftcards")
+        self.dispatch("No")
+        with self.decision("gift_card"):
+            jobs[0]()
+        self.assertFalse(self.client.bitrefill_list_calls)
+        self.assertFalse(self.plugin._natural_assistant.pending)
+
+    def test_borderline_continuation_retains_slots_until_confirmation(self):
+        with self.decision("food", country="US"):
+            self.dispatch("food in US")
+        with self.decision("clarify", suggested_action="gift_card"):
+            self.dispatch("show me a giftcards")
+        self.assertFalse(self.client.bitrefill_list_calls)
+        self.dispatch("Yes")
+        self.assertEqual(self.client.bitrefill_list_calls[-1][:2], ("US", "food"))
+
     def test_country_code_followup_does_not_need_model(self):
         with self.decision("gift_card", category="games") as classify:
             self.dispatch("gaming gift cards")
