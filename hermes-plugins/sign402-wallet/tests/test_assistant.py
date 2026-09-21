@@ -171,12 +171,12 @@ class AssistantTests(unittest.TestCase):
                 self.dispatch("what can you do")
         self.assertEqual(classify.call_count, 12)
 
-    def test_explicit_chat_retains_its_own_handler(self):
+    def test_legacy_chat_marker_does_not_hide_shopping_requests(self):
         self.plugin._enter_chat_mode("1045618308")
-        self.client.execute_chat = lambda *_a, **_k: {"ok": True, "text": "chat response"}
-        with patch.object(self.router, "classify") as classify:
+        with self.decision("esim", country="DE") as classify:
             self.dispatch("internet in Germany")
-        classify.assert_not_called()
+        classify.assert_called_once()
+        self.assertEqual(self.client.bitrefill_search_calls[0][1], "DE")
 
     def test_pending_chat_setup_is_not_reclassified(self):
         self.plugin._CHAT_SETUP["1045618308"] = {

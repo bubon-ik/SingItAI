@@ -39,7 +39,7 @@ class Assistant:
             return None
         user_id = str(identity.user_id)
         # Existing wizards own their replies even when they do not recognize them.
-        if (api._in_chat_mode(user_id) or api._chat_setup(user_id, source)
+        if (api._chat_setup(user_id, source)
                 or user_id in api._CHAT_MODEL_PENDING or user_id in api._BITREFILL_SESSIONS
                 or user_id in api._WITHDRAW_SESSIONS
                 or user_id in api._IMESSAGE_CONNECT_SESSIONS):
