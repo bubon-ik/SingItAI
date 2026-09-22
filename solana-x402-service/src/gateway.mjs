@@ -1,5 +1,7 @@
 // Private JSON-over-stdin bridge. No wallet files, secret argv, or implicit pay.
 import { pathToFileURL } from 'node:url';
+import path from 'node:path';
+import { ExaClient, ExaPayments } from './exa.mjs';
 import { getBase58Encoder } from '@solana/kit';
 import { walletFromBytes } from './wallet.mjs';
 import { configuration, ClientError } from './config.mjs';
@@ -8,12 +10,21 @@ import { VeniceClient } from './venice.mjs';
 import { SolanaChain } from './chain.mjs';
 import { Payments, quoteSummary } from './payments.mjs';
 
-export async function dispatch(input, { wallet, venice, chain, store }) {
+export async function dispatch(input, { wallet, venice, chain, store, exa }) {
   if (wallet.address !== input.payer) throw new ClientError('WRONG_WALLET', 'Wallet mismatch.');
+  if (typeof input.operation === 'string' && input.operation.startsWith('exa-')) {
+    const payments = new ExaPayments({ wallet, exa, chain, store });
+    if (input.operation === 'exa-terms') return payments.terms();
+    if (input.operation === 'exa-quote') return payments.prepare(input.query);
+    if (input.operation === 'exa-search') return payments.pay(input);
+    if (input.operation === 'exa-status') return payments.status(input.quoteId);
+    if (input.operation === 'exa-reconcile') return payments.reconcile(input.quoteId, input.transaction);
+    throw new ClientError('INVALID_OPERATION', 'Unsupported search operation.');
+  }
   const payments = new Payments({ wallet, venice, chain, store });
   if (input.operation === 'balance') return venice.balance();
   if (input.operation === 'quote') return payments.prepare();
-  if (input.operation === 'chat') return venice.chat({ model: input.model, message: input.message, maxTokens: 1024 });
+  if (input.operation === 'chat') return venice.chat({ model: input.model, message: input.message, maxTokens: 1024, sources: input.sources });
   if (!['pay', 'status', 'reconcile'].includes(input.operation)) throw new ClientError('INVALID_OPERATION', 'Unsupported operation.');
   const quote = store.quote(input.quoteId);
   if (quote.payer !== wallet.address) throw new ClientError('WRONG_WALLET', 'Quote belongs to another wallet.');
@@ -37,9 +48,9 @@ async function main() {
   bytes.fill(0);
   delete input.privateKey;
   const config = configuration();
-  const store = new Store(config.stateDir);
+  const store = new Store(input.operation?.startsWith('exa-') ? path.join(config.stateDir, 'exa') : config.stateDir);
   try {
-    const result = await dispatch(input, { wallet, store, venice: new VeniceClient({ wallet }), chain: new SolanaChain(config.rpcUrl) });
+    const result = await dispatch(input, { wallet, store, venice: new VeniceClient({ wallet }), exa: new ExaClient(), chain: new SolanaChain(config.rpcUrl) });
     process.stdout.write(JSON.stringify({ ok: true, result }));
   } finally { store.close(); }
 }

@@ -80,6 +80,11 @@ _CHAT_OPERATION_PATHS = {
     "quote": "/agent/chat/quote",
     "pay": "/agent/chat/pay",
     "payment": "/agent/chat/payment",
+    "search": "/agent/chat/search",
+    "search-prepare": "/agent/chat/search-prepare",
+    "search-approve": "/agent/chat/search-approve",
+    "search-disable": "/agent/chat/search-disable",
+    "search-payment": "/agent/chat/search-payment",
 }
 _MAX_RESPONSE_BYTES = 64 * 1024
 _NOT_CONFIGURED = "Wallet service is not configured. Please contact the operator."

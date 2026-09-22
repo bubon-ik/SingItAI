@@ -12,6 +12,7 @@ See [HACKATHON.md](HACKATHON.md) for the existing SingIt foundation, recorded So
 - The full agent code has been imported from the committed `main` branch.
 - The Venice/x402 client for Solana mainnet lives in `solana-x402-service/`.
 - **The agent supports managed Solana wallets and Venice chat with exact-quote phone approval for x402 top-ups.** [Flow, recovery and verification](docs/venice-solana-agent.md).
+- **Opt-in Exa web search is integrated with Solana Venice chat**, with a separate phone-approved budget, numbered sources and a payment receipt. [Flow and verification](docs/exa-solana-chat.md). A funded Exa payment remains unverified.
 - A real Bitrefill purchase was completed with USDC on Solana: [Alza CZ 200 CZK, live verification](docs/bitrefill-solana-checks.md). This was an operator-assisted run; agent purchasing integration remains pending.
 - Native Telegram navigation, inline shopping controls and private purchase history are implemented: [UI checks and limitations](docs/telegram-ui-checks.md). The navigation update is deployed to the existing bot.
 - No real Venice top-up or paid Venice model request has been completed.

@@ -523,6 +523,11 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                         "/agent/chat/quote",
                         "/agent/chat/pay",
                         "/agent/chat/payment",
+                        "/agent/chat/search",
+                        "/agent/chat/search-prepare",
+                        "/agent/chat/search-approve",
+                        "/agent/chat/search-disable",
+                        "/agent/chat/search-payment",
                     ]
                 )
             if _test_endpoints_enabled():
@@ -650,6 +655,11 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             "/agent/chat/quote",
             "/agent/chat/pay",
             "/agent/chat/payment",
+            "/agent/chat/search",
+            "/agent/chat/search-prepare",
+            "/agent/chat/search-approve",
+            "/agent/chat/search-disable",
+            "/agent/chat/search-payment",
         ):
             self._handle_agent_chat(path)
             return
@@ -920,7 +930,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             if chain == "solana":
                 self._send_json(solana.handle(path, telegram_user_id, payload), status=200)
                 return
-            if path in {"/agent/chat/quote", "/agent/chat/pay", "/agent/chat/payment"}:
+            if path in {"/agent/chat/quote", "/agent/chat/pay", "/agent/chat/payment"} or path.startswith("/agent/chat/search"):
                 self._send_json({"ok": False, "telegramText": "Select Solana in AI settings for this operation."}, status=200)
                 return
             chat_service = getattr(self.server, "chat_service", None)
@@ -5957,6 +5967,11 @@ def _require_authenticated_user(
             "/agent/chat/network", "/agent/chat/approve-policy",
             "/agent/chat/message", "/agent/chat/quote", "/agent/chat/pay",
             "/agent/chat/payment",
+            "/agent/chat/search",
+            "/agent/chat/search-prepare",
+            "/agent/chat/search-approve",
+            "/agent/chat/search-disable",
+            "/agent/chat/search-payment",
         }:
             raise ValueError("This operation is not enabled on Solana yet.")
     _enforce_user_request_rate(user_id)

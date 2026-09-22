@@ -1309,6 +1309,14 @@ def _chat_answer_text(user_id: str, result: dict) -> str:
     if result.get("chain") == "solana":
         credit = result.get("outstandingAtomic")
         footer = f"{_usd_from_atomic(credit)} Venice credit left" if credit is not None else "Venice credit balance unavailable"
+        sources = result.get("sources") or []
+        if sources:
+            text += "\n\nSources:\n" + "\n".join(f"[{i}] {hit['url']}" for i, hit in enumerate(sources, 1))
+        web = str(result.get("webFooter") or "").strip()
+        if web:
+            footer = web + "\n" + footer
+        if result.get("webTransaction"):
+            footer += "\nSearch receipt: https://solscan.io/tx/" + str(result['webTransaction'])
         return f"{text}\n\n{footer} · Solana"
     cost = _usd_from_atomic(result.get("costAtomic", 0), rounding=ROUND_HALF_UP)
     # Credit, not the daily window. The window caps top-ups and reads zero for
@@ -1348,6 +1356,8 @@ def _chat_start_text(status: dict) -> str:
               f"Approval expires: {expiry}", f"Payments: USDC on {_chat_network_label(status)} via x402."]
     if status.get("chain") == "solana":
         lines.append("Each top-up requires approval of its exact quote on your linked phone.")
+        search = status.get("webSearch") or {}
+        lines.append("Web search: " + ("on · separate Exa budget" if search.get("enabled") else "off · enable in Web search"))
         if not status.get("creditFresh"):
             lines.append("Live Venice balance is unavailable; the credit above may be out of date.")
     if status.get("paused"):
@@ -1389,12 +1399,25 @@ def _chat_settings_markup(status):
         rows.append((("Change model", "/model"), ("Review budget", "/chat_budget")))
         if status.get("chain") == "solana":
             rows.append((("Top up Venice", "/chat_topup"), ("Payment status", "/chat_payment")))
+            rows.append((("Web search", "/chat_search"),))
     rows.append((("Home", "/start"),))
     return actions(rows)
 
 
 def _chat_payment_markup():
     return actions([(("Payment status", "/chat_payment"),), (("AI settings", "/chat"),)])
+
+
+def _chat_search_markup(result=None):
+    result = result or {}
+    rows = []
+    if result.get("approvalHash"):
+        rows.append((("Request search approval", "/chat_search_approve " + result["approvalHash"]),))
+    elif result.get("available", True):
+        rows.append((("Review search budget", "/chat_search_review"),))
+    rows += [(("Turn search off", "/chat_search_off"), ("Search payment status", "/chat_search_payment")),
+             (("AI settings", "/chat"),)]
+    return actions(rows)
 
 
 def _handle_solana_chat_command(*, command, args, identity, source, gateway):
@@ -1407,7 +1430,10 @@ def _handle_solana_chat_command(*, command, args, identity, source, gateway):
     _invalidate_telegram_operation(str(identity.user_id))
     for sessions in (_BITREFILL_SESSIONS, _WITHDRAW_SESSIONS, _IMESSAGE_CONNECT_SESSIONS):
         sessions.pop(str(identity.user_id), None)
-    operation = {"chat-network": "network", "chat-topup": "quote", "chat-pay": "pay", "chat-payment": "payment"}[command]
+    operation = {"chat-network": "network", "chat-topup": "quote", "chat-pay": "pay", "chat-payment": "payment",
+                 "chat-search": "search", "chat-search-review": "search-prepare",
+                 "chat-search-approve": "search-approve", "chat-search-off": "search-disable",
+                 "chat-search-payment": "search-payment"}[command]
     payload = {"chain": "solana"}
     if operation == "network":
         if args.strip() not in {"base", "solana"}:
@@ -1420,10 +1446,15 @@ def _handle_solana_chat_command(*, command, args, identity, source, gateway):
             _send_fixed_reply(gateway, source, "Use the approval button on a fresh Venice quote.")
             return dict(_SKIP_RESULT)
         payload.update(quoteId=parts[0], approvalHash=parts[1])
-    elif operation == "payment" and args.strip():
+    elif operation == "search-approve":
+        if not re.fullmatch(r"[a-f0-9]{64}", args.strip()):
+            _send_fixed_reply(gateway, source, "Use the approval button after reviewing your web search budget.")
+            return dict(_SKIP_RESULT)
+        payload["approvalHash"] = args.strip()
+    elif operation in {"payment", "search-payment"} and args.strip():
         parts = args.split()
         if len(parts) != 2:
-            _send_fixed_reply(gateway, source, "Usage: /chat_payment QUOTE_ID TRANSACTION_SIGNATURE")
+            _send_fixed_reply(gateway, source, "Usage: /chat_search_payment QUOTE_ID TRANSACTION_SIGNATURE" if operation == "search-payment" else "Usage: /chat_payment QUOTE_ID TRANSACTION_SIGNATURE")
             return dict(_SKIP_RESULT)
         payload.update(quoteId=parts[0], transaction=parts[1])
 
@@ -1432,6 +1463,8 @@ def _handle_solana_chat_command(*, command, args, identity, source, gateway):
             return "Request cancelled before it started.", None
         client = _client_factory()
         result = client.execute_chat(operation, identity, payload=payload, user_access_token=_user_access_token(client, identity))
+        if operation.startswith("search"):
+            return str((result or {}).get("telegramText") or "Search request unavailable. Check search payment status before retrying."), _chat_search_markup(result)
         if not isinstance(result, dict):
             return "Venice request is unavailable. Check payment status before another top-up.", _chat_payment_markup()
         if operation == "network" and result.get("ok"):
@@ -1447,6 +1480,10 @@ def _handle_solana_chat_command(*, command, args, identity, source, gateway):
             return text, actions([(("Request top-up approval", f"/chat_pay {quote['quoteId']} {quote['approvalHash']}"),), (("Cancel", "/chat"),)])
         return str(result.get("telegramText") or "Open AI settings to continue."), _chat_payment_markup()
 
+    if operation.startswith("search"):
+        return _start_chat_operation(identity=identity, action="chat:search-approve" if operation == "search-approve" else "chat:solana",
+            started_text="Requesting search budget approval on your linked phone…" if operation == "search-approve" else "Checking Exa web search…",
+            source=source, gateway=gateway, work=work)
     message = "Requesting exact top-up approval on your linked phone…" if operation == "pay" else "Checking Venice on Solana…"
     return _start_chat_operation(identity=identity, action="chat:pay" if operation == "pay" else "chat:solana", started_text=message, source=source, gateway=gateway, work=work)
 
@@ -1654,7 +1691,9 @@ def _chat_paid_answer(client, identity, text, status=None):
             _leave_chat_mode(str(identity.user_id))
         markup = _telegram_chat_reply_markup()
         if isinstance(result, dict) and result.get("chain") == "solana":
-            if result.get("state") == "TOP_UP_REQUIRED":
+            if str(result.get("state") or "").startswith("EXA_"):
+                markup = _chat_search_markup()
+            elif result.get("state") == "TOP_UP_REQUIRED":
                 markup = actions([(("Review Solana top-up", "/chat_topup"),), (("AI settings", "/chat"),)])
             else:
                 markup = _chat_payment_markup()
@@ -2159,7 +2198,7 @@ def _start_telegram_background_operation(
     if prepare is not None:
         prepare(generation)
     source = _operation_source(source)
-    preserve_result = action in {"chat:pay", "chat:message", "chat:approve-policy", "command:reveal", "command:last-purchase", "command:llm-buy", "command:llm-terms"}
+    preserve_result = action in {"chat:pay", "chat:message", "chat:approve-policy", "chat:search-approve", "command:reveal", "command:last-purchase", "command:llm-buy", "command:llm-terms"}
     if preserve_result:
         source._singit_card = MessageCard()
         source._singit_protect_card = True
@@ -2415,7 +2454,7 @@ def _handle_telegram_public_command_request(*, command: str, args: str = "", sou
     user_id = str(identity.user_id)
     if command != "model":
         _cancel_chat_setup(user_id)
-    if command in {"chat-network", "chat-topup", "chat-pay", "chat-payment"}:
+    if command in {"chat-network", "chat-topup", "chat-pay", "chat-payment", "chat-search", "chat-search-review", "chat-search-approve", "chat-search-off", "chat-search-payment"}:
         return _handle_solana_chat_command(command=command, args=args, identity=identity, source=source, gateway=gateway)
     if command in {"model", "chat-budget", "cancel"}:
         if getattr(source, "chat_type", "dm") not in {"dm", "private"}:
@@ -4990,6 +5029,11 @@ def _telegram_public_command(event, source) -> str | None:
         "chat-topup",
         "chat-pay",
         "chat-payment",
+        "chat-search",
+        "chat-search-review",
+        "chat-search-approve",
+        "chat-search-off",
+        "chat-search-payment",
         "cancel",
     }:
         return normalized

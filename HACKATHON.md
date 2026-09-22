@@ -162,10 +162,25 @@ post-restart comparison verified preservation of 95 Base wallets, the Solana
 wallet, configuration and purchase history. Only Telegram restarted; both
 services are active and the payment gateway process stayed unchanged.
 
+### September 22: Exa search for Solana Venice chat
+
+The `exa-solana` feature extends the current conversation release with a fixed
+Exa x402 v2 search adapter, per-user Solana signing, a separately approved search
+budget, durable payment holds/recovery, source links and a separate cost/receipt
+in the selected Venice model's answer. Base search behavior is retained.
+
+The exact unpaid request returned HTTP 402 with a 0.007-USDC Solana option and
+sponsored fees. Offline tests cover consent, limits, concurrency and recovery;
+the full SVM fixture uses real transaction signatures against local providers.
+Local checks passed: 1,309 gateway tests, 422 plugin tests and 49 Solana Node
+tests. No real Exa payment or paid Venice answer was sent. See the
+[feature record](docs/exa-solana-chat.md) for limits and verification.
+
 ## Pending work — not claimed as completed
 
 - Manually verify the deployed wallet commands and refreshed navigation in Telegram.
 - A real mainnet Venice payment and paid response through the agent.
+- A real Exa search paid through the Solana agent and its sourced Venice response.
 - Integration of the verified Bitrefill Solana route into the per-user agent, approvals and durable recovery.
 - A custom x402 stock-purchase endpoint.
 

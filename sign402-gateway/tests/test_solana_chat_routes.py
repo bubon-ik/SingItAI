@@ -31,7 +31,7 @@ class SolanaChatRouteTests(unittest.TestCase):
         server.solana_chat_service.handle.assert_called_once_with('/agent/chat/message', endpoints.USER_ID, {'text': 'hello', 'chain': 'solana'})
 
     def test_every_payment_route_requires_authentication(self):
-        for operation in ('network', 'quote', 'pay', 'payment'):
+        for operation in ('network', 'quote', 'pay', 'payment', 'search', 'search-prepare', 'search-approve', 'search-disable', 'search-payment'):
             with self.subTest(operation=operation):
                 server = self.server()
                 response = self.make_handler('/agent/chat/' + operation, {}, server=server, headers={})
@@ -77,7 +77,7 @@ class SolanaChatRouteTests(unittest.TestCase):
 
     @patch('sign402_gateway.server._enforce_user_request_rate')
     def test_real_auth_guard_allows_only_integrated_solana_chat_routes(self, rate):
-        for operation in ('start', 'end', 'models', 'network', 'approve-policy', 'message', 'quote', 'pay', 'payment'):
+        for operation in ('start', 'end', 'models', 'network', 'approve-policy', 'message', 'quote', 'pay', 'payment', 'search', 'search-prepare', 'search-approve', 'search-disable', 'search-payment'):
             with self.subTest(operation=operation):
                 server = self.server()
                 server.user_wallet_service.resolve_telegram_user_id.return_value = endpoints.USER_ID

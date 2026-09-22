@@ -1902,6 +1902,9 @@ def _decision_text(action_type: str, final_status: str) -> str:
         if final_status == "approved":
             return "✅ Payment approved. Your purchase is being processed."
         return "Payment declined. No funds were moved."
+    if action_type == "sign402_exa_search_policy":
+        return ("✅ Exa search budget approved. Searches can charge automatically within the approved limits. Turn off in AI settings."
+                if final_status == "approved" else "Search budget declined. No funds were moved.")
     if action_type == "sign402_solana_chat_policy":
         return ("✅ Solana AI budget approved. Each top-up still requires approval of its exact quote."
                 if final_status == "approved" else "Solana AI budget declined. No funds were moved.")
