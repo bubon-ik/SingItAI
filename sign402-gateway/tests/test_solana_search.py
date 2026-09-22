@@ -144,6 +144,18 @@ class SearchTests(unittest.TestCase):
         search.store.reserve('1', q)
         self.call('search-payment')
         self.assertIsNotNone(search.store.latest('1', pending=True))
+        self.assertIn(q['quoteId'], self.call('search')['telegramText'])
+        original = self.service.bridge
+        def missing_receipt(user, payer, operation, **payload):
+            if operation == 'exa-reconcile':
+                raise SolanaChatError('TRANSACTION_REQUIRED', 'Receipt unavailable; do not pay again.')
+            return original(user, payer, operation, **payload)
+        self.service.bridge = missing_receipt
+        self.attempted = True
+        recovery = self.call('search-payment')
+        self.assertEqual(recovery['state'], 'TRANSACTION_REQUIRED')
+        self.assertIn(q['quoteId'], recovery['telegramText'])
+        self.assertIsNotNone(search.store.latest('1', pending=True))
 
     def test_failed_chain_releases_budget_readonly(self):
         search = self.setup_search()

@@ -126,12 +126,12 @@ class SolanaSearch:
         pending = self.store.latest(uid, pending=True)
         return {'ok': True, 'chain': 'solana', 'enabled': active, 'available': self.enabled,
                 'remainingAtomic': max(0, PER_DAY - spent), 'callsRemaining': max(0, CALLS - count),
-                'pending': bool(pending), 'telegramText': (
+                'pending': bool(pending), 'pendingQuoteId': pending['id'] if pending else None, 'telegramText': (
                     f'Web search: {"on" if active else "off"}\nExa · x402 · USDC on Solana\n'
                     f'Limit: {usd(PER_CALL)} USDC per search, {usd(PER_DAY)} USDC and {CALLS} searches / UTC day.\n'
                     f'Remaining today: {usd(max(0, PER_DAY - spent))} USDC · {max(0, CALLS - count)} searches.\n'
                     'Search is charged separately from Venice credit. Freshness and explicit search requests can search automatically within your approved budget.\n'
-                    + ('A search payment is unresolved. Check its status; do not pay again.' if pending else ''))}
+                    + (f'Search: {pending["id"]}\nA search payment is unresolved. Check its status; do not pay again.' if pending else ''))}
 
     def prepare(self, uid):
         self._available()
@@ -210,7 +210,7 @@ class SolanaSearch:
                 self.store.update(uid, quote['quoteId'], state, status.get('transaction'))
             except Exception:
                 self.store.update(uid, quote['quoteId'], 'uncertain')
-            raise SolanaChatError('EXA_SEARCH_INTERRUPTED', 'Web search did not complete. Check search payment status before trying again.') from None
+            raise SolanaChatError('EXA_SEARCH_INTERRUPTED', f'Search: {quote["quoteId"]}\nWeb search did not complete. Check search payment status before trying again.') from None
         self.store.update(uid, quote['quoteId'], result['state'], result.get('transaction'))
         if result['state'] != 'confirmed' or not result.get('delivered'):
             raise SolanaChatError('EXA_RESULTS_UNAVAILABLE', 'Search results are unavailable. Check search payment status. A confirmed payment is still charged; no automatic retry was made.')
@@ -232,11 +232,16 @@ class SolanaSearch:
         row = self.store.latest(uid, quote_id)
         if not row:
             return {'ok': True, 'chain': 'solana', 'telegramText': 'No search payment found.'}
-        status = self.chat._call(uid, 'exa-status', quoteId=row['id'])
-        if status.get('attempted'):
-            result = self.chat._call(uid, 'exa-reconcile', quoteId=row['id'], transaction=transaction or None)
-            self.store.update(uid, row['id'], result['state'], result.get('transaction'))
-            row = self.store.latest(uid, row['id'])
+        try:
+            status = self.chat._call(uid, 'exa-status', quoteId=row['id'])
+            if status.get('attempted'):
+                result = self.chat._call(uid, 'exa-reconcile', quoteId=row['id'], transaction=transaction or None)
+                self.store.update(uid, row['id'], result['state'], result.get('transaction'))
+                row = self.store.latest(uid, row['id'])
+        except SolanaChatError as error:
+            # Keep the recovery identifier visible even when the provider never
+            # returned a signature; support/reconciliation needs this value.
+            raise SolanaChatError(error.code, f'Search: {row["id"]}\n{error.text}') from None
         # Missing Node attempt after a restart is not proof a previous child is
         # dead. Keep the reservation until an operator can establish that fact.
         text = f'Exa x402 · USDC on Solana\nSearch: {row["id"]}\nPayment: {row["state"]}\nAmount: {usd(row["amount"])} USDC'
