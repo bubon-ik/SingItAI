@@ -7,7 +7,6 @@ from urllib.parse import urlsplit
 
 from .solana_chat import SolanaChatError, USDC, usd
 from .solana_wallets import SOLANA_NETWORK
-from .web_search import classify, Verdict
 
 ENDPOINT = 'https://api.exa.ai/search'
 PER_CALL = 20_000
@@ -16,11 +15,20 @@ CALLS = 20
 DAYS = 30
 
 
-def needs_search(text):
-    # Explicit research and freshness requests, including the bot's Russian UI users.
-    return (text.strip().upper() in {'SOL', 'BTC', 'ETH'} or classify(text) == Verdict.SEARCH or bool(re.search(
-        r'\b(search|look up|browse|latest|today|current|news)\b|'
-        r'найди|поищи|погугли|свежи[ей]|актуальн|новост|сегодня|в интернете|\bкурс(?:а|у|ом|е|ы|ов)?\b|погод|сколько стоит', text, re.I)))
+def requested_search(text):
+    """Only a complete control reply can request a search, never quoted prose.
+
+    The model supplies a query, not payment terms or executable instructions.
+    All consent, recipient, amount and recovery checks remain in search().
+    """
+    value = text.strip()
+    if not re.match(r'^NEED_WEB:', value, re.I):
+        return None
+    query = value[len('NEED_WEB:'):].strip(' ')
+    if (not query or len(query) > 2000 or
+            any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in query)):
+        raise SolanaChatError('EXA_INVALID_QUERY', 'The model returned an invalid search request. No web search was submitted.')
+    return query
 
 
 class SearchStore:
@@ -130,7 +138,7 @@ class SolanaSearch:
                     f'Web search: {"on" if active else "off"}\nExa · x402 · USDC on Solana\n'
                     f'Limit: {usd(PER_CALL)} USDC per search, {usd(PER_DAY)} USDC and {CALLS} searches / UTC day.\n'
                     f'Remaining today: {usd(max(0, PER_DAY - spent))} USDC · {max(0, CALLS - count)} searches.\n'
-                    'Search is charged separately from Venice credit. Freshness and explicit search requests can search automatically within your approved budget.\n'
+                    'Search is charged separately from Venice credit. Your AI model decides when to search, within your approved budget. Its decision uses Venice credit.\n'
                     + (f'Search: {pending["id"]}\nA search payment is unresolved. Check its status; do not pay again.' if pending else ''))}
 
     def prepare(self, uid):

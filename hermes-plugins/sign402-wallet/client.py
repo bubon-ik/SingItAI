@@ -546,7 +546,8 @@ class GatewayClient:
             body,
             token=self.api_token,
             operation=f"chat-{operation}",
-            timeout=self.purchase_timeout,
+            # A Solana turn may include decision, x402 settlement and final answer.
+            timeout=max(self.purchase_timeout, 600.0) if operation == 'message' and body.get('chain') == 'solana' else self.purchase_timeout,
             user_token=user_token,
         )
 

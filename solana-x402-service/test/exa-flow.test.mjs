@@ -4,7 +4,7 @@ import { dispatch } from '../src/gateway.mjs';
 import assert from 'node:assert/strict';
 import { rmSync } from 'node:fs';
 import { getBase58Encoder, getBase58Decoder, getTransactionDecoder, getBase64EncodedWireTransaction } from '@solana/kit';
-import { SolanaChain, VeniceClient, Store, Payments, NETWORK, USDC } from '../src/index.mjs';
+import { SolanaChain, VeniceClient, Store, NETWORK, USDC } from '../src/index.mjs';
 import { TOKEN_PROGRAM } from '../src/config.mjs';
 import { directory, testWallet, challenge, jsonResponse } from './helpers.mjs';
 
@@ -13,7 +13,7 @@ test('Exa: real SVM transaction, sponsored settlement, selected Venice model and
   const dir = directory(), store = new Store(dir);
   const originalFetch = globalThis.fetch;
   t.after(() => { globalThis.fetch = originalFetch; store.close(); rmSync(dir, { recursive: true }); });
-  let paidRequests = 0, credit = 0, settledWire, transaction;
+  let paidRequests = 0, credit = 5, completions = 0, settledWire, transaction;
   const mint = Buffer.alloc(82); mint[44] = 6; mint[45] = 1;
   const account = Buffer.alloc(165);
   Buffer.from(getBase58Encoder().encode(USDC)).copy(account, 0);
@@ -46,30 +46,50 @@ test('Exa: real SVM transaction, sponsored settlement, selected Venice model and
       const sponsorSignature = new Uint8Array(await crypto.subtle.sign('Ed25519', sponsor.signer.keyPair.privateKey, tx.messageBytes));
       settledWire = getBase64EncodedWireTransaction({ ...tx, signatures: { ...tx.signatures, [sponsor.address]: sponsorSignature } });
       transaction = getBase58Decoder().decode(sponsorSignature);
-      credit = 5;
       return jsonResponse({ results: [{ title: 'Solana', url: 'https://solana.com/docs', text: 'A verified excerpt.' }] }, 200, { 'payment-response': Buffer.from(JSON.stringify({ success: true, network: NETWORK, transaction })).toString('base64') });
     }
     assert.ok(url.startsWith('https://api.venice.ai/api/v1/'));
     const auth = JSON.parse(Buffer.from(init.headers['X-Sign-In-With-X'], 'base64').toString());
     assert.equal(auth.address, wallet.address);
     if (url.includes('/x402/balance/')) return jsonResponse({ data: { canConsume: credit > 0, balanceUsd: credit, minimumTopUpUsd: 5 } });
-    if (url.endsWith('/chat/completions')) { assert.equal(credit, 5); const body = JSON.parse(init.body); assert.equal(body.model, 'fixture-model'); assert.equal(body.messages[0].role, 'system'); assert.match(body.messages[0].content, /untrusted/i); assert.match(body.messages.at(-1).content, /solana.com/); return jsonResponse({ model: 'fixture-model', choices: [{ message: { content: 'Solana client works.' } }] }); }
+    if (url.endsWith('/chat/completions')) {
+      completions++;
+      const body = JSON.parse(init.body);
+      assert.equal(body.model, 'fixture-model');
+      assert.equal(body.messages[0].role, 'system');
+      if (completions === 1) {
+        assert.equal(paidRequests, 0);
+        assert.match(body.messages[0].content, /Decide from its meaning/);
+        assert.equal(body.messages.at(-1).content, 'When does registration close?');
+        return jsonResponse({ model: 'fixture-model', choices: [{ message: { content: 'NEED_WEB: Solana hackathon registration deadline' } }] });
+      }
+      assert.equal(paidRequests, 1);
+      assert.match(body.messages[0].content, /untrusted/i);
+      assert.match(body.messages[0].content, /no more searches/);
+      assert.match(body.messages.at(-1).content, /solana.com/);
+      assert.equal(body.messages[1].content, 'When does registration close?');
+      return jsonResponse({ model: 'fixture-model', choices: [{ message: { content: 'Solana client works.' } }] });
+    }
     throw new Error(`Unexpected endpoint: ${url}`);
   };
   globalThis.fetch = fetcher;
   const venice = new VeniceClient({ wallet, fetcher });
   const context = { wallet, venice, exa: new ExaClient({ fetcher }), chain: new SolanaChain('https://rpc.invalid/'), store };
-  const quote = await dispatch({ operation: 'exa-quote', payer: wallet.address, query: 'Solana news' }, context);
+  const decision = await dispatch({ operation: 'chat', payer: wallet.address, model: 'fixture-model', message: 'When does registration close?', offerSearch: true }, context);
+  assert.equal(decision.text, 'NEED_WEB: Solana hackathon registration deadline');
+  const query = decision.text.slice('NEED_WEB: '.length);
+  const quote = await dispatch({ operation: 'exa-quote', payer: wallet.address, query }, context);
   assert.equal(paidRequests, 0);
-  const input = { ...quote, query: 'Solana news', operation: 'exa-search', authorization: {
+  const input = { ...quote, query, operation: 'exa-search', authorization: {
     policyHash: 'a'.repeat(64), payer: wallet.address, recipient: merchant.address, network: NETWORK,
     asset: USDC, endpoint: EXA_URL, maxPerCallAtomic: 20000, expiresAt: Math.floor(Date.now()/1000)+600,
   } };
   const result = await dispatch(input, context);
   assert.equal(result.state, 'confirmed');
   assert.equal(result.delivered, true);
-  const reply = await dispatch({ operation: 'chat', payer: wallet.address, model: 'fixture-model', message: 'Solana news', sources: result.results }, context);
+  const reply = await dispatch({ operation: 'chat', payer: wallet.address, model: 'fixture-model', message: 'When does registration close?', sources: result.results }, context);
   assert.equal(reply.text, 'Solana client works.');
   await assert.rejects(dispatch(input, context), { code: 'ALREADY_ATTEMPTED' });
   assert.equal(paidRequests, 1);
+  assert.equal(completions, 2);
 });

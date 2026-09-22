@@ -1357,7 +1357,7 @@ def _chat_start_text(status: dict) -> str:
     if status.get("chain") == "solana":
         lines.append("Each top-up requires approval of its exact quote on your linked phone.")
         search = status.get("webSearch") or {}
-        lines.append("Web search: " + ("on · separate Exa budget" if search.get("enabled") else "off · enable in Web search"))
+        lines.append("Web search: " + ("automatic · separate Exa budget" if search.get("enabled") else "off · enable in Web search"))
         if not status.get("creditFresh"):
             lines.append("Live Venice balance is unavailable; the credit above may be out of date.")
     if status.get("paused"):

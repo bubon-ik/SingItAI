@@ -182,6 +182,22 @@ checks preserved 95 Base wallets, the Solana wallet, configuration and history.
 Authenticated Exa review and signed Venice balance checks passed; search stayed
 off and no real payment was made. [Deployment evidence](docs/exa-solana-chat.md#existing-vps-deployment).
 
+### September 22: model-selected Solana web search
+
+[PR #5](https://github.com/bubon-ik/singit-solana/pull/5) adds semantic search
+selection by the user's chosen Venice model. Its first completion either answers
+or requests one Exa query; the final completion receives the original question
+and retrieved sources. Search no longer depends on freshness keywords. The
+separate standing budget, payer/merchant binding, durable holds and one-search
+limit remain enforced by the gateway. Both model completions use Venice credit.
+
+Offline coverage includes implicit research questions, translations containing
+search keywords, strict control replies, missing consent, expiry/pause between
+stages, original-question/model preservation, receipt retention and refusing a
+second search. Real funded model/search quality evaluation remains pending;
+scripted provider fixtures are not evidence of every model's semantic accuracy.
+Local checks passed: 1,319 gateway tests, 423 plugin tests and 52 Solana Node tests.
+
 ## Pending work — not claimed as completed
 
 - Manually verify the deployed wallet commands and refreshed navigation in Telegram.

@@ -13,9 +13,10 @@ Venice credit. Base chat retains its existing search implementation.
    Exa recipient, network, native USDC mint, endpoint, current price and limits.
 3. Choose **Request search approval** and confirm through the linked phone
    channel. Connect a phone in Settings first if it is not paired.
-4. Send a freshness or explicit search request, such as “latest Solana news” or
-   “найди документацию Solana”. The bot can make one Exa search for that message,
-   then pass its excerpts to Venice. Ordinary conversation does not search.
+4. Ask a normal question. The selected Venice model answers directly when it
+   has enough information, or requests an Exa search when it needs external
+   evidence. No search button or keyword is required for each question. The bot
+   can buy one search and then pass its excerpts back to the same model.
 5. The answer shows numbered source links, the separate Exa charge, a Solana
    transaction link, and the remaining Venice credit.
 
@@ -25,12 +26,38 @@ search within that allowance. Approval itself moves no money. Revocation is
 available under **Web search → Turn search off**. Reapproving does not reset
 spending already recorded that day.
 
-The initial implementation uses bounded English/Russian freshness and explicit
-search detection; it does not ask an LLM to decide or repeatedly refine searches.
-Users can explicitly ask to search when the detector misses a query. A search
-question is limited to 2,000 characters, with three results and up to 1,200
-characters of text per result. No search query or result is persisted by the
-new search journals; the providers necessarily receive their request content.
+## Automatic search decisions
+
+The selected Venice model makes the decision as part of its first completion.
+It can answer directly or return a complete `NEED_WEB: <query>` control reply.
+There is no separate classifier model and no keyword filter that forces search.
+A translation containing “today” or “news” can therefore receive a direct answer;
+an implicit request for a registration deadline can request external evidence.
+
+Only a complete, single-line query of at most 2,000 characters is accepted.
+Quoted examples inside prose or code do not trigger payment. The original
+question (up to 12,000 characters) is preserved for the final answer; the model
+may condense it into a shorter search query. Sources never authorize spending.
+
+The gateway checks the standing Exa approval, wallet, merchant, limits, payment
+pause and pending journal before spending. The model cannot bypass them. If
+approval is missing, the bot offers budget setup and asks the user to resend the
+question. Turning search off still prevents Exa charges.
+
+A searched answer uses **up to two Venice completions plus one Exa request**.
+Both completions consume prepaid Venice credit at the selected model's rates.
+The decision can use credit even when search is subsequently refused; the bot
+reports that distinction and records the balance from the first completion.
+It checks policy/pause again before the final completion. A second request for
+search is refused without another purchase, and the paid sources/receipt remain
+visible. A failed completion is never automatically retried.
+
+Search returns three results with up to 1,200 characters of text each. No query,
+model reply or source excerpt is added to the new payment journals. The providers
+necessarily receive their request content. Selection quality depends on the
+chosen model; offline fixtures verify routing and spending safeguards, not the
+accuracy of every real model's decision. This flow uses the current message and
+does not add cross-message conversation memory.
 
 ## Payment and recovery
 
@@ -97,6 +124,13 @@ selected Venice model fixture. Tests use generated unfunded wallets only.
 
 Local verification passed: 1,309 gateway tests, 422 Telegram plugin tests and
 49 Solana Node tests, plus syntax and whitespace checks.
+
+Semantic-update local checks passed: 1,319 gateway tests, 423 plugin tests and
+52 Solana Node tests. Semantic-decision regression coverage additionally checks implicit questions,
+keyword-containing translations, strict control parsing, missing consent, pause
+and expiry between stages, preserving the original question/model, and refusing
+a second search. Telegram waits longer for Solana message responses to retain
+receipts through the decision/search/answer sequence; Base timeouts are unchanged.
 
 A real funded Exa search and a paid Venice response remain live acceptance steps
 for the user after reviewing and approving their budgets. No mainnet Exa payment

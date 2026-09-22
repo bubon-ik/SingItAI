@@ -42,3 +42,14 @@ test('gateway CLI redacts malformed secret input and never falls back to environ
   assert.equal(JSON.parse(result.stdout).ok, false);
   assert.doesNotMatch(result.stdout + result.stderr, /SECRET MARKER/);
 });
+
+
+test('gateway forwards only an explicit boolean search offer to Venice', async () => {
+  const wallet = await testWallet();
+  const context = { wallet, venice: { chat: async value => value } };
+  for (const [offerSearch, expected] of [[true, true], [false, false], ['true', false], [undefined, false]]) {
+    const result = await dispatch({ operation: 'chat', payer: wallet.address, model: 'chosen', message: 'question', offerSearch }, context);
+    assert.equal(result.offerSearch, expected);
+    assert.equal(result.model, 'chosen');
+  }
+});

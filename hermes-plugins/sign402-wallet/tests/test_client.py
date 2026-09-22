@@ -1180,3 +1180,17 @@ class PurchaseHistoryClientTests(GatewayClientFixture, unittest.TestCase):
         self.assertEqual(json.loads(request.data)["purchaseId"], "a" * 24)
         self.assertIs(json.loads(request.data)["reveal"], True)
         self.assertEqual(timeout, 180)
+
+
+class SolanaSemanticChatTimeoutTests(GatewayClientFixture, unittest.TestCase):
+    def test_only_solana_messages_allow_time_for_two_completions_and_payment(self):
+        for chain, operation, configured, expected in [
+            ('solana', 'message', 180.0, 600.0), ('solana', 'message', 900.0, 900.0),
+            ('base', 'message', 180.0, 180.0), ('solana', 'search-prepare', 180.0, 180.0),
+            ('solana', 'pay', 180.0, 180.0),
+        ]:
+            with self.subTest(chain=chain, operation=operation, configured=configured):
+                opener = RecordingOpener(response=FakeResponse(b'{"ok":true}'))
+                self.make_client(opener, purchase_timeout=configured).execute_chat(operation,
+                    TelegramIdentity(user_id='1'), payload={'chain': chain}, user_access_token='user-token')
+                self.assertEqual(opener.requests[0][1], expected)

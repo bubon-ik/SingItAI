@@ -24,7 +24,7 @@ export async function dispatch(input, { wallet, venice, chain, store, exa }) {
   const payments = new Payments({ wallet, venice, chain, store });
   if (input.operation === 'balance') return venice.balance();
   if (input.operation === 'quote') return payments.prepare();
-  if (input.operation === 'chat') return venice.chat({ model: input.model, message: input.message, maxTokens: 1024, sources: input.sources });
+  if (input.operation === 'chat') return venice.chat({ model: input.model, message: input.message, maxTokens: 1024, sources: input.sources, offerSearch: input.offerSearch === true });
   if (!['pay', 'status', 'reconcile'].includes(input.operation)) throw new ClientError('INVALID_OPERATION', 'Unsupported operation.');
   const quote = store.quote(input.quoteId);
   if (quote.payer !== wallet.address) throw new ClientError('WRONG_WALLET', 'Quote belongs to another wallet.');
