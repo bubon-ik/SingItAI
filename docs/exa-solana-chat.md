@@ -103,3 +103,23 @@ for the user after reviewing and approving their budgets. No mainnet Exa payment
 was sent during implementation.
 
 Primary protocol reference: [Exa x402 quickstart](https://exa.ai/docs/integrations/payments/x402/quickstart).
+
+## Existing VPS deployment
+
+Release [`12d8dc0`](https://github.com/bubon-ik/singit-solana/commit/12d8dc004235352262bb5c22fbbb124e8ad72e9b) was deployed to the existing **@SingIt0qk_bot** on
+September 22, 2026, on branch `release/exa-solana-20260922`. The release contains
+the deployed TypeSafe/conversation fixes; it does not replace them with the older
+GitHub default branch. Later documentation commits do not imply a new runtime.
+
+All 1,309 gateway, 422 plugin and 49 Solana tests passed in the VPS interpreters
+before deployment, and all seven GitHub checks passed for the runtime commit.
+A private backup preceded each restart. Post-restart checks verified preservation
+of all 95 Base wallets, the Solana wallet, gateway/bot configuration and purchase
+history. Both services are active, health is HTTP 200 and unauthenticated search
+routes return HTTP 401.
+
+During rollout, authenticated checks verified the real Exa budget review without
+approval, search remaining off, unchanged search allowance, signed Venice balance,
+model catalog, original AI network restored, native Telegram menu and no startup
+tracebacks. No phone approval or mainnet payment was sent. Telegram button delivery
+and the funded search/answer flow still require the user's live check.

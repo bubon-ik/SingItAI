@@ -176,6 +176,12 @@ Local checks passed: 1,309 gateway tests, 422 plugin tests and 49 Solana Node
 tests. No real Exa payment or paid Venice answer was sent. See the
 [feature record](docs/exa-solana-chat.md) for limits and verification.
 
+Release [`12d8dc0`](https://github.com/bubon-ik/singit-solana/commit/12d8dc004235352262bb5c22fbbb124e8ad72e9b) was deployed to the existing bot after all seven
+GitHub checks and the full VPS test suites passed. A private backup and post-restart
+checks preserved 95 Base wallets, the Solana wallet, configuration and history.
+Authenticated Exa review and signed Venice balance checks passed; search stayed
+off and no real payment was made. [Deployment evidence](docs/exa-solana-chat.md#existing-vps-deployment).
+
 ## Pending work — not claimed as completed
 
 - Manually verify the deployed wallet commands and refreshed navigation in Telegram.

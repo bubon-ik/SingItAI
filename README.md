@@ -48,9 +48,10 @@ Next steps and acceptance criteria: [integration plan](docs/solana-integration.m
 
 ## Deployment
 
-The existing VPS bot runs the approved `venice-solana` release. See
-[deployment evidence and runtime setup](docs/venice-solana-agent.md). A real
-Venice top-up and paid Solana answer remain the next live acceptance step.
+The existing VPS bot runs the approved `release/exa-solana-20260922` release
+at `12d8dc0`. See [deployment evidence](docs/exa-solana-chat.md#existing-vps-deployment)
+and [runtime setup](docs/venice-solana-agent.md). Real funded Exa and Venice
+requests remain user-approved live acceptance steps.
 
 Before starting a separate Telegram agent, configure its own bot token,
 encryption key, wallet and operation databases, ports, and runtime directories.
