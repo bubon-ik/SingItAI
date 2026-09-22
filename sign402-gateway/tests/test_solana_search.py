@@ -70,6 +70,8 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(args['wallet_chain'], 'solana')
         self.assertEqual(args['commitment_hash'], review['approvalHash'])
         self.assertIn('No per-search approval', '\n'.join(args['context_lines']))
+        from sign402_gateway.imessage_approvals import _sanitize_context_lines
+        self.assertEqual(_sanitize_context_lines(args['context_lines']), args['context_lines'])
         self.assertFalse(self.search_calls())
 
     def test_wrong_user_hash_and_expired_review_cannot_enable(self):

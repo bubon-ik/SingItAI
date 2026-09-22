@@ -164,7 +164,7 @@ services are active and the payment gateway process stayed unchanged.
 
 ### September 22: Exa search for Solana Venice chat
 
-The `exa-solana` feature extends the current conversation release with a fixed
+[PR #5](https://github.com/bubon-ik/singit-solana/pull/5) extends the current conversation release with a fixed
 Exa x402 v2 search adapter, per-user Solana signing, a separately approved search
 budget, durable payment holds/recovery, source links and a separate cost/receipt
 in the selected Venice model's answer. Base search behavior is retained.

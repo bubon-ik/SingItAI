@@ -160,7 +160,9 @@ class SolanaSearch:
                 'Exa web search — automatic x402 payments on Solana',
                 f'Up to {usd(PER_CALL)} USDC per search; {usd(PER_DAY)} USDC and {CALLS} searches / UTC day for {DAYS} days.',
                 f'From: {terms["payer"]}', f'To: {terms["recipient"]}', f'USDC mint: {USDC}', f'Endpoint: {ENDPOINT}',
-                'Separate from Venice credit. No per-search approval within these limits. Turn off in AI settings. This approval moves no money.'])
+                'Network fee: sponsored. Separate from Venice credit.',
+                'No per-search approval within these limits.',
+                'Turn off in AI settings. This approval moves no money.'])
         if not result.get('ok') or not result.get('approved'):
             return {'ok': False, 'chain': 'solana', 'telegramText': result.get('telegramText') or 'Search budget was not approved.'}
         if result.get('approvedHash') != digest:
