@@ -1,0 +1,20 @@
+[profile.default]
+src = "src"
+test = "test"
+out = "out"
+libs = []
+solc_version = "0.8.24"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 10000
+# Nothing is fetched: no forge-std, no OpenZeppelin. The limiter needs two
+# ERC-20 functions and the tests declare the few cheatcodes they use.
+auto_detect_solc = false
+
+[fuzz]
+runs = 1000
+
+[invariant]
+runs = 256
+depth = 200
+fail_on_revert = false
