@@ -17,7 +17,9 @@ BASE_USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 EVM_DERIVATION_PATH = "m/44'/60'/0'/0/0"
 
 _TRANSFER_SELECTOR = bytes.fromhex("a9059cbb")
+_APPROVE_SELECTOR = bytes.fromhex("095ea7b3")
 _BALANCE_OF_SELECTOR = "70a08231"
+_ALLOWANCE_SELECTOR = "dd62ed3e"
 _MAX_RPC_RESPONSE_BYTES = 65_536
 _MAX_RAW_TRANSACTION_BYTES = 131_072
 _SECP256K1_ORDER = int(
@@ -72,6 +74,22 @@ def encode_usdc_transfer(to_address: str, amount_atomic: int) -> str:
         _TRANSFER_SELECTOR
         + b"\x00" * 12
         + recipient
+        + amount.to_bytes(32, "big")
+    ).hex()
+
+
+def encode_usdc_approve(spender_address: str, amount_atomic: int) -> str:
+    """ERC-20 ``approve(spender, amount)``: permission, not a transfer.
+
+    Nothing moves when this is mined. The spender may later pull up to
+    ``amount_atomic`` from the signer's address with ``transferFrom``.
+    """
+    spender = _address_bytes(spender_address)
+    amount = _uint256(amount_atomic)
+    return "0x" + (
+        _APPROVE_SELECTOR
+        + b"\x00" * 12
+        + spender
         + amount.to_bytes(32, "big")
     ).hex()
 
@@ -179,6 +197,50 @@ class BaseRpcClient:
             raise _rpc_unavailable()
         return int(value[2:], 16)
 
+    def _require_base(self) -> None:
+        if self._quantity(self._request(1, "eth_chainId", [])) != BASE_CHAIN_ID:
+            raise _rpc_unavailable()
+
+    def call_word(self, to: str, data: str) -> int:
+        """One ``eth_call`` on Base that must return exactly one 32-byte word."""
+        target = "0x" + _address_bytes(to).hex()
+        if not isinstance(data, str) or _HEX_BYTES.fullmatch(data) is None:
+            raise ValueError("Invalid call data.")
+        self._require_base()
+        return self._word(
+            self._request(2, "eth_call", [{"to": target, "data": data}, "latest"])
+        )
+
+    def has_code(self, address: str) -> bool:
+        target = "0x" + _address_bytes(address).hex()
+        self._require_base()
+        code = self._request(2, "eth_getCode", [target, "latest"])
+        if not isinstance(code, str) or not code.startswith("0x"):
+            raise _rpc_unavailable()
+        return len(code) > 2
+
+    def usdc_allowance(self, owner: str, spender: str) -> int:
+        data = (
+            "0x" + _ALLOWANCE_SELECTOR
+            + "0" * 24 + _address_bytes(owner).hex()
+            + "0" * 24 + _address_bytes(spender).hex()
+        )
+        return self.call_word(BASE_USDC_ADDRESS, data)
+
+    def receipt_status(self, tx_hash: str) -> int | None:
+        """1 or 0 once mined, None while pending."""
+        if not isinstance(tx_hash, str) or _HEX_DATA_WORD.fullmatch(tx_hash) is None:
+            raise ValueError("Invalid transaction hash.")
+        receipt = self._request(2, "eth_getTransactionReceipt", [tx_hash])
+        if receipt is None:
+            return None
+        if not isinstance(receipt, dict):
+            raise _rpc_unavailable()
+        status = self._quantity(receipt.get("status"))
+        if status not in (0, 1):
+            raise _rpc_unavailable()
+        return status
+
     def get_balances(self, address: str) -> BaseBalances:
         account = _address_bytes(address)
         normalized = "0x" + account.hex()
@@ -214,9 +276,42 @@ def verify_signed_usdc_transfer(
     expected_amount_atomic: int,
 ) -> str:
     try:
+        expected_data = bytes.fromhex(
+            encode_usdc_transfer(expected_recipient, expected_amount_atomic)[2:]
+        )
+    except Exception:
+        raise _invalid_transaction() from None
+    return _verify_signed_usdc_call(raw_tx, expected_signer, expected_data)
+
+
+def verify_signed_usdc_approve(
+    raw_tx: str,
+    expected_signer: str,
+    expected_spender: str,
+    expected_amount_atomic: int,
+) -> str:
+    """Refuse any signed transaction except exactly this ``approve``.
+
+    Same checks as a transfer: Base, sent to USDC, no ETH value, no access
+    list, low-s signature by the expected account — and calldata that is
+    byte-for-byte ``approve(expected_spender, expected_amount_atomic)``.
+    """
+    try:
+        expected_data = bytes.fromhex(
+            encode_usdc_approve(expected_spender, expected_amount_atomic)[2:]
+        )
+    except Exception:
+        raise _invalid_transaction() from None
+    return _verify_signed_usdc_call(raw_tx, expected_signer, expected_data)
+
+
+def _verify_signed_usdc_call(
+    raw_tx: str,
+    expected_signer: str,
+    expected_data: bytes,
+) -> str:
+    try:
         signer = _address_bytes(expected_signer)
-        recipient = _address_bytes(expected_recipient)
-        amount = _uint256(expected_amount_atomic)
         if (
             not isinstance(raw_tx, str)
             or len(raw_tx) > 2 + _MAX_RAW_TRANSACTION_BYTES * 2
@@ -261,13 +356,7 @@ def verify_signed_usdc_transfer(
             or not 0 < signature_s <= _SECP256K1_ORDER // 2
         ):
             raise _invalid_transaction()
-        if (
-            len(data) != 68
-            or data[:4] != _TRANSFER_SELECTOR
-            or data[4:16] != b"\x00" * 12
-            or data[16:36] != recipient
-            or int.from_bytes(data[36:68], "big") != amount
-        ):
+        if data != expected_data:
             raise _invalid_transaction()
 
         recovered = _address_bytes(Account.recover_transaction(raw_tx))

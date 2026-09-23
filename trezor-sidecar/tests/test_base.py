@@ -13,6 +13,7 @@ from trezor_sidecar.base import (
     EVM_DERIVATION_PATH,
     BaseBalances,
     BaseRpcClient,
+    encode_usdc_approve,
     encode_usdc_transfer,
     verify_signed_usdc_transfer,
 )
@@ -338,6 +339,29 @@ class BaseTransactionTests(TestCase):
             + "0" * 58
             + "1312d0",
         )
+
+    def test_usdc_approve_calldata_is_exact(self):
+        data = encode_usdc_approve(RECIPIENT, AMOUNT)
+        self.assertEqual(
+            data,
+            "0x095ea7b3"
+            + "0" * 24
+            + "11" * 20
+            + "0" * 58
+            + "1312d0",
+        )
+
+    def test_approve_calldata_rejects_invalid_spender_and_amount(self):
+        for address, amount in (
+            ("0x1234", AMOUNT),
+            ("0x" + "00" * 20, AMOUNT),
+            (RECIPIENT, True),
+            (RECIPIENT, -1),
+            (RECIPIENT, 1 << 256),
+        ):
+            with self.subTest(address=address, amount=amount):
+                with self.assertRaises(ValueError):
+                    encode_usdc_approve(address, amount)
 
     def test_contract_chain_and_path_are_canonical(self):
         self.assertEqual(BASE_CHAIN_ID, 8453)
