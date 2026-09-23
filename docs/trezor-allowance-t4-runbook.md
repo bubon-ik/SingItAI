@@ -8,6 +8,25 @@ USDC** from the Trezor address to the agent's own address — both the owner's.
 Every transaction below is run by the owner. Passwords, keystore files and
 private keys never go into a chat, an issue or this repository.
 
+## One command
+
+`agent-allowance/script/t4-mainnet.sh` runs every step below in order and
+records the results in `~/.sign402-trezor-poc/t4-log.md`:
+
+```bash
+cd "/Users/mp/Documents/Berlin Hack/.worktrees/trezor-local-sidecar/agent-allowance" && ./script/t4-mainnet.sh
+```
+
+It stops for exactly the owner's actions: choosing and typing the two key
+passwords, sending 0.0002 ETH to the agent from Trezor Suite (it waits for the
+funds to arrive), checking the published source on the phone, two confirmations
+on the Trezor, and a `y` before the one real purchase. It is resumable — rerun
+it after any stop and it skips what is done, from the addresses and hashes it
+keeps in `~/.sign402-trezor-poc/t4.env`. Neither file holds a password or key.
+
+The rest of this document is what the script does, step by step, for running
+it by hand or reading what happened.
+
 ## Test policy
 
 | Parameter | Value | Why |

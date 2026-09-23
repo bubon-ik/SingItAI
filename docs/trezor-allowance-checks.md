@@ -156,3 +156,9 @@ refused before signing (`SIGN402_TREZOR_POC_MAX_USD` = 1.00); revoke read back 0
 Conclusion: the runbook's commands and expected results match real USDC on Base
 state. What the rehearsal cannot show is the device itself, Suite's broadcast
 path, and mainnet gas — which is what T4 on mainnet is for.
+
+The same day, `agent-allowance/script/t4-mainnet.sh` was run end to end against
+a fresh fork, with test keys for the agent and guardian, the Trezor address
+impersonated for grant and revoke, and publication skipped. All 10 checks
+passed, the 0.30 was returned, and a second run resumed without deploying,
+granting or purchasing again.
