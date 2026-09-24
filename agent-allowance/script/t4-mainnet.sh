@@ -71,6 +71,18 @@ rcast() {
   done
   printf '%s\n' "$out"; return 1
 }
+# Wait until a read shows the effect of a mined transaction. Public endpoints
+# are load-balanced, and the node answering can be blocks behind the one that
+# reported the receipt; a check run against it would test the old state.
+wait_for() {
+  local what=$1 want=$2 got i; shift 2
+  for i in $(seq 1 20); do
+    got=$("$@") && [[ "$got" == "$want" ]] && return 0
+    sleep 2
+  done
+  log "- WARNING: $what still reads ${got:-nothing}, expected $want (RPC node behind the chain)"
+  FAILS=$((FAILS + 1))
+}
 usdc() { rcast call "$USDC" "balanceOf(address)(uint256)" "$1" | awk '{print $1}'; }
 limiter_word() { rcast call "$LIMITER" "$1" | awk '{print $1}'; }
 
@@ -197,6 +209,7 @@ if [[ -z "${GRANTED:-}" ]]; then
   echo "shows an approve, $LIMITER in full, and 1 USDC. Photograph each screen."
   grant
   save GRANTED 1
+  wait_for "allowanceLeft()" 1000000 limiter_word 'allowanceLeft()(uint256)'
   allowance=$(limiter_word 'allowanceLeft()(uint256)')
 fi
 log "- allowanceLeft(): $allowance, remainingToday(): $(limiter_word 'remainingToday()(uint256)')"
@@ -221,6 +234,8 @@ if [[ -z "${SPEND_TX:-}" ]]; then
       "${AGENT_SIGNER[@]}" --rpc-url "$RPC" --json)
     save SPEND_TX "$(python3 -c 'import json,sys;print(json.load(sys.stdin)["transactionHash"])' <<< "$out")"
     save SPEND_DAY "$(( $(date -u +%s) / 86400 ))"
+    wait_for "spentToday()" "$SPEND" limiter_word 'spentToday()(uint256)'
+    wait_for "agent USDC" "$SPEND" usdc "$AGENT"
   else
     echo "Stopped before the purchase. Rerun to continue."; exit 0
   fi
@@ -244,6 +259,7 @@ if [[ -z "${REVOKED:-}" ]]; then
   echo "Confirm on the device only if it shows an approve of 0 to $LIMITER."
   revoke
   save REVOKED 1
+  wait_for "allowanceLeft()" 0 limiter_word 'allowanceLeft()(uint256)'
 fi
 log "- allowanceLeft(): $(limiter_word 'allowanceLeft()(uint256)')"
 log ""
@@ -255,9 +271,9 @@ expect_revert "0.20 after the revoke" "transfer amount exceeds allowance" "$LIMI
 step "9. Return the 0.30 (optional)"
 agent_usdc=$(usdc "$AGENT")
 if (( agent_usdc > 0 )) && ask "Send $agent_usdc atomic USDC from the agent back to the Trezor address?"; then
-  cast send "$USDC" "transfer(address,uint256)" "$OWNER" "$agent_usdc" \
-    "${AGENT_SIGNER[@]}" --rpc-url "$RPC" > /dev/null
-  log "- returned $agent_usdc atomic USDC to the owner"
+  out=$(cast send "$USDC" "transfer(address,uint256)" "$OWNER" "$agent_usdc" \
+    "${AGENT_SIGNER[@]}" --rpc-url "$RPC" --json)
+  log "- returned $agent_usdc atomic USDC to the owner: $(python3 -c 'import json,sys;print(json.load(sys.stdin)["transactionHash"])' <<< "$out")"
 fi
 
 step "Result"

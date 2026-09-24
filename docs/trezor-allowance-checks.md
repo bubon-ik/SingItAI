@@ -187,3 +187,63 @@ for every `cast call`, reverts included — the exit status after `if …; fi`
 without an `else` is 0 — which a fork rehearsal caught as seven false failures
 before the script was run again on mainnet. After the fix: 9 of 9 checks on the
 fork, and a deliberately wrong expected selector is reported as a failure.
+
+## T4 — the allowance on Base mainnet, 24 September
+
+**Status: PASS.** `agent-allowance/script/t4-mainnet.sh`, resumed after the
+attempt above, run by the owner on the Mac with the Trezor. Every transaction
+was then read back from Base independently of the script.
+
+Addresses: owner (Trezor) `0xB80b5Ca13583fB7E0236db4bD8834B9035654558`, agent
+`0x2d45184b8d2F32bC3F1e7aa71972a2350462a668`, guardian
+`0xacE450136feeE5358F703B30951C9BaEAfCA9EdB`, limiter
+[`0xB9bD6FD8a3F8831DDDCb56BA8562e1080Db465f3`](https://base.blockscout.com/address/0xB9bD6FD8a3F8831DDDCb56BA8562e1080Db465f3?tab=contract)
+(Sourcify `exact_match`). Policy: daily cap 0.50, per purchase 0.30, expiry
+2026-09-30 23:54 UTC.
+
+| Step | Block | Signed by | Transaction | On chain |
+| --- | --- | --- | --- | --- |
+| Deploy | 51709168 | agent | [`0x60477303…45ab`](https://basescan.org/tx/0x60477303e55749d658369f8931967408d47593e608f6dfb7937ee6f49b5445ab) | limiter created, 701,733 gas |
+| Grant | 51709697 | **Trezor** | [`0x0bd2a4af…e986`](https://basescan.org/tx/0x0bd2a4af2006457441f54d388edfb685d3616c93102b3f0b35a038032e74e986) | `Approval(owner, limiter, 1000000)` |
+| Purchase | 51709708 | **agent, no device** | [`0x2dad4c47…e8d6`](https://basescan.org/tx/0x2dad4c47b28b00a296b92c6270d3f2e1a34a31ee68837d4b45227e9d3f89e8d6) | `spend`; USDC `Transfer(owner → agent, 300000)` |
+| Revoke | 51709727 | **Trezor** | [`0xca19d88d…23aa`](https://basescan.org/tx/0xca19d88d1984630a7918ec11e4121278a2aeb341fbb3eda15c7b598f2db023aa) | `Approval(owner, limiter, 0)` |
+| Return | 51709758 | agent | [`0xfcf893ee…6397`](https://basescan.org/tx/0xfcf893ee9d90c4f2871c7cf5593c535e2da5ab074d5dbd3e6885801d61826397) | USDC `Transfer(agent → owner, 300000)` |
+
+Both device transactions were signed on the Trezor, checked by the sidecar
+against exactly the requested `approve` before broadcast, and matched it on
+chain. The purchase moved money from the Trezor address with the Trezor not
+involved — the point of the design.
+
+Checks by `eth_call` against mainnet, nothing sent:
+
+| Case | Expected | Observed |
+| --- | --- | --- |
+| 0.31 over the per-purchase cap | `PerPurchaseCapExceeded` | `0x80b5d3c8` |
+| the owner calling `spend` | `NotAgent` | `0x0d9ab13f` |
+| paying the owner | `InvalidPayee` | `0xb387a238` |
+| the agent pausing | `NotGuardian` | `0xef6d0f02` |
+| the guardian pausing | no revert | no revert |
+| a second 0.30 the same day | `DailyCapExceeded` | `0xcc70389d` |
+| 0.20 inside the day and the allowance | no revert | no revert |
+| replaying the paid reference | `RefUsed` | `0xac0292f0` |
+| 0.20 after the revoke | USDC refuses | `ERC20: transfer amount exceeds allowance` |
+
+State read afterwards: allowance 0; `spentToday` 300000; `usedRef(t4-1)` true;
+not paused; owner 6.526336 USDC (as before the test), agent 0, limiter 0. Gas for
+the whole test: about 0.0000007 ETH from the Trezor address and 0.0000049 ETH
+from the agent.
+
+**What the run showed that nothing before it could.** Three values the script
+printed straight after a transaction were stale: "Allowance now 0" after the
+grant, "agent USDC: 0" after the purchase, "Allowance now 0.7" after the revoke.
+The public endpoint is load-balanced, and the read after a receipt can land on a
+node a few blocks behind. The checks themselves ran on the correct state, but
+could equally have landed on a stale node. Fixed after the run: `grant` and
+`revoke` wait up to 30 s for the RPC to show the mined allowance and otherwise
+say the node is behind and not to sign again; the script waits for the expected
+allowance, `spentToday` and agent balance before any check that depends on them,
+and counts a value that never appears as a failure. Rehearsed on a fork: 9/9.
+
+**Still open.** The device screens were not photographed, so the three T2 details
+— full or shortened spender, amount format, warning screens — remain unrecorded.
+T6, Bitrefill crediting an invoice paid through the limiter, is next on Base.

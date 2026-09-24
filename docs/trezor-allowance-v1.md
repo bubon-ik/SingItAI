@@ -335,7 +335,7 @@ they can end this design.
 | T2 | What the Trezor screen shows for that approve: spender and exact amount, or a blind hash | Device, same run as T1 | **Pass**, as reported, 24 September |
 | T3a | Limiter automated suite: every refusal as a unit test, fuzzed amounts, six invariants, and every check removed in turn to prove the suite catches it | Local EVM | **Pass**, 24 September, 10/10 mutations caught |
 | T3b | The same limiter on Base Sepolia | Testnet | **Skipped** by the owner's decision, 24 September: covered by T4 on mainnet, where the worst case is the 1.00 USDC grant |
-| T4 | Mainnet run: deploy, publish source, grant 1.00 from the device, one real 0.30 purchase, every refusal by `eth_call`, revoke, prove the same purchase now fails in USDC. Procedure: [trezor-allowance-t4-runbook.md](trezor-allowance-t4-runbook.md) | Device, 1.00 USDC at risk, 0.30 moved between the owner's own addresses | Going live |
+| T4 | Mainnet run: deploy, publish source, grant 1.00 from the device, one real 0.30 purchase, every refusal by `eth_call`, revoke, prove the same purchase now fails in USDC. Procedure: [trezor-allowance-t4-runbook.md](trezor-allowance-t4-runbook.md) | Device, 1.00 USDC at risk, 0.30 moved between the owner's own addresses | **Pass**, 24 September, 9/9 |
 | T5 | Whether a Trezor signs an SPL `approve`, and what it displays | Device, Solana | The Solana variant |
 | T6 | Bitrefill credits an invoice paid by `transferFrom` through a contract, not a direct `transfer` from the payer | A deployed limiter and a ~$1 invoice, so after T3 | The direct-payment path; if it fails, `spend` pays a session address that pays the invoice |
 

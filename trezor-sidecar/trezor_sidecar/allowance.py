@@ -49,6 +49,10 @@ _ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}\Z")
 _AMOUNT = re.compile(r"[0-9]+(\.[0-9]{1,6})?\Z")
 RECEIPT_WAIT_SECONDS = 90
 RECEIPT_POLL_SECONDS = 3
+SETTLE_WAIT_SECONDS = 30
+"""How long to wait for the RPC to show a mined approve. Public endpoints are
+load-balanced; the node answering the next read can be a few blocks behind the
+one that reported the receipt."""
 READ_BACKOFF_SECONDS = (1, 2, 4, 8)
 """Waits between retries of a read. Reads are idempotent, and public Base
 endpoints refuse short bursts; a refused read is retried, never guessed."""
@@ -235,6 +239,27 @@ def _approve(settings, deps: Deps, owner: str, spender: str, amount_atomic: int)
     )
 
 
+def _settled_allowance(deps: Deps, owner: str, spender: str, expected: int) -> int:
+    """The allowance once the RPC shows the mined value, or the last value read."""
+    deadline = deps.now() + SETTLE_WAIT_SECONDS
+    while True:
+        left = _read(lambda: deps.rpc.usdc_allowance(owner, spender), deps.sleep)
+        if left == expected or deps.now() >= deadline:
+            return left
+        deps.sleep(2)
+
+
+def _report_allowance(deps: Deps, verb: str, left: int, expected: int) -> None:
+    if left == expected:
+        deps.out(f"{verb}. Allowance now {_usdc(left)}.")
+    else:
+        deps.out(
+            f"{verb} and mined, but the RPC still reports {_usdc(left)} instead of "
+            f"{_usdc(expected)} — a node behind the chain. Check the transaction "
+            "on BaseScan; do not sign again."
+        )
+
+
 def status(limiter_text: str, env: Mapping[str, str] | None = None, **overrides) -> Limiter:
     settings = _settings(os.environ if env is None else env)
     deps = _deps(settings, **overrides)
@@ -281,8 +306,7 @@ def grant(
     deps.out("")
 
     tx_hash = _approve(settings, deps, owner, spender, amount)
-    left = _read(lambda: deps.rpc.usdc_allowance(owner, spender), deps.sleep)
-    deps.out(f"Granted. Allowance now {_usdc(left)}.")
+    _report_allowance(deps, "Granted", _settled_allowance(deps, owner, spender, amount), amount)
     return tx_hash
 
 
@@ -299,8 +323,7 @@ def revoke(limiter_text: str, env: Mapping[str, str] | None = None, **overrides)
     deps.out("")
 
     tx_hash = _approve(settings, deps, owner, spender, 0)
-    left = _read(lambda: deps.rpc.usdc_allowance(owner, spender), deps.sleep)
-    deps.out(f"Revoked. Allowance now {_usdc(left)}.")
+    _report_allowance(deps, "Revoked", _settled_allowance(deps, owner, spender, 0), 0)
     return tx_hash
 
 

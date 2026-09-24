@@ -65,7 +65,13 @@ class FakeRpc:
         name = next(k for k, v in allowance._GETTERS.items() if v == data)
         return self.values[name]
 
+    stale = ()
+
     def usdc_allowance(self, owner, spender):
+        # A lagging node first answers with values from before the transaction.
+        if self.stale:
+            value, self.stale = self.stale[0], self.stale[1:]
+            return value
         return self.allowance
 
     def receipt_status(self, tx_hash):
@@ -247,6 +253,19 @@ class AllowanceTests(TestCase):
         self.rpc.receipt_status = refuse_then_mined
         allowance.grant(LIMITER, "1.00", **self.deps())
         self.assertIn("Granted.", self.text())
+
+    def test_a_lagging_node_is_waited_out_not_reported(self):
+        self.rpc.stale = (0, 0, 0)
+        allowance.grant(LIMITER, "1.00", **self.deps())
+        self.assertIn("Granted. Allowance now 1 USDC.", self.text())
+
+    def test_a_node_that_never_catches_up_is_named_as_such(self):
+        self.rpc.stale = (700_000,) * 1000
+        self.rpc.allowance = 1_000_000
+        allowance.revoke(LIMITER, **self.deps())
+        self.assertIn("still reports 0.7 USDC instead of 0 USDC", self.text())
+        self.assertIn("do not sign again", self.text())
+        self.assertEqual(len(self.trezor.pushed), 1)
 
     # --- revoke ---
 
