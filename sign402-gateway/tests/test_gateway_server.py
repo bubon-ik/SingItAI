@@ -8794,6 +8794,21 @@ class AllowanceBitrefillEndpointTests(unittest.TestCase):
         self.assertIn("already used", body["telegramText"])
         self.assertEqual(self.server.allowance_bitrefill.buy.call_count, 1)
 
+    def test_the_x402_route_is_its_own_merchant_in_spending_memory(self):
+        """Live: under the shared "bitrefill" name, 23 earlier orders to the
+        settlement address made the first x402 order read as payout drift."""
+        from sign402_gateway import server as gateway
+        seen = []
+        real = gateway._reserve_user_wallet_spend
+        with patch("sign402_gateway.server._reserve_user_wallet_spend",
+                   side_effect=lambda server, user_id, requirement, **kw: seen.append(requirement)
+                   or real(server, user_id, requirement, **kw)):
+            status, _ = self.call("bitrefill-buy", {"quoteId": self.quote()})
+        self.assertEqual(status, 200)
+        self.assertEqual((seen[0]["merchant"], seen[0]["resource"]), ("bitrefill:x402", "bitrefill:x402"))
+        self.assertEqual(seen[0]["payTo"], gateway.BITREFILL_X402_PAY_TO)
+        self.assertNotEqual(gateway.BITREFILL_X402_MERCHANT, gateway.BITREFILL_MERCHANT)
+
     def test_an_expired_or_foreign_quote_buys_nothing(self):
         quote_id = self.quote()
         with patch("sign402_gateway.server.time.time", return_value=time.time() + 601):

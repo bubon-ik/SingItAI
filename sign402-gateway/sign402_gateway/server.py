@@ -7737,6 +7737,16 @@ def _record_bankr_llm_spend(
 BITREFILL_MERCHANT = "bitrefill"
 """Merchant identity for every Bitrefill order, however it is funded."""
 
+BITREFILL_X402_MERCHANT = "bitrefill:x402"
+"""Bitrefill's x402 API, the Trezor allowance lane's route (AGENTS.md exception).
+
+Its own identity in spending memory: it pays Bitrefill's published x402
+address, never the settlement address the other routes pay, so under the
+shared name every order would read as payout drift. The payout-drift rule
+still guards it against its own history, and allowance_bitrefill pins the
+address before any payment.
+"""
+
 BITREFILL_NO_COUNTERPARTY = "bitrefill:no-onchain-counterparty"
 """Stand-in for a Bitrefill path that moves no money to a fixed address.
 
@@ -7763,7 +7773,7 @@ def _bitrefill_settlement_address() -> str:
 
 
 def _bitrefill_spend_requirement(
-    price_usd: Any, *, pay_to: str | None = None
+    price_usd: Any, *, pay_to: str | None = None, merchant: str = BITREFILL_MERCHANT
 ) -> dict[str, Any]:
     """Represent a Bitrefill purchase's USD value as a USDC spend requirement.
 
@@ -7780,8 +7790,8 @@ def _bitrefill_spend_requirement(
         "asset": BASE_USDC_MAINNET,
         "network": "base-mainnet",
         "payTo": pay_to or _bitrefill_settlement_address(),
-        "merchant": BITREFILL_MERCHANT,
-        "resource": BITREFILL_MERCHANT,
+        "merchant": merchant,
+        "resource": merchant,
     }
 
 
@@ -8158,7 +8168,8 @@ def _allowance_bitrefill_buy(server: Any, user_id: str, quote_id: str) -> dict[s
     _enforce_user_purchase_rate(user_id)
     server.user_event_store.preflight_write()
     requirement = _bitrefill_spend_requirement(
-        Decimal(quote["price_atomic"]) / Decimal(1_000_000), pay_to=BITREFILL_X402_PAY_TO
+        Decimal(quote["price_atomic"]) / Decimal(1_000_000), pay_to=BITREFILL_X402_PAY_TO,
+        merchant=BITREFILL_X402_MERCHANT,
     )
     reservation_id, claim_id, settled = None, None, False
     try:
@@ -8170,7 +8181,7 @@ def _allowance_bitrefill_buy(server: Any, user_id: str, quote_id: str) -> dict[s
             approval = server.imessage_approval_service.request_purchase_approval(
                 telegram_user_id=user_id,
                 tool_name=f"Bitrefill {quote['name']} {quote['package']}",
-                resource_url=BITREFILL_MERCHANT,
+                resource_url=BITREFILL_X402_MERCHANT,
                 payment_requirements=requirement,
                 payment_context={"productName": quote["name"]},
             )
@@ -8181,7 +8192,7 @@ def _allowance_bitrefill_buy(server: Any, user_id: str, quote_id: str) -> dict[s
                         "telegramText": approval.get("telegramText", "Purchase was not approved in iMessage.")}
         result = bitrefill.buy(user_id, quote["slug"], quote["package"], quote["price_atomic"])
         _settle_user_wallet_spend(
-            server, reservation_id, {"id": "bitrefill"}, BITREFILL_MERCHANT, requirement,
+            server, reservation_id, {"id": "bitrefill"}, BITREFILL_X402_MERCHANT, requirement,
             result, payment=payment, claim_id=claim_id,
         )
         settled = True
