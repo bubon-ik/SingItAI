@@ -15,6 +15,7 @@ PY="$SIDECAR/.venv/bin/python"
 SIDECAR_ENV="${SIDECAR_ENV:-$HOME/.config/sign402-trezor-poc/sidecar.env}"
 CDP_X402_DIR="${CDP_X402_DIR:-$HOME/Documents/Berlin Hack/cdp-x402-service}"
 STATE_DIR="${STATE_DIR:-$HOME/.sign402-trezor-poc}"
+KEYSTORES="${KEYSTORES:-$HOME/.foundry/keystores}"
 LOG="$STATE_DIR/t7-log.md"
 RPC="${RPC:-https://mainnet.base.org}"
 USDC=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
@@ -66,27 +67,35 @@ wait_for() {
 sidecar() { ( cd "$SIDECAR"; set -a; source "$SIDECAR_ENV"; set +a; .venv/bin/python -m trezor_sidecar.allowance "$@" ); }
 
 # The agent key signs x402 payments and sends spend/return. The password is
-# read once, then handed to cast through a file descriptor — never argv, never
-# disk — and the decrypted key only to the x402 client's environment.
+# read once. cast accepts it only from a regular file, so it goes into one in a
+# private temporary directory (mode 700, file 600) that is removed on any exit;
+# never into argv. The decrypted key goes only to the x402 client's environment.
+PW_DIR=$(mktemp -d)
+chmod 700 "$PW_DIR"
+trap 'rm -rf "$PW_DIR"; unset AGENT_PK AGENT_PW' EXIT
 unlock_agent() {
-  if [[ -n "${AGENT_PK:-}" ]]; then return; fi   # rehearsal
-  read -rs -p "sign402-agent password: " AGENT_PW; echo
-  AGENT_PK=$(CAST_UNSAFE_PASSWORD="$AGENT_PW" cast wallet decrypt-keystore sign402-agent | awk '{print $NF}')
+  if [[ -z "${AGENT_PW:-}" ]]; then
+    read -rs -p "sign402-agent password: " AGENT_PW; echo
+  fi
+  ( umask 077; printf '%s' "$AGENT_PW" > "$PW_DIR/pw" )
+  AGENT_PK=$(CAST_UNSAFE_PASSWORD="$AGENT_PW" cast wallet decrypt-keystore \
+    --keystore-dir "$KEYSTORES" sign402-agent 2>/dev/null | awk '{print $NF}') || true
+  [[ "$AGENT_PK" =~ ^0x[0-9a-fA-F]{64}$ ]] || { echo "Could not unlock sign402-agent: wrong password?"; exit 1; }
   local derived
   derived=$(AGENT_PK="$AGENT_PK" "$PY" -c 'import os; from eth_account import Account; print(Account.from_key(os.environ["AGENT_PK"]).address)')
   [[ "$(tr 'A-F' 'a-f' <<< "$derived")" == "$(tr 'A-F' 'a-f' <<< "$AGENT")" ]] \
     || { echo "That keystore is not the agent $AGENT."; exit 1; }
 }
-agent_send() {  # cast send as the agent
-  if [[ -n "${AGENT_PW:-}" ]]; then
-    cast send "$@" --account sign402-agent --password-file <(printf '%s' "$AGENT_PW") --rpc-url "$RPC" --json
-  else
-    cast send "$@" --private-key "$AGENT_PK" --rpc-url "$RPC" --json
-  fi
+agent_send() {  # cast send as the agent; prints the transaction hash or fails loudly
+  local out
+  out=$(cast send "$@" --keystore "$KEYSTORES/sign402-agent" --password-file "$PW_DIR/pw" \
+    --rpc-url "$RPC" --json 2>&1) || { echo "Agent transaction failed: $out" >&2; return 1; }
+  python3 -c 'import json,sys;print(json.load(sys.stdin)["transactionHash"])' <<< "$out" \
+    || { echo "Unexpected cast output: $out" >&2; return 1; }
 }
 tx_hash() { python3 -c 'import json,sys;print(json.load(sys.stdin)["transactionHash"])'; }
 spend_to_agent() {  # amount ref-text -> tx hash
-  agent_send "$LIMITER" "spend(address,uint256,bytes32)" "$AGENT" "$1" "$(cast keccak "$2")" | tx_hash
+  agent_send "$LIMITER" "spend(address,uint256,bytes32)" "$AGENT" "$1" "$(cast keccak "$2")"
 }
 terms() {  # the Base USDC exact leg of a 402, as "amount payTo asset"
   curl -s --max-time 20 -D - -o /dev/null "$1" | python3 -c '
@@ -192,7 +201,7 @@ done
 step "4. Close the float and revoke"
 float=$(usdc "$AGENT")
 if (( float > 0 )) && ask "Return the float ($float atomic USDC) from the agent to the Trezor address?"; then
-  ret_tx=$(agent_send "$USDC" "transfer(address,uint256)" "$OWNER" "$float" | tx_hash)
+  ret_tx=$(agent_send "$USDC" "transfer(address,uint256)" "$OWNER" "$float")
   log "- float returned: $float, tx $ret_tx"
 fi
 if ask "Revoke the allowance on the Trezor now?"; then
@@ -203,5 +212,4 @@ log "- allowanceLeft $(word "$LIMITER" 'allowanceLeft()(uint256)'); owner USDC $
 
 step "Result"
 if (( FAILS == 0 )); then log "**All x402 purchases settled as expected.**"; else log "**$FAILS problem(s).**"; fi
-unset AGENT_PK AGENT_PW
 echo "Log: $LOG"

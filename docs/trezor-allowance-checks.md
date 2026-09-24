@@ -247,3 +247,20 @@ and counts a value that never appears as a failure. Rehearsed on a fork: 9/9.
 **Still open.** The device screens were not photographed, so the three T2 details
 — full or shortened spender, amount format, warning screens — remain unrecorded.
 T6, Bitrefill crediting an invoice paid through the limiter, is next on Base.
+
+## T7, first mainnet attempt — stopped before the first agent transaction, 24 September
+
+The grant went through: the Trezor signed `approve(limiter, 1000000)`, the sidecar
+checked the bytes and broadcast
+[`0x66a47d18…5a82`](https://basescan.org/tx/0x66a47d1822c3396d6c1f410f384e25ffbf605658d33cb68be96a052bae0b5a82),
+and the allowance read back as 1 USDC — the settle-wait fix from T4 working. The
+first purchase then failed before sending anything: cast refused the keystore
+password passed as `/dev/fd/63` ("does not exist"; it wants a regular file). Read
+back afterwards: agent nonce unchanged at 3, owner 6.526336 USDC, allowance
+1000000, `spentToday` 300000 from T4.
+
+The fork rehearsal had not caught it because it supplied the agent's key directly
+and never took the password path. Fixed: the password goes into a regular file in
+a `mktemp -d` directory (700, file 600) removed on any exit, and the rehearsal now
+imports the agent into a password-protected keystore and runs exactly the owner's
+path. It passed; a wrong password stops before any transaction.
