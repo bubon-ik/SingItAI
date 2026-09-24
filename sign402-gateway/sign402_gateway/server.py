@@ -1191,7 +1191,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         except RateLimitExceededError as exc:
             self._send_json({"ok": False, "error": "rate-limited", "telegramText": str(exc)}, status=429)
         except AllowanceUnavailable as exc:
-            self._send_json({"ok": False, "error": "allowance-not-enabled", "telegramText": str(exc)}, status=403)
+            # 400, not 403: the plugin reads 401/403 as its own credentials failing.
+            self._send_json({"ok": False, "error": "allowance-not-enabled", "telegramText": str(exc)}, status=400)
         except AllowanceError as exc:
             self._send_json({"ok": False, "error": "allowance-refused", "telegramText": str(exc)}, status=400)
         except ValueError as exc:
@@ -1238,12 +1239,20 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 **limits,
                 **_bitrefill_live_limit_settings(),
             }
+            telegram_text = _spending_limits_telegram_text(limits, updated=updated)
+            allowance = getattr(self.server, "allowance", None)
+            if allowance is not None and allowance.store.active_limiter(telegram_user_id) is not None:
+                # The limiter's caps are enforced on chain; show them from the chain.
+                try:
+                    telegram_text += "\n\n" + allowance.status(telegram_user_id)["telegramText"]
+                except Exception:
+                    logger.warning("allowance: status for /limits failed", exc_info=True)
             self._send_json(
                 {
                     "ok": True,
                     "updated": updated,
                     "limits": limits,
-                    "telegramText": _spending_limits_telegram_text(limits, updated=updated),
+                    "telegramText": telegram_text,
                 }
             )
         except WalletApiTokenNotConfiguredError as exc:

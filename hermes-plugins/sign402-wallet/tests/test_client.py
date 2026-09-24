@@ -290,6 +290,7 @@ class GatewayClientTests(GatewayClientFixture, unittest.TestCase):
         for decision, text in (
             ("blocked_by_memory", "This merchant changed its payout address. Payment stopped."),
             ("rejected_by_imessage", "Purchase was not approved in iMessage."),
+            ("refused_by_allowance", "Nothing is granted from your Trezor yet."),
         ):
             with self.subTest(decision=decision):
                 error = HTTPError(
@@ -1135,3 +1136,42 @@ class ChatClientTests(GatewayClientFixture, unittest.TestCase):
                 user_access_token="user-token-1",
             )
         self.assertEqual(opener.requests, [])
+
+
+
+class AllowanceClientTests(unittest.TestCase):
+    def make_client(self, opener):
+        return GatewayClient(base_url="http://127.0.0.1:8099", api_token="api-token", opener=opener)
+
+    def test_each_action_posts_to_its_route_as_the_user(self):
+        opener = RecordingOpener(response=FakeResponse(json.dumps(
+            {"ok": True, "telegramText": "Trezor allowance", "limiter": "0xabc"}).encode()))
+        result = self.make_client(opener).execute_allowance(
+            "setup", TelegramIdentity(user_id="1045618308"),
+            payload={"dailyCap": "100", "perPurchaseCap": "10", "days": "30"}, user_access_token="user-token",
+        )
+        request, timeout = opener.requests[-1]
+        self.assertTrue(request.full_url.endswith("/agent/allowance/setup"))
+        self.assertGreaterEqual(timeout, 180.0)
+        self.assertEqual(request.headers["X-sign402-user-token"], "user-token")
+        self.assertEqual(json.loads(request.data), {
+            "telegramUserId": "1045618308", "dailyCap": "100", "perPurchaseCap": "10", "days": "30"})
+        self.assertEqual(result["limiter"], "0xabc")
+
+    def test_unknown_actions_and_missing_user_tokens_never_reach_the_gateway(self):
+        opener = RecordingOpener(response=FakeResponse(b'{"ok":true,"telegramText":"x"}'))
+        client = self.make_client(opener)
+        with self.assertRaises(GatewayClientError):
+            client.execute_allowance("transfer", TelegramIdentity(user_id="1"), user_access_token="t")
+        with self.assertRaises(GatewayClientError):
+            client.execute_allowance("status", TelegramIdentity(user_id="1"), user_access_token="")
+        self.assertEqual(opener.requests, [])
+
+    def test_the_gateways_own_words_reach_the_user_on_refusals(self):
+        text = "Your computer refused to show this on the Trezor: the spender is not your verified limiter."
+        error = HTTPError("http://127.0.0.1:8099/agent/allowance/grant", 400, "Bad Request", {},
+                          io.BytesIO(json.dumps({"ok": False, "error": "allowance-refused", "telegramText": text}).encode()))
+        with self.assertRaises(GatewayClientError) as caught:
+            self.make_client(RecordingOpener(error=error)).execute_allowance(
+                "grant", TelegramIdentity(user_id="1"), payload={"amount": "300"}, user_access_token="t")
+        self.assertEqual(caught.exception.user_message, text)

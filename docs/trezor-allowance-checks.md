@@ -434,3 +434,21 @@ where the first landed. Counted settlements are now stored and excluded.
 Mutations: without settlement de-duplication the float and restart tests fail;
 deciding the lane after the seller and owner are asked fails the refusal test.
 Gateway suite 1283/1283.
+
+
+## Phase 4 — Telegram commands, 24 September
+
+**Status: PASS in tests; not yet run in Telegram.**
+
+Plugin: every command maps to exactly one gateway action with the parsed
+arguments and the user's own token; malformed arguments print usage and call
+nothing; a quote ends with `/allowance_buy <code>`; a refusal reaches the user in
+the gateway's words; a buy-tool purchase refused by the lane shows its reason.
+The tests had to authorise the test user through `SIGN402_TELEGRAM_ALLOWED_USERS`
+exactly as production does — the plugin drops everyone else before any command.
+
+Gateway: "not enabled for this account" is a 400, not a 403 — the plugin reads
+401/403 as its own credentials failing and would have shown the wrong reason;
+`/limits` appends the limiter's status for users on the lane.
+
+Plugin suite 283/283, gateway suite 1284/1284.

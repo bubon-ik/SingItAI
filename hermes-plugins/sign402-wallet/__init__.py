@@ -89,6 +89,27 @@ _TELEGRAM_PUBLIC_COMMAND_STARTED_MESSAGES = {
     "llm-buy": "Preparing LLM credits…",
     "llm-terms": "Updating LLM terms…",
     "llm-credits": "Checking LLM credits…",
+    "allowance": "Reading your Trezor allowance…",
+    "allowance-setup": "Setting up your limiter on Base…",
+    "allowance-grant": "Sending the grant to your Trezor…",
+    "allowance-revoke": "Sending the revoke to your Trezor…",
+    "allowance-pause": "Pausing your limiter…",
+    "allowance-bitrefill": "Searching Bitrefill…",
+    "allowance-quote": "Asking Bitrefill for the price…",
+    "allowance-buy": "Buying from your Trezor allowance…",
+}
+# Commands of the Trezor allowance lane, and the usage each prints when its
+# arguments do not parse. They are not in the public menu: the lane is enabled
+# per account by the operator, and the gateway refuses everyone else.
+_ALLOWANCE_USAGE = {
+    "allowance": "Usage: /allowance",
+    "allowance-setup": "Usage: /allowance_setup <daily USDC> <per purchase USDC> <days>, e.g. /allowance_setup 100 10 30",
+    "allowance-grant": "Usage: /allowance_grant <total USDC>, e.g. /allowance_grant 300",
+    "allowance-revoke": "Usage: /allowance_revoke [limiter address]",
+    "allowance-pause": "Usage: /allowance_pause",
+    "allowance-bitrefill": "Usage: /allowance_bitrefill <search words> [country], e.g. /allowance_bitrefill amazon DE",
+    "allowance-quote": "Usage: /allowance_quote <product id> <package>, e.g. /allowance_quote amazon_de-germany 5",
+    "allowance-buy": "Usage: /allowance_buy <quote code>",
 }
 _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "start", "description": "Set up your Sign402 wallet"},
@@ -1986,6 +2007,8 @@ def _telegram_public_command_result(
             text = f"{text}{_chat_budget_block(client, identity)}"
     elif command in {"email", "forget-email"}:
         text = _buyer_email_text(client, identity, command, args)
+    elif command in _ALLOWANCE_USAGE:
+        text = _allowance_command_text(client, identity, command, args)
     elif command in {"limits", "set-limits"}:
         parsed_limits = _parse_limit_args(command, args)
         if parsed_limits is None:
@@ -4527,6 +4550,7 @@ def _telegram_public_command(event, source) -> str | None:
         "llm-code",
         "llm-credits",
         "chat",
+        *_ALLOWANCE_USAGE,
     }:
         return normalized
     return None
@@ -4618,6 +4642,46 @@ def _telegram_command_args(event) -> str:
         return ""
     parts = text.split(maxsplit=1)
     return parts[1].strip() if len(parts) > 1 else ""
+
+
+def _allowance_payload(command: str, raw_args: str) -> tuple[str, dict] | None:
+    """(gateway action, payload) for one allowance command, or None when it does not parse."""
+    args = str(raw_args or "").strip().split()
+    if command == "allowance" and not args:
+        return "status", {}
+    if command == "allowance-setup" and len(args) == 3:
+        return "setup", {"dailyCap": args[0], "perPurchaseCap": args[1], "days": args[2]}
+    if command == "allowance-grant" and len(args) == 1:
+        return "grant", {"amount": args[0]}
+    if command == "allowance-revoke" and len(args) <= 1:
+        return "revoke", {"limiter": args[0]} if args else {}
+    if command == "allowance-pause" and not args:
+        return "pause", {}
+    if command == "allowance-bitrefill" and args:
+        country = args[-1].upper() if len(args) > 1 and re.fullmatch(r"[A-Za-z]{2}", args[-1]) else ""
+        words = args[:-1] if country else args
+        return "bitrefill-search", {"query": " ".join(words), "country": country}
+    if command == "allowance-quote" and len(args) == 2:
+        return "bitrefill-quote", {"productId": args[0], "package": args[1]}
+    if command == "allowance-buy" and len(args) == 1:
+        return "bitrefill-buy", {"quoteId": args[0]}
+    return None
+
+
+def _allowance_command_text(client, identity: TelegramIdentity, command: str, raw_args: str) -> str:
+    parsed = _allowance_payload(command, raw_args)
+    if parsed is None:
+        return _ALLOWANCE_USAGE[command]
+    action, payload = parsed
+    result = client.execute_allowance(
+        action, identity, payload=payload, user_access_token=_user_access_token(client, identity)
+    )
+    text = str(result["telegramText"]).strip()
+    if action == "bitrefill-quote" and result.get("quoteId"):
+        text += f"\n\nTo buy it: /allowance_buy {result['quoteId']}"
+    if action == "bitrefill-search" and result.get("products"):
+        text += "\n\nPrice one with /allowance_quote <product id> <package>."
+    return text
 
 
 def _parse_limit_args(command: str, raw_args: str) -> tuple[str | None, str | None] | None:

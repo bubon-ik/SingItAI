@@ -46,6 +46,13 @@ _BUYER_EMAIL_PATH = "/agent/buyer-email"
 # The gateway writes this one for the buyer, so it travels to chat unchanged;
 # only the command that fixes it is added here, where the commands are defined.
 _SPEND_LIMIT_PREFIX = "Raise your spending limit to continue."
+# The Trezor allowance lane (docs/trezor-allowance-v1.md). Every answer the
+# gateway gives on it, refusals included, carries telegramText written for the
+# user; unexpected failures there are already replaced by a fixed sentence.
+_ALLOWANCE_PATH_PREFIX = "/agent/allowance/"
+_ALLOWANCE_ACTIONS = frozenset({
+    "status", "setup", "grant", "revoke", "pause", "bitrefill-search", "bitrefill-quote", "bitrefill-buy",
+})
 _SPEND_LIMIT_HINT = (
     "Send /limits to see your current limits, or "
     "/set_limits <max per transaction> <daily cap> to raise them."
@@ -462,6 +469,35 @@ class GatewayClient:
             raise GatewayClientError(_INVALID_RESPONSE)
         return telegram_text.strip()
 
+    def execute_allowance(
+        self,
+        action: str,
+        identity: TelegramIdentity,
+        *,
+        payload: Mapping[str, Any] | None = None,
+        user_access_token: str | None = None,
+    ) -> dict[str, Any]:
+        """One call on the Trezor allowance lane; the gateway's JSON, telegramText included."""
+        if action not in _ALLOWANCE_ACTIONS:
+            raise GatewayClientError(_REQUEST_FAILED)
+        user_token = str(user_access_token or "").strip()
+        if not user_token:
+            raise GatewayClientError(_AUTH_FAILED)
+        body = {"telegramUserId": identity.user_id, **dict(payload or {})}
+        result = self._post(
+            _ALLOWANCE_PATH_PREFIX + action,
+            body,
+            token=self.api_token,
+            operation=f"allowance-{action}",
+            # Setting up deploys a contract and buying waits for delivery.
+            timeout=max(self.timeout, 180.0),
+            user_token=user_token,
+        )
+        telegram_text = result.get("telegramText")
+        if not isinstance(telegram_text, str) or not telegram_text.strip():
+            raise GatewayClientError(_INVALID_RESPONSE)
+        return result
+
     def execute_llm(
         self,
         operation: str,
@@ -643,7 +679,8 @@ class GatewayClient:
         is_llm = operation.startswith("llm-")
         is_imessage = operation in _IMESSAGE_OPERATION_PATHS
         is_paid_tool = operation == "buy-tool"
-        if not is_bitrefill and not is_llm and not is_imessage and not is_paid_tool:
+        is_allowance = operation.startswith("allowance-")
+        if not is_bitrefill and not is_llm and not is_imessage and not is_paid_tool and not is_allowance:
             return None
         try:
             body = exc.read(self.max_response_bytes + 1)
@@ -657,11 +694,14 @@ class GatewayClient:
             return None
         if not isinstance(payload, dict):
             return None
+        if is_allowance:
+            text = payload.get("telegramText")
+            return text.strip() if isinstance(text, str) and text.strip() else None
         if is_paid_tool:
             # These are deliberate policy/approval outcomes with text written
             # for the buyer. Unexpected exceptions still use the fixed error;
             # never forward a signer's stderr or an upstream response body.
-            if payload.get("decision") in {"blocked_by_memory", "rejected_by_imessage"}:
+            if payload.get("decision") in {"blocked_by_memory", "rejected_by_imessage", "refused_by_allowance"}:
                 text = payload.get("telegramText")
                 if isinstance(text, str) and text.strip():
                     return text.strip()

@@ -157,7 +157,7 @@ Build order, each phase ending with tests and a live check:
 | 1 | Server-side agent keys and limiter deployment; setup and status endpoints (done: see below) |
 | 2 | Grant and revoke as broker jobs signed through the companion; guardian pause (done: see below) |
 | 3 | The purchase lane in the gateway: funding, x402 payment by the agent key, Bitrefill x402, settlement on chain, spending memory in front (done: see below) |
-| 4 | Bot commands and `/limits` from the chain |
+| 4 | Bot commands and `/limits` from the chain (done: see below) |
 | 5 | The watcher: notifications and automatic pause |
 | 6 | A live run through Telegram on mainnet, recorded in the checks |
 
@@ -266,6 +266,30 @@ so SingIt's service fee on managed-wallet Bitrefill orders is not collected.
 Configuration: `SIGN402_ALLOWANCE_FLOAT_TARGET_USDC` (0.20),
 `SIGN402_ALLOWANCE_FLOAT_LOW_USDC` (0.05), `SIGN402_ALLOWANCE_EXACT_ABOVE_USDC`
 (0.05).
+
+### Phase 4: the Telegram commands
+
+In the `sign402-wallet` plugin, for accounts the operator enabled (the gateway
+refuses everyone else, so the commands are not in the public menu):
+
+| Command | Does |
+| --- | --- |
+| `/allowance` | Status, read from the chain, with recent requests |
+| `/allowance_setup <daily> <per purchase> <days>` | Deploy and verify the user's limiter |
+| `/allowance_grant <total>` | Send an approve of the total to the user's Trezor |
+| `/allowance_revoke [limiter]` | Send an approve of 0; any of the user's limiters |
+| `/allowance_pause` | Pause at once through the guardian, no device |
+| `/allowance_bitrefill <words> [country]` | Search Bitrefill |
+| `/allowance_quote <product id> <package>` | Price it; the answer ends with the command that buys it |
+| `/allowance_buy <quote code>` | Buy it, within the quoted price |
+
+Each command answers "working on it" at once and the result as a second
+message. Arguments are parsed in the plugin (a malformed command prints its usage
+and reaches nothing); everything else is decided in the gateway, whose answers
+on this lane — refusals included — are written for the user and shown as they are.
+`/limits` for a user on the lane adds the limiter's status, read from the chain.
+x402 purchases through the existing menu need no new command: the gateway pays
+them from the lane for a user on it.
 
 ## Granting, changing and revoking
 

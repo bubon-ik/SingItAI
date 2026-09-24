@@ -5524,3 +5524,74 @@ class ChatModelSearchTests(unittest.TestCase):
 
         switch = [c for c in client.chat_calls if c["payload"].get("model")]
         self.assertEqual(switch[-1]["payload"]["model"], "grok-4-6")
+
+
+class AllowanceCommandTests(unittest.TestCase):
+    """The Trezor allowance lane from Telegram: arguments parsed here, decided in the gateway."""
+
+    class Client(FakeClient):
+        def __init__(self, results=None, error=None):
+            super().__init__()
+            self.allowance_calls = []
+            self.allowance_results = results or {}
+            self.allowance_error = error
+
+        def execute_allowance(self, action, identity, *, payload=None, user_access_token=None):
+            self.allowance_calls.append((action, identity.user_id, dict(payload or {}), user_access_token))
+            if self.allowance_error is not None:
+                raise self.allowance_error
+            return self.allowance_results.get(action, {"ok": True, "telegramText": f"{action} done"})
+
+    def send(self, text, client, plugin=None):
+        plugin = plugin or load_plugin()
+        context = FakeContext()
+        plugin._client_factory = lambda: client
+        plugin.register(context)
+        gateway = FakeGateway(adapter_key="telegram")
+        with patch.dict(os.environ, {"SIGN402_TELEGRAM_ALLOWED_USERS": "1045618308"}):
+            context.hooks["pre_gateway_dispatch"](
+                event=FakeEvent(text, "1045618308", username="owner", platform="telegram", chat_id="chat"),
+                gateway=gateway,
+            )
+        return gateway.adapters["telegram"].sent[-1][1]
+
+    def test_each_command_becomes_one_gateway_action(self):
+        cases = [
+            ("/allowance", "status", {}),
+            ("/allowance_setup 100 10 30", "setup", {"dailyCap": "100", "perPurchaseCap": "10", "days": "30"}),
+            ("/allowance_grant 300", "grant", {"amount": "300"}),
+            ("/allowance_revoke", "revoke", {}),
+            ("/allowance_revoke 0xabc", "revoke", {"limiter": "0xabc"}),
+            ("/allowance_pause", "pause", {}),
+            ("/allowance_bitrefill amazon gift DE", "bitrefill-search", {"query": "amazon gift", "country": "DE"}),
+            ("/allowance_bitrefill steam", "bitrefill-search", {"query": "steam", "country": ""}),
+            ("/allowance_quote amazon_de-germany 5", "bitrefill-quote", {"productId": "amazon_de-germany", "package": "5"}),
+            ("/allowance_buy aq_123", "bitrefill-buy", {"quoteId": "aq_123"}),
+        ]
+        for text, action, payload in cases:
+            with self.subTest(text=text):
+                client = self.Client()
+                reply = self.send(text, client)
+                self.assertEqual(client.allowance_calls, [(action, "1045618308", payload, "user-access-token")])
+                self.assertIn(f"{action} done", reply)
+
+    def test_arguments_that_do_not_parse_print_usage_and_ask_nothing(self):
+        for text in ("/allowance_setup 100 10", "/allowance_grant", "/allowance_grant 1 2", "/allowance_pause now",
+                     "/allowance_quote amazon", "/allowance_buy", "/allowance_bitrefill"):
+            with self.subTest(text=text):
+                client = self.Client()
+                reply = self.send(text, client)
+                self.assertTrue(reply.startswith("Usage: /allowance"))
+                self.assertEqual(client.allowance_calls, [])
+
+    def test_a_quote_ends_with_the_command_that_buys_it(self):
+        client = self.Client({"bitrefill-quote": {"ok": True, "telegramText": "Hediyen Kart 1 TRY: 0.02 USDC",
+                                                  "quoteId": "aq_xyz"}})
+        reply = self.send("/allowance_quote hediyen 1", client)
+        self.assertIn("0.02 USDC", reply)
+        self.assertTrue(reply.endswith("/allowance_buy aq_xyz"))
+
+    def test_a_refusal_is_shown_in_the_gateways_words(self):
+        plugin = load_plugin()
+        client = self.Client(error=plugin.GatewayClientError("Nothing is granted from your Trezor yet."))
+        self.assertEqual(self.send("/allowance_grant 300", client, plugin), "Nothing is granted from your Trezor yet.")

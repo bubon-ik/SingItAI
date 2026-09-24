@@ -8570,7 +8570,7 @@ class AllowanceEndpointTests(unittest.TestCase):
         from sign402_gateway.agent_allowance import AllowanceError, AllowanceUnavailable
 
         cases = [
-            (AllowanceUnavailable("not enabled for this account"), 403, "allowance-not-enabled", "not enabled for this account"),
+            (AllowanceUnavailable("not enabled for this account"), 400, "allowance-not-enabled", "not enabled for this account"),
             (AllowanceError("The per-purchase cap cannot be above the daily cap."), 400, "allowance-refused",
              "The per-purchase cap cannot be above the daily cap."),
             (RuntimeError("secret internal detail"), 500, "allowance-failed", "Nothing was signed"),
@@ -8584,6 +8584,17 @@ class AllowanceEndpointTests(unittest.TestCase):
                 self.assertEqual((status, body["error"]), (code, name))
                 self.assertIn(text, body["telegramText"])
                 self.assertNotIn("secret internal detail", json.dumps(body))
+
+    def test_limits_add_the_limiter_read_from_the_chain_for_lane_users(self):
+        allowance = Mock()
+        allowance.store.active_limiter.return_value = {"limiter_address": "0xLIMITER"}
+        allowance.status.return_value = {"telegramText": "Trezor allowance\nLeft today: 0.5 USDC"}
+        _, body = self.request("/agent/spending-limits", {}, server=self.server(allowance))
+        self.assertIn("Left today: 0.5 USDC", body["telegramText"])
+
+        allowance.store.active_limiter.return_value = None
+        _, body = self.request("/agent/spending-limits", {}, server=self.server(allowance))
+        self.assertNotIn("Trezor allowance", body["telegramText"])
 
     def test_health_lists_the_lane_only_when_it_is_on(self):
         _, off = self.request("/health", server=self.server(), method="GET", user_token="")
