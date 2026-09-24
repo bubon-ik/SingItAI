@@ -8553,6 +8553,19 @@ class AllowanceEndpointTests(unittest.TestCase):
         self.assertEqual((status, body["created"]), (200, True))
         allowance.setup.assert_called_once_with("1045618308", "100", "10", "30")
 
+    def test_grant_revoke_and_pause_reach_the_service_for_the_token_holder(self):
+        allowance = Mock()
+        for method in ("grant", "revoke", "pause"):
+            getattr(allowance, method).return_value = {"telegramText": method}
+        server = self.server(allowance)
+
+        self.assertEqual(self.request("/agent/allowance/grant", {"amount": "300"}, server=server)[0], 200)
+        allowance.grant.assert_called_once_with("1045618308", "300")
+        self.assertEqual(self.request("/agent/allowance/revoke", {"limiter": "0xabc"}, server=server)[0], 200)
+        allowance.revoke.assert_called_once_with("1045618308", "0xabc")
+        self.assertEqual(self.request("/agent/allowance/pause", {}, server=server)[0], 200)
+        allowance.pause.assert_called_once_with("1045618308")
+
     def test_refusals_are_named_and_failures_are_not_leaked(self):
         from sign402_gateway.agent_allowance import AllowanceError, AllowanceUnavailable
 
@@ -8577,4 +8590,5 @@ class AllowanceEndpointTests(unittest.TestCase):
         _, on = self.request("/health", server=self.server(Mock()), method="GET", user_token="")
         self.assertNotIn("/agent/allowance/setup", off["endpoints"])
         self.assertIn("/agent/allowance/setup", on["endpoints"])
-        self.assertIn("/agent/allowance/status", on["endpoints"])
+        for action in ("status", "grant", "revoke", "pause"):
+            self.assertIn(f"/agent/allowance/{action}", on["endpoints"])

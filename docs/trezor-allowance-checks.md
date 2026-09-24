@@ -372,3 +372,32 @@ Sourcify's API accepted the publication request for the T4 limiter (409
 new deployment is first exercised on mainnet.
 
 Gateway suite: 1242/1242 (spending-memory at the pinned 443743e).
+
+
+## Phase 2 — grant, revoke and pause through the whole chain, 24 September
+
+**Status: PASS on a local fork of Base mainnet; not yet run with the device.**
+
+One run through every real component but the device: the gateway's
+`AllowanceService`, the broker over loopback HTTP with its store, a companion
+enrolled for the owner, the sidecar service with its chain checks, and the fork.
+The device was a test key signing with the fork's real nonce and fees — the one
+stand-in.
+
+| Step | Result |
+| --- | --- |
+| `setup 100 10 30` | limiter deployed and verified for the owner |
+| `grant 250` | job through broker and companion; sidecar check passed; signed; gateway checked the bytes, broadcast, allowance read back 250 USDC: **done** |
+| grant to a limiter owned by another address (the T4 limiter) | **refused on the owner's computer before the device** (`limiter_invalid`); the device was not asked; Telegram text names it as a possible attack |
+| `revoke` | approve of 0 signed and sent: allowance 0, **done** |
+| `pause` | guardian funded from the operator's gas key, `pause()` sent, limiter reads paused and 0 left today; no device |
+
+Device prompts in the whole run: two — the grant and the revoke.
+
+Unit coverage: gateway 1257/1257 (42 allowance tests: signed-approve check,
+every refusal before the device, the owner's-computer errors named, transient
+failures kept waiting, a lost broadcast offered again and landing once, an
+owner without gas, a reverted approve, revoke of a superseded limiter, pause);
+sidecar 361/361 (15 device-path tests and the broker migration). Removing the
+gateway's check of the signed bytes, or its check that the paired Trezor is the
+owner on file, or the sidecar's pre-device limiter check, each fails its tests.

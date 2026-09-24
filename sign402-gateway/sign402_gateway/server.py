@@ -116,6 +116,14 @@ from .diagnostics import (
 from .decide import decide as decide_payment, journal as read_decision_journal
 from .keyring import install_master_key
 from .agent_allowance import AllowanceError, AllowanceUnavailable, build_allowance_service_from_env
+
+ALLOWANCE_PATHS = (
+    "/agent/allowance/setup",
+    "/agent/allowance/status",
+    "/agent/allowance/grant",
+    "/agent/allowance/revoke",
+    "/agent/allowance/pause",
+)
 from .numeric import format_decimal
 from .goplausible import fetch_x402_paid_resource, fetch_x402_payment_required, normalize_x402_payment_required
 from .real_rate_pricing import RealRateSingitPricer
@@ -514,7 +522,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                     ]
                 )
             if getattr(self.server, "allowance", None) is not None:
-                endpoints.extend(["/agent/allowance/setup", "/agent/allowance/status"])
+                endpoints.extend(ALLOWANCE_PATHS)
             if _test_endpoints_enabled():
                 endpoints.append("/agent/test-imessage-approval")
             if _legacy_payment_executor_enabled():
@@ -654,7 +662,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         if path == "/agent/spending-limits":
             self._handle_agent_spending_limits()
             return
-        if path in ("/agent/allowance/setup", "/agent/allowance/status"):
+        if path in ALLOWANCE_PATHS:
             self._handle_agent_allowance(path)
             return
         if path == "/agent/buyer-email":
@@ -1145,13 +1153,20 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             telegram_user_id = _require_authenticated_user(self, payload)
-            if path.endswith("/setup"):
+            action = path.rsplit("/", 1)[1]
+            if action == "setup":
                 result = service.setup(
                     telegram_user_id,
                     payload.get("dailyCap"),
                     payload.get("perPurchaseCap"),
                     payload.get("days"),
                 )
+            elif action == "grant":
+                result = service.grant(telegram_user_id, payload.get("amount"))
+            elif action == "revoke":
+                result = service.revoke(telegram_user_id, payload.get("limiter"))
+            elif action == "pause":
+                result = service.pause(telegram_user_id)
             else:
                 result = service.status(telegram_user_id)
             self._send_json({"ok": True, **result})

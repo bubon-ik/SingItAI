@@ -234,6 +234,7 @@ class AllowanceServiceTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.fernet = Fernet(Fernet.generate_key())
         self.funder = Account.create()
+        self.guardian = Account.create()
         self.artifact = aa.Artifact.load()
         self.evm = FakeEvm(self.artifact)
         self.published = []
@@ -243,7 +244,7 @@ class AllowanceServiceTests(unittest.TestCase):
         options = dict(
             store=aa.AllowanceStore(Path(self.tmp.name) / "allowance.db"),
             evm=self.evm, fernet=self.fernet, owners={USER: to_checksum_address(OWNER)},
-            guardian=GUARDIAN, gas_funder_key=lambda: self.funder.key.to_0x_hex(),
+            guardian_key=lambda: self.guardian.key.to_0x_hex(), gas_funder_key=lambda: self.funder.key.to_0x_hex(),
             artifact=self.artifact, max_daily=100_000_000, max_per_purchase=25_000_000, max_days=90,
             publish_source=lambda limiter, tx, artifact: self.published.append((limiter, tx)) or "exact_match",
             now=lambda: NOW,
@@ -282,7 +283,7 @@ class AllowanceServiceTests(unittest.TestCase):
         self.assertEqual(funding["value"], aa.AGENT_GAS_TARGET_WEI)
         self.assertEqual(deployment["from"], agent_row["agent_address"])
         self.assertEqual(deployment["data"], self.artifact.creation_data(
-            OWNER, agent_row["agent_address"], GUARDIAN, 100_000_000, 10_000_000, NOW + 30 * 86400))
+            OWNER, agent_row["agent_address"], self.guardian.address, 100_000_000, 10_000_000, NOW + 30 * 86400))
 
         self.assertTrue(result["created"])
         self.assertEqual(result["limiter"], self.evm.limiter)
@@ -371,9 +372,10 @@ class WiringTests(unittest.TestCase):
 
     def test_on_needs_every_setting(self):
         key = Fernet.generate_key().decode()
-        base = {aa.ENABLED_ENV: "1", aa.OWNERS_ENV: f"{USER}:{OWNER}", aa.GUARDIAN_ENV: GUARDIAN,
+        guardian_blob = Fernet(key.encode()).encrypt(Account.create().key.to_0x_hex().encode()).decode()
+        base = {aa.ENABLED_ENV: "1", aa.OWNERS_ENV: f"{USER}:{OWNER}", aa.GUARDIAN_KEY_ENV: guardian_blob,
                 aa.GAS_FUNDER_ENV: "blob", aa.DB_ENV: str(Path(tempfile.mkdtemp()) / "a.db")}
-        for missing in (aa.OWNERS_ENV, aa.GUARDIAN_ENV, aa.GAS_FUNDER_ENV):
+        for missing in (aa.OWNERS_ENV, aa.GUARDIAN_KEY_ENV, aa.GAS_FUNDER_ENV):
             with self.subTest(missing=missing):
                 env = {k: v for k, v in base.items() if k != missing}
                 with self.assertRaises(ValueError):
@@ -398,3 +400,269 @@ class WiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def signed_approve(account, spender, amount, **changes):
+    tx = {
+        "type": 2, "chainId": aa.BASE_CHAIN_ID, "nonce": 3, "maxPriorityFeePerGas": 1_000_000,
+        "maxFeePerGas": 12_000_000, "gas": 60_000, "to": aa.USDC, "value": 0,
+        "data": aa.encode_call("approve(address,uint256)", spender, amount), "accessList": [],
+    }
+    tx.update(changes)
+    return Account.sign_transaction(tx, account.key).raw_transaction.to_0x_hex()
+
+
+class VerifySignedApproveTests(unittest.TestCase):
+    def setUp(self):
+        self.owner = Account.create()
+        self.spender = to_checksum_address("0x" + "ab" * 20)
+
+    def test_exactly_the_requested_approve_is_accepted(self):
+        raw = signed_approve(self.owner, self.spender, 5)
+        self.assertEqual(aa.verify_signed_approve(raw, self.owner.address, self.spender, 5),
+                         "0x" + keccak(bytes.fromhex(raw[2:])).hex())
+
+    def test_anything_else_is_refused(self):
+        other = Account.create()
+        cases = {
+            "other amount": signed_approve(self.owner, self.spender, 6),
+            "other spender": signed_approve(self.owner, other.address, 5),
+            "other signer": signed_approve(other, self.spender, 5),
+            "other chain": signed_approve(self.owner, self.spender, 5, chainId=1),
+            "other token": signed_approve(self.owner, self.spender, 5, to=other.address),
+            "with value": signed_approve(self.owner, self.spender, 5, value=1),
+            "a transfer": signed_approve(self.owner, self.spender, 5,
+                                         data=aa.encode_call("transfer(address,uint256)", self.spender, 5)),
+            "garbage": "0x02deadbeef",
+        }
+        for name, raw in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(aa.AllowanceError):
+                    aa.verify_signed_approve(raw, self.owner.address, self.spender, 5)
+
+
+class FakeBroker:
+    def __init__(self, wallet):
+        self.wallet = wallet
+        self.jobs = {}
+        self.created = []
+        self.unreachable = False
+
+    def companion(self, user_id):
+        return None if self.wallet is None else {"walletAddress": self.wallet}
+
+    def create_job(self, user_id, kind, key, payload, expires_at):
+        job_id = f"job_{len(self.created) + 1:08d}"
+        self.created.append({"user": user_id, "kind": kind, "key": key, "payload": payload, "expires": expires_at})
+        self.jobs[job_id] = {"jobId": job_id, "state": "QUEUED"}
+        return {"jobId": job_id}
+
+    def job(self, job_id):
+        if self.unreachable:
+            raise aa.AllowanceError("The Trezor link on the server is not answering. Nothing was changed.")
+        return self.jobs[job_id]
+
+
+class DeviceLaneEvm(FakeEvm):
+    """FakeEvm plus broadcasting, receipts, the owner's allowance and pause."""
+
+    def __init__(self, artifact, owner):
+        super().__init__(artifact)
+        self.owner = owner
+        self.rpc = self
+        self.broadcasts = []
+        self.broadcast_error = None
+        self.receipt = None
+        self.allowances = {}
+
+    def call(self, method, params):
+        if method == "eth_sendRawTransaction":
+            self.broadcasts.append(params[0])
+            if self.broadcast_error:
+                raise aa.AllowanceError(self.broadcast_error)
+            return "0x" + keccak(bytes.fromhex(params[0][2:])).hex()
+        if method == "eth_getTransactionReceipt":
+            return self.receipt
+        raise AssertionError(method)
+
+    def send(self, key, *, to, data="0x", value=0):
+        tx = super().send(key, to=to, data=data, value=value)
+        if data == aa.selector("pause()"):
+            self.getter_override["paused()"] = 1
+        return tx
+
+    def call_word(self, to, data):
+        if to == aa.USDC and data.startswith(aa.selector("allowance(address,address)")):
+            spender = to_checksum_address("0x" + data[-40:])
+            return self.allowances.get(spender, 0)
+        return super().call_word(to, data)
+
+
+class DeviceLaneTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.owner = Account.create()
+        self.guardian = Account.create()
+        self.artifact = aa.Artifact.load()
+        self.evm = DeviceLaneEvm(self.artifact, self.owner.address)
+        self.broker = FakeBroker(self.owner.address)
+        self.clock = [NOW]
+        self.service = aa.AllowanceService(
+            store=aa.AllowanceStore(Path(self.tmp.name) / "allowance.db"), evm=self.evm,
+            fernet=Fernet(Fernet.generate_key()), owners={USER: self.owner.address},
+            guardian_key=lambda: self.guardian.key.to_0x_hex(),
+            gas_funder_key=lambda: Account.create().key.to_0x_hex(), artifact=self.artifact,
+            max_daily=100_000_000, max_per_purchase=25_000_000, max_days=90, broker=self.broker,
+            max_grant=300_000_000, now=lambda: self.clock[0],
+        )
+        self.limiter = self.service.setup(USER, "100", "10", "30")["limiter"]
+
+    def job(self, n=1):
+        return self.broker.jobs[f"job_{n:08d}"]
+
+    def sign(self, spender, amount, account=None):
+        self.job_result(signed_approve(account or self.owner, spender, amount))
+
+    def job_result(self, raw, n=1):
+        self.job(n).update(state="SUCCEEDED", result={"signedTransaction": raw})
+
+    def ops(self):
+        return self.service.store.recent_ops(USER, 10)
+
+    def test_a_grant_goes_to_the_device_then_the_chain_then_reads_back(self):
+        answer = self.service.grant(USER, "250")
+        self.assertIn("Confirm on your Trezor: an approve of 250 USDC", answer["telegramText"])
+        self.assertEqual(self.broker.created[0]["kind"], "usdc_approve")
+        self.assertEqual(self.broker.created[0]["payload"], {"spender": self.limiter, "amountAtomic": 250_000_000})
+        self.assertEqual(self.broker.created[0]["expires"], NOW + aa.DEVICE_JOB_SECONDS)
+
+        self.job().update(state="LEASED")
+        self.service.advance(USER)
+        self.assertEqual(self.ops()[0]["state"], "WAITING_DEVICE")
+
+        self.sign(self.limiter, 250_000_000)
+        self.service.advance(USER)
+        self.assertEqual(self.ops()[0]["state"], "BROADCAST")
+        self.assertEqual(len(self.evm.broadcasts), 1)
+
+        self.evm.receipt = {"status": "0x1"}
+        self.evm.allowances[self.limiter] = 250_000_000
+        status = self.service.status(USER)
+        self.assertEqual(self.ops()[0]["state"], "DONE")
+        self.assertEqual(status["state"], "granted")
+        self.assertIn("grant 250 USDC: done — Allowance now 250 USDC.", status["telegramText"])
+        self.assertEqual(len(self.evm.broadcasts), 1)
+
+    def test_grants_are_refused_before_the_device_when_they_should_be(self):
+        cases = [
+            ("no companion", lambda: setattr(self.broker, "wallet", None), "No Trezor companion"),
+            ("another Trezor", lambda: setattr(self.broker, "wallet", Account.create().address), "not the address on file"),
+            ("above the ceiling", lambda: None, "limited to 300 USDC"),
+            ("paused limiter", lambda: self.evm.getter_override.update({"paused()": 1}), "expired or paused"),
+        ]
+        for name, spoil, text in cases:
+            with self.subTest(name):
+                self.broker.wallet = self.owner.address
+                self.evm.getter_override = {}
+                spoil()
+                with self.assertRaises(aa.AllowanceError) as raised:
+                    self.service.grant(USER, "301" if name == "above the ceiling" else "10")
+                self.assertIn(text, str(raised.exception))
+        self.assertEqual(self.broker.created, [])
+
+    def test_one_request_at_a_time(self):
+        self.service.grant(USER, "10")
+        with self.assertRaises(aa.AllowanceError) as raised:
+            self.service.grant(USER, "20")
+        self.assertIn("already waiting", str(raised.exception))
+        self.assertEqual(len(self.broker.created), 1)
+
+    def test_failures_on_the_owners_computer_are_named(self):
+        for code, text in (("device_rejected", "You cancelled it"),
+                           ("limiter_invalid", "treat this as an attack"),
+                           ("limit_exceeded", "SIGN402_TREZOR_POC_MAX_USD"),
+                           ("something_new", "It failed on your computer (something_new)")):
+            with self.subTest(code=code):
+                n = len(self.broker.created) + 1
+                self.service.grant(USER, "10")
+                self.job(n).update(state="FAILED", errorCode=code)
+                self.service.advance(USER)
+                self.assertEqual(self.ops()[0]["state"], "FAILED")
+                self.assertIn(text, self.ops()[0]["detail"])
+        self.assertEqual(self.evm.broadcasts, [])
+
+    def test_an_unconfirmed_request_expires_without_changes(self):
+        self.service.grant(USER, "10")
+        self.job().update(state="EXPIRED")
+        self.service.advance(USER)
+        self.assertIn("Nobody confirmed on the Trezor in time", self.ops()[0]["detail"])
+
+    def test_a_signature_for_something_else_is_never_broadcast(self):
+        self.service.grant(USER, "10")
+        self.job_result(signed_approve(self.owner, self.limiter, 11_000_000))
+        self.service.advance(USER)
+        self.assertEqual(self.ops()[0]["state"], "FAILED")
+        self.assertIn("not the approve that was asked for", self.ops()[0]["detail"])
+        self.assertEqual(self.evm.broadcasts, [])
+
+    def test_a_transient_broker_failure_keeps_the_request_waiting(self):
+        self.service.grant(USER, "10")
+        self.broker.unreachable = True
+        self.service.advance(USER)
+        self.assertEqual(self.ops()[0]["state"], "WAITING_DEVICE")
+
+    def test_a_lost_broadcast_is_offered_again_and_sent_once_on_chain(self):
+        self.service.grant(USER, "10")
+        self.sign(self.limiter, 10_000_000)
+        self.evm.broadcast_error = "Base RPC is not answering. Nothing was changed; try again shortly."
+        self.service.advance(USER)
+        self.assertEqual(self.ops()[0]["state"], "BROADCAST")
+
+        self.evm.broadcast_error = "Base refused eth_sendRawTransaction: already known"
+        self.service.advance(USER)
+        self.assertEqual(self.ops()[0]["state"], "BROADCAST")
+        self.assertEqual(len(set(self.evm.broadcasts)), 1)
+
+        self.evm.receipt = {"status": "0x1"}
+        self.evm.allowances[self.limiter] = 10_000_000
+        self.service.advance(USER)
+        self.assertEqual(self.ops()[0]["state"], "DONE")
+
+    def test_an_owner_without_gas_is_told_so(self):
+        self.service.grant(USER, "10")
+        self.sign(self.limiter, 10_000_000)
+        self.evm.broadcast_error = "Base refused eth_sendRawTransaction: insufficient funds for gas * price + value"
+        self.service.advance(USER)
+        self.assertEqual(self.ops()[0]["state"], "FAILED")
+        self.assertIn("needs a little ETH on Base", self.ops()[0]["detail"])
+
+    def test_a_reverted_approve_fails(self):
+        self.service.grant(USER, "10")
+        self.sign(self.limiter, 10_000_000)
+        self.service.advance(USER)
+        self.evm.receipt = {"status": "0x0"}
+        self.service.advance(USER)
+        self.assertEqual(self.ops()[0]["state"], "FAILED")
+
+    def test_revoke_is_an_approve_of_zero_and_reaches_superseded_limiters(self):
+        old = self.limiter
+        self.service.setup(USER, "50", "5", "7")
+        self.service.revoke(USER, old)
+        self.assertEqual(self.broker.created[-1]["payload"], {"spender": old, "amountAtomic": 0})
+        with self.assertRaises(aa.AllowanceError):
+            self.service.revoke(USER, "0x" + "99" * 20)
+
+    def test_pause_goes_through_the_guardian_without_the_device(self):
+        result = self.service.pause(USER)
+        pause_tx = self.evm.sent[-1]
+        self.assertEqual(pause_tx["from"], self.guardian.address)
+        self.assertEqual(pause_tx["to"], self.limiter)
+        self.assertEqual(pause_tx["data"], aa.selector("pause()"))
+        self.assertTrue(result["paused"])
+        self.assertIn("Paused.", result["telegramText"])
+        self.assertEqual(self.broker.created, [])
+
+        sent = len(self.evm.sent)
+        self.service.pause(USER)
+        self.assertEqual(len(self.evm.sent), sent)

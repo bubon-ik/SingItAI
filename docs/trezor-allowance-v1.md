@@ -155,7 +155,7 @@ Build order, each phase ending with tests and a live check:
 | --- | --- |
 | 0 | Current `main` merged into this branch (done: `696f02e`) |
 | 1 | Server-side agent keys and limiter deployment; setup and status endpoints (done: see below) |
-| 2 | Grant and revoke as broker jobs signed through the companion; guardian pause |
+| 2 | Grant and revoke as broker jobs signed through the companion; guardian pause (done: see below) |
 | 3 | The purchase lane in the gateway: funding, x402 payment by the agent key, Bitrefill x402, settlement on chain, spending memory in front |
 | 4 | Bot commands and `/limits` from the chain |
 | 5 | The watcher: notifications and automatic pause |
@@ -186,13 +186,46 @@ Build order, each phase ending with tests and a live check:
   down" get different answers.
 
 Configuration: `SIGN402_ALLOWANCE_OWNERS` (`telegramUserId:0xTrezorAddress`, the
-allowlist while the lane is the owner's only), `SIGN402_ALLOWANCE_GUARDIAN_ADDRESS`,
+allowlist while the lane is the owner's only), `SIGN402_ALLOWANCE_GUARDIAN_KEY` (phase 2),
 `SIGN402_ALLOWANCE_GAS_FUNDER_KEY` (encrypted), optional `SIGN402_ALLOWANCE_DB`,
 `SIGN402_ALLOWANCE_RPC_URL`, `SIGN402_ALLOWANCE_MAX_DAILY_USDC` (100),
 `SIGN402_ALLOWANCE_MAX_PER_PURCHASE_USDC` (25), `SIGN402_ALLOWANCE_MAX_DAYS` (90).
 Operator keys are made with `python -m sign402_gateway.agent_allowance
 new-operator-key`, which prints only the address and the encrypted blob. A
 misconfigured lane is logged and left off; it does not stop the gateway.
+
+### Phase 2: grant, revoke and pause from Telegram
+
+`POST /agent/allowance/grant {amount}`, `/revoke {limiter?}`, `/pause`.
+
+- **Grant and revoke** create a `usdc_approve` job in the broker and answer at
+  once ("confirm on your Trezor"); `/allowance_status` moves the request on. The
+  owner's companion takes the job to the local sidecar, which signs
+  `approve(limiter, amount)` on the device and returns it signed, not broadcast.
+  The gateway checks the bytes again — Base, USDC, `approve` of exactly this
+  limiter and amount, signed by the owner on file — and only then sends it, and
+  reports done once the allowance reads back.
+- **The owner's computer refuses a lookalike before the device is asked.** For a
+  grant, the sidecar reads the spender from the chain and requires the tested
+  AgentAllowance code (immutables masked, against its own copy of the artifact),
+  this Trezor as owner, USDC as token, not paused, not expired. A compromised
+  server cannot put another contract on the device screen; the refusal reaches
+  Telegram as an alarm. Revoking checks nothing about the spender.
+- **The owner on file and the Trezor paired through the companion must agree**,
+  or nothing is asked.
+- **One request at a time.** A request records its state before each step
+  (waiting for the device, sent, done, failed), so a lost reply cannot send a
+  signed approve twice; a transient broker or RPC failure leaves the request
+  where it was, and a sent approve without a receipt is offered again with the
+  same bytes.
+- **Pause** is a guardian transaction: no device, permanent. The guardian's gas
+  is topped up from the operator's gas key like the agent's.
+
+Adds `SIGN402_ALLOWANCE_BROKER_URL` (default `http://127.0.0.1:8122`),
+`SIGN402_ALLOWANCE_BROKER_TOKEN` (the broker's internal token),
+`SIGN402_ALLOWANCE_GUARDIAN_KEY` (encrypted; replaces the phase 1 guardian
+address) and `SIGN402_ALLOWANCE_MAX_GRANT_USDC` (300). The broker learns the job
+kind with a migration that keeps every existing row.
 
 ## Granting, changing and revoking
 

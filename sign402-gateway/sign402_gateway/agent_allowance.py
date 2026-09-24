@@ -5,9 +5,10 @@ address. The owner grants an `AgentAllowance` limiter an ERC-20 allowance from
 the device; the user's agent key — held here, encrypted like managed wallet keys
 — spends through the limiter within caps fixed at deployment.
 
-This module is phase 1 of the product integration: the agent key, the gas that
-key needs, the limiter's deployment and the reads that describe it. Granting,
-revoking, pausing and spending come in later phases.
+Phases 1 and 2 of the product integration: the agent key, the gas that key
+needs, the limiter's deployment and the reads that describe it; then granting
+and revoking from the owner's Trezor, through the broker and the companion on
+the owner's computer, and pausing through the guardian. Spending comes later.
 
 Nothing is trusted that can be checked. After a deployment, every immutable is
 read back from the chain and the runtime code is compared with the artifact the
@@ -48,7 +49,10 @@ OWNERS_ENV = "SIGN402_ALLOWANCE_OWNERS"
 DB_ENV = "SIGN402_ALLOWANCE_DB"
 RPC_ENV = "SIGN402_ALLOWANCE_RPC_URL"
 GAS_FUNDER_ENV = "SIGN402_ALLOWANCE_GAS_FUNDER_KEY"
-GUARDIAN_ENV = "SIGN402_ALLOWANCE_GUARDIAN_ADDRESS"
+GUARDIAN_KEY_ENV = "SIGN402_ALLOWANCE_GUARDIAN_KEY"
+BROKER_URL_ENV = "SIGN402_ALLOWANCE_BROKER_URL"
+BROKER_TOKEN_ENV = "SIGN402_ALLOWANCE_BROKER_TOKEN"
+MAX_GRANT_ENV = "SIGN402_ALLOWANCE_MAX_GRANT_USDC"
 MAX_DAILY_ENV = "SIGN402_ALLOWANCE_MAX_DAILY_USDC"
 MAX_PER_PURCHASE_ENV = "SIGN402_ALLOWANCE_MAX_PER_PURCHASE_USDC"
 MAX_DAYS_ENV = "SIGN402_ALLOWANCE_MAX_DAYS"
@@ -59,6 +63,9 @@ DEFAULT_RPC = "https://mainnet.base.org"
 DEFAULT_MAX_DAILY = Decimal("100")
 DEFAULT_MAX_PER_PURCHASE = Decimal("25")
 DEFAULT_MAX_DAYS = 90
+DEFAULT_MAX_GRANT = Decimal("300")
+DEFAULT_BROKER_URL = "http://127.0.0.1:8122"
+DEVICE_JOB_SECONDS = 600
 
 BASE_CHAIN_ID = 8453
 USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
@@ -328,6 +335,20 @@ class AllowanceStore:
                     created_at INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS limiters_by_user ON limiters(user_id, created_at);
+                CREATE TABLE IF NOT EXISTS operations (
+                    op_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('GRANT', 'REVOKE', 'PAUSE')),
+                    limiter_address TEXT NOT NULL,
+                    amount INTEGER NOT NULL,
+                    job_id TEXT,
+                    tx_hash TEXT,
+                    state TEXT NOT NULL CHECK(state IN ('WAITING_DEVICE', 'BROADCAST', 'DONE', 'FAILED')),
+                    detail TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS operations_by_user ON operations(user_id, created_at);
                 """
             )
         os.chmod(self.path, 0o600)
@@ -372,9 +393,144 @@ class AllowanceStore:
                 dict(row),
             )
 
+    def limiter(self, user_id: str, address: str) -> sqlite3.Row | None:
+        with self._db() as db:
+            return db.execute(
+                "SELECT * FROM limiters WHERE user_id = ? AND lower(limiter_address) = lower(?)",
+                (user_id, address),
+            ).fetchone()
+
+    def insert_op(self, row: Mapping[str, Any]) -> None:
+        with self._db() as db:
+            db.execute(
+                """INSERT INTO operations (op_id, user_id, kind, limiter_address, amount, job_id, tx_hash,
+                   state, detail, created_at, updated_at)
+                   VALUES (:op_id, :user_id, :kind, :limiter_address, :amount, :job_id, :tx_hash,
+                   :state, :detail, :created_at, :updated_at)""",
+                dict(row),
+            )
+
+    def update_op(self, op_id: str, now: int, **fields: Any) -> None:
+        assignments = ", ".join(f"{name} = :{name}" for name in fields)
+        with self._db() as db:
+            db.execute(
+                f"UPDATE operations SET {assignments}, updated_at = :updated_at WHERE op_id = :op_id",
+                {**fields, "updated_at": now, "op_id": op_id},
+            )
+
+    def open_ops(self, user_id: str) -> list[sqlite3.Row]:
+        with self._db() as db:
+            return db.execute(
+                "SELECT * FROM operations WHERE user_id = ? AND state IN ('WAITING_DEVICE', 'BROADCAST') ORDER BY created_at",
+                (user_id,),
+            ).fetchall()
+
+    def recent_ops(self, user_id: str, limit: int = 3) -> list[sqlite3.Row]:
+        with self._db() as db:
+            return db.execute(
+                "SELECT * FROM operations WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+                (user_id, limit),
+            ).fetchall()
+
     def set_source(self, limiter: str, source: str) -> None:
         with self._db() as db:
             db.execute("UPDATE limiters SET source = ? WHERE limiter_address = ?", (source, limiter))
+
+
+# --- the owner's device, through the broker -------------------------------------------------
+
+class BrokerClient:
+    """The loopback broker that hands device jobs to the owner's companion."""
+
+    def __init__(self, url: str, token: str, *, timeout: float = 10.0):
+        self.url = url.rstrip("/")
+        self.token = token
+        self.timeout = timeout
+
+    def _request(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
+        data = None if body is None else json.dumps(body).encode()
+        request = urllib.request.Request(
+            self.url + path, data=data, method=method,
+            headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                return response.status, json.loads(response.read() or b"{}")
+        except urllib.error.HTTPError as error:
+            try:
+                return error.code, json.loads(error.read() or b"{}")
+            except ValueError:
+                return error.code, {}
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+            raise AllowanceError("The Trezor link on the server is not answering. Nothing was changed.") from None
+
+    def companion(self, user_id: str) -> dict | None:
+        status, body = self._request("GET", f"/v1/internal/companions/{user_id}")
+        if status == 404:
+            return None
+        if status != 200:
+            raise AllowanceError("The Trezor link on the server refused the request. Nothing was changed.")
+        return body.get("companion")
+
+    def create_job(self, user_id: str, kind: str, key: str, payload: dict, expires_at: int) -> dict:
+        status, body = self._request("POST", "/v1/internal/jobs", {
+            "userId": user_id, "kind": kind, "idempotencyKey": key, "payload": payload, "expiresAt": expires_at,
+        })
+        if status != 202 or not isinstance(body.get("job"), dict):
+            raise AllowanceError("Could not reach your Trezor companion. Is it running on your computer?")
+        return body["job"]
+
+    def job(self, job_id: str) -> dict:
+        status, body = self._request("GET", f"/v1/internal/jobs/{job_id}")
+        if status != 200 or not isinstance(body.get("job"), dict):
+            raise AllowanceError("The Trezor link on the server did not return the request.")
+        return body["job"]
+
+
+def verify_signed_approve(raw_tx: str, owner: str, spender: str, amount_atomic: int) -> str:
+    """The transaction hash, if and only if raw_tx is exactly this approve from owner.
+
+    The owner's computer already checked it before returning it; this checks
+    again, here, because this is where it is broadcast.
+    """
+    import rlp
+
+    try:
+        raw = bytes.fromhex(raw_tx.removeprefix("0x"))
+        if not raw or raw[0] != 2:
+            raise ValueError("not an EIP-1559 transaction")
+        fields = rlp.decode(raw[1:])
+        chain_id, _nonce, _priority, _max_fee, _gas, to, value, data, access_list = fields[:9]
+        expected = bytes.fromhex(encode_call("approve(address,uint256)", spender, amount_atomic)[2:])
+        if (
+            len(fields) != 12
+            or int.from_bytes(chain_id, "big") != BASE_CHAIN_ID
+            or to != bytes.fromhex(USDC[2:])
+            or int.from_bytes(value, "big") != 0
+            or data != expected
+            or access_list != []
+            or Account.recover_transaction(raw_tx).lower() != owner.lower()
+        ):
+            raise ValueError("not the requested approve")
+    except Exception:
+        raise AllowanceError(
+            "What came back from your Trezor is not the approve that was asked for. It was not sent."
+        ) from None
+    return "0x" + keccak(raw).hex()
+
+
+DEVICE_ERRORS = {
+    "device_rejected": "You cancelled it on the Trezor. Nothing changed.",
+    "device_timeout": "The Trezor was not confirmed in time. Nothing changed.",
+    "limiter_invalid": (
+        "Your computer refused to show this on the Trezor: the spender is not your verified limiter. "
+        "Nothing was signed. If you did not change anything yourself, treat this as an attack."
+    ),
+    "limit_exceeded": "The amount is above the limit set on your computer (SIGN402_TREZOR_POC_MAX_USD). Nothing changed.",
+    "not_paired": "Your computer has no paired Trezor. Pair it again, then retry. Nothing changed.",
+    "pairing_mismatch": "The Trezor paired on your computer does not match. Nothing changed.",
+    "device_busy": "The Trezor was busy with another request. Nothing changed; try again.",
+}
 
 
 # --- the service ---------------------------------------------------------------------------
@@ -412,28 +568,34 @@ class AllowanceService:
         evm: EvmClient,
         fernet: Any,
         owners: Mapping[str, str],
-        guardian: str,
+        guardian_key: Callable[[], str],
         gas_funder_key: Callable[[], str],
         artifact: Artifact,
         max_daily: int,
         max_per_purchase: int,
         max_days: int,
         publish_source: Callable[[str, str, Artifact], str] | None = None,
+        broker: BrokerClient | None = None,
+        max_grant: int = int(DEFAULT_MAX_GRANT * 1_000_000),
         now: Callable[[], float] = time.time,
     ):
         self.store = store
         self.evm = evm
         self.fernet = fernet
         self.owners = dict(owners)
-        self.guardian = to_checksum_address(guardian)
+        self.guardian_key = guardian_key
+        self.guardian = Account.from_key(guardian_key()).address
         self.gas_funder_key = gas_funder_key
         self.artifact = artifact
         self.max_daily = max_daily
         self.max_per_purchase = max_per_purchase
         self.max_days = max_days
         self.publish_source = publish_source
+        self.broker = broker
+        self.max_grant = max_grant
         self.now = now
         self._setup_lock = threading.Lock()
+        self._ops_lock = threading.Lock()
 
     # -- who --
 
@@ -564,14 +726,202 @@ class AllowanceService:
                 return f"{getter} does not read back as deployed"
         return None
 
+    # -- the owner's device: grant and revoke --
+
+    def _verified_owner(self, user_id: str) -> str:
+        owner = self.owner_of(user_id)
+        if self.broker is None:
+            raise AllowanceUnavailable("Granting from the Trezor is not set up on this server.")
+        companion = self.broker.companion(user_id)
+        if companion is None:
+            raise AllowanceError("No Trezor companion is paired for your account. Pair it first.")
+        if str(companion.get("walletAddress", "")).lower() != owner.lower():
+            raise AllowanceError(
+                "The Trezor paired through the companion is not the address on file for you. Nothing was changed."
+            )
+        return owner
+
+    def grant(self, user_id: str, amount: Any) -> dict[str, Any]:
+        owner = self._verified_owner(user_id)
+        amount_atomic = _usdc_atomic(amount, "The allowance")
+        if amount_atomic > self.max_grant:
+            raise AllowanceError(f"Allowances are limited to {_usdc_text(self.max_grant)} while the lane is in testing.")
+        active = self.store.active_limiter(user_id)
+        if active is None:
+            raise AllowanceError("Set up a limiter first with /allowance_setup <daily> <per purchase> <days>.")
+        if active["expiry"] <= self.now() or self.evm.call_word(active["limiter_address"], selector("paused()")):
+            raise AllowanceError("Your limiter is expired or paused. Set up a new one first.")
+        return self._device_op(user_id, "GRANT", active["limiter_address"], amount_atomic, owner)
+
+    def revoke(self, user_id: str, limiter: str | None = None) -> dict[str, Any]:
+        owner = self._verified_owner(user_id)
+        if limiter:
+            row = self.store.limiter(user_id, str(limiter).strip())
+            if row is None:
+                raise AllowanceError("That limiter is not one of yours.")
+        else:
+            row = self.store.active_limiter(user_id)
+            if row is None:
+                raise AllowanceError("You have no limiter to revoke.")
+        return self._device_op(user_id, "REVOKE", row["limiter_address"], 0, owner)
+
+    def _device_op(self, user_id: str, kind: str, limiter: str, amount: int, owner: str) -> dict[str, Any]:
+        with self._ops_lock:
+            if self.store.open_ops(user_id):
+                raise AllowanceError("A request is already waiting for your Trezor. Finish or let it expire first.")
+            now = int(self.now())
+            op_id = "op_" + keccak(text=f"{user_id}:{kind}:{limiter}:{amount}:{now}:{os.urandom(8).hex()}").hex()[:24]
+            job = self.broker.create_job(
+                user_id, "usdc_approve", f"allowance:{op_id}",
+                {"spender": to_checksum_address(limiter), "amountAtomic": amount}, now + DEVICE_JOB_SECONDS,
+            )
+            self.store.insert_op({
+                "op_id": op_id, "user_id": user_id, "kind": kind, "limiter_address": limiter, "amount": amount,
+                "job_id": job["jobId"], "tx_hash": None, "state": "WAITING_DEVICE", "detail": "",
+                "created_at": now, "updated_at": now,
+            })
+        what = f"an approve of {_usdc_text(amount)}" if amount else "an approve of 0 (revoke)"
+        return {
+            "operation": op_id, "state": "WAITING_DEVICE",
+            "telegramText": (
+                f"Confirm on your Trezor: {what} to\n{limiter}\n"
+                "Your computer checks the limiter before the device shows anything. "
+                "Then send /allowance_status."
+            ),
+        }
+
+    def advance(self, user_id: str) -> None:
+        """Move this user's pending grants and revokes forward, once each."""
+        with self._ops_lock:
+            for op in self.store.open_ops(user_id):
+                try:
+                    self._advance_op(op)
+                except AllowanceError as error:
+                    self.store.update_op(op["op_id"], int(self.now()), state="FAILED", detail=str(error))
+
+    def _advance_op(self, op: sqlite3.Row) -> None:
+        """One step for one operation. A transient failure leaves it where it is.
+
+        WAITING_DEVICE -> the broker job finished: failed on the owner's side
+        (FAILED, with the reason in words), or signed (checked here, then
+        BROADCAST before sending, so a lost reply cannot send it twice).
+        BROADCAST -> a receipt: DONE once the allowance reads back, FAILED if it
+        reverted. No receipt yet: the same signed bytes are offered again, which
+        a node that already has them answers with "already known".
+        """
+        now = int(self.now())
+        if op["state"] == "WAITING_DEVICE":
+            try:
+                job = self.broker.job(op["job_id"])
+            except AllowanceError:
+                return
+            state = job.get("state")
+            if state in ("QUEUED", "LEASED"):
+                return
+            if state == "EXPIRED":
+                self.store.update_op(op["op_id"], now, state="FAILED",
+                                     detail="Nobody confirmed on the Trezor in time (is the companion running?). Nothing changed.")
+                return
+            if state != "SUCCEEDED":
+                code = str(job.get("errorCode") or "failed")
+                self.store.update_op(op["op_id"], now, state="FAILED", detail=DEVICE_ERRORS.get(
+                    code, f"It failed on your computer ({code}). Nothing changed."))
+                return
+            raw = str((job.get("result") or {}).get("signedTransaction", ""))
+            tx_hash = verify_signed_approve(raw, self.owners.get(op["user_id"], ""), op["limiter_address"], op["amount"])
+            self.store.update_op(op["op_id"], now, state="BROADCAST", tx_hash=tx_hash)
+            self._broadcast(raw)
+            return
+
+        # BROADCAST
+        try:
+            receipt = self.evm.rpc.call("eth_getTransactionReceipt", [op["tx_hash"]])
+        except Exception:
+            return
+        if isinstance(receipt, dict):
+            if int(receipt.get("status", "0x0"), 16) != 1:
+                raise AllowanceError(f"The approve {op['tx_hash']} reverted on Base.")
+            owner = self.owners.get(op["user_id"], "")
+            left = self.evm.wait_until(
+                lambda: self.evm.call_word(USDC, encode_call("allowance(address,address)", owner, op["limiter_address"])),
+                lambda value: value == op["amount"],
+            )
+            self.store.update_op(op["op_id"], now, state="DONE", detail=f"Allowance now {_usdc_text(left)}.")
+            return
+        if now - op["updated_at"] > DEVICE_JOB_SECONDS:
+            raise AllowanceError(f"The approve {op['tx_hash']} was sent but not mined. Check it on BaseScan before retrying.")
+        try:
+            job = self.broker.job(op["job_id"])
+        except AllowanceError:
+            return
+        self._broadcast(str((job.get("result") or {}).get("signedTransaction", "")))
+
+    def _broadcast(self, raw: str) -> None:
+        try:
+            self.evm.call("eth_sendRawTransaction", [raw])
+        except AllowanceError as error:
+            message = str(error).lower()
+            if "already known" in message or "nonce too low" in message:
+                return  # sent before; the receipt decides
+            if "not answering" in message:
+                return  # transport: stays BROADCAST, offered again next time
+            if "insufficient funds" in message:
+                raise AllowanceError(
+                    "Your Trezor address needs a little ETH on Base to pay for the approve's gas. It was not sent."
+                ) from None
+            raise
+
+    def _op_text(self, op: sqlite3.Row) -> str:
+        when = time.strftime("%H:%M UTC", time.gmtime(op["created_at"]))
+        what = {"GRANT": f"grant {_usdc_text(op['amount'])}", "REVOKE": "revoke", "PAUSE": "pause"}[op["kind"]]
+        state = {"WAITING_DEVICE": "waiting for your Trezor", "BROADCAST": f"sent, {op['tx_hash']}",
+                 "DONE": "done", "FAILED": "failed"}[op["state"]]
+        detail = f" — {op['detail']}" if op["detail"] else ""
+        return f"{when} {what}: {state}{detail}"
+
+    # -- the guardian: pause without the device --
+
+    def pause(self, user_id: str) -> dict[str, Any]:
+        self.owner_of(user_id)
+        active = self.store.active_limiter(user_id)
+        if active is None:
+            raise AllowanceError("You have no limiter to pause.")
+        limiter = active["limiter_address"]
+        if self.evm.call_word(limiter, selector("paused()")):
+            return {**self._describe(active), "paused": True}
+        data = selector("pause()")
+        self.ensure_gas(self.guardian, self.evm.quote(self.guardian, to=limiter, data=data)["maxCostWei"])
+        tx = self.evm.send(self.guardian_key(), to=limiter, data=data)
+        self.evm.wait_receipt(tx)
+        self.evm.wait_until(lambda: self.evm.call_word(limiter, selector("paused()")), lambda flag: flag == 1)
+        now = int(self.now())
+        self.store.insert_op({
+            "op_id": "op_" + tx[2:26], "user_id": user_id, "kind": "PAUSE", "limiter_address": limiter,
+            "amount": 0, "job_id": None, "tx_hash": tx, "state": "DONE", "detail": "Paused for good.",
+            "created_at": now, "updated_at": now,
+        })
+        logger.info("allowance: guardian paused %s for user %s in %s", limiter, user_id, tx)
+        described = self._describe(active)
+        described["telegramText"] = (
+            f"Paused. The limiter {limiter} can no longer move anything, permanently (tx {tx}).\n"
+            "To stop the allowance on chain as well, revoke it from your Trezor with /allowance_revoke.\n\n"
+            + described["telegramText"]
+        )
+        return described
+
     # -- reads --
 
     def status(self, user_id: str) -> dict[str, Any]:
         self.owner_of(user_id)
+        self.advance(user_id)
         active = self.store.active_limiter(user_id)
         if active is None:
             return {"configured": False, "telegramText": "No Trezor allowance yet. Set one up with /allowance_setup <daily> <per purchase> <days>."}
-        return {**self._describe(active), "configured": True}
+        described = self._describe(active)
+        operations = [self._op_text(op) for op in self.store.recent_ops(user_id)]
+        if operations:
+            described["telegramText"] += "\n\nRecent requests:\n" + "\n".join(operations)
+        return {**described, "configured": True, "operations": operations}
 
     def _describe(self, row: Mapping[str, Any]) -> dict[str, Any]:
         limiter, owner, agent = row["limiter_address"], row["owner_address"], row["agent_address"]
@@ -653,15 +1003,24 @@ def build_allowance_service_from_env(
     owners = parse_owners(str(values.get(OWNERS_ENV, "")))
     if not owners:
         raise ValueError(f"{ENABLED_ENV}=1 needs {OWNERS_ENV}.")
-    guardian = str(values.get(GUARDIAN_ENV, "")).strip()
-    if not guardian:
-        raise ValueError(f"{ENABLED_ENV}=1 needs {GUARDIAN_ENV}.")
+    guardian_blob = str(values.get(GUARDIAN_KEY_ENV, "")).strip()
+    if not guardian_blob:
+        raise ValueError(f"{ENABLED_ENV}=1 needs {GUARDIAN_KEY_ENV} (Fernet-encrypted with the master key).")
     funder_blob = str(values.get(GAS_FUNDER_ENV, "")).strip()
     if not funder_blob:
         raise ValueError(f"{ENABLED_ENV}=1 needs {GAS_FUNDER_ENV} (Fernet-encrypted with the master key).")
 
     def funder_key() -> str:
         return fernet.decrypt(funder_blob.encode("ascii")).decode()
+
+    def guardian_key() -> str:
+        return fernet.decrypt(guardian_blob.encode("ascii")).decode()
+
+    broker_token = str(values.get(BROKER_TOKEN_ENV, "")).strip()
+    broker = (
+        BrokerClient(str(values.get(BROKER_URL_ENV, "") or DEFAULT_BROKER_URL), broker_token)
+        if broker_token else None
+    )
 
     rpc_url = str(values.get(RPC_ENV, "") or values.get("SIGN402_BASE_RPC_URL", "") or DEFAULT_RPC).strip()
     evm = EvmClient(JsonRpc(rpc_url))
@@ -670,13 +1029,15 @@ def build_allowance_service_from_env(
         evm=evm,
         fernet=fernet,
         owners=owners,
-        guardian=guardian,
+        guardian_key=guardian_key,
         gas_funder_key=funder_key,
         artifact=Artifact.load(),
         max_daily=_usdc_atomic(values.get(MAX_DAILY_ENV, DEFAULT_MAX_DAILY), MAX_DAILY_ENV),
         max_per_purchase=_usdc_atomic(values.get(MAX_PER_PURCHASE_ENV, DEFAULT_MAX_PER_PURCHASE), MAX_PER_PURCHASE_ENV),
         max_days=int(values.get(MAX_DAYS_ENV, DEFAULT_MAX_DAYS)),
         publish_source=publish_to_sourcify if str(values.get(SOURCIFY_ENV, "1")) == "1" else None,
+        broker=broker,
+        max_grant=_usdc_atomic(values.get(MAX_GRANT_ENV, DEFAULT_MAX_GRANT), MAX_GRANT_ENV),
     )
 
 
