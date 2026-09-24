@@ -1,0 +1,400 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from cryptography.fernet import Fernet
+from eth_account import Account
+from eth_utils import keccak, to_checksum_address
+
+from sign402_gateway import agent_allowance as aa
+from sign402_gateway.base_balances import BaseBalanceError
+
+OWNER = "0x1111111111111111111111111111111111111111"
+GUARDIAN = "0x2222222222222222222222222222222222222222"
+USER = "4242"
+NOW = 1_800_000_000
+
+
+class FakeRpc:
+    """JSON-RPC at the method level, for EvmClient."""
+
+    def __init__(self, replies=None, failures=0):
+        self.replies = dict(replies or {})
+        self.calls = []
+        self.failures = failures
+
+    def call(self, method, params):
+        self.calls.append((method, params))
+        if self.failures:
+            self.failures -= 1
+            raise BaseBalanceError("Base RPC is unavailable")
+        reply = self.replies[method]
+        return reply(params) if callable(reply) else reply
+
+
+def rpc_for_send(report=None):
+    def send_raw(params):
+        raw = params[0]
+        return report or "0x" + keccak(bytes.fromhex(raw[2:])).hex()
+
+    return FakeRpc({
+        "eth_chainId": hex(aa.BASE_CHAIN_ID),
+        "eth_getTransactionCount": "0x7",
+        "eth_maxPriorityFeePerGas": hex(1_000_000),
+        "eth_getBlockByNumber": {"baseFeePerGas": hex(5_000_000)},
+        "eth_estimateGas": hex(100_000),
+        "eth_sendRawTransaction": send_raw,
+    })
+
+
+class EvmClientTests(unittest.TestCase):
+    def setUp(self):
+        self.sleeps = []
+
+    def client(self, rpc):
+        return aa.EvmClient(rpc, sleep=self.sleeps.append, now=lambda: NOW)
+
+    def test_send_signs_exactly_the_transaction_it_reports(self):
+        key = Account.create().key.to_0x_hex()
+        rpc = rpc_for_send()
+        tx_hash = self.client(rpc).send(key, to=OWNER, data="0x1234", value=5)
+
+        raw = next(p[0] for m, p in rpc.calls if m == "eth_sendRawTransaction")
+        self.assertEqual(tx_hash, "0x" + keccak(bytes.fromhex(raw[2:])).hex())
+        decoded = Account.recover_transaction(raw)
+        self.assertEqual(decoded, Account.from_key(key).address)
+        estimate = next(p[0] for m, p in rpc.calls if m == "eth_estimateGas")
+        self.assertEqual(estimate["to"], OWNER)
+        self.assertEqual(estimate["value"], "0x5")
+
+    def test_a_node_refusal_is_named_and_not_retried(self):
+        class Refusing(FakeRpc):
+            def call(self, method, params):
+                if method == "eth_sendRawTransaction":
+                    self.calls.append((method, params))
+                    raise aa.RpcRejected("insufficient funds for gas * price + value")
+                return super().call(method, params)
+
+        rpc = Refusing(rpc_for_send().replies)
+        with self.assertRaises(aa.AllowanceError) as raised:
+            self.client(rpc).send(Account.create().key.to_0x_hex(), to=OWNER)
+        self.assertIn("insufficient funds", str(raised.exception))
+        self.assertEqual([m for m, _ in rpc.calls].count("eth_sendRawTransaction"), 1)
+        self.assertEqual(self.sleeps, [])
+
+    def test_an_already_known_broadcast_is_success(self):
+        class AlreadyKnown(FakeRpc):
+            def call(self, method, params):
+                if method == "eth_sendRawTransaction":
+                    raise aa.RpcRejected("already known")
+                return super().call(method, params)
+
+        key = Account.create().key.to_0x_hex()
+        tx_hash = self.client(AlreadyKnown(rpc_for_send().replies)).send(key, to=OWNER)
+        self.assertEqual(len(tx_hash), 66)
+
+    def test_a_different_reported_hash_is_not_trusted(self):
+        rpc = rpc_for_send(report="0x" + "ab" * 32)
+        with self.assertRaises(aa.AllowanceError) as raised:
+            self.client(rpc).send(Account.create().key.to_0x_hex(), to=OWNER)
+        self.assertIn("Check both", str(raised.exception))
+
+    def test_refused_reads_are_retried_then_named(self):
+        rpc = FakeRpc({"eth_chainId": hex(aa.BASE_CHAIN_ID)}, failures=3)
+        self.client(rpc).require_base()
+        self.assertEqual(self.sleeps, [1, 2, 4])
+
+        rpc = FakeRpc({"eth_chainId": hex(aa.BASE_CHAIN_ID)}, failures=99)
+        with self.assertRaises(aa.AllowanceError) as raised:
+            self.client(rpc).require_base()
+        self.assertIn("Nothing was changed", str(raised.exception))
+
+    def test_another_chain_is_refused(self):
+        with self.assertRaises(aa.AllowanceError):
+            self.client(FakeRpc({"eth_chainId": "0x1"})).require_base()
+
+    def test_the_chain_is_confirmed_once(self):
+        rpc = FakeRpc({"eth_chainId": hex(aa.BASE_CHAIN_ID), "eth_getBalance": "0x5"})
+        client = self.client(rpc)
+        client.balance(OWNER)
+        client.balance(OWNER)
+        self.assertEqual([m for m, _ in rpc.calls].count("eth_chainId"), 1)
+
+    def test_a_reverted_transaction_is_an_error_and_a_pending_one_is_waited_for(self):
+        answers = iter([None, None, {"status": "0x1", "contractAddress": OWNER}])
+        rpc = FakeRpc({"eth_getTransactionReceipt": lambda p: next(answers)})
+        self.assertEqual(self.client(rpc).wait_receipt("0x" + "00" * 32)["contractAddress"], OWNER)
+
+        rpc = FakeRpc({"eth_getTransactionReceipt": {"status": "0x0"}})
+        with self.assertRaises(aa.AllowanceError):
+            self.client(rpc).wait_receipt("0x" + "00" * 32)
+
+
+class ArtifactTests(unittest.TestCase):
+    def setUp(self):
+        self.artifact = aa.Artifact.load()
+
+    def test_the_shipped_artifact_is_the_tested_contract(self):
+        data = json.loads(aa.ARTIFACT_PATH.read_text())
+        self.assertEqual(data["sourcePath"], "agent-allowance/src/AgentAllowance.sol")
+        self.assertEqual(self.artifact.compiler_version, "v0.8.24+commit.e11b9ed9")
+        # Seven immutables, each referenced wherever the code reads it.
+        self.assertGreaterEqual(len(self.artifact.immutable_ranges), 7)
+        self.assertTrue(all(length == 32 for _, length in self.artifact.immutable_ranges))
+
+    def test_creation_data_appends_the_seven_constructor_words(self):
+        data = self.artifact.creation_data(OWNER, GUARDIAN, OWNER, 100, 10, NOW)
+        tail = data[len(self.artifact.bytecode):]
+        self.assertEqual(len(tail), 7 * 64)
+        self.assertEqual(tail[:64], aa.USDC.lower()[2:].rjust(64, "0"))
+        self.assertEqual(int(tail[-64:], 16), NOW)
+
+    def test_code_check_ignores_immutables_and_nothing_else(self):
+        code = bytearray(bytes.fromhex(self.artifact.deployed_bytecode[2:]))
+        start, length = self.artifact.immutable_ranges[0]
+        code[start:start + length] = b"\x42" * length
+        self.assertTrue(self.artifact.runs("0x" + code.hex()))
+
+        outside = next(i for i in range(len(code)) if all(not s <= i < s + n for s, n in self.artifact.immutable_ranges))
+        code[outside] ^= 0xFF
+        self.assertFalse(self.artifact.runs("0x" + code.hex()))
+
+
+class FakeEvm:
+    """The chain at the EvmClient interface, with a limiter that answers."""
+
+    def __init__(self, artifact):
+        self.artifact = artifact
+        self.balances = {}
+        self.sent = []
+        self.limiter = None
+        self.deployments = 0
+        self.deployed = None
+        self.code_override = None
+        self.getter_override = {}
+        self.allowance = 0
+
+    def balance(self, address):
+        return self.balances.get(address, 0)
+
+    deploy_cost = 10_000_000_000_000  # 0.00001 ETH, as on Base mainnet
+
+    def quote(self, sender, *, to, data="0x", value=0):
+        return {"maxCostWei": self.deploy_cost}
+
+    def send(self, key, *, to, data="0x", value=0):
+        sender = Account.from_key(key).address
+        self.sent.append({"from": sender, "to": to, "data": data, "value": value})
+        if to is None:
+            # Every deployment has its own address, as on chain.
+            self.deployments += 1
+            self.limiter = to_checksum_address("0x" + format(0xAB00 + self.deployments, "040x"))
+            self.deployed = data
+        else:
+            self.balances[to] = self.balances.get(to, 0) + value
+        return "0x" + format(len(self.sent), "064x")
+
+    def wait_receipt(self, tx):
+        return {"status": "0x1", "contractAddress": self.limiter if self.sent[-1]["to"] is None else None}
+
+    def wait_until(self, read, accept):
+        return read()
+
+    def code(self, address):
+        if self.code_override is not None:
+            return self.code_override
+        return self.artifact.deployed_bytecode if self.deployed else "0x"
+
+    def _constructor(self):
+        tail = self.deployed[len(self.artifact.bytecode):]
+        return [int(tail[i:i + 64], 16) for i in range(0, len(tail), 64)]
+
+    def call_word(self, to, data):
+        if to == aa.USDC:
+            return self.allowance if data.startswith(aa.selector("allowance(address,address)")) else 7_000_000
+        token, owner, agent, guardian, daily, per, expiry = self._constructor()
+        values = {
+            "token()": token, "owner()": owner, "agent()": agent, "guardian()": guardian,
+            "dailyCap()": daily, "perPurchaseCap()": per, "expiry()": expiry, "paused()": 0,
+            "remainingToday()": daily,
+        }
+        for getter, value in values.items():
+            if data == aa.selector(getter):
+                return self.getter_override.get(getter, value)
+        raise AssertionError(f"unexpected read {data}")
+
+    def usdc_balance(self, address):
+        return 7_000_000
+
+
+class AllowanceServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.fernet = Fernet(Fernet.generate_key())
+        self.funder = Account.create()
+        self.artifact = aa.Artifact.load()
+        self.evm = FakeEvm(self.artifact)
+        self.published = []
+        self.service = self.make_service()
+
+    def make_service(self, **overrides):
+        options = dict(
+            store=aa.AllowanceStore(Path(self.tmp.name) / "allowance.db"),
+            evm=self.evm, fernet=self.fernet, owners={USER: to_checksum_address(OWNER)},
+            guardian=GUARDIAN, gas_funder_key=lambda: self.funder.key.to_0x_hex(),
+            artifact=self.artifact, max_daily=100_000_000, max_per_purchase=25_000_000, max_days=90,
+            publish_source=lambda limiter, tx, artifact: self.published.append((limiter, tx)) or "exact_match",
+            now=lambda: NOW,
+        )
+        options.update(overrides)
+        return aa.AllowanceService(**options)
+
+    def test_only_listed_owners_are_served(self):
+        with self.assertRaises(aa.AllowanceUnavailable):
+            self.service.setup("9999", "100", "10", "30")
+        with self.assertRaises(aa.AllowanceUnavailable):
+            self.service.status("9999")
+        self.assertEqual(self.evm.sent, [])
+
+    def test_caps_are_checked_before_anything_is_created(self):
+        for daily, per, days in (("0", "1", "30"), ("10", "11", "30"), ("101", "10", "30"),
+                                 ("100", "26", "30"), ("10", "1", "0"), ("10", "1", "91"),
+                                 ("abc", "1", "30"), ("10", "1.0000001", "30"), ("10", "1", "2.5")):
+            with self.subTest(daily=daily, per=per, days=days):
+                with self.assertRaises(aa.AllowanceError):
+                    self.service.setup(USER, daily, per, days)
+        self.assertEqual(self.evm.sent, [])
+        self.assertIsNone(self.service.store.agent(USER))
+
+    def test_setup_funds_the_agent_deploys_and_verifies(self):
+        result = self.service.setup(USER, "100", "10", "30")
+
+        agent_row = self.service.store.agent(USER)
+        key = self.fernet.decrypt(agent_row["encrypted_key"].encode()).decode()
+        self.assertEqual(Account.from_key(key).address, agent_row["agent_address"])
+        self.assertNotIn(key[2:], agent_row["encrypted_key"])
+
+        funding, deployment = self.evm.sent
+        self.assertEqual(funding["from"], self.funder.address)
+        self.assertEqual(funding["to"], agent_row["agent_address"])
+        self.assertEqual(funding["value"], aa.AGENT_GAS_TARGET_WEI)
+        self.assertEqual(deployment["from"], agent_row["agent_address"])
+        self.assertEqual(deployment["data"], self.artifact.creation_data(
+            OWNER, agent_row["agent_address"], GUARDIAN, 100_000_000, 10_000_000, NOW + 30 * 86400))
+
+        self.assertTrue(result["created"])
+        self.assertEqual(result["limiter"], self.evm.limiter)
+        self.assertEqual(result["state"], "waiting for a grant from your Trezor")
+        self.assertEqual(result["source"], "exact_match")
+        self.assertIn(f"https://base.blockscout.com/address/{self.evm.limiter}?tab=contract", result["telegramText"])
+
+    def test_setup_twice_with_the_same_caps_deploys_once(self):
+        self.service.setup(USER, "100", "10", "30")
+        again = self.service.setup(USER, "100", "10", "30")
+        self.assertFalse(again["created"])
+        self.assertEqual(len(self.evm.sent), 2)
+
+    def test_gas_follows_the_price_of_the_deployment(self):
+        self.evm.deploy_cost = 300_000_000_000_000  # 0.0003 ETH, a fee spike
+        self.service.setup(USER, "100", "10", "30")
+        self.assertEqual(self.evm.sent[0]["value"], 600_000_000_000_000)
+
+    def test_a_top_up_above_the_ceiling_is_refused_before_anything_is_sent(self):
+        self.evm.deploy_cost = aa.MAX_GAS_TOP_UP_WEI
+        with self.assertRaises(aa.AllowanceError) as raised:
+            self.service.setup(USER, "100", "10", "30")
+        self.assertIn("unusually expensive", str(raised.exception))
+        self.assertEqual(self.evm.sent, [])
+
+    def test_gas_is_not_sent_to_an_agent_that_has_enough(self):
+        address, _ = self.service.agent_key(USER)
+        self.evm.balances[address] = aa.AGENT_GAS_MINIMUM_WEI
+        self.service.setup(USER, "100", "10", "30")
+        self.assertEqual([tx["to"] for tx in self.evm.sent], [None])
+
+    def test_a_limiter_that_is_not_the_tested_code_is_rejected(self):
+        code = bytearray(bytes.fromhex(self.artifact.deployed_bytecode[2:]))
+        code[-1] ^= 0xFF
+        self.evm.code_override = "0x" + code.hex()
+        with self.assertRaises(aa.AllowanceError) as raised:
+            self.service.setup(USER, "100", "10", "30")
+        self.assertIn("not the tested AgentAllowance", str(raised.exception))
+        self.assertIsNone(self.service.store.active_limiter(USER))
+        self.assertEqual(self.published, [])
+
+    def test_a_limiter_whose_fields_do_not_read_back_is_rejected(self):
+        for getter in ("owner()", "agent()", "guardian()", "token()", "dailyCap()", "perPurchaseCap()", "expiry()", "paused()"):
+            with self.subTest(getter=getter):
+                self.evm.getter_override = {getter: 1}
+                with self.assertRaises(aa.AllowanceError):
+                    self.service.setup(USER, "100", "10", "30")
+                self.assertIsNone(self.service.store.active_limiter(USER))
+
+    def test_a_failed_publication_does_not_undo_a_verified_deployment(self):
+        def fail(*args):
+            raise OSError("sourcify down")
+
+        service = self.make_service(publish_source=fail)
+        result = service.setup(USER, "100", "10", "30")
+        self.assertEqual(result["source"], "failed")
+        self.assertEqual(service.status(USER)["limiter"], self.evm.limiter)
+
+    def test_replacing_a_granted_limiter_warns_that_its_allowance_remains(self):
+        first = self.service.setup(USER, "100", "10", "30")
+        self.evm.allowance = 250_000_000
+        second = self.service.setup(USER, "50", "5", "7")
+        self.assertNotEqual(first["limiter"], second["limiter"])
+        self.assertEqual(second["previousLimiter"], first["limiter"])
+        self.assertIn("still holds an allowance of 250 USDC", second["telegramText"])
+
+    def test_replacing_an_ungranted_limiter_says_nothing_more(self):
+        self.service.setup(USER, "100", "10", "30")
+        second = self.service.setup(USER, "50", "5", "7")
+        self.assertNotIn("previousLimiter", second)
+
+    def test_status_reads_the_chain(self):
+        self.assertFalse(self.service.status(USER)["configured"])
+        self.service.setup(USER, "100", "10", "30")
+        self.evm.allowance = 300_000_000
+        status = self.service.status(USER)
+        self.assertTrue(status["configured"])
+        self.assertEqual(status["state"], "granted")
+        self.assertIn("Allowance from your Trezor: 300 USDC", status["telegramText"])
+        self.assertIn("Caps: 100 USDC a day, 10 USDC a purchase", status["telegramText"])
+
+
+class WiringTests(unittest.TestCase):
+    def test_off_by_default(self):
+        self.assertIsNone(aa.build_allowance_service_from_env("", env={}))
+
+    def test_on_needs_every_setting(self):
+        key = Fernet.generate_key().decode()
+        base = {aa.ENABLED_ENV: "1", aa.OWNERS_ENV: f"{USER}:{OWNER}", aa.GUARDIAN_ENV: GUARDIAN,
+                aa.GAS_FUNDER_ENV: "blob", aa.DB_ENV: str(Path(tempfile.mkdtemp()) / "a.db")}
+        for missing in (aa.OWNERS_ENV, aa.GUARDIAN_ENV, aa.GAS_FUNDER_ENV):
+            with self.subTest(missing=missing):
+                env = {k: v for k, v in base.items() if k != missing}
+                with self.assertRaises(ValueError):
+                    aa.build_allowance_service_from_env(key, env=env)
+        with self.assertRaises(ValueError):
+            aa.build_allowance_service_from_env("", env=base)
+        self.assertIsInstance(aa.build_allowance_service_from_env(key, env=base), aa.AllowanceService)
+
+    def test_owners_parse_to_checksummed_addresses(self):
+        self.assertEqual(aa.parse_owners(f" {USER} : {OWNER.lower()} , 7:{GUARDIAN}"),
+                         {USER: to_checksum_address(OWNER), "7": to_checksum_address(GUARDIAN)})
+        with self.assertRaises(ValueError):
+            aa.parse_owners("no-address")
+
+    def test_operator_keys_are_only_ever_returned_encrypted(self):
+        master = Fernet.generate_key().decode()
+        address, blob = aa.encrypt_operator_key(master)
+        key = Fernet(master.encode()).decrypt(blob.encode()).decode()
+        self.assertEqual(Account.from_key(key).address, address)
+        self.assertNotIn(key[2:], blob)
+
+
+if __name__ == "__main__":
+    unittest.main()

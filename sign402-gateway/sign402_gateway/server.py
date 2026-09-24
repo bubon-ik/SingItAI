@@ -115,6 +115,7 @@ from .diagnostics import (
 )
 from .decide import decide as decide_payment, journal as read_decision_journal
 from .keyring import install_master_key
+from .agent_allowance import AllowanceError, AllowanceUnavailable, build_allowance_service_from_env
 from .numeric import format_decimal
 from .goplausible import fetch_x402_paid_resource, fetch_x402_payment_required, normalize_x402_payment_required
 from .real_rate_pricing import RealRateSingitPricer
@@ -512,6 +513,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                         "/agent/chat/models",
                     ]
                 )
+            if getattr(self.server, "allowance", None) is not None:
+                endpoints.extend(["/agent/allowance/setup", "/agent/allowance/status"])
             if _test_endpoints_enabled():
                 endpoints.append("/agent/test-imessage-approval")
             if _legacy_payment_executor_enabled():
@@ -650,6 +653,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if path == "/agent/spending-limits":
             self._handle_agent_spending_limits()
+            return
+        if path in ("/agent/allowance/setup", "/agent/allowance/status"):
+            self._handle_agent_allowance(path)
             return
         if path == "/agent/buyer-email":
             self._handle_agent_buyer_email()
@@ -1129,6 +1135,41 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=503)
         except Exception as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_allowance(self, path: str) -> None:
+        """The Trezor allowance lane (docs/trezor-allowance-v1.md): off unless enabled."""
+        service = getattr(self.server, "allowance", None)
+        if service is None:
+            self._send_json({"ok": False, "error": "allowance-disabled"}, status=404)
+            return
+        try:
+            payload = self._read_json()
+            telegram_user_id = _require_authenticated_user(self, payload)
+            if path.endswith("/setup"):
+                result = service.setup(
+                    telegram_user_id,
+                    payload.get("dailyCap"),
+                    payload.get("perPurchaseCap"),
+                    payload.get("days"),
+                )
+            else:
+                result = service.status(telegram_user_id)
+            self._send_json({"ok": True, **result})
+        except WalletApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except WalletApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+        except AllowanceUnavailable as exc:
+            self._send_json({"ok": False, "error": "allowance-not-enabled", "telegramText": str(exc)}, status=403)
+        except AllowanceError as exc:
+            self._send_json({"ok": False, "error": "allowance-refused", "telegramText": str(exc)}, status=400)
+        except Exception:
+            logger.exception("allowance: %s failed", path)
+            self._send_json(
+                {"ok": False, "error": "allowance-failed",
+                 "telegramText": "The Trezor allowance request failed. Nothing was signed; try again later."},
+                status=500,
+            )
 
     def _handle_agent_spending_limits(self) -> None:
         try:
@@ -3104,6 +3145,13 @@ def build_server(
     # handle per request.
     server.spending_policy = build_spending_policy_from_env()
     server.ledger_payments = build_ledger_payments(server, ledger_config)
+    # A misconfigured allowance lane is logged and left off, not fatal: the
+    # gateway's other purchases must keep working while it is being set up.
+    try:
+        server.allowance = build_allowance_service_from_env(user_wallet_service.master_key)
+    except (ValueError, OSError) as exc:
+        logger.error("allowance lane disabled: %s", exc)
+        server.allowance = None
     # Its own memory, on purpose. See build_decide_policy_from_env.
     server.decide_policy = build_decide_policy_from_env()
     # Decisions for purchases in flight, keyed by reservation id. The Bitrefill

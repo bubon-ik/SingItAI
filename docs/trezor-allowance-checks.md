@@ -337,3 +337,38 @@ Two things the owner met on the way, both fixed or explained: the Claude Code
 terminal panel cannot execute files under `~/Documents` (macOS privacy; the
 macOS Terminal can), and the pre-grant read of the limiter sat silent for about
 fifteen seconds on the public endpoint — it now says what it is doing first.
+
+
+## Phase 1 — the gateway deploys limiters, 24 September
+
+**Status: PASS on a local fork of Base mainnet; not yet run on mainnet.**
+
+`AllowanceService.setup` against `anvil --fork-url https://mainnet.base.org`, with an
+anvil test key as the operator's gas key and the owner's real Trezor address as
+owner:
+
+- `setup 100 10 30`: agent key created and stored encrypted, agent funded by the
+  service's own quote, limiter deployed and verified in 4.4 s; status read from
+  the chain ("waiting for a grant from your Trezor", owner 6.481336 USDC).
+- The same caps again deployed nothing; new caps (`50 5 7`) deployed a second
+  limiter and marked the first `SUPERSEDED`; an unlisted Telegram user was refused.
+- `export_artifact.py --check --onchain` on both: each runs exactly the tested
+  code, immutables masked. Owner and guardian read back as configured.
+
+Two defects the rehearsal found in the new code, fixed before this record:
+
+1. The gateway's JSON-RPC client folds every node error into "request failed", so
+   a refused deployment was reported as "Base RPC is not answering" and retried.
+   The lane now has its own client that keeps the node's message: refusals are
+   named and not retried, transport failures are retried, and an "already known"
+   broadcast counts as sent.
+2. The agent was topped up to a fixed 0.0002 ETH. The fork's node quotes a 1 gwei
+   priority fee (mainnet quotes 0.001 gwei), the deployment's maximum cost
+   exceeded it, and the node refused it. The service now quotes the deployment
+   first and funds to twice its cost, with a 0.002 ETH ceiling.
+
+Sourcify's API accepted the publication request for the T4 limiter (409
+`already_verified`, exact matches), confirming the request shape; publication of a
+new deployment is first exercised on mainnet.
+
+Gateway suite: 1242/1242 (spending-memory at the pinned 443743e).

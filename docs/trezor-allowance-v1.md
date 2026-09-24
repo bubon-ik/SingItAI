@@ -154,12 +154,45 @@ Build order, each phase ending with tests and a live check:
 | Phase | Scope |
 | --- | --- |
 | 0 | Current `main` merged into this branch (done: `696f02e`) |
-| 1 | Server-side agent keys and limiter deployment; setup and status endpoints |
+| 1 | Server-side agent keys and limiter deployment; setup and status endpoints (done: see below) |
 | 2 | Grant and revoke as broker jobs signed through the companion; guardian pause |
 | 3 | The purchase lane in the gateway: funding, x402 payment by the agent key, Bitrefill x402, settlement on chain, spending memory in front |
 | 4 | Bot commands and `/limits` from the chain |
 | 5 | The watcher: notifications and automatic pause |
 | 6 | A live run through Telegram on mainnet, recorded in the checks |
+
+### Phase 1 in the gateway
+
+`sign402-gateway/sign402_gateway/agent_allowance.py`, behind `SIGN402_ALLOWANCE_ENABLED=1`.
+`POST /agent/allowance/setup {dailyCap, perPurchaseCap, days}` and
+`POST /agent/allowance/status`, both per user (`X-Sign402-User-Token`).
+
+- **Agent keys** are created on first use, one per user, Fernet-encrypted with the
+  wallet master key, and never returned.
+- **Gas**: before a deployment the service quotes its cost at current prices and
+  tops the agent up from the operator's gas key to the larger of 0.0002 ETH and
+  twice that cost; a top-up above 0.002 ETH is refused instead.
+- **The deployed code is the tested code.** The gateway deploys from
+  `contracts/agent_allowance.json`, which `agent-allowance/script/export_artifact.py`
+  writes from `forge build` and `--check` compares with a fresh build (and, with
+  `--onchain`, with a live limiter's code). After each deployment the service
+  compares the runtime code with the artifact, immutables masked, and reads every
+  immutable back; a limiter failing either is stored as `REJECTED` and never used.
+- **Source** is published to Sourcify per deployment; a failure is recorded, not
+  fatal.
+- **Replacing** a limiter with new caps leaves the old one's allowance on chain;
+  the answer says so when there is one to revoke.
+- **Node refusals are named, not retried**: "insufficient funds" and "the RPC is
+  down" get different answers.
+
+Configuration: `SIGN402_ALLOWANCE_OWNERS` (`telegramUserId:0xTrezorAddress`, the
+allowlist while the lane is the owner's only), `SIGN402_ALLOWANCE_GUARDIAN_ADDRESS`,
+`SIGN402_ALLOWANCE_GAS_FUNDER_KEY` (encrypted), optional `SIGN402_ALLOWANCE_DB`,
+`SIGN402_ALLOWANCE_RPC_URL`, `SIGN402_ALLOWANCE_MAX_DAILY_USDC` (100),
+`SIGN402_ALLOWANCE_MAX_PER_PURCHASE_USDC` (25), `SIGN402_ALLOWANCE_MAX_DAYS` (90).
+Operator keys are made with `python -m sign402_gateway.agent_allowance
+new-operator-key`, which prints only the address and the encrypted blob. A
+misconfigured lane is logged and left off; it does not stop the gateway.
 
 ## Granting, changing and revoking
 

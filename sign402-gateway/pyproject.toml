@@ -14,3 +14,7 @@ dependencies = [
 
 [project.scripts]
 sign402-gateway = "sign402_gateway.server:main"
+
+[tool.setuptools.package-data]
+# The compiled limiter the allowance lane deploys; see agent-allowance/script/export_artifact.py.
+sign402_gateway = ["contracts/*.json"]

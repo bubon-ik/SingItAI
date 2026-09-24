@@ -8495,3 +8495,86 @@ class SearchSettleHelperTests(unittest.TestCase):
             ).parameters
         ]
         self.assertEqual(missing, [])
+
+
+class AllowanceEndpointTests(unittest.TestCase):
+    """The Trezor allowance lane over HTTP: off by default, per-user, errors named."""
+
+    def request(self, path, body=None, *, server, method="POST", user_token="user-token-1"):
+        headers = {"Authorization": "Bearer test-wallet-token"}
+        if user_token:
+            headers["X-Sign402-User-Token"] = user_token
+        encoded = json.dumps(body or {}).encode("utf-8") if method == "POST" else b""
+        raw = (
+            f"{method} {path} HTTP/1.1\r\n".encode("ascii")
+            + f"Content-Length: {len(encoded)}\r\n".encode("ascii")
+            + b"Content-Type: application/json\r\n"
+            + b"".join(f"{k}: {v}\r\n".encode("ascii") for k, v in headers.items())
+            + b"\r\n"
+            + encoded
+        )
+        socket = FakeSocket(raw)
+        with patch("sys.stderr", io.StringIO()):
+            handler = Sign402GatewayHandler(socket, ("127.0.0.1", 12345), server)
+        text = socket.wfile.getvalue().decode("utf-8", "replace")
+        status_line, _, rest = text.partition("\r\n")
+        return int(status_line.split()[1]), json.loads(rest.split("\r\n\r\n", 1)[1])
+
+    def server(self, allowance=None):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id = Mock(return_value="1045618308")
+        if allowance is not None:
+            server.allowance = allowance
+        return server
+
+    def test_the_lane_is_off_unless_built(self):
+        status, body = self.request("/agent/allowance/status", server=self.server())
+        self.assertEqual(status, 404)
+        self.assertEqual(body["error"], "allowance-disabled")
+
+    def test_a_user_token_is_required(self):
+        allowance = Mock()
+        status, _ = self.request("/agent/allowance/status", server=self.server(allowance), user_token="")
+        self.assertEqual(status, 401)
+        allowance.status.assert_not_called()
+
+    def test_status_and_setup_act_for_the_token_holder(self):
+        allowance = Mock()
+        allowance.status.return_value = {"configured": True, "limiter": "0xabc", "telegramText": "ok"}
+        allowance.setup.return_value = {"created": True, "limiter": "0xabc", "telegramText": "made"}
+        server = self.server(allowance)
+
+        status, body = self.request("/agent/allowance/status", server=server)
+        self.assertEqual((status, body["limiter"]), (200, "0xabc"))
+        allowance.status.assert_called_once_with("1045618308")
+
+        status, body = self.request(
+            "/agent/allowance/setup", {"dailyCap": "100", "perPurchaseCap": "10", "days": "30"}, server=server)
+        self.assertEqual((status, body["created"]), (200, True))
+        allowance.setup.assert_called_once_with("1045618308", "100", "10", "30")
+
+    def test_refusals_are_named_and_failures_are_not_leaked(self):
+        from sign402_gateway.agent_allowance import AllowanceError, AllowanceUnavailable
+
+        cases = [
+            (AllowanceUnavailable("not enabled for this account"), 403, "allowance-not-enabled", "not enabled for this account"),
+            (AllowanceError("The per-purchase cap cannot be above the daily cap."), 400, "allowance-refused",
+             "The per-purchase cap cannot be above the daily cap."),
+            (RuntimeError("secret internal detail"), 500, "allowance-failed", "Nothing was signed"),
+        ]
+        for error, code, name, text in cases:
+            with self.subTest(name=name):
+                allowance = Mock()
+                allowance.setup.side_effect = error
+                with patch("sign402_gateway.server.logger"):
+                    status, body = self.request("/agent/allowance/setup", {}, server=self.server(allowance))
+                self.assertEqual((status, body["error"]), (code, name))
+                self.assertIn(text, body["telegramText"])
+                self.assertNotIn("secret internal detail", json.dumps(body))
+
+    def test_health_lists_the_lane_only_when_it_is_on(self):
+        _, off = self.request("/health", server=self.server(), method="GET", user_token="")
+        _, on = self.request("/health", server=self.server(Mock()), method="GET", user_token="")
+        self.assertNotIn("/agent/allowance/setup", off["endpoints"])
+        self.assertIn("/agent/allowance/setup", on["endpoints"])
+        self.assertIn("/agent/allowance/status", on["endpoints"])
