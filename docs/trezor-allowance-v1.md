@@ -199,7 +199,7 @@ misconfigured lane is logged and left off; it does not stop the gateway.
 `POST /agent/allowance/grant {amount}`, `/revoke {limiter?}`, `/pause`.
 
 - **Grant and revoke** create a `usdc_approve` job in the broker and answer at
-  once ("confirm on your Trezor"); `/allowance_status` moves the request on. The
+  once ("confirm on your Trezor"); `/allowance` moves the request on. The
   owner's companion takes the job to the local sidecar, which signs
   `approve(limiter, amount)` on the device and returns it signed, not broadcast.
   The gateway checks the bytes again — Base, USDC, `approve` of exactly this

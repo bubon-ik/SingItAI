@@ -951,7 +951,7 @@ class AllowanceService:
             "telegramText": (
                 f"Confirm on your Trezor: {what} to\n{limiter}\n"
                 "Your computer checks the limiter before the device shows anything. "
-                "Then send /allowance_status."
+                "Then send /allowance."
             ),
         }
 
@@ -1011,7 +1011,10 @@ class AllowanceService:
                 lambda: self.evm.call_word(USDC, encode_call("allowance(address,address)", owner, op["limiter_address"])),
                 lambda value: value == op["amount"],
             )
-            self.store.update_op(op["op_id"], now, state="DONE", detail=f"Allowance now {_usdc_text(left)}.")
+            detail = f"Allowance now {_usdc_text(left)}."
+            if op["kind"] == "REVOKE":
+                detail += self._return_float_if_closed(op["user_id"], owner)
+            self.store.update_op(op["op_id"], now, state="DONE", detail=detail)
             return
         if now - op["updated_at"] > DEVICE_JOB_SECONDS:
             raise AllowanceError(f"The approve {op['tx_hash']} was sent but not mined. Check it on BaseScan before retrying.")
@@ -1020,6 +1023,35 @@ class AllowanceService:
         except AllowanceError:
             return
         self._broadcast(str((job.get("result") or {}).get("signedTransaction", "")))
+
+    def _return_float_if_closed(self, user_id: str, owner: str) -> str:
+        """Send the agent's USDC back to the owner once nothing is granted any more.
+
+        The float is the owner's money held for the next purchases; with the
+        lane closed it has no purpose on a key this server holds. A revoke of a
+        superseded limiter, while the active one is still granted, keeps it.
+        """
+        active = self.store.active_limiter(user_id)
+        if active is not None and self.evm.call_word(
+                USDC, encode_call("allowance(address,address)", owner, active["limiter_address"])):
+            return ""
+        if self.store.agent(user_id) is None:
+            return ""
+        agent = self.store.agent(user_id)["agent_address"]
+        try:
+            agent, key = self.agent_key(user_id)
+            amount = self.evm.usdc_balance(agent)
+            if not amount:
+                return ""
+            data = encode_call("transfer(address,uint256)", owner, amount)
+            self.ensure_gas(agent, self.evm.quote(agent, to=USDC, data=data)["maxCostWei"])
+            tx = self.evm.send(key, to=USDC, data=data)
+            self.evm.wait_receipt(tx)
+        except Exception as exc:  # the revoke itself stands; the float can be returned later
+            logger.warning("allowance: returning the float of %s failed: %s", user_id, exc)
+            return f" Returning your agent's float failed ({exc}); it is still at {agent}."
+        logger.info("allowance: returned %s of float from %s to %s in %s", amount, agent, owner, tx)
+        return f" Your agent's float of {_usdc_text(amount)} went back to your Trezor address: {tx}."
 
     def _broadcast(self, raw: str) -> None:
         try:

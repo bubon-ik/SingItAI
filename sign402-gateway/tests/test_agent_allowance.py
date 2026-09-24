@@ -669,6 +669,35 @@ class DeviceLaneTests(unittest.TestCase):
         with self.assertRaises(aa.AllowanceError):
             self.service.revoke(USER, "0x" + "99" * 20)
 
+    def finish_revoke(self, limiter, n=1):
+        self.service.revoke(USER, limiter)
+        self.sign(limiter, 0)
+        self.service.advance(USER)
+        self.evm.receipt = {"status": "0x1"}
+        self.evm.allowances[limiter] = 0
+        self.service.advance(USER)
+        return self.ops()[0]
+
+    def test_a_revoke_that_closes_the_lane_returns_the_float_to_the_owner(self):
+        agent = self.service.store.agent(USER)["agent_address"]
+        sent = len(self.evm.sent)
+        op = self.finish_revoke(self.limiter)
+        transfer = self.evm.sent[-1]
+        self.assertEqual((transfer["from"], transfer["to"]), (agent, aa.USDC))
+        self.assertEqual(transfer["data"], aa.encode_call("transfer(address,uint256)", self.owner.address, 7_000_000))
+        self.assertEqual(len(self.evm.sent), sent + 1)
+        self.assertEqual(op["state"], "DONE")
+        self.assertIn("float of 7 USDC went back to your Trezor address", op["detail"])
+
+    def test_a_revoke_of_an_old_limiter_keeps_the_float_while_the_new_one_is_granted(self):
+        old = self.limiter
+        new = self.service.setup(USER, "50", "5", "7")["limiter"]
+        self.evm.allowances[new] = 5_000_000
+        sent = len(self.evm.sent)
+        op = self.finish_revoke(old)
+        self.assertEqual(len(self.evm.sent), sent)
+        self.assertEqual(op["detail"], "Allowance now 0 USDC.")
+
     def test_pause_goes_through_the_guardian_without_the_device(self):
         result = self.service.pause(USER)
         pause_tx = self.evm.sent[-1]
