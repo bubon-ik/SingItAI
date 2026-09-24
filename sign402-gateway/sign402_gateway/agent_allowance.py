@@ -941,6 +941,9 @@ class AllowanceService:
         return self._device_op(user_id, "REVOKE", row["limiter_address"], 0, owner)
 
     def _device_op(self, user_id: str, kind: str, limiter: str, amount: int, owner: str) -> dict[str, Any]:
+        # A request already mined but not yet read back must not block the next
+        # one (live: a grant stayed BROADCAST because no /allowance followed it).
+        self.advance(user_id)
         with self._ops_lock:
             if self.store.open_ops(user_id):
                 raise AllowanceError("A request is already waiting for your Trezor. Finish or let it expire first.")
@@ -1017,9 +1020,12 @@ class AllowanceService:
             if int(receipt.get("status", "0x0"), 16) != 1:
                 raise AllowanceError(f"The approve {op['tx_hash']} reverted on Base.")
             owner = self.owners.get(op["user_id"], "")
+            # Waits out a lagging node, but only while the approve is fresh:
+            # afterwards purchases spend from it and it never reads back whole.
+            fresh = now - op["updated_at"] < 120
             left = self.evm.wait_until(
                 lambda: self.evm.call_word(USDC, encode_call("allowance(address,address)", owner, op["limiter_address"])),
-                lambda value: value == op["amount"],
+                lambda value: value == op["amount"] or not fresh,
             )
             detail = f"Allowance now {_usdc_text(left)}."
             if op["kind"] == "REVOKE":

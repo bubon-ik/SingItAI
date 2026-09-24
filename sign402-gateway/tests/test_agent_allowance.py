@@ -713,6 +713,20 @@ class DeviceLaneTests(unittest.TestCase):
         self.assertEqual(op["state"], "DONE")
         self.assertIn("float of 7 USDC went back to your Trezor address", op["detail"])
 
+    def test_a_mined_grant_nobody_read_back_does_not_block_the_revoke(self):
+        """Live: grant broadcast, a purchase spent part of it, no /allowance; then /allowance_revoke."""
+        self.service.grant(USER, "1")
+        self.sign(self.limiter, 1_000_000)
+        self.service.advance(USER)
+        self.evm.receipt = {"status": "0x1"}
+        self.evm.allowances[self.limiter] = 800_000  # a purchase already spent from it
+        self.clock[0] += 600
+
+        answer = self.service.revoke(USER)
+        self.assertIn("approve of 0 (revoke)", answer["telegramText"])
+        grant = [op for op in self.ops() if op["kind"] == "GRANT"][0]
+        self.assertEqual((grant["state"], grant["detail"]), ("DONE", "Allowance now 0.8 USDC."))
+
     def test_a_revoke_of_an_old_limiter_keeps_the_float_while_the_new_one_is_granted(self):
         old = self.limiter
         new = self.service.setup(USER, "50", "5", "7")["limiter"]
