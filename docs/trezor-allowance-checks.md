@@ -264,3 +264,40 @@ and never took the password path. Fixed: the password goes into a regular file i
 a `mktemp -d` directory (700, file 600) removed on any exit, and the rehearsal now
 imports the agent into a password-protected keystore and runs exactly the owner's
 path. It passed; a wrong password stops before any transaction.
+
+## T7 — x402 on Base mainnet, paid by the agent, funded by the limiter, 24 September
+
+**Status: PASS, verified from the chain.** `agent-allowance/script/t7-x402.sh`
+against the owner's own services on Bankr x402 Cloud (x402 v2, `exact`, EIP-3009,
+facilitator `api.bankr.bot`), with the T4 limiter re-granted 1 USDC from the Trezor
+([`0x66a47d18…5a82`](https://basescan.org/tx/0x66a47d1822c3396d6c1f410f384e25ffbf605658d33cb68be96a052bae0b5a82)).
+Float target 0.05, low-water 0.01, exact funding above 0.01.
+
+| Purchase | HTTP | Funding by the limiter | Settlement on chain |
+| --- | --- | --- | --- |
+| `vet-service?slug=treza`, 0.005 | 200, review delivered | refill 0.05, [`0x7377411c…0832`](https://basescan.org/tx/0x7377411cea4feab76798d6a1f248b0cc76a9b9f6244ca95631f5f5ef6aa50832), block 51711184 | [`0x7cc1e86d…f7ab`](https://basescan.org/tx/0x7cc1e86d7f6c677a8a94fb9425bd04a1b052052dcd9ad162c38f4f2a422ff7ab), block 51711193: agent → `0x8AEE…01a0`, 5000 |
+| `vet-service?slug=venice`, 0.005 | 404, "service not found" | none: paid from the float | **none** — not delivered, not charged |
+| `vet-shortlist?limit=3`, 0.02 | 200, shortlist delivered | exact 0.02, [`0xee2ccf70…a282`](https://basescan.org/tx/0xee2ccf7092e41945eb834758ffd10e397500d4db77684807c5cf2f653b7aa282), block 51711206 | [`0x05e11d6d…891a`](https://basescan.org/tx/0x05e11d6de7592cf6251bfa563597792970faded03fe00e1ef7ddb9655c3a891a), block 51711215: agent → `0x8AEE…01a0`, 20000 |
+| Float returned | — | — | [`0x8c98edd2…0cf4`](https://basescan.org/tx/0x8c98edd20e857dff63a787d0a94bf7eed8bd203567214d2afa779ceb77970cf4): agent → owner, 45000 |
+| Revoke (Trezor) | — | — | [`0x8f412244…32ff`](https://basescan.org/tx/0x8f412244a37cc5671bcf388c6eaac2ec87d798b174eeaed34f98256f776932ff): allowance 0 |
+
+Both settlements were submitted by Bankr's facilitator `0x4a15…a584` to the payTo
+contract, which pulled the USDC with the agent's signed authorization. The owner
+lost exactly 0.025 (6.526336 → 6.501336), the price of the two delivered calls.
+Every x402 payment was signed by the agent key; the Trezor signed only the grant
+and the revoke. That is the lane working as designed.
+
+**The script reported 3 failures; none was real.** It took the settlement hash
+from the x402 client's result, and Bankr returns no settlement header
+(`paymentResponse: null`), so two paid calls looked unsettled; the 404 was counted
+as a failure too. Settlement is now read from the chain — a USDC `Transfer` from
+the agent to `payTo` of exactly the price, mined after the payment was sent — and
+four outcomes are distinguished: delivered and paid, and not delivered and not
+charged, pass; charged without delivery, or delivery without a settlement, fail.
+Rehearsed on a fork with a stub that behaves like Bankr: all four purchases
+classified correctly; with settlement suppressed, every delivered call fails.
+
+Not shown by this run: a *paid* purchase from the float with no refill. The
+venice call exercised that path but was not charged. The mechanism is the same as
+the first payment, which also came out of the float rather than an exact amount.
+The fixed script targets treza twice to show it on the next run.

@@ -28,7 +28,11 @@ FLOAT_TARGET=50000   # 0.05 USDC
 LOW_WATER=10000      # 0.01
 THRESHOLD=10000      # payments above this are funded exactly
 BANKR=https://x402.bankr.bot/0x3b3e349e6cfee692b69d2c63ce86f7d444667d98
+# treza twice: the first refills the float, the second pays from it with no
+# refill. venice is not in the service's index and answers 404: the check is
+# that nothing is charged. The shortlist is above the threshold: exact funding.
 TARGETS=(
+  "$BANKR/vet-service?slug=treza"
   "$BANKR/vet-service?slug=treza"
   "$BANKR/vet-service?slug=venice"
   "$BANKR/vet-shortlist?limit=3"
@@ -109,18 +113,33 @@ if not legs: sys.exit("no Base USDC exact leg in the 402")
 a = legs[0]
 print(a.get("amount") or a["maxAmountRequired"], a["payTo"], a["asset"])'
 }
-settled() {  # tx payTo amount: exactly one USDC Transfer agent -> payTo of amount
-  local receipt
-  receipt=$(rcast receipt "$1" --json) || return 1
-  python3 - "$receipt" "$TRANSFER_TOPIC" "$AGENT" "$2" "$3" <<'PY'
+# The settlement is read from the chain, not from the seller: a USDC Transfer
+# from the agent to payTo of exactly the price, mined at or after `from`, and
+# not one already counted. Sellers need not return a settlement header — Bankr
+# does not — and one that did could be wrong. Polls up to 60 s, since the
+# facilitator may settle after the response.
+SEEN=""
+settlement_on_chain() {  # from-block payTo amount -> tx hash, or nothing
+  local from=$1 to=$2 amount=$3 i latest found
+  local agent_topic="0x000000000000000000000000$(tr 'A-F' 'a-f' <<< "${AGENT#0x}")"
+  local to_topic="0x000000000000000000000000$(tr 'A-F' 'a-f' <<< "${to#0x}")"
+  for i in $(seq 1 20); do
+    latest=$(rcast block-number) || latest=""
+    if [[ -n "$latest" ]]; then
+      found=$(curl -s --max-time 20 -X POST "$RPC" -H 'content-type: application/json' --data \
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getLogs\",\"params\":[{\"fromBlock\":\"$(printf '0x%x' "$from")\",\"toBlock\":\"$(printf '0x%x' "$latest")\",\"address\":\"$USDC\",\"topics\":[\"$TRANSFER_TOPIC\",\"$agent_topic\",\"$to_topic\"]}]}" \
+        | python3 -c '
 import json, sys
-rc, topic, frm, to, amount = json.loads(sys.argv[1]), *sys.argv[2:]
-hits = [l for l in rc["logs"] if l["topics"][0] == topic
-        and l["topics"][1][-40:].lower() == frm[2:].lower()
-        and l["topics"][2][-40:].lower() == to[2:].lower()
-        and int(l["data"], 16) == int(amount)]
-sys.exit(0 if int(rc["status"], 16) == 1 and len(hits) == 1 else 1)
-PY
+amount, seen = int(sys.argv[1]), sys.argv[2].split()
+try: logs = json.load(sys.stdin).get("result") or []
+except Exception: logs = []
+hits = [l["transactionHash"] for l in logs if int(l["data"], 16) == amount and l["transactionHash"] not in seen]
+print(hits[0] if hits else "")' "$amount" "$SEEN")
+      if [[ -n "$found" ]]; then SEEN="$SEEN $found"; echo "$found"; return 0; fi
+    fi
+    sleep 3
+  done
+  return 0
 }
 x402_pay() {  # url amount payTo asset -> JSON from the x402 client
   if [[ -n "${X402_PAY_CMD:-}" ]]; then eval "$X402_PAY_CMD"; return; fi
@@ -176,25 +195,33 @@ for url in "${TARGETS[@]}"; do
     wait_at_least $(( float + refill )) || true
   fi
 
+  start=$(rcast block-number)
   out=$(x402_pay "$url" "$amount" "$pay_to" "$asset" || true)
   if grep -q '"insufficient_funds"' <<< "$out"; then
     echo "The facilitator does not see the funds yet; retrying in 6 s."
     sleep 6
     out=$(x402_pay "$url" "$amount" "$pay_to" "$asset" || true)
   fi
-  read -r ok status settle_tx < <(python3 -c '
+  status=$(python3 -c '
 import json, sys
 raw = sys.stdin.read(); i = raw.find("{")
 try: d = json.loads(raw[i:]) if i >= 0 else {}
 except Exception: d = {}
-print(str(bool(d.get("ok"))).lower(), d.get("status", "—"), d.get("transactionHash") or "—")' <<< "$out")
-  result="**FAIL**"
-  if [[ "$ok" == true && "$settle_tx" != "—" ]] && settled "$settle_tx" "$pay_to" "$amount"; then
-    result=pass
+print(d.get("status", "—"))' <<< "$out")
+  # SEEN must be updated in this shell, so no command substitution here.
+  settlement_on_chain "$start" "$pay_to" "$amount" > "$STATE_DIR/.t7-settle"
+  settle_tx=$(cat "$STATE_DIR/.t7-settle")
+  [[ -n "$settle_tx" ]] && SEEN="$SEEN $settle_tx"
+  if [[ "$status" =~ ^2[0-9][0-9]$ && -n "$settle_tx" ]]; then
+    result="pass: delivered, paid"
+  elif [[ ! "$status" =~ ^2[0-9][0-9]$ && -z "$settle_tx" ]]; then
+    result="pass: not delivered ($status), not charged"
+  elif [[ -n "$settle_tx" ]]; then
+    result="**FAIL: charged, not delivered**"; FAILS=$((FAILS + 1))
   else
-    FAILS=$((FAILS + 1))
-    echo "$out" | tail -5
+    result="**FAIL: delivered, no settlement found**"; FAILS=$((FAILS + 1))
   fi
+  settle_tx=${settle_tx:-—}
   log "| ${url#"$BANKR"} | $amount | $funding | $fund_tx | $settle_tx | $status | $(usdc "$AGENT") | $result |"
 done
 

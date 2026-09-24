@@ -245,6 +245,11 @@ What this costs, stated as plainly as the rest:
   this rare.
 - **A failed payment leaves USDC with the agent.** It stays in the float for the
   next call, and is returned to the owner when the float is closed.
+- **Settlement is read from the chain, never from the seller.** A seller need not
+  return a settlement header, and one that did could be wrong. Paid means a USDC
+  `Transfer` from the agent to `payTo` of exactly the price, mined after the
+  payment was sent. A non-2xx answer with no such transfer is "not delivered, not
+  charged" — correct; either one without the other is a failure.
 
 ## Threat model
 
@@ -386,7 +391,7 @@ they can end this design.
 | T3b | The same limiter on Base Sepolia | Testnet | **Skipped** by the owner's decision, 24 September: covered by T4 on mainnet, where the worst case is the 1.00 USDC grant |
 | T4 | Mainnet run: deploy, publish source, grant 1.00 from the device, one real 0.30 purchase, every refusal by `eth_call`, revoke, prove the same purchase now fails in USDC. Procedure: [trezor-allowance-t4-runbook.md](trezor-allowance-t4-runbook.md) | Device, 1.00 USDC at risk, 0.30 moved between the owner's own addresses | **Pass**, 24 September, 9/9 |
 | T5 | Whether a Trezor signs an SPL `approve`, and what it displays | Device, Solana | The Solana variant |
-| T7 | x402 on Base mainnet through the limiter: a float refill and a 0.005 payment to `vet-service`, a second 0.005 from the float with no refill, a 0.02 payment to `vet-shortlist` funded exactly, each settlement read back on chain, the float returned and the allowance revoked. Procedure: `agent-allowance/script/t7-x402.sh` | Device, the owner's own x402 services, cents | The x402 lane |
+| T7 | x402 on Base mainnet through the limiter: a float refill and a 0.005 payment to `vet-service`, a second 0.005 from the float with no refill, a 0.02 payment to `vet-shortlist` funded exactly, each settlement read back on chain, the float returned and the allowance revoked. Procedure: `agent-allowance/script/t7-x402.sh` | Device, the owner's own x402 services, cents | **Pass**, 24 September |
 | T6 | Bitrefill credits an invoice paid by `transferFrom` through a contract, not a direct `transfer` from the payer. Procedure: `agent-allowance/script/t6-bitrefill.sh` (a limiter sized to the product, the invoice created through the Bitrefill MCP server after the owner confirms it, paid by `spend`, then revoked) | A limiter and a ~$1–3 invoice | The direct-payment path; if it fails, `spend` pays a session address that pays the invoice |
 
 T3 is also the automated suite: the reverts are the specification, and a limiter
