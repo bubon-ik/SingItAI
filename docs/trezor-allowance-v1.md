@@ -156,7 +156,7 @@ Build order, each phase ending with tests and a live check:
 | 0 | Current `main` merged into this branch (done: `696f02e`) |
 | 1 | Server-side agent keys and limiter deployment; setup and status endpoints (done: see below) |
 | 2 | Grant and revoke as broker jobs signed through the companion; guardian pause (done: see below) |
-| 3 | The purchase lane in the gateway: funding, x402 payment by the agent key, Bitrefill x402, settlement on chain, spending memory in front |
+| 3 | The purchase lane in the gateway: funding, x402 payment by the agent key, Bitrefill x402, settlement on chain, spending memory in front (done: see below) |
 | 4 | Bot commands and `/limits` from the chain |
 | 5 | The watcher: notifications and automatic pause |
 | 6 | A live run through Telegram on mainnet, recorded in the checks |
@@ -226,6 +226,46 @@ Adds `SIGN402_ALLOWANCE_BROKER_URL` (default `http://127.0.0.1:8122`),
 `SIGN402_ALLOWANCE_GUARDIAN_KEY` (encrypted; replaces the phase 1 guardian
 address) and `SIGN402_ALLOWANCE_MAX_GRANT_USDC` (300). The broker learns the job
 kind with a migration that keeps every existing row.
+
+### Phase 3: purchases on the lane
+
+**x402 tools** (`/agent/buy-tool`). For a user on the lane, everything before the
+payment is unchanged — purchase rate, the seller's terms, the budget hold and the
+spending-memory decision, with the owner's approval when memory escalates. Only
+the payer changes: `AllowanceService.pay_x402` funds the agent from the limiter
+(from its float for micro-payments, a refill to the float target, or exactly the
+price above the threshold) and pays with the agent key through the same guarded
+x402 client, which refuses any other amount, recipient or asset. Paid means
+delivered (2xx) and a USDC transfer agent → seller of exactly the price found on
+chain; a charge without delivery is reported with its transaction.
+
+Whether a user is on the lane is decided first, before the seller or the owner is
+asked. A user with a limiter that cannot spend — nothing granted, paused, expired
+— is refused with the reason; they are never paid for from a custodial wallet
+instead.
+
+**Counted settlements are kept.** Two identical micro-payments to one seller are
+ordinary, and the second could otherwise find the first's transfer and pass as
+paid. Every settlement counted is stored, and never counted again, across
+restarts. The unit tests found this before any run did.
+
+**Bitrefill** (`/agent/allowance/bitrefill-search`, `-quote`, `-buy`) goes through
+Bitrefill's x402 API. The agent signs in with Sign-In-With-X, the message built
+byte for byte as the Bitrefill skill builds it (a test compares them). A quote is
+stored for ten minutes and buys one order, never above the quoted price; a price
+that rose, a pay route asking for anyone but Bitrefill's published address, or an
+order above the quote pays nothing. The same limits, memory and approval apply as
+to any purchase. The order result carries no code: `/last_purchase` fetches it
+from Bitrefill when asked and shows it once, like the managed-wallet lane.
+
+Two consequences to decide on, not decided here: the gateway's own spending
+limits (`/limits`) apply on this lane as well as the limiter's caps, so the lower
+of the two binds; and a Bitrefill purchase on this lane pays Bitrefill directly,
+so SingIt's service fee on managed-wallet Bitrefill orders is not collected.
+
+Configuration: `SIGN402_ALLOWANCE_FLOAT_TARGET_USDC` (0.20),
+`SIGN402_ALLOWANCE_FLOAT_LOW_USDC` (0.05), `SIGN402_ALLOWANCE_EXACT_ABOVE_USDC`
+(0.05).
 
 ## Granting, changing and revoking
 

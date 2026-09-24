@@ -401,3 +401,36 @@ owner without gas, a reverted approve, revoke of a superseded limiter, pause);
 sidecar 361/361 (15 device-path tests and the broker migration). Removing the
 gateway's check of the signed bytes, or its check that the paired Trezor is the
 owner on file, or the sidecar's pre-device limiter check, each fails its tests.
+
+
+## Phase 3 — purchases on the lane, 24 September
+
+**Status: PASS in tests and on a local fork of Base mainnet; Bitrefill sign-in and
+quote live; not yet a live purchase through the gateway.**
+
+**x402 on a fork.** The service deployed a limiter for the owner's real Trezor
+address (6.48 USDC on the fork), the allowance was set by impersonation (the grant
+path is phase 2's), and a stand-in facilitator moved the agent's USDC to the
+seller as a real one does:
+
+| Purchase | Funding | Settlement |
+| --- | --- | --- |
+| 0.005, empty float | refill to 0.20 | found |
+| 0.005 again, same seller | float, no transaction | found — a different transfer from the first |
+| 0.12 | exactly 0.12 | found |
+
+Owner −0.32 (0.20 refill + 0.12), agent float 0.19, limiter `spentToday` 0.32,
+three settlements counted.
+
+**Bitrefill, live, free.** The gateway's own Sign-In-With-X with a throwaway key
+got a token from `api.bitrefill.com/x402`; the quote for the T6 card read 0.02
+USDC; search returned products. The sign-in message equals the skill's
+`siwx_build_message.js` output byte for byte.
+
+**Found by the tests, fixed before any run:** a second identical micro-payment
+matched the first's settlement, because the search window can start at the block
+where the first landed. Counted settlements are now stored and excluded.
+
+Mutations: without settlement de-duplication the float and restart tests fail;
+deciding the lane after the seller and owner are asked fails the refusal test.
+Gateway suite 1283/1283.

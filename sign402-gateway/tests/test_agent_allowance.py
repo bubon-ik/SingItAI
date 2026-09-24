@@ -666,3 +666,187 @@ class DeviceLaneTests(unittest.TestCase):
         sent = len(self.evm.sent)
         self.service.pause(USER)
         self.assertEqual(len(self.evm.sent), sent)
+
+
+class SpendingEvm(DeviceLaneEvm):
+    """DeviceLaneEvm plus balances, spend(), blocks and USDC Transfer logs."""
+
+    def __init__(self, artifact, owner, clock):
+        super().__init__(artifact, owner)
+        self.usdc = {owner: 6_000_000}
+        self.block = 100
+        self.logs = []
+        self.clock = clock
+        self.spends = []
+
+    def sleep(self, seconds):
+        self.clock[0] += seconds
+
+    def usdc_balance(self, address):
+        return self.usdc.get(address, 0)
+
+    def call(self, method, params):
+        if method == "eth_blockNumber":
+            return hex(self.block)
+        if method == "eth_getLogs":
+            query = params[0]
+            return [entry for entry in self.logs
+                    if entry["topics"][1:] == query["topics"][1:] and int(entry["blockNumber"], 16) >= int(query["fromBlock"], 16)]
+        return super().call(method, params)
+
+    def quote(self, sender, *, to, data="0x", value=0):
+        return {"maxCostWei": 1}
+
+    def send(self, key, *, to, data="0x", value=0):
+        tx = super().send(key, to=to, data=data, value=value)
+        if data.startswith(aa.selector("spend(address,uint256,bytes32)")):
+            payee = to_checksum_address("0x" + data[10 + 24:10 + 64])
+            size = int(data[10 + 64:10 + 128], 16)
+            self.spends.append((payee, size))
+            self.usdc[self.owner] -= size
+            self.usdc[payee] = self.usdc.get(payee, 0) + size
+            self.allowances[to] = self.allowances.get(to, 0) - size
+        self.block += 1
+        return tx
+
+    def settle(self, sender, pay_to, amount):
+        self.block += 1
+        self.usdc[sender] -= amount
+        self.logs.append({
+            "topics": [aa.TRANSFER_TOPIC, "0x" + aa._word(sender), "0x" + aa._word(pay_to)],
+            "data": hex(amount), "blockNumber": hex(self.block), "transactionHash": "0x" + format(self.block, "064x"),
+        })
+
+
+class FakeX402:
+    def __init__(self, evm, *, status=200, settle=True, first_insufficient=False):
+        self.evm, self.status, self.settle, self.first_insufficient = evm, status, settle, first_insufficient
+        self.calls = []
+
+    def __call__(self, resource_url, **kwargs):
+        self.calls.append((resource_url, kwargs))
+        if self.first_insufficient and len(self.calls) == 1:
+            return {"ok": False, "status": 402, "body": {"reason": "insufficient_funds"}}
+        agent = Account.from_key(kwargs["private_key"]).address
+        if self.settle:
+            self.evm.settle(agent, kwargs["expected_receiver"], int(kwargs["max_atomic"]))
+        return {"ok": 200 <= self.status < 300, "status": self.status, "body": {"answer": 42}, "transactionHash": None}
+
+
+class SpendingLaneTests(unittest.TestCase):
+    PAY_TO = to_checksum_address("0x" + "8a" * 20)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.owner = Account.create()
+        self.clock = [NOW]
+        self.artifact = aa.Artifact.load()
+        self.evm = SpendingEvm(self.artifact, self.owner.address, self.clock)
+        self.service = aa.AllowanceService(
+            store=aa.AllowanceStore(Path(self.tmp.name) / "allowance.db"), evm=self.evm,
+            fernet=Fernet(Fernet.generate_key()), owners={USER: self.owner.address},
+            guardian_key=lambda: Account.create().key.to_0x_hex(),
+            gas_funder_key=lambda: Account.create().key.to_0x_hex(), artifact=self.artifact,
+            max_daily=100_000_000, max_per_purchase=25_000_000, max_days=90, broker=FakeBroker(self.owner.address),
+            float_target=200_000, float_low=50_000, exact_above=50_000, now=lambda: self.clock[0],
+        )
+        self.limiter = self.service.setup(USER, "0.50", "0.30", "30")["limiter"]
+        self.evm.allowances[self.limiter] = 1_000_000
+        self.agent = self.service.store.agent(USER)["agent_address"]
+
+    def requirements(self, amount):
+        return {"amountAtomic": str(amount), "receiver": self.PAY_TO, "asset": aa.USDC, "network": "base-mainnet"}
+
+    def pay(self, amount, client=None, **kwargs):
+        client = client or FakeX402(self.evm)
+        return self.service.pay_x402(USER, "https://seller.example/r", self.requirements(amount), client, **kwargs), client
+
+    def test_who_is_on_the_lane(self):
+        self.assertIsNone(self.service.lane_for("someone-else"))
+        self.assertEqual(self.service.lane_for(USER)["limiter_address"], self.limiter)
+        for spoil, text in ((lambda: self.evm.allowances.update({self.limiter: 0}), "Nothing is granted"),
+                            (lambda: self.evm.getter_override.update({"paused()": 1}), "paused"),
+                            (lambda: self.clock.__setitem__(0, NOW + 31 * 86400), "expired")):
+            with self.subTest(text):
+                self.setUp()
+                spoil()
+                with self.assertRaises(aa.AllowanceError) as raised:
+                    self.service.lane_for(USER)
+                self.assertIn(text, str(raised.exception))
+
+    def test_a_micro_payment_refills_the_float_once_then_pays_from_it(self):
+        first, client = self.pay(5_000)
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["funding"], "refill 0.2 USDC")
+        self.assertEqual(self.evm.spends, [(self.agent, 200_000)])
+        self.assertEqual(client.calls[0][1]["max_atomic"], "5000")
+        self.assertEqual(client.calls[0][1]["expected_receiver"], self.PAY_TO)
+        self.assertEqual(client.calls[0][1]["expected_asset"], aa.USDC)
+        self.assertIsNotNone(first["settlementTx"])
+
+        second, _ = self.pay(5_000)
+        self.assertTrue(second["ok"])
+        self.assertEqual(second["funding"], "float")
+        self.assertEqual(len(self.evm.spends), 1)
+        self.assertNotEqual(first["settlementTx"], second["settlementTx"])
+
+    def test_a_larger_payment_is_funded_exactly(self):
+        result, _ = self.pay(120_000)
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.evm.spends, [(self.agent, 120_000)])
+        self.assertEqual(self.evm.usdc[self.agent], 0)
+
+    def test_what_the_limiter_cannot_fund_is_refused_before_anything_moves(self):
+        for spoil in (lambda: self.evm.allowances.update({self.limiter: 100_000}),
+                      lambda: self.evm.usdc.update({self.owner.address: 100_000})):
+            with self.subTest():
+                self.setUp()
+                spoil()
+                client = FakeX402(self.evm)
+                with self.assertRaises(aa.AllowanceError) as raised:
+                    self.pay(120_000, client)
+                self.assertIn("cannot fund", str(raised.exception))
+                self.assertEqual(self.evm.spends, [])
+                self.assertEqual(client.calls, [])
+
+    def test_delivered_without_settlement_is_not_paid(self):
+        result, _ = self.pay(120_000, FakeX402(self.evm, settle=False))
+        self.assertTrue(result["delivered"])
+        self.assertIsNone(result["settlementTx"])
+        self.assertFalse(result["ok"])
+
+    def test_charged_without_delivery_is_reported_as_such(self):
+        result, _ = self.pay(120_000, FakeX402(self.evm, status=500))
+        self.assertFalse(result["delivered"])
+        self.assertIsNotNone(result["settlementTx"])
+        self.assertFalse(result["ok"])
+
+    def test_a_facilitator_behind_the_funding_is_given_one_retry(self):
+        client = FakeX402(self.evm, first_insufficient=True)
+        result, _ = self.pay(120_000, client)
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(len(self.evm.spends), 1)
+
+    def test_a_post_resource_keeps_its_method_and_body(self):
+        _, client = self.pay(120_000, method="POST", request_body={"q": "weth"})
+        self.assertEqual(client.calls[0][1]["method"], "POST")
+        self.assertEqual(client.calls[0][1]["request_body"], {"q": "weth"})
+
+    def test_a_counted_settlement_is_never_counted_again_even_after_a_restart(self):
+        first, _ = self.pay(5_000)
+        restarted = aa.AllowanceService(
+            store=aa.AllowanceStore(Path(self.tmp.name) / "allowance.db"), evm=self.evm,
+            fernet=self.service.fernet, owners={USER: self.owner.address},
+            guardian_key=lambda: Account.create().key.to_0x_hex(),
+            gas_funder_key=lambda: Account.create().key.to_0x_hex(), artifact=self.artifact,
+            max_daily=100_000_000, max_per_purchase=25_000_000, max_days=90,
+            float_target=200_000, float_low=50_000, exact_above=50_000, now=lambda: self.clock[0],
+        )
+        # The seller does not settle this time: the old transfer must not stand in for it.
+        second = restarted.pay_x402(USER, "https://seller.example/r", self.requirements(5_000),
+                                    FakeX402(self.evm, settle=False))
+        self.assertIsNone(second["settlementTx"])
+        self.assertFalse(second["ok"])
+        self.assertIsNotNone(first["settlementTx"])

@@ -53,6 +53,9 @@ GUARDIAN_KEY_ENV = "SIGN402_ALLOWANCE_GUARDIAN_KEY"
 BROKER_URL_ENV = "SIGN402_ALLOWANCE_BROKER_URL"
 BROKER_TOKEN_ENV = "SIGN402_ALLOWANCE_BROKER_TOKEN"
 MAX_GRANT_ENV = "SIGN402_ALLOWANCE_MAX_GRANT_USDC"
+FLOAT_TARGET_ENV = "SIGN402_ALLOWANCE_FLOAT_TARGET_USDC"
+FLOAT_LOW_ENV = "SIGN402_ALLOWANCE_FLOAT_LOW_USDC"
+EXACT_ABOVE_ENV = "SIGN402_ALLOWANCE_EXACT_ABOVE_USDC"
 MAX_DAILY_ENV = "SIGN402_ALLOWANCE_MAX_DAILY_USDC"
 MAX_PER_PURCHASE_ENV = "SIGN402_ALLOWANCE_MAX_PER_PURCHASE_USDC"
 MAX_DAYS_ENV = "SIGN402_ALLOWANCE_MAX_DAYS"
@@ -66,6 +69,11 @@ DEFAULT_MAX_DAYS = 90
 DEFAULT_MAX_GRANT = Decimal("300")
 DEFAULT_BROKER_URL = "http://127.0.0.1:8122"
 DEVICE_JOB_SECONDS = 600
+DEFAULT_FLOAT_TARGET = Decimal("0.20")
+DEFAULT_FLOAT_LOW = Decimal("0.05")
+DEFAULT_EXACT_ABOVE = Decimal("0.05")
+SETTLEMENT_WAIT_SECONDS = 60
+TRANSFER_TOPIC = "0x" + keccak(text="Transfer(address,address,uint256)").hex()
 
 BASE_CHAIN_ID = 8453
 USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
@@ -349,6 +357,32 @@ class AllowanceStore:
                     updated_at INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS operations_by_user ON operations(user_id, created_at);
+                CREATE TABLE IF NOT EXISTS settlements (
+                    tx_hash TEXT NOT NULL,
+                    log_index TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    pay_to TEXT NOT NULL,
+                    amount INTEGER NOT NULL,
+                    resource TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY (tx_hash, log_index)
+                );
+                CREATE TABLE IF NOT EXISTS bitrefill_quotes (
+                    quote_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    slug TEXT NOT NULL,
+                    package TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    price_atomic INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    used_at INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS bitrefill_reveals (
+                    invoice_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    revealed_at INTEGER NOT NULL
+                );
                 """
             )
         os.chmod(self.path, 0o600)
@@ -431,6 +465,56 @@ class AllowanceStore:
                 "SELECT * FROM operations WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
                 (user_id, limit),
             ).fetchall()
+
+    def counted_settlements(self, user_id: str) -> set[tuple[str, str]]:
+        with self._db() as db:
+            rows = db.execute("SELECT tx_hash, log_index FROM settlements WHERE user_id = ?", (user_id,)).fetchall()
+        return {(row["tx_hash"].lower(), row["log_index"]) for row in rows}
+
+    def count_settlement(self, tx_hash: str, log_index: str, user_id: str, pay_to: str, amount: int,
+                         resource: str, now: int) -> None:
+        with self._db() as db:
+            db.execute(
+                "INSERT INTO settlements (tx_hash, log_index, user_id, pay_to, amount, resource, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (tx_hash.lower(), log_index, user_id, pay_to, amount, resource, now),
+            )
+
+    def save_bitrefill_quote(self, row: Mapping[str, Any]) -> None:
+        with self._db() as db:
+            db.execute(
+                """INSERT INTO bitrefill_quotes (quote_id, user_id, slug, package, name, price_atomic, created_at, expires_at)
+                   VALUES (:quote_id, :user_id, :slug, :package, :name, :price_atomic, :created_at, :expires_at)""",
+                dict(row),
+            )
+
+    def take_bitrefill_quote(self, user_id: str, quote_id: str, now: int) -> sqlite3.Row:
+        """The quote, once: a confirmed price buys one order."""
+        with self._db() as db:
+            row = db.execute("SELECT * FROM bitrefill_quotes WHERE quote_id = ? AND user_id = ?",
+                             (quote_id, user_id)).fetchone()
+            if row is None:
+                raise AllowanceError("That quote is not yours or does not exist. Quote again.")
+            if row["used_at"] is not None:
+                raise AllowanceError("That quote was already used. Quote again for another order.")
+            if row["expires_at"] <= now:
+                raise AllowanceError("That quote has expired. Quote again to see today's price.")
+            db.execute("UPDATE bitrefill_quotes SET used_at = ? WHERE quote_id = ? AND used_at IS NULL", (now, quote_id))
+            return row
+
+    def reveal_once(self, user_id: str, invoice_id: str, now: int) -> bool:
+        """True the first time a code is shown for this order, False after."""
+        with self._db() as db:
+            try:
+                db.execute("INSERT INTO bitrefill_reveals (invoice_id, user_id, revealed_at) VALUES (?, ?, ?)",
+                           (invoice_id, user_id, now))
+            except sqlite3.IntegrityError:
+                return False
+        return True
+
+    def unreveal(self, invoice_id: str) -> None:
+        with self._db() as db:
+            db.execute("DELETE FROM bitrefill_reveals WHERE invoice_id = ?", (invoice_id,))
 
     def set_source(self, limiter: str, source: str) -> None:
         with self._db() as db:
@@ -577,6 +661,9 @@ class AllowanceService:
         publish_source: Callable[[str, str, Artifact], str] | None = None,
         broker: BrokerClient | None = None,
         max_grant: int = int(DEFAULT_MAX_GRANT * 1_000_000),
+        float_target: int = int(DEFAULT_FLOAT_TARGET * 1_000_000),
+        float_low: int = int(DEFAULT_FLOAT_LOW * 1_000_000),
+        exact_above: int = int(DEFAULT_EXACT_ABOVE * 1_000_000),
         now: Callable[[], float] = time.time,
     ):
         self.store = store
@@ -593,7 +680,11 @@ class AllowanceService:
         self.publish_source = publish_source
         self.broker = broker
         self.max_grant = max_grant
+        self.float_target = float_target
+        self.float_low = float_low
+        self.exact_above = exact_above
         self.now = now
+        self._spend_lock = threading.Lock()
         self._setup_lock = threading.Lock()
         self._ops_lock = threading.Lock()
 
@@ -879,6 +970,140 @@ class AllowanceService:
         detail = f" — {op['detail']}" if op["detail"] else ""
         return f"{when} {what}: {state}{detail}"
 
+    # -- spending: the agent pays, the limiter funds it --
+
+    def lane_for(self, user_id: str) -> sqlite3.Row | None:
+        """The user's usable limiter, None if they are not on this lane at all.
+
+        Listed with a limiter but unable to spend (no grant, paused, expired) is a
+        refusal, not a fallback: an owner who set up the Trezor lane must never be
+        paid for from a custodial wallet without knowing it.
+        """
+        if str(user_id) not in self.owners:
+            return None
+        active = self.store.active_limiter(str(user_id))
+        if active is None:
+            return None
+        limiter = active["limiter_address"]
+        if active["expiry"] <= self.now():
+            raise AllowanceError("Your Trezor allowance has expired. Set up a new limiter with /allowance_setup.")
+        if self.evm.call_word(limiter, selector("paused()")):
+            raise AllowanceError("Your Trezor allowance is paused. Set up a new limiter to spend again.")
+        owner = active["owner_address"]
+        if not self.evm.call_word(USDC, encode_call("allowance(address,address)", owner, limiter)):
+            raise AllowanceError("Nothing is granted from your Trezor yet. Grant an allowance with /allowance_grant <amount>.")
+        return active
+
+    def _fund(self, active: Mapping[str, Any], agent: str, agent_key: str, amount: int, ref_text: str) -> dict[str, Any]:
+        """Make sure the agent holds `amount`: from its float, a refill, or exactly this."""
+        limiter, owner = active["limiter_address"], active["owner_address"]
+        float_now = self.evm.usdc_balance(agent)
+        room = min(
+            active["per_purchase_cap"],
+            self.evm.call_word(limiter, selector("remainingToday()")),
+            self.evm.call_word(USDC, encode_call("allowance(address,address)", owner, limiter)),
+            self.evm.usdc_balance(owner),
+        )
+        if amount > self.exact_above:
+            size, kind = amount, "exact"
+        elif float_now - amount >= self.float_low:
+            return {"funding": "float", "fundingTx": None, "floatBefore": float_now}
+        else:
+            size, kind = max(amount - float_now, min(self.float_target - float_now, room)), "refill"
+            if size <= 0:
+                if float_now >= amount:
+                    return {"funding": "float", "fundingTx": None, "floatBefore": float_now}
+                size = amount - float_now
+        if size > room:
+            raise AllowanceError(
+                f"Your limiter cannot fund {_usdc_text(size)} now: it allows {_usdc_text(room)} "
+                "(per purchase, left today, the allowance and your Trezor balance). Nothing was paid."
+            )
+        data = encode_call("spend(address,uint256,bytes32)", agent, size, keccak(text=ref_text).hex())
+        self.ensure_gas(agent, self.evm.quote(agent, to=limiter, data=data)["maxCostWei"])
+        tx = self.evm.send(agent_key, to=limiter, data=data)
+        self.evm.wait_receipt(tx)
+        self.evm.wait_until(lambda: self.evm.usdc_balance(agent), lambda held: held >= float_now + size)
+        return {"funding": f"{kind} {_usdc_text(size)}", "fundingTx": tx, "floatBefore": float_now}
+
+    def find_settlement(self, agent: str, pay_to: str, amount: int, from_block: int,
+                        seen: set[tuple[str, str]] = frozenset()) -> tuple[str, str] | None:
+        """(tx hash, log index) of a USDC Transfer agent -> pay_to of exactly `amount`,
+        mined from `from_block` on and not already counted for another purchase.
+
+        Two identical micro-payments to one seller are ordinary; without `seen`, the
+        second would find the first's transfer and pass as paid.
+        """
+        deadline = self.now() + SETTLEMENT_WAIT_SECONDS
+        while True:
+            latest = int(self.evm.call("eth_blockNumber", []), 16)
+            logs = self.evm.call("eth_getLogs", [{
+                "fromBlock": hex(from_block), "toBlock": hex(latest), "address": USDC,
+                "topics": [TRANSFER_TOPIC, "0x" + _word(agent), "0x" + _word(pay_to)],
+            }]) or []
+            for entry in logs:
+                key = (str(entry["transactionHash"]).lower(), str(entry.get("logIndex", "0x0")))
+                if int(entry["data"], 16) == amount and key not in seen:
+                    return key
+            if self.now() >= deadline:
+                return None
+            self.evm.sleep(3)
+
+    def pay_x402(
+        self,
+        user_id: str,
+        resource_url: str,
+        requirements: Mapping[str, Any],
+        x402_client: Callable[..., dict[str, Any]],
+        *,
+        method: str = "GET",
+        request_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Pay one x402 resource from the agent key, funded by the limiter.
+
+        The caller has already decided the purchase may happen (limits, spending
+        memory, the owner's approval when asked). This moves the money and proves
+        it: paid means delivered (2xx) and a matching settlement on chain.
+        """
+        active = self.lane_for(user_id)
+        if active is None:
+            raise AllowanceUnavailable("The Trezor allowance is not set up for this account.")
+        amount = int(requirements["amountAtomic"])
+        pay_to = to_checksum_address(str(requirements["receiver"]))
+        if str(requirements["asset"]).lower() != USDC.lower():
+            raise AllowanceError("Only USDC on Base can be paid from the Trezor allowance.")
+        agent, agent_key = self.agent_key(user_id)
+        with self._spend_lock:
+            funding = self._fund(active, agent, agent_key, amount,
+                                 f"x402:{resource_url}:{amount}:{self.now()}:{os.urandom(4).hex()}")
+            start = int(self.evm.call("eth_blockNumber", []), 16)
+            kwargs = {"private_key": agent_key, "max_atomic": str(amount), "expected_receiver": pay_to,
+                      "expected_asset": USDC}
+            if method != "GET" or request_body is not None:
+                kwargs.update(method=method, request_body=request_body)
+            result = x402_client(resource_url, **kwargs)
+            if "insufficient_funds" in json.dumps(result, default=str):
+                # The facilitator's node can be a few blocks behind the funding.
+                self.evm.sleep(6)
+                result = x402_client(resource_url, **kwargs)
+            status = int(result.get("status") or 0)
+            found = self.find_settlement(agent, pay_to, amount, start, self.store.counted_settlements(user_id))
+            settlement = None
+            if found is not None:
+                settlement = found[0]
+                self.store.count_settlement(found[0], found[1], user_id, pay_to, amount, resource_url, int(self.now()))
+        delivered = 200 <= status < 300
+        return {
+            "ok": delivered and settlement is not None,
+            "status": status,
+            "delivered": delivered,
+            "settlementTx": settlement,
+            "payer": agent,
+            "limiter": active["limiter_address"],
+            **funding,
+            "resourceResult": result,
+        }
+
     # -- the guardian: pause without the device --
 
     def pause(self, user_id: str) -> dict[str, Any]:
@@ -1038,6 +1263,9 @@ def build_allowance_service_from_env(
         publish_source=publish_to_sourcify if str(values.get(SOURCIFY_ENV, "1")) == "1" else None,
         broker=broker,
         max_grant=_usdc_atomic(values.get(MAX_GRANT_ENV, DEFAULT_MAX_GRANT), MAX_GRANT_ENV),
+        float_target=_usdc_atomic(values.get(FLOAT_TARGET_ENV, DEFAULT_FLOAT_TARGET), FLOAT_TARGET_ENV),
+        float_low=_usdc_atomic(values.get(FLOAT_LOW_ENV, DEFAULT_FLOAT_LOW), FLOAT_LOW_ENV),
+        exact_above=_usdc_atomic(values.get(EXACT_ABOVE_ENV, DEFAULT_EXACT_ABOVE), EXACT_ABOVE_ENV),
     )
 
 
