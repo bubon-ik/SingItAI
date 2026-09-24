@@ -121,6 +121,46 @@ for a purchase already paid reverts on-chain. `ref` is the same reference the
 Ledger lane already computes over the frozen order, so a receipt is comparable
 across both lanes.
 
+## Product integration
+
+Decided by the owner on 24 September 2026, after T1–T7:
+
+| Decision | Choice | Why |
+| --- | --- | --- |
+| Agent keys | One per user, encrypted at rest like managed wallet keys | A stolen key opens one user's caps, not everyone's |
+| Rollout | The owner's Telegram account only, every part behind a flag off by default | Existing purchases for other users do not change; the limiter has no external audit |
+| Grant and revoke | Through the existing broker and companion: the user's computer runs the sidecar and companion only when granting or revoking | Already built and tested; a browser signer is a separate project with its own display check |
+| Bitrefill on this lane | Bitrefill's x402 API, recorded as an exception in `AGENTS.md` | T6 proved it end to end; the MCP route would need the `transferFrom` crediting question answered |
+
+The flow, as the user sees it in Telegram:
+
+1. Pair the Trezor once through the companion (existing enrolment).
+2. `/allowance_setup <daily> <per purchase> <days>` — the server creates the user's
+   agent key, pays its gas, deploys their limiter, publishes the source, and sends
+   the link to check it from a phone.
+3. `/allowance_grant <total>` — the Trezor shows an `approve` of that total; the
+   server checks the signed bytes before broadcasting.
+4. Purchases: x402 resources and Bitrefill go through the agent key, funded by the
+   limiter (float for micro-payments, exact above the threshold), after the
+   spending-memory decision. Settlement is read from the chain.
+5. `/limits` reads caps, today's remaining budget, the allowance and the float from
+   the chain.
+6. `/allowance_pause` pauses at once through the guardian, no device;
+   `/allowance_revoke` sets the allowance to zero from the Trezor.
+7. A watcher reports every spend and pauses on anomalies.
+
+Build order, each phase ending with tests and a live check:
+
+| Phase | Scope |
+| --- | --- |
+| 0 | Current `main` merged into this branch (done: `696f02e`) |
+| 1 | Server-side agent keys and limiter deployment; setup and status endpoints |
+| 2 | Grant and revoke as broker jobs signed through the companion; guardian pause |
+| 3 | The purchase lane in the gateway: funding, x402 payment by the agent key, Bitrefill x402, settlement on chain, spending memory in front |
+| 4 | Bot commands and `/limits` from the chain |
+| 5 | The watcher: notifications and automatic pause |
+| 6 | A live run through Telegram on mainnet, recorded in the checks |
+
 ## Granting, changing and revoking
 
 **Grant** is one transaction from the device: `approve(limiter, total)` on USDC.
