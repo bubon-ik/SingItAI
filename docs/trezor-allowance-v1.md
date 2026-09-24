@@ -337,7 +337,7 @@ they can end this design.
 | T3b | The same limiter on Base Sepolia | Testnet | **Skipped** by the owner's decision, 24 September: covered by T4 on mainnet, where the worst case is the 1.00 USDC grant |
 | T4 | Mainnet run: deploy, publish source, grant 1.00 from the device, one real 0.30 purchase, every refusal by `eth_call`, revoke, prove the same purchase now fails in USDC. Procedure: [trezor-allowance-t4-runbook.md](trezor-allowance-t4-runbook.md) | Device, 1.00 USDC at risk, 0.30 moved between the owner's own addresses | **Pass**, 24 September, 9/9 |
 | T5 | Whether a Trezor signs an SPL `approve`, and what it displays | Device, Solana | The Solana variant |
-| T6 | Bitrefill credits an invoice paid by `transferFrom` through a contract, not a direct `transfer` from the payer | A deployed limiter and a ~$1 invoice, so after T3 | The direct-payment path; if it fails, `spend` pays a session address that pays the invoice |
+| T6 | Bitrefill credits an invoice paid by `transferFrom` through a contract, not a direct `transfer` from the payer. Procedure: `agent-allowance/script/t6-bitrefill.sh` (a limiter sized to the product, the invoice created through the Bitrefill MCP server after the owner confirms it, paid by `spend`, then revoked) | A limiter and a ~$1–3 invoice | The direct-payment path; if it fails, `spend` pays a session address that pays the invoice |
 
 T3 is also the automated suite: the reverts are the specification, and a limiter
 that passes only the happy path has not been tested at all.
