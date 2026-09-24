@@ -10,6 +10,22 @@ With the flag off, the deployed gateway behaves exactly as `main` does. Every st
 is the owner's or needs the owner's approval: it changes production, spends ETH,
 or touches the device.
 
+## The script
+
+[`scripts/deploy-trezor-allowance.sh`](../scripts/deploy-trezor-allowance.sh) does
+steps 0–6 below in order, stops at the first thing that is not as expected, and
+never prints a secret. It needs the owner's terminal once, for sudo:
+
+```bash
+scp scripts/deploy-trezor-allowance.sh hermes@164.68.104.44:
+ssh -t hermes@164.68.104.44 'bash ~/deploy-trezor-allowance.sh <commit>'
+```
+
+It ends with the gas funder's address to fund. The broker it installs is the one
+already running since August (`~/apps/sign402-trezor`, same state and token),
+moved to the new code under a user unit `sign402-trezor-broker`; the old
+remote agent keeps running untouched.
+
 ## 0. Before anything changes
 
 On the VPS (`hermes@164.68.104.44`, checkout `~/apps/sign402`):
