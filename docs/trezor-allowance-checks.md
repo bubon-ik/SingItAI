@@ -301,3 +301,39 @@ Not shown by this run: a *paid* purchase from the float with no refill. The
 venice call exercised that path but was not charged. The mechanism is the same as
 the first payment, which also came out of the float rather than an exact amount.
 The fixed script targets treza twice to show it on the next run.
+
+## T6 — a Bitrefill purchase through x402, on Base mainnet, 24 September
+
+**Status: PASS, verified from the chain.** `t6-bitrefill.sh grant 0.10`, then
+`buy hediyen-kart-all-access-turkey 1` (Hediyen Kart All Access Turkey, 1 TRY,
+0.02 USDC), then `revoke`, on the T4 limiter. The owner chose Bitrefill's x402
+route for this instead of its MCP server; the owner confirmed the product and
+price before the order existed.
+
+| Step | Block | Signed by | Transaction | On chain |
+| --- | --- | --- | --- | --- |
+| Grant | 51713080 | **Trezor** | [`0x9884cc11…d389`](https://basescan.org/tx/0x9884cc11b82210315546e255a23e0f1b662494680cc5f69b5f46746e5fb7d389) | `Approval(owner, limiter, 100000)` |
+| Funding | 51713109 | agent | [`0x46109346…440b`](https://basescan.org/tx/0x46109346573a08d7e791b2f0d82b9ce9419eec071cd8a1fc5b0043a7edce440b) | `spend`: USDC owner → agent, 20000 |
+| Payment | 51713115 | Bitrefill's facilitator, with the agent's authorization | [`0x29a761fc…5dcd`](https://basescan.org/tx/0x29a761fcb79eedba5a81d026146c0adbd2bb1dac36f758f09028d6cd97f35dcd) | USDC agent → `0x480C…846A` (Bitrefill's published x402 address), 20000 |
+| Revoke | 51713136 | **Trezor** | [`0x23b319f4…671f`](https://basescan.org/tx/0x23b319f42147ea8755bc410eb9ddd4149f4fd71b5b7a536dfb169197bd4b671f) | `Approval(owner, limiter, 0)` |
+
+Invoice `4d730b74-9a2f-4f27-85cb-82221a75f097`, created 02:05 UTC, delivered
+02:06 UTC, 35 seconds after the order. Owner 6.501336 → 6.481336 USDC; agent 0;
+`usedRef(keccak("bitrefill:<invoice>"))` true, so the same invoice cannot be
+funded twice.
+
+The purchase log holds the invoice id, product, amount, payment method, the two
+transaction hashes and the times — nothing from the redemption. No file under
+`~/.sign402-trezor-poc` mentions a redemption, serial or barcode. The code was
+printed in the owner's terminal only.
+
+What this run settled that none before it could: the order-creation, pay-route
+and delivery shapes of Bitrefill's x402 API, which had not been exercised — the
+pay route's recipient matched the address Bitrefill publishes, its amount matched
+the confirmed price, and `redemption_info` came back with the invoice status under
+the agent's sign-in token without a second signature.
+
+Two things the owner met on the way, both fixed or explained: the Claude Code
+terminal panel cannot execute files under `~/Documents` (macOS privacy; the
+macOS Terminal can), and the pre-grant read of the limiter sat silent for about
+fifteen seconds on the public endpoint — it now says what it is doing first.
