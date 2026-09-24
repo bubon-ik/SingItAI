@@ -159,6 +159,31 @@ path, and mainnet gas — which is what T4 on mainnet is for.
 
 The same day, `agent-allowance/script/t4-mainnet.sh` was run end to end against
 a fresh fork, with test keys for the agent and guardian, the Trezor address
-impersonated for grant and revoke, and publication skipped. All 10 checks
+impersonated for grant and revoke, and publication skipped. All 9 checks
 passed, the 0.30 was returned, and a second run resumed without deploying,
 granting or purchasing again.
+
+## T4, first mainnet attempt — stopped before the device, 24 September
+
+The limiter was deployed and published (`exact_match` on Sourcify) at
+`0xB9bD6FD8a3F8831DDDCb56BA8562e1080Db465f3`, deploy transaction
+`0x60477303e55749d658369f8931967408d47593e608f6dfb7937ee6f49b5445ab`. `grant`
+then stopped with "That contract does not answer like an AgentAllowance limiter".
+Nothing was signed; the device was not reached.
+
+Cause, reproduced with the public Base RPC: the inspection checked the chain ID
+before every read — about twenty requests in a burst — and the endpoint began
+refusing after the fifth field. The refusal was then reported as a wrong
+contract. The first five fields had read back correctly.
+
+Fixed in the sidecar: the chain is confirmed once per client, refused reads are
+retried with backoff, a refused receipt poll counts as pending, and a read that
+keeps failing says it is the RPC and that nothing was signed. The same limiter
+then read back in full through the public endpoint: owner, token, agent,
+guardian, caps 500000 and 300000, not paused, 0.50 left today.
+
+The script's own reads got the same retry. Its first version returned success
+for every `cast call`, reverts included — the exit status after `if …; fi`
+without an `else` is 0 — which a fork rehearsal caught as seven false failures
+before the script was run again on mainnet. After the fix: 9 of 9 checks on the
+fork, and a deliberately wrong expected selector is reported as a failure.

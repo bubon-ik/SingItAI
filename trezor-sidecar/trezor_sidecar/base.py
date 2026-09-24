@@ -120,6 +120,7 @@ class BaseRpcClient:
         self._url = url
         self.timeout_seconds = float(timeout_seconds)
         self._transport = transport
+        self._base_confirmed = False
 
     def __repr__(self) -> str:
         return f"BaseRpcClient(timeout_seconds={self.timeout_seconds})"
@@ -198,8 +199,16 @@ class BaseRpcClient:
         return int(value[2:], 16)
 
     def _require_base(self) -> None:
+        """Confirm the endpoint is Base once per client, not once per read.
+
+        Public endpoints rate-limit bursts; a chain check before every read
+        doubled the requests of a nine-field inspection and got it refused.
+        """
+        if self._base_confirmed:
+            return
         if self._quantity(self._request(1, "eth_chainId", [])) != BASE_CHAIN_ID:
             raise _rpc_unavailable()
+        self._base_confirmed = True
 
     def call_word(self, to: str, data: str) -> int:
         """One ``eth_call`` on Base that must return exactly one 32-byte word."""

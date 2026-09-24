@@ -117,6 +117,30 @@ class BaseRpcTests(TestCase):
                 expected_methods,
             )
 
+    def test_reads_confirm_the_chain_once_per_client(self):
+        word = "0x" + "0" * 63 + "7"
+        client, queue = self.make_client(
+            rpc_result(1, hex(BASE_CHAIN_ID)),
+            rpc_result(2, word),
+            rpc_result(2, word),
+            rpc_result(2, "0x6080"),
+        )
+
+        self.assertEqual(client.call_word(RECIPIENT, "0x8da5cb5b"), 7)
+        self.assertEqual(client.call_word(RECIPIENT, "0xfc0c546a"), 7)
+        self.assertTrue(client.has_code(RECIPIENT))
+        self.assertEqual(
+            [r["method"] for r in queue.requests],
+            ["eth_chainId", "eth_call", "eth_call", "eth_getCode"],
+        )
+
+    def test_reads_refuse_a_wrong_chain(self):
+        client, queue = self.make_client(rpc_result(1, "0x1"))
+        with self.assertRaises(SafeError) as raised:
+            client.call_word(RECIPIENT, "0x8da5cb5b")
+        self.assertEqual(raised.exception.code, "base_rpc_unavailable")
+        self.assertEqual([r["method"] for r in queue.requests], ["eth_chainId"])
+
     def test_wrong_chain_is_refused_before_balance_reads(self):
         client, queue = self.make_client(
             rpc_result(1, "0x1"),

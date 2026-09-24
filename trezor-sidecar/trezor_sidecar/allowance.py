@@ -49,6 +49,9 @@ _ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}\Z")
 _AMOUNT = re.compile(r"[0-9]+(\.[0-9]{1,6})?\Z")
 RECEIPT_WAIT_SECONDS = 90
 RECEIPT_POLL_SECONDS = 3
+READ_BACKOFF_SECONDS = (1, 2, 4, 8)
+"""Waits between retries of a read. Reads are idempotent, and public Base
+endpoints refuse short bursts; a refused read is retried, never guessed."""
 
 
 def _selector(signature: str) -> str:
@@ -115,17 +118,38 @@ class Limiter:
     remaining_today: int
 
 
-def inspect_limiter(rpc: BaseRpcClient, limiter: str) -> Limiter:
-    if not rpc.has_code(limiter):
-        raise SafeError("limiter_invalid", "There is no contract at that address on Base.", 409)
+def _read(read: Callable[[], object], sleep: Callable[[float], None]):
+    """One chain read, retried with backoff while the RPC refuses it."""
+    for wait in READ_BACKOFF_SECONDS:
+        try:
+            return read()
+        except SafeError as error:
+            if error.code != "base_rpc_unavailable":
+                raise
+        sleep(wait)
     try:
-        words = {name: rpc.call_word(limiter, data) for name, data in _GETTERS.items()}
-    except SafeError:
+        return read()
+    except SafeError as error:
+        if error.code != "base_rpc_unavailable":
+            raise
         raise SafeError(
-            "limiter_invalid",
-            "That contract does not answer like an AgentAllowance limiter.",
-            409,
+            "base_rpc_unavailable",
+            "Could not read from Base: the RPC kept refusing (rate limit or outage), "
+            "or the address is not an AgentAllowance. Nothing was signed. Wait a "
+            "minute and run it again.",
+            503,
         ) from None
+
+
+def inspect_limiter(
+    rpc: BaseRpcClient, limiter: str, sleep: Callable[[float], None] = time.sleep
+) -> Limiter:
+    if not _read(lambda: rpc.has_code(limiter), sleep):
+        raise SafeError("limiter_invalid", "There is no contract at that address on Base.", 409)
+    words = {
+        name: _read(lambda data=data: rpc.call_word(limiter, data), sleep)
+        for name, data in _GETTERS.items()
+    }
     if words["paused"] not in (0, 1):
         raise SafeError("limiter_invalid", "Limiter returned a malformed flag.", 409)
     return Limiter(
@@ -192,7 +216,12 @@ def _approve(settings, deps: Deps, owner: str, spender: str, amount_atomic: int)
     deps.out(f"  tx               https://basescan.org/tx/{tx_hash}")
     deadline = deps.now() + RECEIPT_WAIT_SECONDS
     while deps.now() < deadline:
-        status = deps.rpc.receipt_status(tx_hash)
+        try:
+            status = deps.rpc.receipt_status(tx_hash)
+        except SafeError as error:
+            if error.code != "base_rpc_unavailable":
+                raise
+            status = None
         if status == 1:
             return tx_hash
         if status == 0:
@@ -209,10 +238,12 @@ def _approve(settings, deps: Deps, owner: str, spender: str, amount_atomic: int)
 def status(limiter_text: str, env: Mapping[str, str] | None = None, **overrides) -> Limiter:
     settings = _settings(os.environ if env is None else env)
     deps = _deps(settings, **overrides)
-    limiter = inspect_limiter(deps.rpc, _address(limiter_text))
+    limiter = inspect_limiter(deps.rpc, _address(limiter_text), deps.sleep)
     _describe(limiter, deps.out)
-    deps.out(f"  allowance left   {_usdc(deps.rpc.usdc_allowance(limiter.owner, limiter.address))}")
-    deps.out(f"  owner balance    {_usdc(deps.rpc.get_balances(limiter.owner).usdc_atomic)}")
+    left = _read(lambda: deps.rpc.usdc_allowance(limiter.owner, limiter.address), deps.sleep)
+    balance = _read(lambda: deps.rpc.get_balances(limiter.owner).usdc_atomic, deps.sleep)
+    deps.out(f"  allowance left   {_usdc(left)}")
+    deps.out(f"  owner balance    {_usdc(balance)}")
     return limiter
 
 
@@ -225,7 +256,7 @@ def grant(
     spender = _address(limiter_text)
     amount = parse_amount(amount_text, settings.max_usd)
 
-    limiter = inspect_limiter(deps.rpc, spender)
+    limiter = inspect_limiter(deps.rpc, spender, deps.sleep)
     if limiter.owner.lower() != owner.lower():
         raise SafeError("limiter_invalid", f"Limiter owner is {limiter.owner}, not your paired account {owner}.", 409)
     if limiter.token.lower() != BASE_USDC_ADDRESS.lower():
@@ -250,7 +281,7 @@ def grant(
     deps.out("")
 
     tx_hash = _approve(settings, deps, owner, spender, amount)
-    left = deps.rpc.usdc_allowance(owner, spender)
+    left = _read(lambda: deps.rpc.usdc_allowance(owner, spender), deps.sleep)
     deps.out(f"Granted. Allowance now {_usdc(left)}.")
     return tx_hash
 
@@ -268,7 +299,7 @@ def revoke(limiter_text: str, env: Mapping[str, str] | None = None, **overrides)
     deps.out("")
 
     tx_hash = _approve(settings, deps, owner, spender, 0)
-    left = deps.rpc.usdc_allowance(owner, spender)
+    left = _read(lambda: deps.rpc.usdc_allowance(owner, spender), deps.sleep)
     deps.out(f"Revoked. Allowance now {_usdc(left)}.")
     return tx_hash
 

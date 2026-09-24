@@ -55,8 +55,24 @@ ask() {
   local a; read -r -p "$1 [y/N] " a; [[ "$a" == y || "$a" == Y ]]
 }
 pause() { [[ "$ASSUME_YES" == 1 ]] || read -r -p "$1 — press Enter to continue " _; }
-usdc() { cast call "$USDC" "balanceOf(address)(uint256)" "$1" --rpc-url "$RPC" | awk '{print $1}'; }
-limiter_word() { cast call "$LIMITER" "$1" --rpc-url "$RPC" | awk '{print $1}'; }
+# Read-only cast against the RPC, retried while a public endpoint rate-limits.
+# A refusal must never be mistaken for a revert, or for a failed check.
+rcast() {
+  local out rc attempt
+  for attempt in 1 2 3 4 5 6; do
+    # Not `if out=$(…); then`: after an if without an else, $? is 0, and a
+    # revert would be reported as success.
+    out=$(cast "$@" --rpc-url "$RPC" 2>&1) && rc=0 || rc=$?
+    if (( rc == 0 )); then printf '%s\n' "$out"; return 0; fi
+    if grep -qiE '429|rate.?limit|too many requests' <<< "$out"; then
+      sleep $((attempt * 2)); continue
+    fi
+    printf '%s\n' "$out"; return $rc
+  done
+  printf '%s\n' "$out"; return 1
+}
+usdc() { rcast call "$USDC" "balanceOf(address)(uint256)" "$1" | awk '{print $1}'; }
+limiter_word() { rcast call "$LIMITER" "$1" | awk '{print $1}'; }
 
 sidecar() {
   ( cd "$SIDECAR"
@@ -71,7 +87,7 @@ revoke() { if [[ -n "${REVOKE_CMD:-}" ]]; then eval "$REVOKE_CMD"; else sidecar 
 expect_revert() {
   local name=$1 want=$2; shift 2
   local out got
-  if out=$(cast call "$@" --rpc-url "$RPC" 2>&1); then
+  if out=$(rcast call "$@"); then
     log "| $name | \`$want\` | no revert | **FAIL** |"; FAILS=$((FAILS + 1)); return
   fi
   if grep -q -- "$want" <<< "$out"; then
@@ -83,7 +99,7 @@ expect_revert() {
 }
 expect_ok() {
   local name=$1; shift
-  if cast call "$@" --rpc-url "$RPC" > /dev/null 2>&1; then
+  if rcast call "$@" > /dev/null; then
     log "| $name | no revert | no revert | pass |"
   else
     log "| $name | no revert | reverted | **FAIL** |"; FAILS=$((FAILS + 1))
@@ -94,9 +110,9 @@ ref() { cast keccak "t4-$1"; }
 
 # ---------------------------------------------------------------------------
 step "0. Preconditions"
-[[ "$(cast chain-id --rpc-url "$RPC")" == "$BASE_CHAIN_ID" ]] || { echo "RPC is not Base"; exit 1; }
+[[ "$(rcast chain-id)" == "$BASE_CHAIN_ID" ]] || { echo "RPC is not Base"; exit 1; }
 log "- run started $(date -u '+%Y-%m-%d %H:%M UTC'), RPC chain $BASE_CHAIN_ID"
-log "- owner (Trezor) $OWNER: $(usdc "$OWNER") atomic USDC, $(cast balance "$OWNER" --rpc-url "$RPC" --ether) ETH"
+log "- owner (Trezor) $OWNER: $(usdc "$OWNER") atomic USDC, $(rcast balance "$OWNER" --ether) ETH"
 if [[ -z "${GRANT_CMD:-}" ]]; then
   [[ -f "$SIDECAR_ENV" ]] || { echo "Missing $SIDECAR_ENV"; exit 1; }
   grep -q '^SIGN402_TREZOR_POC_ENABLED=1' "$SIDECAR_ENV" || {
@@ -127,14 +143,14 @@ new_key sign402-guardian GUARDIAN
 
 # ---------------------------------------------------------------------------
 step "2. Gas for the agent"
-bal=$(cast balance "$AGENT" --rpc-url "$RPC")
+bal=$(rcast balance "$AGENT")
 if (( bal < MIN_GAS_WEI )); then
   echo "From Trezor Suite, send 0.0002 ETH on Base to:"
   echo "    $AGENT"
   echo "Waiting for it to arrive (checks every 10 s, Ctrl-C to stop and rerun later)…"
-  while (( $(cast balance "$AGENT" --rpc-url "$RPC") < MIN_GAS_WEI )); do sleep 10; done
+  while (( $(rcast balance "$AGENT" || echo 0) < MIN_GAS_WEI )); do sleep 10; done
 fi
-log "- agent gas: $(cast balance "$AGENT" --rpc-url "$RPC" --ether) ETH"
+log "- agent gas: $(rcast balance "$AGENT" --ether) ETH"
 
 # ---------------------------------------------------------------------------
 step "3. Deploy the limiter"
@@ -151,7 +167,7 @@ fi
 log "- limiter: $LIMITER"
 log "- deploy tx: ${DEPLOY_TX:-unknown}"
 for f in owner agent guardian token; do
-  got=$(cast call "$LIMITER" "$f()(address)" --rpc-url "$RPC")
+  got=$(rcast call "$LIMITER" "$f()(address)")
   log "- $f(): $got"
 done
 log "- dailyCap(): $(limiter_word 'dailyCap()(uint256)'), perPurchaseCap(): $(limiter_word 'perPurchaseCap()(uint256)'), expiry(): $(limiter_word 'expiry()(uint256)')"

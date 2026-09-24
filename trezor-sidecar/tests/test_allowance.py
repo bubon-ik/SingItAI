@@ -56,7 +56,12 @@ class FakeRpc:
     def has_code(self, address):
         return self.code
 
+    refusals = 0
+
     def call_word(self, to, data):
+        if self.refusals:
+            self.refusals -= 1
+            raise SafeError("base_rpc_unavailable", "Base RPC is unavailable.", 503)
         name = next(k for k, v in allowance._GETTERS.items() if v == data)
         return self.values[name]
 
@@ -216,6 +221,32 @@ class AllowanceTests(TestCase):
         self.assertEqual(raised.exception.code, "receipt_pending")
         self.assertIn("Do not sign again", raised.exception.message)
         self.assertEqual(len(self.trezor.pushed), 1)
+
+    # --- a refusing RPC ---
+
+    def test_a_rate_limited_read_is_retried_not_misreported(self):
+        self.rpc.refusals = 3
+        allowance.grant(LIMITER, "1.00", **self.deps())
+        self.assertEqual(len(self.trezor.pushed), 1)
+
+    def test_an_rpc_that_keeps_refusing_stops_before_the_device_and_says_so(self):
+        self.rpc.refusals = 10_000
+        with self.assertRaises(SafeError) as raised:
+            allowance.grant(LIMITER, "1.00", **self.deps())
+        self.assertEqual(raised.exception.code, "base_rpc_unavailable")
+        self.assertIn("Nothing was signed", raised.exception.message)
+        self.assertEqual(self.trezor.signed, [])
+
+    def test_a_refused_receipt_poll_counts_as_pending(self):
+        def refuse_then_mined(tx_hash, polls=[0]):
+            polls[0] += 1
+            if polls[0] < 3:
+                raise SafeError("base_rpc_unavailable", "Base RPC is unavailable.", 503)
+            return 1
+
+        self.rpc.receipt_status = refuse_then_mined
+        allowance.grant(LIMITER, "1.00", **self.deps())
+        self.assertIn("Granted.", self.text())
 
     # --- revoke ---
 
