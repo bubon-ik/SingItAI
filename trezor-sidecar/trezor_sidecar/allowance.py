@@ -49,6 +49,7 @@ _ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}\Z")
 _AMOUNT = re.compile(r"[0-9]+(\.[0-9]{1,6})?\Z")
 RECEIPT_WAIT_SECONDS = 90
 RECEIPT_POLL_SECONDS = 3
+READING = "Reading the limiter from Base (public endpoints can take up to a minute)…"
 SETTLE_WAIT_SECONDS = 30
 """How long to wait for the RPC to show a mined approve. Public endpoints are
 load-balanced; the node answering the next read can be a few blocks behind the
@@ -263,6 +264,7 @@ def _report_allowance(deps: Deps, verb: str, left: int, expected: int) -> None:
 def status(limiter_text: str, env: Mapping[str, str] | None = None, **overrides) -> Limiter:
     settings = _settings(os.environ if env is None else env)
     deps = _deps(settings, **overrides)
+    deps.out(READING)
     limiter = inspect_limiter(deps.rpc, _address(limiter_text), deps.sleep)
     _describe(limiter, deps.out)
     left = _read(lambda: deps.rpc.usdc_allowance(limiter.owner, limiter.address), deps.sleep)
@@ -281,6 +283,7 @@ def grant(
     spender = _address(limiter_text)
     amount = parse_amount(amount_text, settings.max_usd)
 
+    deps.out(READING)
     limiter = inspect_limiter(deps.rpc, spender, deps.sleep)
     if limiter.owner.lower() != owner.lower():
         raise SafeError("limiter_invalid", f"Limiter owner is {limiter.owner}, not your paired account {owner}.", 409)
