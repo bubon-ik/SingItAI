@@ -186,6 +186,17 @@ class CompanionWorker:
                 payload["expiresAt"],
                 payload["idempotencyKey"],
             )
+        if kind == "usdc_approve":
+            # A grant or revoke for the allowance lane. The sidecar checks the
+            # spender before the device is asked and returns the approve
+            # signed, not broadcast; the server that asked checks and sends it.
+            if set(payload) != {"spender", "amountAtomic"} or type(payload["amountAtomic"]) is not int:
+                raise SafeError("broker_failed", "Allowance job is invalid.", 502)
+            return self.sidecar.approve_allowance(
+                payload["spender"],
+                payload["amountAtomic"],
+                "allowance:" + str(job.get("jobId")),
+            )
         raise SafeError("broker_failed", "Trezor companion job type is invalid.", 502)
 
 

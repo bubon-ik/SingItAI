@@ -76,7 +76,9 @@ _HEALTH_STATES = frozenset({
 _PAIR_PATH = "/v1/pair"
 _APPROVE_PATH = "/v1/purchase-intents/approve"
 _PAYMENTS_PATH = "/v1/payments"
-_POST_PATHS = frozenset({_PAIR_PATH, _APPROVE_PATH, _PAYMENTS_PATH})
+_ALLOWANCE_PATH = "/v1/allowance/approve"
+_ALLOWANCE_FIELDS = frozenset({"spender", "amountAtomic"})
+_POST_PATHS = frozenset({_PAIR_PATH, _APPROVE_PATH, _PAYMENTS_PATH, _ALLOWANCE_PATH})
 
 _PAIR_FIELDS = frozenset({"allowRepair"})
 _INTENT_FIELDS = frozenset({
@@ -291,6 +293,12 @@ class _SidecarHttpServer(ThreadingHTTPServer):
         with self._device_operation_lock:
             return self._device_operation(
                 lambda: self.service.pair(allow_repair=allow_repair)
+            )
+
+    def approve_allowance(self, spender: Any, amount_atomic: Any) -> dict[str, Any]:
+        with self._device_operation_lock:
+            return self._device_operation(
+                lambda: self.service.approve_allowance(spender, amount_atomic)
             )
 
     def approve_intent(self, intent: PurchaseIntent, timestamp: int) -> PurchaseIntent:
@@ -571,6 +579,8 @@ class _SidecarHandler(BaseHTTPRequestHandler):
             self._handle_pair(body)
         elif path == _APPROVE_PATH:
             self._handle_approve(body, timestamp)
+        elif path == _ALLOWANCE_PATH:
+            self._handle_allowance(body)
         else:
             self._handle_payment(body, timestamp, idempotency_key)
 
@@ -619,6 +629,17 @@ class _SidecarHandler(BaseHTTPRequestHandler):
                 "intentId": _bounded_text(approved.intent_id, maximum=66),
                 "state": PaymentState.DEVICE_APPROVED.value,
             }
+
+        self._dispatch(operation)
+
+    def _handle_allowance(self, body: dict[str, Any]) -> None:
+        if set(body) != _ALLOWANCE_FIELDS or type(body["amountAtomic"]) is not int:
+            self._error(400, "invalid_request", "Allowance request is invalid.")
+            return
+
+        def operation() -> tuple[int, dict[str, Any]]:
+            signed = self.sidecar_server.approve_allowance(body["spender"], body["amountAtomic"])
+            return 200, {"ok": True, **signed}
 
         self._dispatch(operation)
 

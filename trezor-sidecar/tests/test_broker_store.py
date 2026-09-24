@@ -123,3 +123,81 @@ class BrokerStoreTests(TestCase):
         finally:
             database.close()
         self.assertFalse({"private_key", "mcp_token", "seed", "signed_transaction"} & columns)
+
+
+class BrokerStoreMigrationTests(TestCase):
+    """A broker created before `usdc_approve` keeps its rows and accepts the kind."""
+
+    LEGACY_JOBS = """
+        CREATE TABLE jobs (
+            job_id TEXT PRIMARY KEY,
+            companion_id TEXT NOT NULL REFERENCES companions(companion_id),
+            user_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('purchase_intent', 'usdc_payment')),
+            idempotency_key TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN
+                ('QUEUED', 'LEASED', 'SUCCEEDED', 'FAILED', 'EXPIRED')),
+            result_json TEXT,
+            error_code TEXT,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            leased_at INTEGER,
+            completed_at INTEGER,
+            UNIQUE(companion_id, idempotency_key)
+        );
+    """
+
+    def test_legacy_jobs_table_is_rebuilt_with_every_row(self):
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "state.db"
+            tokens = iter(["enrollment-" + "e" * 32, "companion-" + "t" * 32])
+            identifiers = iter(["c" * 24, "j" * 24, "k" * 24, "m" * 24])
+            store = BrokerStore(path, token_factory=lambda: next(tokens), id_factory=lambda: next(identifiers))
+            code = store.create_enrollment("12345", now=1_700_000_000)
+            companion = store.enroll(code, ADDRESS, now=1_700_000_001)
+            # Turn it into a database from before this change, with a job in it.
+            with sqlite3.connect(path) as db:
+                db.execute("DROP TABLE jobs")
+                db.executescript(self.LEGACY_JOBS)
+            with sqlite3.connect(path) as db:
+                db.execute(
+                    "INSERT INTO jobs VALUES ('job_legacy_1', ?, '12345', 'usdc_payment', 'pay:1', '{}', "
+                    "'SUCCEEDED', '{\"x\":1}', NULL, 1700000002, 1700000100, NULL, 1700000003)",
+                    (companion["companionId"],),
+                )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    db.execute(
+                        "INSERT INTO jobs VALUES ('job_legacy_2', ?, '12345', 'usdc_approve', 'grant:1', '{}', "
+                        "'QUEUED', NULL, NULL, 1700000002, 1700000100, NULL, NULL)",
+                        (companion["companionId"],),
+                    )
+
+            reopened = BrokerStore(path, token_factory=lambda: next(tokens), id_factory=lambda: next(identifiers))
+
+            with sqlite3.connect(path) as db:
+                schema = db.execute("SELECT sql FROM sqlite_master WHERE name = 'jobs'").fetchone()[0]
+                old = db.execute("SELECT kind, state, result_json FROM jobs WHERE job_id = 'job_legacy_1'").fetchone()
+                leftovers = db.execute("SELECT name FROM sqlite_master WHERE name LIKE 'jobs_before%'").fetchall()
+                index = db.execute("SELECT name FROM sqlite_master WHERE name = 'jobs_claimable'").fetchone()
+            self.assertIn("'usdc_approve'", schema)
+            self.assertEqual(old, ("usdc_payment", "SUCCEEDED", '{"x":1}'))
+            self.assertEqual(leftovers, [])
+            self.assertIsNotNone(index)
+
+            job = reopened.create_job(user_id="12345", kind="usdc_approve", idempotency_key="grant:12345678",
+                                      payload={"spender": ADDRESS, "amountAtomic": 1}, expires_at=1_700_000_100,
+                                      now=1_700_000_002)
+            self.assertEqual(job["kind"], "usdc_approve")
+
+            # Opening again is a no-op.
+            BrokerStore(path, token_factory=lambda: next(tokens), id_factory=lambda: next(identifiers))
+            with sqlite3.connect(path) as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 2)
+
+    def test_unknown_kinds_are_still_refused(self):
+        with TemporaryDirectory() as temp:
+            store = BrokerStore(Path(temp) / "state.db")
+            with self.assertRaisesRegex(ValueError, "job kind is invalid"):
+                store.create_job(user_id="12345", kind="usdc_transfer", idempotency_key="transfer:12345678",
+                                 payload={}, expires_at=1_700_000_100, now=1_700_000_002)

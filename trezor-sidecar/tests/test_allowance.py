@@ -7,6 +7,7 @@ from eth_account import Account
 from eth_utils import keccak
 
 from trezor_sidecar import allowance
+from trezor_sidecar.limiter import LimiterArtifact
 from trezor_sidecar.base import (
     BASE_CHAIN_ID,
     BASE_USDC_ADDRESS,
@@ -36,7 +37,7 @@ def word(address):
 
 class FakeRpc:
     def __init__(self, owner, **limiter):
-        self.code = True
+        self.contract = True
         self.values = {
             "owner": word(owner),
             "token": word(BASE_USDC_ADDRESS),
@@ -54,7 +55,14 @@ class FakeRpc:
         self.calls = []
 
     def has_code(self, address):
-        return self.code
+        return self.contract
+
+    code_override = None
+
+    def code(self, address):
+        if self.code_override is not None:
+            return self.code_override
+        return LimiterArtifact().deployed_bytecode if self.contract else "0x"
 
     refusals = 0
 
@@ -169,13 +177,23 @@ class AllowanceTests(TestCase):
             with self.subTest(name):
                 self.rpc = FakeRpc(self.account.address)
                 if change.pop("code", True) is False:
-                    self.rpc.code = False
+                    self.rpc.contract = False
                 self.rpc.values.update(change)
                 self.trezor = FakeTrezor(self.account, self.rpc)
                 with self.assertRaises(SafeError) as raised:
                     allowance.grant(LIMITER, "1.00", **self.deps())
                 self.assertEqual(raised.exception.code, "limiter_invalid")
                 self.assertEqual(self.trezor.signed, [])
+
+    def test_grant_refuses_a_contract_that_is_not_the_tested_limiter(self):
+        code = bytearray(bytes.fromhex(LimiterArtifact().deployed_bytecode[2:]))
+        code[-1] ^= 0xFF
+        self.rpc.code_override = "0x" + code.hex()
+        with self.assertRaises(SafeError) as raised:
+            allowance.grant(LIMITER, "1.00", **self.deps())
+        self.assertEqual(raised.exception.code, "limiter_invalid")
+        self.assertIn("not the tested AgentAllowance", raised.exception.message)
+        self.assertEqual(self.trezor.signed, [])
 
     def test_grant_refuses_bad_amounts_before_the_device(self):
         for text in ("0", "0.0", "-1", "1.0000001", "abc", "1e2", "1.01", "", " 1"):
@@ -270,7 +288,7 @@ class AllowanceTests(TestCase):
     # --- revoke ---
 
     def test_revoke_works_for_any_spender_without_inspecting_it(self):
-        self.rpc.code = False
+        self.rpc.contract = False
         self.rpc.values["owner"] = word(OTHER)
         self.rpc.allowance = 1_000_000
 

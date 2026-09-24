@@ -220,13 +220,16 @@ class BaseRpcClient:
             self._request(2, "eth_call", [{"to": target, "data": data}, "latest"])
         )
 
-    def has_code(self, address: str) -> bool:
+    def code(self, address: str) -> str:
         target = "0x" + _address_bytes(address).hex()
         self._require_base()
         code = self._request(2, "eth_getCode", [target, "latest"])
-        if not isinstance(code, str) or not code.startswith("0x"):
+        if not isinstance(code, str) or _HEX_BYTES.fullmatch(code) is None and code != "0x":
             raise _rpc_unavailable()
-        return len(code) > 2
+        return code
+
+    def has_code(self, address: str) -> bool:
+        return len(self.code(address)) > 2
 
     def usdc_allowance(self, owner: str, spender: str) -> int:
         data = (

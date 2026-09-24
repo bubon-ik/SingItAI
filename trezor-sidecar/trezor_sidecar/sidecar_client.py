@@ -20,7 +20,7 @@ _MAX_RESPONSE_BYTES = 65_536
 _FAST_REQUEST_TIMEOUT_SECONDS = 5.0
 _DEVICE_REQUEST_TIMEOUT_SECONDS = 130.0
 _DEVICE_CONFIRMATION_PATHS = frozenset(
-    {"/v1/pair", "/v1/purchase-intents/approve"}
+    {"/v1/pair", "/v1/purchase-intents/approve", "/v1/allowance/approve"}
 )
 _IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9._:-]{8,128}\Z")
 _PAYMENT_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
@@ -62,6 +62,8 @@ _PUBLIC_MESSAGES = {
     "invalid_request": "Request is invalid.",
     "invalid_signature": "Trezor returned an invalid approval signature.",
     "invalid_signed_transaction": "Trezor returned an invalid signed transaction.",
+    "limit_exceeded": "The allowance exceeds the configured limit.",
+    "limiter_invalid": "The spender is not the tested limiter owned by this Trezor; nothing was shown on the device.",
     "internal_error": "Request failed safely.",
     "invoice_expired": "Payment invoice has expired.",
     "method_not_allowed": "Method not allowed.",
@@ -472,6 +474,36 @@ class SidecarClient:
             expected_status=200,
         )
         return self._pairing_response(result)
+
+    def approve_allowance(self, spender: str, amount_atomic: int, idempotency_key: str) -> dict[str, Any]:
+        """Ask the local sidecar for a device-signed USDC approve; never broadcast here."""
+        if not isinstance(spender, str) or _ADDRESS.fullmatch(spender) is None:
+            raise SafeError("invalid_request", "Request is invalid.")
+        if type(amount_atomic) is not int or amount_atomic < 0:
+            raise SafeError("invalid_request", "Request is invalid.")
+        result = self._request(
+            "POST",
+            "/v1/allowance/approve",
+            idempotency_key=idempotency_key,
+            payload={"spender": spender, "amountAtomic": amount_atomic},
+            expected_status=200,
+        )
+        expected = {"ok", "signedTransaction", "transactionHash", "owner", "spender", "amountAtomic"}
+        if set(result) != expected:
+            raise _invalid_response()
+        raw = result["signedTransaction"]
+        if (
+            not isinstance(raw, str)
+            or re.fullmatch(r"0x(?:[0-9a-fA-F]{2}){1,65536}", raw) is None
+            or not isinstance(result["transactionHash"], str)
+            or _TX_HASH.fullmatch(result["transactionHash"]) is None
+            or not isinstance(result["owner"], str)
+            or _ADDRESS.fullmatch(result["owner"]) is None
+            or result["spender"] != spender and str(result["spender"]).lower() != spender.lower()
+            or result["amountAtomic"] != amount_atomic
+        ):
+            raise _invalid_response()
+        return {key: result[key] for key in expected - {"ok"}}
 
     def approve_intent(self, intent: PurchaseIntent) -> dict[str, Any]:
         if type(intent) is not PurchaseIntent:

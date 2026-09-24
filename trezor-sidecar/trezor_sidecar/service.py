@@ -29,12 +29,15 @@ from .base import (
     EVM_DERIVATION_PATH,
     BaseBalances,
     BaseRpcClient,
+    encode_usdc_approve,
     encode_usdc_transfer,
+    verify_signed_usdc_approve,
     verify_signed_usdc_transfer,
 )
 from .config import SidecarSettings
 from .errors import SafeError
 from .intent import build_intent_message, recover_intent_signer
+from .limiter import verify_for_grant
 from .mcp_client import TrezorMcpClient
 from .models import (
     IntentRecord,
@@ -472,6 +475,69 @@ class TrezorSidecarService:
         if not isinstance(signature, str) or _SIGNATURE.fullmatch(signature) is None:
             raise _invalid_signature()
         return signature
+
+    def approve_allowance(self, spender: Any, amount_atomic: Any) -> dict[str, Any]:
+        """Sign one USDC `approve` on the device; return it signed, not broadcast.
+
+        The server that asked broadcasts it, after checking the same bytes. A
+        grant (amount above zero) is refused before the device is asked unless
+        the spender is the tested limiter owned by this Trezor
+        (limiter.verify_for_grant). A revoke (zero) is never refused for the
+        spender's sake. The amount is capped like every other proof operation.
+        """
+        settings = self._settings_snapshot()
+        self._require_enabled(settings)
+        self._require_fixed_configuration(settings)
+        try:
+            spender = to_checksum_address(_normalize_address(spender))
+        except SafeError:
+            raise _safe("invalid_request", "Spender is invalid.") from None
+        if int(spender, 16) == 0:
+            raise _safe("invalid_request", "Spender is invalid.")
+        if type(amount_atomic) is not int or amount_atomic < 0:
+            raise _safe("invalid_request", "Allowance amount is invalid.")
+        if amount_atomic > int(settings.max_usd * 1_000_000):
+            raise _safe(
+                "limit_exceeded",
+                f"Allowance exceeds SIGN402_TREZOR_POC_MAX_USD ({settings.max_usd}).",
+            )
+        pairing = self.store.get_pairing()
+        if pairing is None:
+            raise _safe("not_paired", "Pair the Trezor first.", 409)
+        if pairing.derivation_path != EVM_DERIVATION_PATH:
+            raise _safe("pairing_mismatch", "The stored Trezor pairing is invalid.", 409)
+        owner = pairing.address
+        if amount_atomic > 0:
+            verify_for_grant(self._rpc, spender, owner, now=self._now())
+
+        with self._device_guard() as acquired:
+            if not acquired:
+                raise _device_lock_unavailable()
+            try:
+                result = self.trezor.sign_base_transaction(
+                    settings.derivation_path,
+                    BASE_USDC_ADDRESS,
+                    encode_usdc_approve(spender, amount_atomic),
+                )
+            except SafeError as error:
+                if error.code in {"device_rejected", "device_cancelled", "action_cancelled"}:
+                    raise _safe("device_rejected", "The approval was cancelled on the Trezor.") from None
+                if error.code in {"device_timeout", "timeout"}:
+                    raise _safe("device_timeout", "The Trezor approval timed out.", 504) from None
+                raise _unavailable() from None
+            except TimeoutError:
+                raise _safe("device_timeout", "The Trezor approval timed out.", 504) from None
+            except Exception:
+                raise _unavailable() from None
+        raw = self._signed_transaction(result)
+        tx_hash = verify_signed_usdc_approve(raw, owner, spender, amount_atomic)
+        return {
+            "signedTransaction": raw,
+            "transactionHash": tx_hash,
+            "owner": owner,
+            "spender": spender,
+            "amountAtomic": amount_atomic,
+        }
 
     def approve_intent(self, intent: PurchaseIntent, now: int) -> PurchaseIntent:
         with self._device_guard() as acquired:

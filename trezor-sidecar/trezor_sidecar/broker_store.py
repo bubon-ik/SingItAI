@@ -18,7 +18,9 @@ from eth_utils import to_checksum_address
 
 _USER_ID = re.compile(r"[0-9]{1,32}\Z")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9._:-]{8,128}\Z")
-_JOB_KINDS = frozenset({"purchase_intent", "usdc_payment"})
+_JOB_KINDS = frozenset({"purchase_intent", "usdc_payment", "usdc_approve"})
+_JOBS_KIND_CHECK = "CHECK(kind IN ('purchase_intent', 'usdc_payment', 'usdc_approve'))"
+_LEGACY_JOBS_KIND_CHECK = "CHECK(kind IN ('purchase_intent', 'usdc_payment'))"
 _TERMINAL_STATES = frozenset({"SUCCEEDED", "FAILED", "EXPIRED"})
 _MAX_JSON_BYTES = 65_536
 
@@ -150,7 +152,7 @@ class BrokerStore:
                     job_id TEXT PRIMARY KEY,
                     companion_id TEXT NOT NULL REFERENCES companions(companion_id),
                     user_id TEXT NOT NULL,
-                    kind TEXT NOT NULL CHECK(kind IN ('purchase_intent', 'usdc_payment')),
+                    kind TEXT NOT NULL CHECK(kind IN ('purchase_intent', 'usdc_payment', 'usdc_approve')),
                     idempotency_key TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     state TEXT NOT NULL CHECK(state IN
@@ -167,6 +169,33 @@ class BrokerStore:
                     ON jobs(companion_id, state, created_at);
                 """
             )
+        self._migrate_job_kinds()
+
+    def _migrate_job_kinds(self) -> None:
+        """Let a database created before `usdc_approve` store it.
+
+        SQLite cannot alter a CHECK constraint, so a jobs table carrying the old
+        one is rebuilt with the new one and every row copied, in one transaction.
+        Nothing else about the table changes.
+        """
+        with self._database() as database:
+            row = database.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'jobs'"
+            ).fetchone()
+            if row is None or _LEGACY_JOBS_KIND_CHECK not in row["sql"]:
+                return
+            new_sql = row["sql"].replace(_LEGACY_JOBS_KIND_CHECK, _JOBS_KIND_CHECK)
+            database.execute("PRAGMA foreign_keys = OFF")
+            database.execute("BEGIN IMMEDIATE")
+            database.execute("ALTER TABLE jobs RENAME TO jobs_before_usdc_approve")
+            database.execute(new_sql)
+            database.execute("INSERT INTO jobs SELECT * FROM jobs_before_usdc_approve")
+            database.execute("DROP TABLE jobs_before_usdc_approve")
+            database.execute(
+                "CREATE INDEX IF NOT EXISTS jobs_claimable ON jobs(companion_id, state, created_at)"
+            )
+            database.execute("COMMIT")
+            database.execute("PRAGMA foreign_keys = ON")
 
     def create_enrollment(self, user_id: str, *, now: int, ttl_seconds: int = 600) -> str:
         owner = _user_id(user_id)

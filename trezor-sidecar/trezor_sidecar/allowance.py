@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Callable, Mapping
 
-from eth_utils import keccak, to_checksum_address
+from eth_utils import to_checksum_address
 
 from .base import (
     BASE_USDC_ADDRESS,
@@ -40,6 +40,7 @@ from .base import (
     verify_signed_usdc_approve,
 )
 from .errors import SafeError
+from .limiter import READ_BACKOFF_SECONDS, _GETTERS, Limiter, _read, inspect_limiter, verify_for_grant  # noqa: F401
 from .mcp_client import McpToolCaller, TrezorMcpClient
 from .service import TrezorSidecarService
 from .transfer_preview import _paired_address, _settings
@@ -54,24 +55,6 @@ SETTLE_WAIT_SECONDS = 30
 """How long to wait for the RPC to show a mined approve. Public endpoints are
 load-balanced; the node answering the next read can be a few blocks behind the
 one that reported the receipt."""
-READ_BACKOFF_SECONDS = (1, 2, 4, 8)
-"""Waits between retries of a read. Reads are idempotent, and public Base
-endpoints refuse short bursts; a refused read is retried, never guessed."""
-
-
-def _selector(signature: str) -> str:
-    return "0x" + keccak(text=signature)[:4].hex()
-
-
-_GETTERS = {
-    name: _selector(f"{name}()")
-    for name in (
-        "owner", "token", "agent", "guardian", "dailyCap",
-        "perPurchaseCap", "expiry", "paused", "remainingToday",
-    )
-}
-
-
 def _usdc(atomic: int) -> str:
     return f"{Decimal(atomic) / Decimal(1_000_000):.6f}".rstrip("0").rstrip(".") + " USDC"
 
@@ -82,12 +65,6 @@ def _address(value: str) -> str:
     if int(value, 16) == 0:
         raise SafeError("invalid_request", "Limiter cannot be the zero address.")
     return to_checksum_address(value)
-
-
-def _word_address(word: int) -> str:
-    if word >> 160:
-        raise SafeError("limiter_invalid", "Limiter returned a malformed address.", 409)
-    return to_checksum_address(word.to_bytes(20, "big"))
 
 
 def parse_amount(text: str, max_usd: Decimal) -> int:
@@ -107,68 +84,6 @@ def parse_amount(text: str, max_usd: Decimal) -> int:
             "the owner's worst-case loss; raise that setting deliberately if intended.",
         )
     return int(value * 1_000_000)
-
-
-@dataclass(frozen=True)
-class Limiter:
-    address: str
-    owner: str
-    token: str
-    agent: str
-    guardian: str
-    daily_cap: int
-    per_purchase_cap: int
-    expiry: int
-    paused: bool
-    remaining_today: int
-
-
-def _read(read: Callable[[], object], sleep: Callable[[float], None]):
-    """One chain read, retried with backoff while the RPC refuses it."""
-    for wait in READ_BACKOFF_SECONDS:
-        try:
-            return read()
-        except SafeError as error:
-            if error.code != "base_rpc_unavailable":
-                raise
-        sleep(wait)
-    try:
-        return read()
-    except SafeError as error:
-        if error.code != "base_rpc_unavailable":
-            raise
-        raise SafeError(
-            "base_rpc_unavailable",
-            "Could not read from Base: the RPC kept refusing (rate limit or outage), "
-            "or the address is not an AgentAllowance. Nothing was signed. Wait a "
-            "minute and run it again.",
-            503,
-        ) from None
-
-
-def inspect_limiter(
-    rpc: BaseRpcClient, limiter: str, sleep: Callable[[float], None] = time.sleep
-) -> Limiter:
-    if not _read(lambda: rpc.has_code(limiter), sleep):
-        raise SafeError("limiter_invalid", "There is no contract at that address on Base.", 409)
-    words = {
-        name: _read(lambda data=data: rpc.call_word(limiter, data), sleep)
-        for name, data in _GETTERS.items()
-    }
-    if words["paused"] not in (0, 1):
-        raise SafeError("limiter_invalid", "Limiter returned a malformed flag.", 409)
-    return Limiter(
-        address=limiter,
-        owner=_word_address(words["owner"]),
-        token=_word_address(words["token"]),
-        agent=_word_address(words["agent"]),
-        guardian=_word_address(words["guardian"]),
-        daily_cap=words["dailyCap"],
-        per_purchase_cap=words["perPurchaseCap"],
-        expiry=words["expiry"],
-        paused=bool(words["paused"]),
-        remaining_today=words["remainingToday"],
-    )
 
 
 def _describe(limiter: Limiter, out: Callable[[str], None]) -> None:
@@ -284,15 +199,7 @@ def grant(
     amount = parse_amount(amount_text, settings.max_usd)
 
     deps.out(READING)
-    limiter = inspect_limiter(deps.rpc, spender, deps.sleep)
-    if limiter.owner.lower() != owner.lower():
-        raise SafeError("limiter_invalid", f"Limiter owner is {limiter.owner}, not your paired account {owner}.", 409)
-    if limiter.token.lower() != BASE_USDC_ADDRESS.lower():
-        raise SafeError("limiter_invalid", f"Limiter token is {limiter.token}, not USDC on Base.", 409)
-    if limiter.paused:
-        raise SafeError("limiter_invalid", "Limiter is paused permanently; deploy a new one.", 409)
-    if limiter.expiry <= deps.now():
-        raise SafeError("limiter_invalid", "Limiter has expired; deploy a new one.", 409)
+    limiter = verify_for_grant(deps.rpc, spender, owner, now=int(deps.now()), sleep=deps.sleep)
 
     deps.out("Grant an allowance. This moves no money: it lets the limiter pull up to")
     deps.out("the amount from your address, only through its caps, until revoked.")

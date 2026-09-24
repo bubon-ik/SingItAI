@@ -28,6 +28,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent.parent
 SOURCE = HERE / "src" / "AgentAllowance.sol"
 TARGET = HERE.parent / "sign402-gateway" / "sign402_gateway" / "contracts" / "agent_allowance.json"
+# The owner's machine checks a spender against the same code before the Trezor
+# is asked to approve it; it keeps its own copy to stay independent of the gateway.
+SIDECAR_TARGET = HERE.parent / "trezor-sidecar" / "trezor_sidecar" / "agent_allowance.json"
 DUMMY = "0x000000000000000000000000000000000000dEaD"
 
 
@@ -77,17 +80,19 @@ def main() -> int:
 
     fresh = build()
     if not args.check:
-        TARGET.parent.mkdir(parents=True, exist_ok=True)
-        TARGET.write_text(json.dumps(fresh, indent=1, sort_keys=True) + "\n")
-        print(f"wrote {TARGET.relative_to(HERE.parent)} ({fresh['sourceSha256'][:12]})")
+        for target in (TARGET, SIDECAR_TARGET):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(fresh, indent=1, sort_keys=True) + "\n")
+            print(f"wrote {target.relative_to(HERE.parent)} ({fresh['sourceSha256'][:12]})")
         return 0
 
-    committed = json.loads(TARGET.read_text())
-    for field in ("sourceSha256", "compilerVersion", "bytecode", "deployedBytecode", "immutableRanges"):
-        if committed.get(field) != fresh[field]:
-            print(f"STALE: {field} differs from a fresh build of {fresh['sourcePath']}")
-            return 1
-    print("artifact matches a fresh build of the source")
+    for target in (TARGET, SIDECAR_TARGET):
+        committed = json.loads(target.read_text())
+        for field in ("sourceSha256", "compilerVersion", "bytecode", "deployedBytecode", "immutableRanges"):
+            if committed.get(field) != fresh[field]:
+                print(f"STALE: {target.relative_to(HERE.parent)} {field} differs from a fresh build of {fresh['sourcePath']}")
+                return 1
+    print("both artifacts match a fresh build of the source")
 
     if args.onchain:
         live = onchain_code(args.onchain, args.rpc)
