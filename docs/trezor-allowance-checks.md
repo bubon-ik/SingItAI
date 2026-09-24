@@ -488,11 +488,14 @@ Deployed with `scripts/deploy-trezor-allowance.sh` (f381590, then fixes up to
 | `buy crypto news` (Otto AI, 0.001) | delivered, "paid from your Trezor allowance (refill 0.2 USDC)" | refill [`0xffaaf82e…3756`](https://basescan.org/tx/0xffaaf82e0aee3d0f5d2fa37ce2136bc8df5e50d16e2caf9e88d05228a4553756), block 51737981: `Spent` 0.2 to the agent; settlement [`0x946ceb1a…676f`](https://basescan.org/tx/0x946ceb1ab7077fd6787114d2ce3e5aa5c1f2045fe758edb89cb5e0d409be676f), block 51737984: agent → `0x0e84…b808`, 1000 |
 | Watcher | reported the refill after the 2feb739 fix | — |
 | Bitrefill x402 | paused by the owner at the iMessage approval for the new merchant `bitrefill:x402`; nothing paid | — |
-| Revoke | not yet | — |
+| `/allowance_revoke`, confirmed on the Trezor | done after the grant was read back (fixed in 2ba7762) | [`0xfc1d7a9c…3e02`](https://basescan.org/tx/0xfc1d7a9cd1bc0bfd1a2043f091146be2e9186aa0cfd90ce2f4024060cf1e3e02), block 51738890: `approve(limiter, 0)`; allowance 0 |
+| Float returned by the gateway | 0.199 USDC back to the Trezor address | [`0xc82c5e2a…b85d`](https://basescan.org/tx/0xc82c5e2ad8efb5831fe66398d8f95f3050a65ae5c832e53b099bb0d440d8b85d), block 51738905: agent → owner, 199000; agent 0, owner 6.480336 |
+
+The owner lost exactly 0.001 USDC, the one delivered call (6.481336 → 6.480336).
 
 Found and fixed during the run: an empty gas wallet surfaced as Base's raw
 `OutOfFunds` (056d00c); the grant reply named a command that does not exist, and
 revoke did not return the float (254cef8); the production RPC (Alchemy free tier)
 allows 10-block `eth_getLogs` and its HTTP 400 read as an outage, so the watcher
 saw nothing (2feb739); both Bitrefill routes shared one merchant name, so the
-x402 address read as payout drift (7612ecb).
+x402 address read as payout drift (7612ecb); a mined grant nobody read back blocked the revoke (2ba7762).
