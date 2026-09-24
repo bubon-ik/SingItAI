@@ -16,7 +16,7 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Mapping
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote
 import urllib.request
 
 
@@ -26,7 +26,8 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 SIGN402_BRIDGE_DIR = ROOT_DIR / "sign402-bridge"
 PAYMENT_EXECUTOR_DIR = ROOT_DIR / "payment-executor"
 LIVE_DEMO_DIR = ROOT_DIR / "live-demo"
-DEMO_RESOURCE_SERVER_DIR = ROOT_DIR / "demo-resource-server"
+# Historical runtime paths: retained so existing deployments keep their orders
+# and state when the retired dashboard HTML is removed from the repository.
 DEFAULT_EVENT_STORE_PATH = ROOT_DIR / "demo-dashboard" / "latest-run.json"
 DEFAULT_AGENT_STATE_PATH = ROOT_DIR / "demo-dashboard" / "agent-state.json"
 DEFAULT_BITREFILL_COMMERCE_STORE_PATH = ROOT_DIR / "demo-dashboard" / "bitrefill-orders.sqlite3"
@@ -78,28 +79,31 @@ SPEND_RECORD_RETENTION_DAYS = 30
 MAX_BASE_RPC_RESPONSE_BYTES = 1024 * 1024
 COINBASE_NATIVE_TOKEN_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 
-for package_dir in (SIGN402_BRIDGE_DIR, PAYMENT_EXECUTOR_DIR, LIVE_DEMO_DIR, DEMO_RESOURCE_SERVER_DIR):
+for package_dir in (SIGN402_BRIDGE_DIR, PAYMENT_EXECUTOR_DIR, LIVE_DEMO_DIR):
     package_path = str(package_dir)
     if package_path not in sys.path:
         sys.path.insert(0, package_path)
 
-from sign402_live.flow import build_payment_commitment
+from sign402_live.flow import build_payment_commitment, encode_payment_proof
 from sign402_live.http_resource import X402ResourceClient
 from sign402_bridge.firefly import FireflyClient, find_firefly_port
 from sign402_bridge.policy import canonicalize_policy, hash_policy
 from sign402_executor.executor import build_x402_avm_payment_signature_header, execute_payment
-from x402_demo.core import encode_payment_proof
+
+from spending_memory.adapters.x402 import build_policy, to_payment
 
 from .bankr_swap import (
     BASE_USDC_MAINNET,
     BankrSwapClient,
     BankrWalletApiClient,
     load_bankr_api_key,
+    swap_idempotency_key,
     usdc_balance_from_portfolio,
 )
 from .bankr_llm_purchase import (
     BankrLlmError,
     build_bankr_llm_purchase_service_from_env,
+    start_bankr_llm_settlement_worker,
 )
 from .bitrefill_quote import SERVICE_FEE_BPS
 from .bitrefill_runner import CdpWalletServiceError
@@ -109,6 +113,8 @@ from .diagnostics import (
     log_hidden_detail,
     log_swallowed_failure,
 )
+from .decide import decide as decide_payment, journal as read_decision_journal
+from .keyring import install_master_key
 from .numeric import format_decimal
 from .goplausible import fetch_x402_paid_resource, fetch_x402_payment_required, normalize_x402_payment_required
 from .real_rate_pricing import RealRateSingitPricer
@@ -119,6 +125,20 @@ from .secure_state import (
     atomic_write_private_json,
 )
 from .user_emails import BuyerEmailStore, mask_email
+from .venice_chat import (
+    ChatError,
+    UnknownModel,
+    ChatPolicyApprovalService,
+    build_chat_service_from_env,
+    start_payto_watcher,
+)
+from .ledger_approval import LedgerApprovalError
+from .ledger_payments import LedgerConfig, LedgerOperationError, LedgerOperationStore, LedgerPayments
+from .onchain_data import build_onchain_data_from_env
+from .web_search import (
+    EXA_SEARCH_URL,
+    build_web_search_from_env,
+)
 from .user_wallets import (
     BASE_NATIVE_ETH_ASSET_ID,
     DEFAULT_USER_WALLET_STORE_PATH,
@@ -138,6 +158,7 @@ FUND_MOVING_POST_PATHS = frozenset(
         "/execute-payment",
         "/agent/buy-probe",
         "/agent/buy-tool",
+        "/agent/ledger-approve",
         "/agent/buy-x402",
         "/agent/top-up-llm-credits",
         "/agent/buy-bitrefill",
@@ -454,6 +475,8 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/health":
             endpoints = [
+                "/v1/decide",
+                "/v1/journal",
                 "/agent/buy-tool",
                 "/agent/search-bitrefill",
                 "/agent/list-bitrefill-products",
@@ -479,6 +502,16 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 "/agent/imessage/pending",
                 "/agent/imessage/decision",
             ]
+            if _ai_chat_enabled():
+                endpoints.extend(
+                    [
+                        "/agent/chat/start",
+                        "/agent/chat/message",
+                        "/agent/chat/end",
+                        "/agent/chat/approve-policy",
+                        "/agent/chat/models",
+                    ]
+                )
             if _test_endpoints_enabled():
                 endpoints.append("/agent/test-imessage-approval")
             if _legacy_payment_executor_enabled():
@@ -513,6 +546,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         if path == "/events/latest":
             self._handle_get_latest_event()
             return
+        if path == "/v1/journal":
+            self._handle_decision_journal()
+            return
         self._send_json({"error": "not_found"}, status=404)
 
     def do_POST(self) -> None:
@@ -531,6 +567,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         if path in FUND_MOVING_POST_PATHS and self._reject_if_purchases_paused():
             return
 
+        if path == "/v1/decide":
+            self._handle_decide()
+            return
         if path == "/approve-policy":
             self._handle_approve_policy()
             return
@@ -551,6 +590,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if path == "/agent/buy-tool":
             self._handle_agent_buy_tool()
+            return
+        if path in {"/agent/ledger-status", "/agent/ledger-approve", "/agent/ledger-cancel"}:
+            self._handle_ledger_operation(path)
             return
         if path == "/agent/inspect-x402":
             self._handle_agent_inspect_x402()
@@ -584,6 +626,15 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if path == "/agent/get-bitrefill-order":
             self._handle_agent_get_bitrefill_order()
+            return
+        if path in (
+            "/agent/chat/start",
+            "/agent/chat/message",
+            "/agent/chat/end",
+            "/agent/chat/approve-policy",
+            "/agent/chat/models",
+        ):
+            self._handle_agent_chat(path)
             return
         if path == "/agent/wallet":
             self._handle_agent_wallet()
@@ -813,6 +864,164 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=503)
         except Exception as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=400)
+
+    def _handle_agent_chat(self, path: str) -> None:
+        """Serve /agent/chat/*.
+
+        Free messages move no money, so a global purchase pause refuses paid
+        messages here rather than at dispatch: pausing the whole route would
+        also take the free tier down with it.
+
+        Prompt text and model output are never logged, and never appear in an
+        error body — an unexpected exception is reported without its message.
+        """
+        if not _ai_chat_enabled():
+            self._send_json({"error": "not_found"}, status=404)
+            return
+        try:
+            payload = self._read_json()
+            telegram_user_id = _require_authenticated_user(self, payload)
+            chat_service = getattr(self.server, "chat_service", None)
+            if chat_service is None:
+                self._send_json(
+                    {"ok": False, "error": "chat is not configured"}, status=503
+                )
+                return
+
+            if path == "/agent/chat/start":
+                self._send_json(chat_service.start(telegram_user_id), status=200)
+                return
+            if path == "/agent/chat/end":
+                self._send_json(chat_service.end(telegram_user_id), status=200)
+                return
+
+            if path == "/agent/chat/models":
+                model_id = str(payload.get("model", "") or "").strip()
+                if not model_id:
+                    self._send_json(
+                        chat_service.models(
+                            telegram_user_id,
+                            category=str(payload.get("category", "") or "").strip(),
+                            query=str(payload.get("query", "") or "").strip(),
+                            page=int(payload.get("page") or 0),
+                        ),
+                        status=200,
+                    )
+                    return
+                if model_id:
+                    try:
+                        self._send_json(
+                            chat_service.set_model(telegram_user_id, model_id),
+                            status=200,
+                        )
+                    except UnknownModel as exc:
+                        self._send_json(
+                            {"ok": False, "telegramText": str(exc)}, status=200
+                        )
+                    return
+
+
+            if path == "/agent/chat/approve-policy":
+                self._handle_chat_policy_approval(telegram_user_id, payload)
+                return
+
+            text = str(payload.get("text", "") or "")
+            if not text:
+                self._send_json(
+                    {"ok": False, "error": "text is required"}, status=400
+                )
+                return
+
+            if self._reject_if_purchases_paused():
+                return
+
+            result = chat_service.send(telegram_user_id, text)
+            self._send_json(
+                {
+                    "ok": True,
+                    "text": result.text,
+                    # Empty unless the turn paid for a web search. Kept out of
+                    # `text` so the client decides how to show a charge.
+                    "webFooter": getattr(result, "web_footer", ""),
+                    "costAtomic": result.cost_atomic,
+                    "prefunded": result.prefunded,
+                    "remainingWindowAtomic": result.remaining_window_atomic,
+                    "outstandingAtomic": result.outstanding_atomic,
+                },
+                status=200,
+            )
+        except WalletApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except WalletApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+        except ChatError as exc:
+            self._send_json(
+                {
+                    "ok": False,
+                    "state": exc.state,
+                    "telegramText": str(exc),
+                },
+                status=200,
+            )
+        except Exception:
+            # The message may quote the prompt. Report the failure, not its text.
+            self._send_json(
+                {"ok": False, "error": "chat_failed"},
+                status=400,
+            )
+
+    def _handle_chat_policy_approval(
+        self, telegram_user_id: str, payload: dict[str, Any]
+    ) -> None:
+        """Ask the user to approve a standing daily chat budget."""
+        if self._reject_if_purchases_paused():
+            return
+
+        policy_service = getattr(self.server, "chat_policy_service", None)
+        if policy_service is None:
+            self._send_json(
+                {"ok": False, "error": "chat is not configured"}, status=503
+            )
+            return
+
+        try:
+            cap = int(payload.get("dailyCapAtomic") or 0)
+            days = int(payload.get("days") or 0)
+        except (TypeError, ValueError):
+            cap, days = 0, 0
+
+        # A budget smaller than one top-up can be approved and then never
+        # work, because a whole chunk would never fit inside the daily window.
+        # Refuse it here rather than let the user approve something inert.
+        minimum = _chat_minimum_daily_cap_atomic()
+        if cap < minimum:
+            self._send_json(
+                {
+                    "ok": False,
+                    "state": "CAP_TOO_SMALL",
+                    "telegramText": (
+                        "The smallest workable daily budget is "
+                        f"${Decimal(minimum) / 1000000:.2f}."
+                    ),
+                },
+                status=200,
+            )
+            return
+        if days <= 0:
+            self._send_json(
+                {
+                    "ok": False,
+                    "state": "EXPIRY_REQUIRED",
+                    "telegramText": "A chat budget needs an end date.",
+                },
+                status=200,
+            )
+            return
+
+        result = policy_service.approve(
+            telegram_user_id, daily_cap_atomic=cap, days=days
+        )
+        self._send_json(result, status=200)
 
     def _handle_agent_buyer_email(self) -> None:
         """Read, set, or forget the address a guest invoice delivers to.
@@ -1492,11 +1701,23 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         # Any exit that does not settle must give the held budget back, so a
         # failed purchase never eats into the user's daily cap.
         reservation_id: str | None = None
+        claim_id: str | None = None
         settled = False
         try:
             user_id = _require_authenticated_user(
                 self, {"telegramUserId": telegram_user_id}
             )
+            ledger = getattr(self.server, "ledger_payments", None)
+            if ledger is not None and user_id == ledger.config.owner:
+                _enforce_user_purchase_rate(user_id)
+                intent = {
+                    "tool": tool,
+                    "resourceUrl": resource_url,
+                    "paymentContext": _tool_payment_context(tool, payload),
+                }
+                status, response = ledger.start(user_id, payload.get("requestId"), intent)
+                self._send_json(response, status=status)
+                return
             _enforce_user_purchase_rate(user_id)
             self.server.user_event_store.preflight_write()
             payment_context = _tool_payment_context(tool, payload)
@@ -1510,30 +1731,59 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 resource_url=resource_url,
             )
             _validate_base_usdc_x402_requirement(payment_requirements)
-            reservation_id = _reserve_user_wallet_spend(
-                self.server, user_id, payment_requirements
-            )
-            approval = self.server.imessage_approval_service.request_purchase_approval(
-                telegram_user_id=user_id,
-                tool_name=str(tool.get("name") or "x402 resource"),
+            # Reserving now decides too: a BLOCK raises SpendingBlocked and is
+            # rendered below, and a PAY comes back holding its claim.
+            reservation_id, decision, claim_id = _reserve_user_wallet_spend(
+                self.server,
+                user_id,
+                payment_requirements,
                 resource_url=resource_url,
-                payment_requirements=payment_requirements,
-                payment_context=payment_context,
+                claim_scope=payload.get("requestId"),
             )
-            if not approval.get("ok") or approval.get("status") != "approved":
-                self._send_json(
-                    {
-                        "decision": "rejected_by_imessage",
-                        "ok": False,
-                        "approval": approval,
-                        "telegramText": approval.get(
-                            "telegramText",
-                            "Purchase was not approved in iMessage.",
-                        ),
-                    },
-                    status=400,
+            payment = _payment_from_requirements(
+                payment_requirements, owner=user_id, resource_url=resource_url
+            )
+
+            if decision is None or decision.needs_human:
+                approval = self.server.imessage_approval_service.request_purchase_approval(
+                    telegram_user_id=user_id,
+                    tool_name=str(tool.get("name") or "x402 resource"),
+                    resource_url=resource_url,
+                    payment_requirements=payment_requirements,
+                    payment_context=payment_context,
                 )
-                return
+                if not approval.get("ok") or approval.get("status") != "approved":
+                    if self.server.spending_policy is not None:
+                        self.server.spending_policy.memory.remember_rejection(
+                            payment, reason="declined in iMessage"
+                        )
+                    self._send_json(
+                        {
+                            "decision": "rejected_by_imessage",
+                            "ok": False,
+                            "approval": approval,
+                            "telegramText": approval.get(
+                                "telegramText",
+                                "Purchase was not approved in iMessage.",
+                            ),
+                        },
+                        status=400,
+                    )
+                    return
+            else:
+                # The buyer only checks `ok` and `status`, so this is the whole
+                # shape it validates.
+                approval = {
+                    "ok": True,
+                    "status": "approved",
+                    "source": "spending_memory",
+                    # Carried into the event by the buyer and from there into
+                    # the spend ledger, so the row points at the journal entry
+                    # holding the rule and the evidence.
+                    "approvalId": f"sm-{decision.journal_id}",
+                    "reason": decision.reason,
+                    "rule": decision.rule,
+                }
 
             private_key = self.server.user_wallet_service.decrypt_private_key_for_future_signing(
                 user_id
@@ -1560,10 +1810,33 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                     resource_url,
                     payment_requirements,
                     enriched,
+                    payment=payment,
+                    claim_id=claim_id,
                 )
                 settled = True
                 self.server.user_event_store.write(user_id, enriched)
             self._send_json(enriched, status=200 if enriched.get("ok") else 400)
+        except (LedgerApprovalError, LedgerOperationError) as exc:
+            self._send_json(
+                {
+                    "decision": "needs_ledger_approval",
+                    "ok": False,
+                    "error": str(exc),
+                    "telegramText": str(exc),
+                },
+                status=getattr(exc, "status", 400),
+            )
+        except SpendingBlocked as exc:
+            self._send_json(
+                {
+                    "decision": "blocked_by_memory",
+                    "ok": False,
+                    "rule": exc.decision.rule,
+                    "telegramText": exc.decision.reason,
+                    "evidence": exc.decision.evidence,
+                },
+                status=400,
+            )
         except WalletApiAuthError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=401)
         except (WalletApiTokenNotConfiguredError, WalletEncryptionError) as exc:
@@ -1575,6 +1848,38 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         finally:
             if not settled:
                 _release_user_wallet_spend(self.server, reservation_id)
+                if claim_id:
+                    # Giving the claim back matters as much as the reservation:
+                    # held, it would refuse the user's own retry until it aged
+                    # out, and a purchase that failed is exactly when they retry.
+                    self.server.spending_policy.memory.release_claim(claim_id)
+
+    def _handle_ledger_operation(self, path: str) -> None:
+        try:
+            payload = self._read_json()
+            user_id = _require_authenticated_user(self, payload)
+            allowed = {"telegramUserId", "requestId", "ledgerApproval"}
+            if set(payload) - allowed:
+                raise LedgerOperationError("Only the requestId and signature may be submitted; purchase details are frozen.", 400)
+            ledger = getattr(self.server, "ledger_payments", None)
+            if ledger is None:
+                raise LedgerOperationError("Ledger payments are not configured.", 503)
+            request_id = payload.get("requestId")
+            if not isinstance(request_id, str):
+                raise LedgerOperationError("requestId is required.", 400)
+            if path == "/agent/ledger-approve":
+                status, body = ledger.approve(user_id, request_id, payload.get("ledgerApproval"))
+            elif path == "/agent/ledger-cancel":
+                status, body = ledger.cancel(user_id, request_id)
+            else:
+                status, body = ledger.status(user_id, request_id)
+            self._send_json(body, status=status)
+        except WalletApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+        except (LedgerOperationError, LedgerApprovalError) as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=getattr(exc, "status", 400))
+        except Exception:
+            self._send_json({"ok": False, "error": "Ledger operation unavailable. Check its status before retrying."}, status=503)
 
     def _handle_agent_inspect_x402(self) -> None:
         if not self._legacy_operator_request_allowed():
@@ -1758,15 +2063,22 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                     # feed; only the token-gated /agent/last-purchase reads it.
                     self.server.user_event_store.write(user_id, result)
                     if result.get("priceUsd"):
+                        reservation_id = str(result.get("spendReservationId") or "")
+                        held = self.server.spending_memory_holds.pop(
+                            reservation_id, None
+                        ) or {}
                         _settle_user_wallet_spend(
                             self.server,
                             result.get("spendReservationId"),
                             {"id": "bitrefill"},
-                            "bitrefill",
-                            _bitrefill_spend_requirement(
+                            BITREFILL_MERCHANT,
+                            held.get("requirement")
+                            or _bitrefill_spend_requirement(
                                 result.get("totalUsd") or result["priceUsd"]
                             ),
                             result,
+                            payment=held.get("payment"),
+                            claim_id=held.get("claimId"),
                         )
                 else:
                     self.server.event_store.write(redacted)
@@ -1869,6 +2181,34 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             status=503,
         )
         return True
+
+    def _handle_decide(self) -> None:
+        """POST /v1/decide — ask the spending policy about one payment.
+
+        Nothing is spent, held or settled here. The handler reads a body,
+        forwards it to the policy the gateway already runs, and writes the
+        answer back.
+        """
+        try:
+            # do_POST has already validated the header is an int inside the
+            # body-size ceiling, so this only has to read what it promised.
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length) or b"")
+        except (ValueError, UnicodeDecodeError):
+            self._send_json({"error": "invalid-request"}, status=400)
+            return
+        status, body = decide_payment(payload, self.server.decide_policy)
+        self._send_json(body, status=status)
+
+    def _handle_decision_journal(self) -> None:
+        """GET /v1/journal?owner=…&limit=… — one owner's decisions, newest first."""
+        query = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+        owner = (query.get("owner") or [None])[0]
+        limit = (query.get("limit") or [None])[0]
+        status, body = read_decision_journal(
+            owner, limit, self.server.decide_policy
+        )
+        self._send_json(body, status=status)
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
@@ -2092,6 +2432,7 @@ class Sign402GatewayServer(ThreadingHTTPServer):
         # client has to ask for it before it starts a purchase.
         self.buyer_email_required = buyer_email_required
         self.bankr_llm_purchase_service = bankr_llm_purchase_service
+        self.bankr_llm_settlement_worker = None
         self.user_token_transfer_client = user_token_transfer_client
         self.imessage_approval_service = imessage_approval_service
         self.imessage_approval_api_token = imessage_approval_api_token
@@ -2487,6 +2828,15 @@ def build_server(
     )
     from .commerce_store import BitrefillCommerceStore
 
+    ledger_config = LedgerConfig.from_env()
+
+    # Before anything reads it. Eight call sites pull
+    # SIGN402_WALLET_MASTER_KEY out of an environment mapping, and with the key
+    # ring switched on none of them would find it there. Resolving it once,
+    # here, leaves all eight unchanged; with the ring off this is the value
+    # that was already in the environment, put back.
+    install_master_key()
+
     approval_env = None
     if approval_provider is not None:
         approval_env = dict(os.environ)
@@ -2583,12 +2933,66 @@ def build_server(
         settlement_verifier=build_singit_settlement_verifier_from_env(),
         fulfillment_runner=bitrefill_fulfillment_runner,
     )
+    def bitrefill_enforce_spend(user_id: str, quote: dict[str, Any]) -> str | None:
+        """Reserve, decide, and leave the verdict where the approval finds it.
+
+        The runner's contract is "give me a reservation id", so the decision
+        and the claim travel on the server rather than through a signature the
+        runner would have to learn.
+        """
+        requirement = _bitrefill_spend_requirement(
+            quote.get("totalUsd") or quote["priceUsd"]
+        )
+        reservation_id, decision, claim_id = _reserve_user_wallet_spend(
+            server,
+            user_id,
+            requirement,
+            # One quote is one purchase, and a resent order for the same quote
+            # is the retry this is here to catch.
+            claim_scope=str(quote.get("quoteId") or quote.get("id") or ""),
+        )
+        _forget_stale_spending_memory_holds(server)
+        server.spending_memory_holds[reservation_id] = {
+            "owner": user_id,
+            "decision": decision,
+            "claimId": claim_id,
+            "payment": _payment_from_requirements(requirement, owner=user_id),
+            "requirement": requirement,
+            "heldAt": time.time(),
+        }
+        return reservation_id
+
+    def bitrefill_release_spend(reservation_id: Any) -> None:
+        """Give back the hold and the claim together, so a retry is possible."""
+        _release_user_wallet_spend(server, reservation_id)
+        held = server.spending_memory_holds.pop(str(reservation_id or ""), None)
+        if held and held.get("claimId") and server.spending_policy is not None:
+            server.spending_policy.memory.release_claim(held["claimId"])
+
     def bitrefill_wallet_approval_client(
         payment_hash: str,
         *,
         context_lines: list[str],
         telegram_user_id: str | None = None,
     ) -> dict[str, Any]:
+        # The Bitrefill runner reserves and then asks, one call apart, so the
+        # decision taken during the reservation is waiting here. This is the
+        # same branch the x402 path takes inline; the runner does not need to
+        # know memory exists.
+        held = _memory_hold_for_owner(server, telegram_user_id)
+        decision = (held or {}).get("decision")
+        if decision is not None and not decision.needs_human:
+            return {
+                "ok": True,
+                "approved": True,
+                "approvedHash": payment_hash,
+                "commitmentHash": payment_hash,
+                "status": "approved",
+                "source": "spending_memory",
+                "approvalId": f"sm-{decision.journal_id}",
+                "reason": decision.reason,
+                "rule": decision.rule,
+            }
         if telegram_user_id:
             return imessage_approval_service.request_hash_approval(
                 telegram_user_id=telegram_user_id,
@@ -2628,15 +3032,8 @@ def build_server(
         # `server` is bound later in this scope; the closure resolves it at
         # call time, so spend limits are re-checked at buy time (not only at
         # quote time, which a direct /agent/buy-wallet-bitrefill call skips).
-        enforce_spend=lambda user_id, quote: _reserve_user_wallet_spend(
-            server,
-            user_id,
-            _bitrefill_spend_requirement(quote.get("totalUsd") or quote["priceUsd"]),
-        ),
-        release_spend=lambda reservation_id: _release_user_wallet_spend(
-            server,
-            reservation_id,
-        ),
+        enforce_spend=bitrefill_enforce_spend,
+        release_spend=bitrefill_release_spend,
     )
     x402_inspector = ExternalX402Inspector()
     bankr_llm_topup_inspector = BankrLlmCreditsTopUpInspector()
@@ -2703,6 +3100,16 @@ def build_server(
         imessage_approval_service=imessage_approval_service,
         imessage_approval_api_token=os.getenv("SIGN402_PHOTON_API_TOKEN", ""),
     )
+    # Built once, at start-up: constructing it per request would open a SQLite
+    # handle per request.
+    server.spending_policy = build_spending_policy_from_env()
+    server.ledger_payments = build_ledger_payments(server, ledger_config)
+    # Its own memory, on purpose. See build_decide_policy_from_env.
+    server.decide_policy = build_decide_policy_from_env()
+    # Decisions for purchases in flight, keyed by reservation id. The Bitrefill
+    # runner reserves, approves and settles in three separate calls, and only
+    # the reservation knows what memory decided.
+    server.spending_memory_holds = {}
     server.bankr_llm_purchase_service = build_bankr_llm_purchase_service_from_env(
         env=dict(os.environ),
         wallet_service=user_wallet_service,
@@ -2721,7 +3128,174 @@ def build_server(
             metadata,
         ),
     )
+    # Finishes top-ups whose credit landed after the request that started them
+    # timed out, so a buyer is not left holding RECONCILIATION_REQUIRED.
+    server.bankr_llm_settlement_worker = start_bankr_llm_settlement_worker(
+        server.bankr_llm_purchase_service,
+        env=dict(os.environ),
+    )
+    server.chat_service = None
+    server.chat_policy_service = None
+    server.payto_watcher = None
+    if _ai_chat_enabled():
+        # Only built when the flag is on: with it unset the server has no chat
+        # service at all and the routes 404.
+        server.chat_service = build_chat_service_from_env(
+            wallet_service=user_wallet_service,
+            settle=lambda requirement, *, user_id: _settle_chat_prefund(
+                server, requirement, telegram_user_id=user_id
+            ),
+            purchases_paused=_purchases_paused,
+        )
+        if server.chat_service is not None:
+            # Web search rides on the chat service's store and wallet, and is
+            # off unless its own flag is set. With it unset `web_search` stays
+            # None and every chat path is the one that ran before it existed.
+            server.chat_service.client.web_search = build_web_search_from_env(
+                store=server.chat_service.store,
+                settle_from_gateway=lambda requirement, *, user_id, request_body: (
+                    _settle_search_from_gateway(
+                        base_payment_client,
+                        requirement,
+                        request_body=request_body,
+                    )
+                ),
+                settle_from_user=lambda requirement, *, user_id, request_body: (
+                    _settle_search_from_user(
+                        server,
+                        requirement,
+                        telegram_user_id=user_id,
+                        request_body=request_body,
+                    )
+                ),
+                purchases_paused=_purchases_paused,
+                on_merchant_change=_record_search_merchant_change,
+            )
+            # Onchain readings ride on the same spending policy as every other
+            # purchase, so a one-cent subgraph query draws on the daily cap a
+            # gift card draws on and lands in the same journal. Off unless its
+            # own flag is set, and refuses to build at all when memory is off:
+            # paying for data with no cap and no provider memory is the thing
+            # it exists to avoid.
+            server.chat_service.client.onchain_data = build_onchain_data_from_env(
+                policy=server.spending_policy,
+                pay=base_payment_client,
+                purchases_paused=_purchases_paused,
+            )
+            server.chat_policy_service = ChatPolicyApprovalService(
+                store=server.chat_service.store,
+                approval_service=imessage_approval_service,
+                pay_to=server.chat_service.client.config.bound_pay_to,
+                network=server.chat_service.client.config.network,
+                asset=server.chat_service.client.config.asset,
+            )
+            server.payto_watcher = start_payto_watcher(
+                store=server.chat_service.store,
+                bound_pay_to=server.chat_service.client.config.bound_pay_to,
+            )
     return server
+
+
+def _settle_search_from_gateway(
+    pay: Callable[..., dict[str, Any]],
+    requirement: dict[str, Any],
+    *,
+    request_body: dict[str, Any],
+) -> dict[str, Any]:
+    """Pay for a free-trial search from the gateway's own account.
+
+    "Free" can only mean paid by someone else — Exa charges for every call.
+    The approved terms are the ones the client already checked against the
+    binding, and the node guard checks them again before signing.
+
+    The payment client is passed in rather than read off the server: it is a
+    local in the builder and never lived on the server object, which is a
+    difference no test sees until someone actually pays.
+    """
+    return pay(
+        str(requirement.get("resource") or "") or EXA_SEARCH_URL,
+        max_atomic=str(requirement.get("amount") or ""),
+        expected_receiver=str(requirement.get("payTo") or ""),
+        expected_asset=str(requirement.get("asset") or ""),
+        method="POST",
+        request_body=request_body,
+    )
+
+
+def _settle_search_from_user(
+    server,
+    requirement: dict[str, Any],
+    *,
+    telegram_user_id: str,
+    request_body: dict[str, Any],
+) -> dict[str, Any]:
+    """Pay for a search from the user's managed wallet.
+
+    The chat lane's settle path without the prefund around it: one 402, one
+    payment, one response body.
+    """
+    private_key = server.user_wallet_service.decrypt_private_key_for_future_signing(
+        telegram_user_id
+    )
+    return server.user_x402_buyer.base_payment_client(
+        str(requirement.get("resource") or "") or EXA_SEARCH_URL,
+        private_key=private_key,
+        max_atomic=str(requirement.get("amount") or ""),
+        expected_receiver=str(requirement.get("payTo") or ""),
+        expected_asset=str(requirement.get("asset") or ""),
+        method="POST",
+        request_body=request_body,
+    )
+
+
+def _record_search_merchant_change(notice: dict[str, Any]) -> None:
+    """Tell the operator the search merchant moved. Addresses only, no query."""
+    logger.warning(
+        "web search merchant changed: resource=%s expected=%s seen=%s",
+        notice.get("resource"),
+        notice.get("expected"),
+        notice.get("seen"),
+    )
+
+
+def _settle_chat_prefund(
+    server, requirement: dict[str, Any], *, telegram_user_id: str
+) -> dict[str, Any]:
+    """Pay one Venice top-up through the Base USDC x402 lane.
+
+    The buyer runs the whole 402 -> pay -> retry cycle against the top-up
+    endpoint itself, so this performs the POST rather than handing a header
+    back. The bound merchant, asset and amount travel with it as approved
+    terms: the node signer refuses to sign for anything else, which is the
+    check that actually protects the funds.
+    """
+    _validate_base_usdc_x402_requirement(requirement)
+
+    private_key = server.user_wallet_service.decrypt_private_key_for_future_signing(
+        telegram_user_id
+    )
+    # The POST-capable client lives inside the user wallet buyer; the buyer
+    # itself runs its own fetch-402-pay-retry loop and refuses a request body,
+    # which the top-up needs.
+    pay = server.user_x402_buyer.base_payment_client
+    return pay(
+        str(requirement.get("resource") or "")
+        or "https://api.venice.ai/api/v1/x402/top-up",
+        private_key=private_key,
+        # A live 402 is x402 v2 (`amount`, `payTo`); the gateway's own
+        # normalizer emits v1 names. Read both, exactly as
+        # _validate_base_usdc_x402_requirement above already does — reading one
+        # set yields blank approved terms and the buyer refuses to pay.
+        max_atomic=str(
+            requirement.get("amountAtomic") or requirement.get("amount") or ""
+        ),
+        expected_receiver=str(
+            requirement.get("receiver") or requirement.get("payTo") or ""
+        ),
+        expected_asset=str(requirement.get("asset") or ""),
+        method="POST",
+        request_body={},
+    )
 
 
 def build_payment_executor(payment_executor_dir: Path):
@@ -3954,6 +4528,9 @@ class BankrSingitToUsdcFundingRunner:
             to_token=self.to_token,
             amount=amount,
             chain=self.chain,
+            # One Sign402 quote must never fund more than one swap, so the
+            # idempotency key is derived from the quote id rather than the call.
+            idempotency_key=swap_idempotency_key(quote.get("quoteId")),
         )
         _assert_swap_received_enough_usdc(result, required_usdc=required_usdc)
         return {
@@ -4025,16 +4602,59 @@ class BankrCliX402PaymentClient:
 
 
 class CdpBaseX402PaymentClient:
-    def __init__(self, service_dir: Path):
+    def __init__(
+        self,
+        service_dir: Path,
+        *,
+        runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    ):
         self.service_dir = service_dir
+        self.runner = runner
 
-    def __call__(self, resource_url: str) -> dict[str, Any]:
+    def __call__(
+        self,
+        resource_url: str,
+        *,
+        max_atomic: str | None = None,
+        expected_receiver: str | None = None,
+        expected_asset: str | None = None,
+        method: str = "GET",
+        request_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         script = self.service_dir / "src" / "index.mjs"
         if not script.exists():
             raise ValueError(f"CDP x402 service script not found: {script}")
 
-        result = subprocess.run(
-            ["node", str(script), "buy", "--url", resource_url],
+        command = ["node", str(script), "buy", "--url", resource_url]
+        # Spending the gateway's own account is not a reason to skip the
+        # approved-terms guard: partial terms would leave the signer free to
+        # accept whatever the resource server asks for, so they are all or
+        # nothing.
+        approved_terms = {
+            "--max-atomic": str(max_atomic or "").strip(),
+            "--expected-receiver": str(expected_receiver or "").strip(),
+            "--expected-asset": str(expected_asset or "").strip(),
+        }
+        supplied = [flag for flag, value in approved_terms.items() if value]
+        if supplied and len(supplied) != len(approved_terms):
+            missing = sorted(
+                flag.removeprefix("--")
+                for flag, value in approved_terms.items()
+                if not value
+            )
+            raise ValueError(
+                "refusing to pay without approved terms: " + ", ".join(missing)
+            )
+        for flag, value in approved_terms.items():
+            if value:
+                command += [flag, value]
+        if str(method or "GET").upper() != "GET":
+            command += ["--method", str(method).upper()]
+        if request_body is not None:
+            command += ["--body-json", json.dumps(request_body)]
+
+        result = self.runner(
+            command,
             cwd=str(self.service_dir),
             check=False,
             capture_output=True,
@@ -4073,6 +4693,8 @@ class UserWalletBaseX402PaymentClient:
         max_atomic: str | None = None,
         expected_receiver: str | None = None,
         expected_asset: str | None = None,
+        method: str = "GET",
+        request_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         script = self.service_dir / "src" / "index.mjs"
         if not script.exists():
@@ -4099,6 +4721,12 @@ class UserWalletBaseX402PaymentClient:
         command = ["node", str(script), "buy-user", "--url", resource_url]
         for flag, value in approved_terms.items():
             command += [flag, value]
+        # Venice's top-up is a POST. The approved terms above still gate the
+        # signature, so a body changes what is fetched, never what may be paid.
+        if str(method or "GET").upper() != "GET":
+            command += ["--method", str(method).upper()]
+        if request_body is not None:
+            command += ["--body-json", json.dumps(request_body)]
 
         env = dict(os.environ)
         env["SIGN402_EVM_PRIVATE_KEY"] = str(private_key).strip()
@@ -5570,6 +6198,26 @@ def _legacy_payment_executor_enabled() -> bool:
     ).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _chat_minimum_daily_cap_atomic() -> int:
+    """One prefund chunk. Venice's floor is $5, so a smaller cap is inert."""
+    try:
+        return int(
+            os.environ.get("SIGN402_AI_CHAT_PREFUND_CHUNK_ATOMIC", "") or 5_000_000
+        )
+    except (TypeError, ValueError):
+        return 5_000_000
+
+
+def _ai_chat_enabled() -> bool:
+    """Paid AI chat ships disabled. With the flag unset the routes do not exist."""
+    return str(os.environ.get("SIGN402_AI_CHAT_ENABLED", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _test_endpoints_enabled() -> bool:
     """Keep non-product approval probes out of normal production runtime."""
     return str(os.environ.get("SIGN402_ENABLE_TEST_ENDPOINTS", "")).strip().lower() in {
@@ -6431,18 +7079,228 @@ def _enforce_user_wallet_spend_limits(
         )
 
 
+SPENDING_MEMORY_ENABLED_ENV = "SIGN402_SPENDING_MEMORY_ENABLED"
+
+SPENDING_MEMORY_HOLD_TTL_SECONDS = 900
+"""How long a decision may wait for the purchase it belongs to.
+
+Generous on purpose — a Bitrefill order reserves, waits for a human, funds and
+fulfils, and none of that is fast. What it bounds is the other case: a purchase
+that died between reserving and settling leaves its verdict behind, and a
+verdict with no purchase must not be able to answer for the next one.
+"""
+
+
+def build_spending_policy_from_env(env: dict[str, str] | None = None):
+    """The policy, or None when memory is switched off.
+
+    Off means the gateway behaves exactly as it did before memory existed:
+    every payment asks its owner. That is the point of the switch — a way back
+    to known-good behaviour that does not need a deploy.
+
+    The switch is read *before* the policy is built, so a box with the switch
+    off starts even when the autonomy cap is unset. A rescue lever that itself
+    needs configuration is not a rescue lever.
+
+    The package reads its own variables from `os.environ` directly, so an
+    explicitly passed mapping is forwarded as arguments — a dict that was
+    checked for the flag and then silently ignored for everything else would
+    let a test pass for the wrong reason.
+    """
+    values = os.environ if env is None else env
+    raw = str(values.get(SPENDING_MEMORY_ENABLED_ENV, "1")).strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        logger.warning(
+            "%s is off: every payment will ask its owner, and nothing is "
+            "remembered.",
+            SPENDING_MEMORY_ENABLED_ENV,
+        )
+        return None
+    if env is None:
+        return build_policy()
+    overrides: dict[str, Any] = {}
+    db_path = str(values.get("SPENDING_MEMORY_DB", "") or "").strip()
+    if db_path:
+        overrides["db_path"] = db_path
+    cap = str(values.get("SPENDING_MEMORY_AUTONOMY_CAP", "") or "").strip()
+    try:
+        overrides["daily_cap_usd"] = Decimal(cap) if cap else None
+    except InvalidOperation:
+        raise ValueError(
+            f"SPENDING_MEMORY_AUTONOMY_CAP must be a decimal amount in USD, "
+            f"got {cap!r}"
+        ) from None
+    return build_policy(**overrides)
+
+
+DECIDE_MEMORY_DB_ENV = "SIGN402_DECIDE_MEMORY_DB"
+DECIDE_AUTONOMY_CAP_ENV = "SIGN402_DECIDE_AUTONOMY_CAP"
+DEFAULT_DECIDE_MEMORY_DB = "~/.sibyl-memory/decide.db"
+
+
+def build_decide_policy_from_env(env: dict[str, str] | None = None):
+    """The policy `/v1/decide` answers from — never the custodial one.
+
+    `/v1/decide` is unauthenticated by design: an agent has to be able to ask
+    before it spends, and requiring a key would defeat the point. That makes
+    *writing* the deciding factor, and the journal is written on every call.
+
+    Rule 6 counts a merchant's escalations across every owner, straight out of
+    the journal. So three anonymous requests quoting an absurd price for a real
+    merchant push that merchant over the escalation limit, and the next genuine
+    customer to buy from them is refused for an hour. No key, no cost, no trace
+    beyond the journal lines that caused it. It was reproduced before this was
+    written, not imagined afterwards.
+
+    The boundary in the design was drawn around *money* — no wallets, no
+    reservations, nothing on the payment path — and it missed that the journal
+    is an input to the decision, so writing to it **is** the payment path.
+
+    Hence a separate memory. Callers of the public endpoint still form a fleet
+    and still learn from each other, which is the whole value; they simply do
+    not get a vote on the decisions that move real customers' USDC. The rules
+    are the same rules and the class is the same class. Only the database
+    differs, and that is the trust boundary.
+
+    Returns None — and the endpoint answers 503 — when the kill switch is off
+    or no cap is configured. An endpoint that is not set up says so instead of
+    inventing a verdict.
+    """
+    values = os.environ if env is None else env
+    raw = str(values.get(SPENDING_MEMORY_ENABLED_ENV, "1")).strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return None
+
+    cap = str(values.get(DECIDE_AUTONOMY_CAP_ENV, "") or "").strip()
+    if not cap:
+        logger.warning(
+            "%s is not set, so /v1/decide will answer 503. There is no safe "
+            "default for how much an agent may spend without asking.",
+            DECIDE_AUTONOMY_CAP_ENV,
+        )
+        return None
+    try:
+        daily_cap_usd = Decimal(cap)
+    except InvalidOperation:
+        raise ValueError(
+            f"{DECIDE_AUTONOMY_CAP_ENV} must be a decimal amount in USD, "
+            f"got {cap!r}"
+        ) from None
+
+    db_path = str(
+        values.get(DECIDE_MEMORY_DB_ENV, "") or DEFAULT_DECIDE_MEMORY_DB
+    ).strip()
+    if db_path == str(values.get("SPENDING_MEMORY_DB", "") or "").strip():
+        raise ValueError(
+            f"{DECIDE_MEMORY_DB_ENV} points at the same database as "
+            "SPENDING_MEMORY_DB. The public endpoint must not be able to write "
+            "the journal the custodial payment path reads from: three "
+            "anonymous requests can otherwise block a real customer's "
+            "purchase for an hour."
+        )
+    return build_policy(db_path=db_path, daily_cap_usd=daily_cap_usd)
+
+
+class SpendingBlocked(ValueError):
+    """Memory refused this payment outright.
+
+    A `ValueError` so every existing `except Exception` handler still turns it
+    into a 400, while the call sites that care can reach the decision and show
+    the person why. Both of the rules that raise it — an identical payment
+    already in flight, and a merchant that keeps being escalated — say
+    something the user has never been told before, so the reason is written to
+    be read verbatim.
+    """
+
+    def __init__(self, decision: Any) -> None:
+        super().__init__(str(decision.reason))
+        self.decision = decision
+
+
+CLAIM_SCOPE_WINDOW_SECONDS = 120
+"""Fallback window when a caller does not identify its own request.
+
+Same length as the claim itself. A client that resends inside it is retrying;
+one that comes back later meant it. Callers that send a request id get exact
+semantics instead of this guess.
+"""
+
+
+def _claim_scope(request_id: Any) -> str:
+    """What tells two purchases of the same thing apart.
+
+    A claim is keyed on owner, merchant, payout address and amount, which is a
+    good identity when the amount distinguishes purchases. For a fixed-price
+    API it does not: every call costs the same cent to the same address, so
+    without a scope the first successful purchase settles that claim for ever
+    and every later one is refused as already in flight.
+
+    The caller's own request id is the honest answer — a retry carries the same
+    one, a new intention carries a new one. Without it, fall back to a window,
+    which keeps a redelivered request from paying twice while still letting the
+    same purchase happen again tomorrow.
+    """
+    scope = str(request_id or "").strip()[:128]
+    if scope:
+        return scope
+    return f"window-{int(time.time()) // CLAIM_SCOPE_WINDOW_SECONDS}"
+
+
+def _payment_from_requirements(
+    payment_requirements: dict[str, Any],
+    *,
+    owner: str,
+    resource_url: str | None = None,
+) -> Any:
+    """Map a gateway spend requirement onto a Spending Memory payment.
+
+    The two vocabularies differ and neither should bend to the other: the
+    gateway normalises every 402 block to `receiver`/`amountAtomic`, while the
+    package's adapter reads the protocol's own `payTo`/`maxAmountRequired`.
+    They are joined here, in the gateway, because this is the side that knows
+    both.
+
+    The merchant is whatever the requirement names, falling back to the
+    resource host for x402 — so one seller's endpoints stay one merchant.
+    """
+    receiver = str(
+        payment_requirements.get("receiver")
+        or payment_requirements.get("payTo")
+        or ""
+    )
+    amount_atomic = str(
+        payment_requirements.get("amountAtomic")
+        or payment_requirements.get("maxAmountRequired")
+        or ""
+    )
+    merchant = str(payment_requirements.get("merchant") or "")
+    resource = str(resource_url or payment_requirements.get("resource") or "")
+    return to_payment(
+        {"payTo": receiver, "maxAmountRequired": amount_atomic},
+        merchant or resource,
+        owner=str(owner),
+    )
+
+
 def _reserve_user_wallet_spend(
     server: Sign402GatewayServer,
     telegram_user_id: str,
     payment_requirements: dict[str, Any],
-) -> str:
-    """Check the caps and hold the amount for this purchase.
+    *,
+    resource_url: str | None = None,
+    claim_scope: str | None = None,
+) -> tuple[str, Any, str | None]:
+    """Check the caps, hold the amount, and ask memory what to do about it.
 
     The hold is what closes the window between the cap check and the recorded
     spend: approval can take minutes, and a second purchase started in that
     window would otherwise measure itself against a total that ignores the
     first. Callers must settle the returned id on success and release it on
     rejection, timeout, or error.
+
+    The decision lives here rather than at the call sites so that no future
+    payment path can forget to ask: every user spend already comes through this
+    function, and one that does not is one nobody remembered to protect.
     """
     scope = _user_wallet_spend_scope(server, telegram_user_id, payment_requirements)
     amount = scope["amount"]
@@ -6455,7 +7313,30 @@ def _reserve_user_wallet_spend(
         daily_cap_atomic=scope["dailyCap"],
     )
     if reservation_id is not None:
-        return reservation_id
+        if server.spending_policy is None:
+            # Memory is off. No decision means "ask the owner", which is what
+            # every caller already does when the answer is not a clean PAY.
+            return reservation_id, None, None
+        try:
+            payment = _payment_from_requirements(
+                payment_requirements,
+                owner=telegram_user_id,
+                resource_url=resource_url,
+            )
+            decision, claim_id = server.spending_policy.authorise(
+                payment, claim_scope=_claim_scope(claim_scope)
+            )
+        except Exception:
+            # The caller has not received this id yet and cannot release it
+            # when mapping or memory fails before we return.
+            _release_user_wallet_spend(server, reservation_id)
+            raise
+        if decision.action.value == "BLOCK":
+            # Nothing was spent, so nothing may stay held — including on the
+            # paths whose own error handling never learns a decision was taken.
+            _release_user_wallet_spend(server, reservation_id)
+            raise SpendingBlocked(decision)
+        return reservation_id, decision, claim_id
 
     if scope["maxPerTx"] is not None and amount > int(scope["maxPerTx"]):
         raise ValueError(
@@ -6475,6 +7356,108 @@ def _reserve_user_wallet_spend(
             spent_today=spent_today,
         )
     )
+
+
+def build_ledger_payments(server, config: LedgerConfig | None, *, path: Path | None = None):
+    if config is None:
+        return None
+    if server.spending_policy is None:
+        raise ValueError("Ledger approval requires spending memory. Refusing to fall back to chat.")
+    store = LedgerOperationStore(
+        path or Path(os.getenv("SIGN402_LEDGER_OPERATIONS_DB", "~/.sign402/ledger/operations.sqlite3")),
+        SensitiveStateCipher(os.getenv("SIGN402_WALLET_MASTER_KEY", "")),
+    )
+
+    def inspect(owner, intent):
+        body = intent["tool"].get("requestBody")
+        if isinstance(body, dict):
+            raise LedgerOperationError("Ledger v1 supports the existing GET x402 tools only.", 400)
+        raw = fetch_x402_payment_required(intent["resourceUrl"], request_body=body if isinstance(body, dict) else None)
+        requirements = normalize_x402_payment_required(raw, resource_url=intent["resourceUrl"])
+        _validate_base_usdc_x402_requirement(requirements)
+        return requirements, _payment_from_requirements(requirements, owner=owner, resource_url=intent["resourceUrl"])
+
+    def reserve(owner, requirements):
+        server.user_event_store.preflight_write()
+        scope = _user_wallet_spend_scope(server, owner, requirements)
+        reservation = server.user_spend_limit_store.reserve_within_limits(
+            owner, amount_atomic=scope["amount"], asset=scope["asset"], network=scope["network"],
+            max_per_tx_atomic=scope["maxPerTx"], daily_cap_atomic=scope["dailyCap"],
+        )
+        if reservation is None:
+            raise LedgerOperationError("This purchase exceeds the current wallet spending limits.")
+        return reservation
+
+    def pay(owner, intent, requirements, approval):
+        kwargs = {
+            "private_key": server.user_wallet_service.decrypt_private_key_for_future_signing(owner),
+            "approval": approval, "payment_requirements": requirements,
+        }
+        if intent["paymentContext"]:
+            kwargs["payment_context"] = intent["paymentContext"]
+        if isinstance(intent["tool"].get("requestBody"), dict):
+            kwargs["request_body"] = intent["tool"]["requestBody"]
+        result = server.user_x402_buyer(intent["resourceUrl"], **kwargs)
+        enriched = _tool_result(intent["tool"], result, intent["resourceUrl"])
+        enriched.update(ok=bool(result.get("ok")), telegramUserId=owner,
+                        approvalId=approval["approvalId"], decision=result.get("decision", "approved_and_executed"))
+        return enriched
+
+    def settle(owner, reservation, intent, requirements, result, payment, claim):
+        _settle_user_wallet_spend(server, reservation, intent["tool"], intent["resourceUrl"], requirements,
+                                 result, payment=payment, claim_id=claim)
+        server.user_event_store.write(owner, result)
+
+    return LedgerPayments(config, store, policy=lambda: server.spending_policy, inspect=inspect,
+                          reserve=reserve, release=server.user_spend_limit_store.release_reservation,
+                          pay=pay, settle=settle, paused=_purchases_paused)
+
+
+def _memory_hold_for_owner(
+    server: Sign402GatewayServer, telegram_user_id: str | None
+) -> dict[str, Any] | None:
+    """The decision taken for the purchase this owner has in flight.
+
+    Keyed by reservation id because that is what the release and settle paths
+    carry, and looked up by owner because the approval client only knows who is
+    being asked. One buyer holds at most one managed-wallet purchase at a time
+    — `_acquire_purchase_slot` enforces exactly that — so the scan sees a
+    handful of entries and cannot confuse two purchases by the same person.
+    """
+    if not telegram_user_id:
+        return None
+    _forget_stale_spending_memory_holds(server)
+    for held in server.spending_memory_holds.values():
+        if held.get("owner") == telegram_user_id:
+            return held
+    return None
+
+
+def _forget_stale_spending_memory_holds(
+    server: Sign402GatewayServer, *, now: float | None = None
+) -> list[str]:
+    """Drop decisions whose purchase never came back, and say which.
+
+    A purchase that crashes between reserving and settling leaves its verdict
+    in the registry. Unbounded that is a slow leak, which is the small problem.
+    The real one is that the verdict is found by owner: the buyer's *next*
+    purchase would be waved through on the strength of a decision taken for a
+    different one. Age is what separates the two.
+    """
+    cutoff = (now or time.time()) - SPENDING_MEMORY_HOLD_TTL_SECONDS
+    stale = [
+        reservation_id
+        for reservation_id, held in server.spending_memory_holds.items()
+        if float(held.get("heldAt") or 0) < cutoff
+    ]
+    for reservation_id in stale:
+        server.spending_memory_holds.pop(reservation_id, None)
+    if stale:
+        logger.warning(
+            "dropped %d spending memory hold(s) whose purchase never finished",
+            len(stale),
+        )
+    return stale
 
 
 def _release_user_wallet_spend(
@@ -6520,11 +7503,21 @@ def _settle_user_wallet_spend(
     resource_url: str,
     payment_requirements: dict[str, Any],
     event: dict[str, Any],
+    *,
+    payment: Any = None,
+    claim_id: str | None = None,
 ) -> None:
-    """Convert this purchase's hold into a settled spend record."""
+    """Convert this purchase's hold into a settled spend record, and remember it.
+
+    `payment` is passed in rather than rebuilt from the requirement, because
+    the requirement does not say whose money this was and a settlement charged
+    to the wrong owner is worse than one nobody remembers. The callers know;
+    this function never did.
+    """
+    tx_id = str(event.get("txId") or "")
     server.user_spend_limit_store.settle_reservation(
         reservation_id,
-        tx_id=str(event.get("txId") or ""),
+        tx_id=tx_id,
         payment_intent=str(
             payment_requirements.get("paymentIntent") or event.get("paymentIntent") or ""
         ),
@@ -6532,6 +7525,13 @@ def _settle_user_wallet_spend(
         tool_id=str(tool.get("id") or event.get("toolId") or ""),
         resource_url=resource_url,
     )
+    if payment is None or server.spending_policy is None:
+        return
+    if claim_id:
+        # Settled claims are never re-claimable, whatever their TTL says: this
+        # is what stops a redelivered request paying for the same thing twice.
+        server.spending_policy.memory.settle_claim(claim_id, tx_id=tx_id or None)
+    server.spending_policy.memory.remember_settlement(payment, tx_id=tx_id or None)
 
 
 def _record_bankr_llm_spend(
@@ -6553,17 +7553,54 @@ def _record_bankr_llm_spend(
     )
 
 
-def _bitrefill_spend_requirement(price_usd: Any) -> dict[str, Any]:
+BITREFILL_MERCHANT = "bitrefill"
+"""Merchant identity for every Bitrefill order, however it is funded."""
+
+BITREFILL_NO_COUNTERPARTY = "bitrefill:no-onchain-counterparty"
+"""Stand-in for a Bitrefill path that moves no money to a fixed address.
+
+A constant that can never differ from itself, so the payout-drift rule cannot
+fire on this path. That is deliberate and it is the honest answer: with user
+funding switched off there is no address for the user's money to land on, and
+inventing one would make the rule look like it was checking something.
+"""
+
+
+def _bitrefill_settlement_address() -> str:
+    """The address a user's Bitrefill funding is actually transferred to.
+
+    Not Bitrefill's. On the managed-wallet path the user's tokens go to this
+    deployment's own CDP wallet, which then funds the order — so this is the
+    real counterparty of the on-chain movement the spend limit is holding
+    budget for, and the only address on this path that can drift.
+    """
+    return (
+        os.getenv("SIGN402_CDP_WALLET_ADDRESS", "").strip()
+        or os.getenv("CDP_EVM_ACCOUNT_ADDRESS", "").strip()
+        or BITREFILL_NO_COUNTERPARTY
+    )
+
+
+def _bitrefill_spend_requirement(
+    price_usd: Any, *, pay_to: str | None = None
+) -> dict[str, Any]:
     """Represent a Bitrefill purchase's USD value as a USDC spend requirement.
 
     Spending limits are denominated in USD (6-decimal atomic), so a Bitrefill
     order is capped by its USD price regardless of the token actually debited.
+
+    It also names the counterparty, so the same decision that covers x402 tools
+    covers gift cards: without a `payTo` there is nothing for memory to compare
+    against and the merchant would be judged on price alone.
     """
     amount_atomic = int((Decimal(str(price_usd)) * Decimal(1_000_000)).to_integral_value())
     return {
         "amountAtomic": str(amount_atomic),
         "asset": BASE_USDC_MAINNET,
         "network": "base-mainnet",
+        "payTo": pay_to or _bitrefill_settlement_address(),
+        "merchant": BITREFILL_MERCHANT,
+        "resource": BITREFILL_MERCHANT,
     }
 
 

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from collections.abc import Mapping
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -68,6 +69,13 @@ _LLM_OPERATION_PATHS = {
     "accept-terms": "/agent/llm-key/accept-terms",
     "verify": "/agent/llm-key/verify",
     "credits": "/agent/llm-credits",
+}
+_CHAT_OPERATION_PATHS = {
+    "start": "/agent/chat/start",
+    "message": "/agent/chat/message",
+    "end": "/agent/chat/end",
+    "approve-policy": "/agent/chat/approve-policy",
+    "models": "/agent/chat/models",
 }
 _MAX_RESPONSE_BYTES = 64 * 1024
 _NOT_CONFIGURED = "Wallet service is not configured. Please contact the operator."
@@ -206,8 +214,16 @@ class GatewayClient:
         identity: TelegramIdentity,
         *,
         user_access_token: str | None = None,
+        request_id: str | None = None,
     ) -> str:
-        payload = {"tool": str(tool or "").strip(), "telegramUserId": identity.user_id}
+        payload = {
+            "tool": str(tool or "").strip(),
+            "telegramUserId": identity.user_id,
+            # One id per request the buyer made. A resend of this same request
+            # carries it again and is refused as a duplicate; the next time
+            # they ask for the same thing, it is a new purchase and says so.
+            "requestId": request_id or str(uuid.uuid4()),
+        }
         if identity.username:
             payload["telegramUsername"] = identity.username
         result = self._post(
@@ -472,6 +488,37 @@ class GatewayClient:
             user_token=user_token,
         )
 
+    def execute_chat(
+        self,
+        operation: str,
+        identity: TelegramIdentity,
+        *,
+        payload: Mapping[str, Any] | None = None,
+        user_access_token: str,
+    ) -> dict[str, Any]:
+        """Call an /agent/chat/* route.
+
+        The prompt travels in the request body and is never logged here; the
+        gateway is the only thing that sees it.
+        """
+        path = _CHAT_OPERATION_PATHS.get(operation)
+        if path is None:
+            raise GatewayClientError(_UNSUPPORTED)
+        user_token = str(user_access_token or "").strip()
+        if not user_token:
+            raise GatewayClientError(_AUTH_FAILED)
+
+        body = dict(payload or {})
+        body["telegramUserId"] = identity.user_id
+        return self._post(
+            path,
+            body,
+            token=self.api_token,
+            operation=f"chat-{operation}",
+            timeout=self.purchase_timeout,
+            user_token=user_token,
+        )
+
     def withdraw_tokens(
         self,
         identity: TelegramIdentity,
@@ -595,7 +642,8 @@ class GatewayClient:
         is_bitrefill = operation in {"quote-bitrefill", "buy-wallet-bitrefill"}
         is_llm = operation.startswith("llm-")
         is_imessage = operation in _IMESSAGE_OPERATION_PATHS
-        if not is_bitrefill and not is_llm and not is_imessage:
+        is_paid_tool = operation == "buy-tool"
+        if not is_bitrefill and not is_llm and not is_imessage and not is_paid_tool:
             return None
         try:
             body = exc.read(self.max_response_bytes + 1)
@@ -609,6 +657,18 @@ class GatewayClient:
             return None
         if not isinstance(payload, dict):
             return None
+        if is_paid_tool:
+            # These are deliberate policy/approval outcomes with text written
+            # for the buyer. Unexpected exceptions still use the fixed error;
+            # never forward a signer's stderr or an upstream response body.
+            if payload.get("decision") in {"blocked_by_memory", "rejected_by_imessage"}:
+                text = payload.get("telegramText")
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+            error = str(payload.get("error") or "").strip()
+            if error.startswith(_SPEND_LIMIT_PREFIX):
+                return f"{error}\n\n{_SPEND_LIMIT_HINT}"
+            return _GATEWAY_ERROR_TEXTS.get(error)
         if is_imessage:
             for key in ("imessageText", "telegramText"):
                 text = payload.get(key)

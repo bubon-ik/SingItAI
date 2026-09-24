@@ -1,10 +1,17 @@
 import unittest
 from unittest.mock import Mock
 
-from sign402_live.flow import build_payment_commitment, run_paid_probe_flow
+from sign402_live.flow import build_payment_commitment, encode_payment_proof, run_paid_probe_flow
 
 
 class LiveFlowTests(unittest.TestCase):
+    def test_payment_proof_preserves_legacy_wire_format(self):
+        proof = {"txId": "TEST_TX", "paymentIntent": "probe-algorand-co-001"}
+        expected = "eyJwYXltZW50SW50ZW50IjoicHJvYmUtYWxnb3JhbmQtY28tMDAxIiwidHhJZCI6IlRFU1RfVFgifQ"
+
+        self.assertEqual(encode_payment_proof(proof), expected)
+        self.assertEqual(encode_payment_proof(dict(reversed(list(proof.items())))), expected)
+
     def test_build_payment_commitment_is_stable(self):
         requirement = {
             "network": "algorand-testnet",

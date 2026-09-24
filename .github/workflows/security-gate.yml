@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, x402Bnkr]
   pull_request:
+  workflow_dispatch:
   schedule:
     # Weekly rescan so newly published advisories surface without a push.
     - cron: "0 6 * * 1"
@@ -40,6 +41,25 @@ jobs:
           pip install -e ./sign402-gateway
           pip-audit --skip-editable
 
+  node-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [cdp-x402-service, singit-risk-check, tools/ledger-approve]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install test dependencies
+        working-directory: ${{ matrix.component }}
+        # Unit tests mock hardware; native USB install scripts are unnecessary.
+        run: npm ci --ignore-scripts
+      - name: Unit tests
+        working-directory: ${{ matrix.component }}
+        run: npm test
+
   node-audit:
     runs-on: ubuntu-latest
     steps:
@@ -47,12 +67,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: cdp-x402-service audit and tests
+      - name: cdp-x402-service audit
         working-directory: cdp-x402-service
         run: |
-          npm ci
+          npm ci --ignore-scripts
           npm audit --audit-level=moderate
-          npm test
       - name: singit-risk-check audit
         working-directory: singit-risk-check
         run: npm audit --audit-level=moderate

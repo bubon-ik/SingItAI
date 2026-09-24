@@ -7,6 +7,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+*.egg-info/
 
 # Node
 node_modules/
@@ -18,6 +19,9 @@ env/
 payment-executor/.venv/
 
 # Secrets and local runtime config
+# Ledger key ring ciphertext. The encrypted master key is still the master
+# key: anyone who has it and WALLET_PASS has every managed wallet.
+*.enc
 .env
 *.env
 !*.env.example
@@ -28,9 +32,10 @@ sign402-gateway/.bitrefill-api-key
 
 # Demo runtime artifacts
 .demo-logs/
-demo-dashboard/latest-run.json
-demo-dashboard/agent-state.json
-demo-dashboard/bitrefill-orders.sqlite3
+.ledger-live/
+.graph-live/
+# Runtime data retained at its historical path; includes SQLite sidecar files.
+/demo-dashboard/
 
 # Generated presentation scratch workspace
 outputs/
@@ -39,9 +44,19 @@ tmp/
 SingIt-backgrounds.zip
 SingIt-presentation-assets/
 
+# Generated x402 survey exports; keep handwritten notes and patches visible.
+/out/*.csv
+/out/x402-services-live.md
+
+# Local brainstorming sessions and preview server state
+/.superpowers/
+
 # Local tooling and duplicated/scratch workspaces
 .tools/
-tools/
+tools/*
+# …except the Ledger approval signer, which is part of the product rather than
+# scratch: the local client signs a gateway operation on the owner's device.
+!tools/ledger-approve/
 x402HackBerlin/
 .worktrees/
 
@@ -51,5 +66,7 @@ Sign402 X Longform Post.md
 # Local editor files
 .vscode/
 .idea/
-demo-dashboard/user-purchases.json
-sign402-gateway/sign402_gateway.egg-info/
+/.codex/
+
+# …but not its installed dependencies.
+tools/ledger-approve/node_modules/

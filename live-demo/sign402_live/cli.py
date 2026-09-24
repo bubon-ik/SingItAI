@@ -17,13 +17,9 @@ def main() -> None:
     args = parser.parse_args()
 
     payment_executor_dir = Path(args.payment_executor_dir).resolve()
-    demo_resource_dir = Path(__file__).resolve().parents[2] / "demo-resource-server"
     sys.path.insert(0, str(payment_executor_dir))
-    sys.path.insert(0, str(demo_resource_dir))
 
-    from sign402_executor.executor import execute_payment
-    from x402_demo.core import encode_payment_proof
-    from .flow import run_paid_probe_flow
+    from .flow import encode_payment_proof, run_paid_probe_flow
     from .http_resource import X402ResourceClient
 
     env = _read_env(payment_executor_dir / ".env")

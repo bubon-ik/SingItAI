@@ -178,49 +178,12 @@ SINGIT. When the endpoint supports Alchemy Token API, it also discovers up to
 include their contract address, and remain display-only: discovery never grants
 the agent permission to spend them.
 
-## Main Demo Flow
+## Running the gateway
 
-For the normal hackathon demo, start all local services from the repository root:
-
-```bash
-cd "/Users/mp/Documents/Berlin Hack"
-./scripts/start-local-demo.sh
-```
-
-Then expose only the gateway:
-
-```bash
-cloudflared tunnel --url http://127.0.0.1:8099
-```
-
-Give Hermes the resulting base URL:
-
-```text
-SIGN402_GATEWAY_URL=https://<tunnel>.trycloudflare.com
-```
-
-Hermes uses two product endpoints:
-
-```text
-POST /approve-policy
-POST /agent/buy-tool
-```
-
-For the official GoPlausible weather demo, Hermes can inspect and buy the paid tool:
-
-```bash
-curl -sS http://127.0.0.1:8099/agent/tools
-
-curl -sS -X POST http://127.0.0.1:8099/agent/inspect-tool \
-  -H "Content-Type: application/json" \
-  -d '{"tool":"goplausible.weather"}'
-
-curl -sS -X POST http://127.0.0.1:8099/agent/buy-tool \
-  -H "Content-Type: application/json" \
-  -d '{"tool":"goplausible.weather"}'
-```
-
-The paid-tool endpoints wrap the official `/agent/buy-x402` path so the agent workflow is tool-oriented rather than URL-oriented. `/agent/buy-probe` remains available for the local probe demo.
+Use [the operations guide](../docs/operations.md) for installation, startup and
+tests. The original local demo server, dashboard and launcher have been retired.
+For the maintained Graph/Ledger demonstration, use
+[its runbook](../docs/telegram-graph-ledger-demo.md).
 
 ## Base Mainnet CDP Flow
 
@@ -500,9 +463,9 @@ Expected response:
 }
 ```
 
-## Live Dashboard Event
+## Latest run event
 
-The dashboard polls the gateway for the latest safe run event:
+The gateway retains the latest safe run event for diagnostics:
 
 ```text
 GET /events/latest
@@ -510,7 +473,7 @@ GET /events/latest
 
 In the main short-mode demo, `/agent/buy-probe` writes this event automatically.
 
-For low-level debugging, a client can update the dashboard manually after a completed flow:
+For low-level debugging, a client can record an event after a completed flow:
 
 ```bash
 curl -X POST http://127.0.0.1:8099/events/latest \
@@ -540,7 +503,8 @@ curl -X POST http://127.0.0.1:8099/events/latest \
   }'
 ```
 
-The default event store is:
+The default event store retains its historical location for compatibility.
+Removing the dashboard HTML does not move or delete existing runtime data:
 
 ```text
 /Users/mp/Documents/Berlin Hack/demo-dashboard/latest-run.json

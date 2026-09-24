@@ -2,6 +2,7 @@ import io
 import json
 import sys
 import unittest
+import uuid
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
@@ -36,7 +37,7 @@ class RecordingOpener:
         return self.response
 
 
-class GatewayClientTests(unittest.TestCase):
+class GatewayClientFixture:
     def make_client(self, opener, **kwargs):
         return GatewayClient(
             base_url="http://127.0.0.1:8099",
@@ -46,6 +47,8 @@ class GatewayClientTests(unittest.TestCase):
             **kwargs,
         )
 
+
+class GatewayClientTests(GatewayClientFixture, unittest.TestCase):
     def test_execute_posts_trusted_identity_and_bearer_token(self):
         response = FakeResponse(
             json.dumps({"telegramText": "Wallet 0xabc"}).encode("utf-8")
@@ -247,6 +250,7 @@ class GatewayClientTests(unittest.TestCase):
         result = client.execute_paid_tool(
             "news",
             TelegramIdentity(user_id="1045618308", username="AlpskyKnedlik"),
+            request_id="request-1",
         )
 
         self.assertEqual(result, "Crypto News unlocked.")
@@ -257,14 +261,66 @@ class GatewayClientTests(unittest.TestCase):
             request.get_header("Authorization"),
             "Bearer wallet-token-secret-value",
         )
+        posted = json.loads(request.data)
         self.assertEqual(
-            json.loads(request.data),
+            posted,
             {
                 "tool": "news",
                 "telegramUserId": "1045618308",
                 "telegramUsername": "AlpskyKnedlik",
+                "requestId": "request-1",
             },
         )
+
+    def test_paid_tool_requests_have_distinct_ids_but_retries_can_keep_their_id(self):
+        opener = RecordingOpener(response=FakeResponse(b'{"telegramText":"ok"}'))
+        client = self.make_client(opener)
+        identity = TelegramIdentity(user_id="1045618308")
+        client.execute_paid_tool("news", identity)
+        client.execute_paid_tool("news", identity)
+        first_id = json.loads(opener.requests[0][0].data)["requestId"]
+        second_id = json.loads(opener.requests[1][0].data)["requestId"]
+        self.assertEqual(str(uuid.UUID(first_id)), first_id)
+        self.assertEqual(str(uuid.UUID(second_id)), second_id)
+        self.assertNotEqual(first_id, second_id)
+        client.execute_paid_tool("news", identity, request_id=first_id)
+        self.assertEqual(json.loads(opener.requests[2][0].data)["requestId"], first_id)
+
+    def test_paid_tool_surfaces_memory_and_approval_outcomes(self):
+        for decision, text in (
+            ("blocked_by_memory", "This merchant changed its payout address. Payment stopped."),
+            ("rejected_by_imessage", "Purchase was not approved in iMessage."),
+        ):
+            with self.subTest(decision=decision):
+                error = HTTPError(
+                    "http://127.0.0.1:8099/agent/buy-tool", 400, "Bad Request", {},
+                    io.BytesIO(json.dumps({"ok": False, "decision": decision, "telegramText": text}).encode()),
+                )
+                with self.assertRaises(GatewayClientError) as caught:
+                    self.make_client(RecordingOpener(error=error)).execute_paid_tool(
+                        "news", TelegramIdentity(user_id="1045618308")
+                    )
+                self.assertEqual(caught.exception.user_message, text)
+
+    def test_paid_tool_does_not_expose_unexpected_error_details(self):
+        for payload in (
+            {"error": "signer-secret", "telegramText": "signer-secret", "decision": "rejected"},
+            {"error": "signer-secret", "decision": "blocked_by_memory", "telegramText": ""},
+            {"error": "signer-secret", "decision": "blocked_by_memory", "telegramText": {}},
+            {"error": "signer-secret", "decision": "unrecognised"},
+        ):
+            with self.subTest(payload=payload):
+                error = HTTPError(
+                    "http://127.0.0.1:8099/agent/buy-tool", 400, "Bad Request", {},
+                    io.BytesIO(json.dumps(payload).encode()),
+                )
+                with self.assertLogs("client", level="WARNING") as logs:
+                    with self.assertRaises(GatewayClientError) as caught:
+                        self.make_client(RecordingOpener(error=error)).execute_paid_tool(
+                            "news", TelegramIdentity(user_id="1045618308")
+                        )
+                self.assertEqual(caught.exception.user_message, "Wallet request failed. Please try again or contact the operator.")
+                self.assertNotIn("signer-secret", "\n".join(logs.output))
 
     def test_execute_omits_missing_username(self):
         opener = RecordingOpener(response=FakeResponse(b'{"telegramText":"ok"}'))
@@ -996,3 +1052,86 @@ class GatewayClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChatClientTests(GatewayClientFixture, unittest.TestCase):
+    def test_chat_start_posts_to_the_chat_route(self):
+        opener = RecordingOpener(
+            response=FakeResponse(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "freeMessagesRemaining": 5,
+                        "hasPolicy": False,
+                        "dailyCapUsdc": "5.00",
+                    }
+                ).encode("utf-8")
+            )
+        )
+
+        result = self.make_client(opener).execute_chat(
+            "start",
+            TelegramIdentity(user_id="1045618308"),
+            user_access_token="user-token-1",
+        )
+
+        request, _timeout = opener.requests[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8099/agent/chat/start")
+        self.assertEqual(result["freeMessagesRemaining"], 5)
+        self.assertEqual(request.get_header("X-sign402-user-token"), "user-token-1")
+
+    def test_chat_message_sends_the_text(self):
+        opener = RecordingOpener(
+            response=FakeResponse(
+                json.dumps(
+                    {"ok": True, "text": "an answer", "costAtomic": 3000}
+                ).encode("utf-8")
+            )
+        )
+
+        self.make_client(opener).execute_chat(
+            "message",
+            TelegramIdentity(user_id="1045618308"),
+            payload={"text": "hello there"},
+            user_access_token="user-token-1",
+        )
+
+        request, _timeout = opener.requests[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8099/agent/chat/message")
+        self.assertEqual(
+            json.loads(request.data),
+            {"telegramUserId": "1045618308", "text": "hello there"},
+        )
+
+    def test_chat_end_posts_to_the_end_route(self):
+        opener = RecordingOpener(response=FakeResponse(b'{"ok":true}'))
+
+        self.make_client(opener).execute_chat(
+            "end",
+            TelegramIdentity(user_id="1045618308"),
+            user_access_token="user-token-1",
+        )
+
+        request, _timeout = opener.requests[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8099/agent/chat/end")
+
+    def test_chat_requires_a_user_token(self):
+        opener = RecordingOpener(response=FakeResponse(b"{}"))
+        with self.assertRaises(GatewayClientError):
+            self.make_client(opener).execute_chat(
+                "message",
+                TelegramIdentity(user_id="1045618308"),
+                payload={"text": "hi"},
+                user_access_token="",
+            )
+        self.assertEqual(opener.requests, [])
+
+    def test_unknown_chat_operation_is_refused(self):
+        opener = RecordingOpener(response=FakeResponse(b"{}"))
+        with self.assertRaises(GatewayClientError):
+            self.make_client(opener).execute_chat(
+                "nonsense",
+                TelegramIdentity(user_id="1045618308"),
+                user_access_token="user-token-1",
+            )
+        self.assertEqual(opener.requests, [])

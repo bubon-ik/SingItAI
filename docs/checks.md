@@ -1,0 +1,716 @@
+# Phase 0 — the five checks
+
+Every entry: the command, the output, and one line of conclusion. Parts 5 and 6
+read this file. Nothing here is remembered, guessed, or reconstructed later —
+it is written as each check runs.
+
+Machine: darwin arm64, node v24.12.0, npm 11.6.2, Python 3.14.5.
+`@ledgerhq/wallet-cli` v2.1.0.
+
+---
+
+## L1 — ring init → encrypt → decrypt, then unplug and decrypt again
+
+**Status: PASS.** Run on the real device, 5 September.
+
+```
+$ wallet-cli ring init
+✔ Member credentials created
+✔ Ledger Key Ring ready
+
+Member:  mymac.local (darwin)
+Root ID: 001a903e…                      (truncated: this identifies the trustchain)
+Encrypt/decrypt with: wallet-cli ring encrypt --key <name>
+```
+
+With the device connected:
+
+```
+$ printf 'phase-0-l1-canary' | wallet-cli ring encrypt --key l1-test > l1.enc \
+    && wallet-cli ring decrypt --key l1-test < l1.enc
+✔ Key retrieved
+✔ Encrypted (45 bytes, AES-256-GCM)
+✔ Key retrieved
+✔ Decrypted
+phase-0-l1-canary
+```
+
+Then the device was **physically disconnected**, and the same decrypt run again:
+
+```
+$ wallet-cli ring decrypt --key l1-test < l1.enc
+✔ Key retrieved
+✔ Decrypted
+phase-0-l1-canary
+```
+
+**Conclusion: decrypt works with no device attached.** This is what makes §4
+possible at all — the gateway runs on a VPS with no USB port, and it is Ledger's
+own stated model, "one device tap to set up, then none", confirmed rather than
+assumed.
+
+It is also exactly the property the threat model in `keyring.py` has to state
+plainly rather than talk around: an attacker who already holds a live,
+compromised host holds the ring credentials and `WALLET_PASS` too, and will
+decrypt. What this buys is that a stolen disk, a leaked backup or a copied
+`/etc` is AES-256-GCM ciphertext instead of a key. That is a real and worthwhile
+gain, and it is not the same thing as protecting a host that is already lost.
+
+Note that 17 bytes of plaintext became 45 bytes of ciphertext — a 28-byte
+overhead, consistent with a 12-byte GCM nonce and a 16-byte tag.
+
+### L1b — and with the network off as well
+
+The documented command table says `ring decrypt` requires network. It does not.
+With Wi-Fi disabled **and** the device unplugged:
+
+```
+$ wallet-cli ring decrypt --key l1-test < l1.enc; echo "exit=$?"
+✔ Key retrieved
+✔ Decrypted
+phase-0-l1-canary
+exit=0
+```
+
+Two consequences, and they pull in opposite directions, so both get written
+down.
+
+**Operationally this is the good outcome.** Boot does not depend on Ledger's
+LKRP service being up. Had it gone the other way, the gateway would refuse to
+start whenever someone else's API had a bad afternoon, and a key-management
+change would have quietly introduced a third-party dependency into the start-up
+path of a payment system. That is worth knowing before shipping rather than
+after.
+
+**For the threat model it sharpens the claim, and downwards.** After `ring
+init`, the scoped key is derivable on this host from the local member
+credentials and `WALLET_PASS` alone — no device, no network, no Ledger. So the
+device is the *enrolment* root, not a per-use gate, and what actually stands
+between the encrypted file and plaintext on a running host is `WALLET_PASS` and
+the credential store next to it.
+
+That is still a real gain over a key in plaintext in `/etc`: a stolen disk, a
+leaked backup, or a copied `/etc` without the passphrase is AES-256-GCM
+ciphertext. It is not the stronger claim it would be easy to imply, and the
+README says so in those words.
+
+---
+
+## L3 — can the VPS, which has no USB port, be a ring member at all?
+
+Not part of the original five. It should have been, and it is the check that
+changed part 2 the most.
+
+L1 proved decrypt needs no device **on the machine that ran `ring init`**. It
+says nothing about a second machine, and the plan — "only `master-key.enc` goes
+to the server" — assumed the answer without testing it.
+
+`wallet-cli` 2.1.0 installs and runs fine on the VPS (Linux x86_64, node
+installed in userspace, no sudo, nothing about the host changed):
+
+```
+$ node .../wallet-cli --version        →  {"ok": true, ... "version": "2.1.0"}
+$ node .../wallet-cli ring keys
+{"ok": false, "error": {"message": "Ledger Key Ring not initialized. Run `wallet-cli ring init` first.", "command": "keys"}}
+```
+
+So the server must be enrolled. Three facts close every route to that:
+
+1. **`ring init` requires a physically attached device.** Its own help says
+   "creating or recovering a trustchain (device required)", and L1 confirmed the
+   device step is not skippable — `WALLET_CLI_MOCK=1` does not stand in for it.
+   A cloud VPS has no USB port to attach one to.
+2. **There is no export or import verb.** The `ring` subcommands are `init`,
+   `encrypt`, `decrypt`, `keys`, `destroy`. Nothing moves a membership between
+   machines.
+3. **There is nowhere to put it even by hand.** The member private key is held
+   by the OS secret service — macOS Keychain here, as
+   `ledger-wallet-cli` / `member-private-key-8d7f63a1…`, 510 bytes,
+   password-protected. The Linux build reaches for `libsecret` / `secret-tool` /
+   `gnome-keyring` over DBus, and this host has none of them:
+
+```
+  secret-tool            ABSENT
+  gnome-keyring-daemon   ABSENT
+  dbus-launch            ABSENT
+  libsecret lib          ABSENT
+```
+
+**Conclusion: FAILED. A host that cannot have a Ledger physically attached to it
+cannot join the ring by any supported path.** This is precisely the case Ledger
+advertises — Key Ring on hosts without USB ports — and in 2.1.0 there is no
+route to it. It is the headline entry in `ledger-dx-notes.md`.
+
+**What it changes.** Part 2's code is unaffected and every acceptance criterion
+still holds: the key is ciphertext at rest, it is decrypted at boot through the
+ring, and the gateway refuses to start when that fails. What changes is where it
+can run — an enrolled host, which for now means one a device can reach. The
+claim "this runs on a keyless VPS" is not made, because it is not true, and
+making it to the company that built the product would be found out in a
+sentence.
+
+---
+
+## L4 — `keyring.py` against the real `wallet-cli`, end to end
+
+The 19 unit tests drive a stand-in binary, and L1 exercised the ring on its own.
+Neither shows the two working *together*, which is the only thing that matters
+on the morning of a demo. Run on the enrolled machine, 6 September, with a
+**throwaway** Fernet key — the production master key was not involved.
+
+```
+== 1. throwaway Fernet key, encrypted through the ring ==
+✔ Encrypted (72 bytes, AES-256-GCM)
+== 2. the gateway loads it through the ring ==
+   loaded a valid Fernet key, length 44 - value not printed
+== 3. corrupt the ciphertext: it must refuse ==
+   refused, as designed:
+    `wallet-cli ring decrypt` failed with exit code 1 reading key 'sign402-master'
+    in /var/folders/…/master-key.enc
+== 4. ring off: unchanged behaviour ==
+   read straight from the environment: not-a-real-key
+```
+
+**Conclusion: PASS, all four acceptance criteria of §4.** A 44-character Fernet
+key becomes 72 bytes of ciphertext; `load_master_key` recovers it through the
+real CLI and validates it as a Fernet key before returning; a single appended
+byte makes the gateway refuse to start; and with the ring off the value comes
+straight from the environment as it always did.
+
+Criterion 3 is the one worth insisting on, and it was tested by actually
+corrupting the file rather than by reading the code. The refusal names both the
+key and the file, which is what turns "the wallets are undecryptable" into "the
+service did not start and said why".
+
+---
+
+## L5 — a real Ledger signature, verified, and refused on replay
+
+Signature verification on the hardware, 6 September. Nothing was spent and no wallet
+was touched: the payload is the one the gateway builds for an escalated payment,
+and only the signature is real.
+
+```
+== 1. what the device is asked to show ==
+   merchant   giftcards.example.com
+   payTo      0x8f3a1c2b4d5e6f708192a3b4c5d6e7f809a1b2c3
+   amountUsd  25.00
+   owner      agent-7
+   rule       unknown_merchant
+   journalId  01JB8Z4A1B2C3D4E5F6G7H8J9K
+== 2. signing on the Ledger ==
+  … pending  … completed
+   signature: 0xc96f07842d8760d002…9c988f1b
+== 3. the gateway verifies it ==
+   accepted, signed by 0x1388…d9fa
+== 4. the same signature on the next payment ==
+   refused, as designed: That approval was signed for a different decision.
+```
+
+**Conclusion: PASS.** Step 4 is the one worth the exercise. Same merchant, same
+payout address, same amount, same signer — refused, because the journal entry is
+a different one. That is the property a tap in a chat cannot have: an approval
+is spent when the decision it names is spent.
+
+Device: Ledger Nano S Plus, Ethereum app, derivation `44'/60'/0'/0/0`, signed domain
+`SingIt Spending Approval`. This is signature evidence, not verified evidence of
+readable device review. The owner later reported missing purchase details;
+the earlier claim that the domain was checked on-screen is withdrawn. Signed
+through `@ledgerhq/device-signer-kit-ethereum` 1.18.0 on DMK 1.9.0, because L2
+established `wallet-cli` cannot sign messages at all.
+
+Three bugs stood between the device and this output, and all three were ours or
+the SDK's rather than the hardware's. They are written up in
+`ledger-dx-notes.md` because each one presents, from the caller's side, as a
+device that never answered — which is the most expensive way for an integration
+to fail.
+
+---
+
+## L2 — does `wallet-cli` sign messages?
+
+```
+$ wallet-cli --help
+wallet-cli v2.1.0
+Ledger Wallet CLI
+
+Commands:
+  account        Account management commands
+  assets         Crypto-assets store queries (resolve tokens by address or id)
+  balances       Fetch native and token balances for an account (no device required)
+  earn           Earn (staking & DeFi yield) commands
+  genuine-check  Check whether the connected Ledger device is genuine
+  operations     List operations for an account (no device required)
+  receive        Get receive address for an account (optionally verify on device)
+  ring           Ledger Key Ring — trustless, hardware-rooted encryption for files and text (LKRP)
+  send           Sign and broadcast a transaction
+  session        Session management commands
+  skill          Ledger wallet-cli agent skills (list, retrieve, install, doctor)
+  swap           Swap-related commands
+```
+
+Every subcommand's help was walked and grepped for `sign`. The only hits are
+`send` — "Sign and broadcast a transaction". There is no `sign`, no
+`sign-message`, no `personal-sign`, and no `--message` flag anywhere in the
+tree. `send` signs a *transaction* and broadcasts it; it cannot produce a
+detached signature over arbitrary typed data, and it moves money, which is
+disqualifying on its own for an approval primitive.
+
+**Conclusion: NO. `wallet-cli` cannot sign an EIP-712 message.** Part 3 (§5) must
+go through the Device Management Kit — the day-instead-of-half-day branch. Its
+cut line in §5 therefore applies from the start, not as a surprise late on.
+
+### Side finding, useful for §8
+
+`wallet-cli skill list | retrieve | install | doctor` ships agent SKILLs
+embedded in the binary. That is a first-party example of the SKILL.md format
+§8 has to match, and it comes from the same sponsor.
+
+---
+
+## G1 — The Graph's x402 endpoint, unpaid, verbatim
+
+```
+$ curl -s -i https://gateway.thegraph.com/api/x402/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV
+HTTP/2 402
+content-length: 0
+payment-required: eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJQYXltZW50LVNpZ25hdHVyZSBoZWFkZXIgaXMgcmVxdWlyZWQi…
+allow: POST
+```
+
+Base64-decoded value of the `payment-required` header, verbatim:
+
+```json
+{
+    "x402Version": 2,
+    "error": "Payment-Signature header is required",
+    "resource": {
+        "url": "http://mainnet-thegraph-arbitrum-02-eu-west3.thegraph.com/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"
+    },
+    "accepts": [
+        {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "10000",
+            "payTo": "0x79DC34E41B2b591078d3dE222C43EcaaBD52FcCB",
+            "maxTimeoutSeconds": 300,
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "extra": {
+                "assetTransferMethod": "eip3009",
+                "name": "USD Coin",
+                "version": "2"
+            }
+        }
+    ]
+}
+```
+
+Four things the adapter has to know, and none of them were guessable:
+
+1. **The block is not in the body.** The body is empty — `content-length: 0`.
+   The requirements arrive base64-encoded in a `payment-required` **header**.
+   An x402 client that parses the response body finds nothing at all.
+2. **`x402Version` is 2**, and the requirements are nested under `accepts[]`
+   rather than sitting at the top level.
+3. **The amount field is `amount`.** Not `maxAmountRequired`, not
+   `amountAtomic`. This is the third vocabulary the spec warned about, and G2
+   confirms it breaks the existing adapter.
+4. `payTo` **is** spelled `payTo`, `asset` is Base USDC
+   (`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`), `network` is `eip155:8453`.
+   Six decimals, so `"10000"` atomic is **$0.01** per query.
+
+`resource.url` points at an internal indexer hostname, not at the gateway URL
+that was called. It is not the merchant identity — keying a merchant on it
+would split one seller across regions and indexers. The merchant is
+`gateway.thegraph.com`, taken from the URL the agent actually requested.
+
+**Conclusion: PASS.** Field names captured exactly. The adapter reads the header,
+not the body, and takes `accepts[0]`.
+
+---
+
+## G2 — does the existing adapter survive that block?
+
+```
+$ python -c 'from spending_memory.adapters.x402 import to_payment; to_payment(<G1 accepts[0]>, <url>)'
+Traceback (most recent call last):
+  File "<stdin>", line 12, in <module>
+  File "spending_memory/adapters/x402.py", line 87, in to_payment
+    raise ValueError(
+        "payment requirements are missing maxAmountRequired (or amountAtomic)"
+    )
+ValueError: payment requirements are missing maxAmountRequired (or amountAtomic)
+```
+
+`payTo` was read fine. `amount` was not, because the adapter knows two spellings
+and this is a third.
+
+**Conclusion: FAILS, exactly where the spec predicted.** `thegraph.py` adds the
+third spelling and the header decoding, and leaves the two existing spellings
+untouched — the x402 adapter's tests must stay green without edits.
+
+---
+
+## G3 — is there a subgraph that gives an address's first-seen date and distinct counterparty count on Base?
+
+The Subgraph MCP is live at `https://subgraphs.mcp.thegraph.com/sse` (legacy SSE
+transport; the streamable-HTTP paths all 404). `initialize` reports
+`subgraph-mcp 0.1.1` and nine tools, of which four matter here:
+`search_subgraphs_by_keyword`, `get_top_subgraph_deployments`,
+`get_schema_by_ipfs_hash`, `get_deployment_30day_query_counts`.
+
+Two lines of attack were run.
+
+**By keyword.** `base`, `transfers`, `usdc`, `erc20`, `token transfers`,
+`holder`, `account`, `address activity`, `base transfers`, `wallet activity`.
+The last three return `"returned": 0`. Everything that does return is
+protocol-scoped: `uniswap-v4-base-3`, `uniswap-v2-base`, `Uniswap V3 Base`,
+`Aerodrome Base Full`, `llens-aggs-base`, `base-derp-holders`.
+
+The one name that looked exactly right, `base-usdc`
+(`CpmUGfuDNbovon9Bruo4pXvNer4PAMiMyvX6HGasXJ7u`), is not a transfer index — its
+whole schema is:
+
+```graphql
+type Wallet @entity { id: ID! vault: Bytes! owner: Bytes! deposited: BigInt! withdrawn: BigInt! }
+type Variable @entity { id: ID! value: BigInt! }
+```
+
+and `get_deployment_30day_query_counts` reports `total_query_count: 0` for it
+and for `base-usdc-optimized`. Dead, and not the thing anyway.
+
+**By contract.** `get_top_subgraph_deployments(chain="base",
+contract_address="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")` — Base USDC
+itself — returns three live deployments with real query fees (121, 48 and 16
+GRT). The top one, `QmWWa5bGmfqVD7C8mVSBQ5ct46Qseb6mnKYBjThLNrsSD3`, has a
+schema of `Market`, `Pair`, `Position`, `PositionFee`, `CurrentPosition`. It is
+a derivatives protocol that settles in USDC. It sees an address only if that
+address traded on it.
+
+That is the shape of the whole result, and it is structural rather than bad
+luck: **a subgraph indexes a contract's events, so it knows the addresses that
+touched that contract and no others.** "Every address on Base" is not a
+contract, so nothing indexes it. A merchant payout address that has only ever
+received USDC transfers appears in none of these.
+
+The one product that would answer the question is the Token API, and
+`thegraph.com/docs/en/token-api/quick-start/` now 301s to
+`app.pinax.network/docs/api/`. It has moved off The Graph to Pinax and takes a
+key — which breaks the exact property §6 is built on, that payment *is* the
+authentication.
+
+**Conclusion: FAILED.** Not "we could not find one in the time" — no such
+subgraph exists, for a reason that will not change by looking harder. Per §2,
+Part 5 (§7, onchain counterparty history as evidence) is **cut**, and §11
+forbids writing our own subgraph to rescue it. Rule 1 keeps its current
+behaviour: never paid this merchant before → ESCALATE.
+
+The honest version of this belongs in the README rather than being quietly
+dropped, because it is a genuine finding about the network: per-query x402
+access is real and cheap, and the data behind it is protocol-shaped, so an
+agent can buy an answer about *a protocol* for a cent and cannot buy one about
+*an address* at all.
+
+---
+
+## What Phase 0 changed
+
+| | Result | Effect on the plan |
+|---|---|---|
+| L1 | **pass** | decrypt needs neither device nor network — on the enrolled host |
+| L3 | **failed** | a USB-less host cannot be enrolled at all; part 2 runs where a device can reach |
+| L4 | **pass** | keyring.py drives the real wallet-cli; all four §4 criteria met |
+| L5 | **pass (signature only)** | a real signature verifies for one decision and is refused for another; HTTP lifecycle tested separately in L6 |
+| L2 | **no message signing** | Part 3 (§5) needs DMK; its §5 cut line is live from day one |
+| G1 | pass | header not body, `accepts[0]`, `amount`, $0.01, Base USDC |
+| G2 | fails as predicted | `thegraph.py` adds a third spelling and the header decode |
+| G3 | **failed, structurally** | Part 5 (§7) is cut |
+
+Parts that survive and are fully unblocked: **1** (`/decide`), **2**
+(`keyring.py`), **4** (The Graph adapter), **6** (SKILL.md).
+
+
+## L6 — hardware approval through the HTTP purchase lifecycle, 9 September
+
+**PASS.** The replacement `ledger-approval-rehearsal.py` used the production
+HTTP handler on loopback, a real Spending Policy, encrypted SQLite operation
+state, real budget accounting, and the shipped local `purchase.py` client.
+Only the quote, spending wallet access and payer were doubles.
+
+The connected Ledger at derivation `44'/60'/0'/0/0` returned its public address
+before the pending request was created, then signed `0.001 USD` for
+`ledger-rehearsal.invalid`, payout `0x0000…0001`. The client submitted that
+signature to `/agent/ledger-approve`; verification and settlement accounting
+succeeded. The test payer was called exactly once. Reopening the operation
+store and retrying both approval and buy returned the original result.
+
+No money was transferred. No real payment private key was loaded. No approval
+signature was printed or saved. This establishes the HTTP continuation and
+retry path that the older L5 signature-only exercise did not test. Reproduce
+it with the commands and scope in [ledger-v1.md](ledger-v1.md).
+
+The Key Ring check was not rerun in this session: its enrolled-host
+`WALLET_PASS` was not present in the execution environment. L1/L4 remain
+historical hardware evidence; current fail-closed behavior is covered by
+automated tests. Neither check claims a production VPS key migration.
+
+Automated verification for the payment lifecycle: **1169 gateway tests passed**
+against source exported from the declared Spending Memory pin
+`cbc0739b2842e92f7d7c698580d48284a7063960` (the imported path was checked), plus
+**79 Hermes wallet-client tests passed**. The gateway suite includes 20 Key Ring
+tests, including rehearsal exit checks for an incorrect decrypted key and a
+CLI that incorrectly accepts corrupt ciphertext. JavaScript/Python syntax,
+shell syntax, `git diff --check` and installed direct npm versions also passed.
+
+## L7 — real purchase after Ledger approval, 9 September
+
+**PASS: real money and delivered data.** After the owner explicitly approved
+buying Otto directly for 0.001 USDC, the connected Ledger signed the persisted
+`SpendingApproval` for `x402.ottoai.services`, payout
+`0x0E84dDEdAaE6A779c462C22a59F301EC31B6b808`.
+
+**This run did not verify device display.** The owner subsequently reported seeing
+technical fields without the purchase details. This run proves authorization
+verification, payment and delivery; it does not prove readable review or Clear
+Signing. The subsequent [v2 device check](#l8--readable-compact-approval-9-september)
+verified readable text without another purchase.
+
+The real HTTP approval endpoint accepted it and the existing operator CDP
+account paid through the x402 client, with amount/recipient/token guards.
+The quote, payment and delivered response were real. The live-check script
+uses the same `LedgerPayments` lifecycle and HTTP handler as the customer lane,
+with the configured operator payer. Production customer wallets were not
+migrated or used for this check.
+
+- Transaction: [0x4ab728a1…a2ffc4](https://basescan.org/tx/0x4ab728a10ee6c35eb76c7270aa24ff4fb02fc3f67e26b8bbf3c5fd04d2a2ffc4).
+- Base block: **51078334**, receipt status **0x1**.
+- USDC transfer: **1000 atomic units / 0.001 USDC**, exactly one matching event
+  from `0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd` to the approved recipient.
+- Payer's USDC balance: **6.933403 → 6.932403**.
+- Delivery: HTTP **200**, body `status: success`; news report and ten headlines.
+  Provider metadata: `dataAsOf: 2026-09-09T09:00:13.477Z`, `freshness: fresh`,
+  `degraded: false`. Freshness is the provider's report, not independent news verification.
+- Reopening the local HTTP gateway and requesting the completed operation
+  returned the saved data with **zero payer calls**. Spending Memory recorded
+  the 0.001 USDC once.
+
+The first post-payment RPC check failed through the Python transport. Payment
+had already succeeded and was saved. A separate read-only RPC call confirmed
+the receipt and balance; the diagnostic was changed to the working curl
+transport. Reading status then completed successfully, without another device
+signature or payment. This exercised actual recovery after a diagnostics
+failure rather than hiding it or paying for a replacement request.
+
+Reproduce with [the live-check instructions](ledger-v1.md#real-purchase-check).
+Local purchase records contain only the allowed non-secret fields. Secrets,
+approval signatures and the paid response are not committed to this report.
+
+
+## L8 — readable compact approval, 9 September
+
+**PASS: compact EIP-191 approval on the owner's Ledger Nano S Plus.** A fresh
+v1 EIP-712 rehearsal first reproduced the problem: the owner reported only
+hashes / a Blind signing warning. The SDK reached `provideContext` and
+`signTypedData` without entering `signTypedDataLegacy`; the owner rejected it,
+and nothing was submitted to the gateway for execution.
+
+The signer was changed to Ledger's `signMessage` API with the readable text
+itself. The owner saw the purchase, amount, network and recipient in the first
+text version, but reported that its eight pages contained too much information.
+That version was rejected. The final message was reduced to five lines, 165
+ASCII characters for this purchase: SingIt purchase v2, Otto AI - Crypto News,
+0.001 USDC on Base, the full recipient ending 0001, and a 43-character reference.
+The reference is a full SHA-256 commitment to all frozen approval fields and
+the domain, not a truncated order ID. It binds the technical fields while
+keeping them off separate device pages.
+
+- Device: Nano S Plus, Ethereum app, path `44'/60'/0'/0/0`, configured approver
+  `0x13883199454Fb3a0CaEeF31327Fe2Ec02C08d9fa`.
+- SDK: `sign-personal-message` followed by `completed`.
+- Owner confirmed the compact review was now comfortable: “Да, теперь нормально”.
+- The real HTTP handler verified the hardware signature and called the **test
+  payer exactly once**. No real wallet was loaded and no funds were transferred.
+- After reopening the operation store, both approve and buy retries returned
+  the saved result without another signature or payer call. Accounting recorded
+  the simulated 0.001 USDC once.
+- **1174 gateway tests passed**, including 72 Ledger checks; **six JavaScript
+  checks passed**. Coverage includes changed purchase/resource/technical fields,
+  old-format refusal, historical completed results, exact text passed to the
+  SDK, and refusing invalid input before requesting a device action.
+
+This establishes readable off-chain consent with EIP-191. It does not claim an
+ERC-7730 descriptor integration. The real mainnet payment remains L7's earlier
+EIP-712 run; there was no repeat purchase or production deployment. Production
+continues to use the owner's existing Trezor setup.
+
+
+## G4 — application transport, receipt and restart cache, 10–11 September
+
+**PASS for the unpaid live transport and automated integration checks.**
+The approved paid WETH check subsequently passed; see G5 below. No production changes.
+
+The application check found two defects that the earlier adapter-only demo
+could not catch:
+
+- The application's default Python User-Agent received HTTP **403** from the
+  real Graph gateway. The same unpaid POST with an identifying SingItAI
+  User-Agent returned the expected **402**, with the requirements in the
+  `payment-required` header and an empty body. The application now sets that
+  User-Agent and reports non-402 HTTP errors without parsing HTML as a quote.
+- The actual `CdpBaseX402PaymentClient` returns `transactionHash`; the onchain
+  builder read only `txId`, dropping the receipt from the spending journal.
+  It now accepts the actual payer field, retaining `txId` compatibility.
+
+The price query also requests `_meta.block.number` and `hasIndexingErrors`.
+The model receives the indexed block and an explicit cache indication instead
+of claiming a cached answer was read at the current block. Partial GraphQL
+errors or indexing errors are refused, and the configured liquidity floor is
+checked locally as well as in the query filter.
+
+Verification:
+
+- **1178 gateway tests passed**, including **30 onchain tests**.
+- **33 Graph adapter tests passed** against the installed dependency; its
+  adapter source matches the pinned `cbc0739b2842e92f7d7c698580d48284a7063960`.
+- A regression test uses the real CDP Python wrapper with a simulated Node
+  response, then reopens the SQLite database and enters the actual chat
+  branch. The transaction hash survives, the second query points to the first
+  journal entry, spending remains 0.01 USDC, and both the quote callback and
+  payer are invoked once in total. **This is simulated payment evidence.**
+- The live quote is still **10000 atomic USDC (0.01 USDC), Base 8453**, receiver
+  `0x79DC34E41B2b591078d3dE222C43EcaaBD52FcCB`, asset
+  `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`.
+- A read-only Base RPC receipt check confirmed the historical 0.01 USDC
+  settlement `0x57ddeebd74b89f8834c8627d7e1ad6878e44a651744da49fae677491ac2d7958`.
+  That older purchase queried `_meta`; it is not evidence of today's WETH
+  price flow.
+
+The reproducible check is `sign402-gateway/scripts/graph-live-check.py`:
+
+```sh
+payment-executor/.venv/bin/python sign402-gateway/scripts/graph-live-check.py prepare
+# Only after explicit approval of the displayed terms:
+payment-executor/.venv/bin/python sign402-gateway/scripts/graph-live-check.py run
+# Read the saved result and verify its receipt without paying:
+payment-executor/.venv/bin/python sign402-gateway/scripts/graph-live-check.py status
+```
+
+It uses the existing operator payer with isolated `.graph-live/` state, a
+0.01 USDC daily budget, frozen recipient/asset/price checks, and a permanent
+attempt marker written before calling the payer. A restart or an uncertain
+payment result cannot cause this check script to pay again. Merchant history
+is imported from the verified historical receipt under a separate owner;
+there is no fabricated seed payment. The repeated WETH query uses the normal
+five-minute journal cache and actual chat routing after reopening the database.
+This does not test production deployment, a live Telegram conversation, or a
+paid language-model response.
+
+
+## G5 — real WETH price purchase and free repeats, 11 September
+
+**PASS: one real 0.01 USDC payment, real pool data, and two free cached
+repeats across reopened clients / a separate Python process.** The owner
+explicitly approved this direct Graph query outside Bitrefill. Production was
+not changed and this check did not require Ledger or Trezor signing.
+
+The normal onchain client and CDP payer submitted `PoolsForSymbol` for WETH to
+the pinned Base Uniswap V3 subgraph. The gateway returned HTTP 200:
+
+- WETH price: **2569.701078542337763424403175755199 USDC**.
+- Pool: `0x6c561b446416e1a00e8e93e221854d6ea4171372`, fee tier 3000 (0.30%).
+- Indexed Base block: **51176748**. No GraphQL or indexing errors.
+- Transaction:
+  [`0x0d2ef8410a230f3e1b97532d5a7bdc8ad80d0d2a988c5ded318ee78e5ed2517a`](https://basescan.org/tx/0x0d2ef8410a230f3e1b97532d5a7bdc8ad80d0d2a988c5ded318ee78e5ed2517a).
+- Settlement block: **51176753**, status successful, exactly one matching
+  USDC Transfer of **0.01** from `0x84C0f9cd76b351e4dc90B0dD70Fa85b8aCC2b9dd`
+  to `0x79DC34E41B2b591078d3dE222C43EcaaBD52FcCB`.
+- Balance at block 51176752: **6.932403 USDC**; at 51176753:
+  **6.922403 USDC**. A later `latest` read also returned 6.922403.
+
+An independent, unpaid JSON-RPC check read this pool's `token0()`, `token1()`
+and `slot0()` at **the same indexed block**, 51176748. The tokens were canonical
+Base WETH (`0x4200000000000000000000000000000000000006`, 18 decimals) and USDC
+(`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, 6 decimals). Computing
+`sqrtPriceX96² / 2¹⁹² × 10¹²` gave
+2569.70107854233786010459926228535589422538120058822619553300 USDC,
+relative difference **3.77 × 10⁻¹⁷ or less** from the subgraph answer.
+This checks the price orientation against contract state, independently of
+the fixtures and subgraph price field.
+
+The paid journal entry stored the actual transaction hash. Reopening the
+database and rebuilding the client, then calling the actual chat branch for
+`price of WETH`, returned the same price/block with the cache footer. Its
+journal entry pointed to the paid source and recorded zero cost. Across these
+first two requests, the quote callback and payer were each called once.
+A further read in a **separate Python process** disabled both network and
+payer callbacks: it still returned the same price with `paid=False`, zero
+network/payer calls, and another zero-cost journal entry. All repeats were
+inside the default 300-second cache TTL; this does not claim indefinite free
+refreshes.
+
+The first immediate `latest` balance read still showed the pre-payment balance.
+The transaction receipt was already present. Reading balances at explicit
+blocks independently confirmed the debit; the check script now pins its
+post-payment balance read to the settlement block. No payment was repeated
+to recover the diagnostic. Operational evidence is private and ignored under
+`.graph-live/`; the minimal purchase record contains only the permitted fields.
+
+The preceding **1178 gateway / 33 adapter tests** remain the validation for
+the application fixes. This live check additionally establishes the actual
+paid data, onchain receipt, accounting and restart-cache behavior. It does not
+claim a production deployment or a full Telegram/LLM conversation.
+
+## G6 — video demonstration and report recovery, 13 September
+
+The owner ran `graph-live-check.py run --video-demo`. The real gateway returned
+402, accepted one 0.01 USDC x402 payment, and returned HTTP 200 with a WETH price
+of **2476.223193181634607138906425419718 USDC**, indexed at Base block **51257970**.
+The repeated question after reopening storage was served from the journal.
+The journal contains one paid query and one zero-cost cached query.
+
+- Transaction: [0xebfb3de4…d3c803](https://basescan.org/tx/0xebfb3de4760d796c0835ffbfc023e44416ec26ddf97048a65da1baf742d3c803).
+- Settlement block: **51257974**, successful receipt with exactly one matching
+  0.01 USDC transfer to The Graph's configured recipient.
+- Balance: **6.922403 → 6.912403 USDC**, post-payment read pinned to settlement.
+
+The initial run stopped during the optional balance RPC after verifying the
+receipt. The report writer now persists the payment/data evidence first.
+`status --video-demo` recovered this run from the saved response and journal,
+verified the receipt and balance, and wrote the minimal purchase record with
+**zero payer calls**. This is recovery of the existing reading, not a fresh
+Graph query. The original payment attempt marker remains intact.
+
+**38 focused checks passed** (30 onchain-data tests and eight demo safety/recovery
+tests). This demonstration uses the operator gateway wallet; it does not invoke
+Ledger or send results to Telegram.
+
+## G7 — Telegram → Ledger → The Graph, 13 September
+
+The owner's `/graph_demo` request to the existing Telegram bot reached the
+private Mac service. The Graph returned its fixed 0.01 USDC quote on Base.
+The physical Ledger signed readable EIP-191 consent for `The Graph - WETH price`;
+the configured public address verified successfully before the payer ran.
+The paid GraphQL request then returned HTTP 200.
+
+- Transaction: [0xf65f6f5f…a9212](https://basescan.org/tx/0xf65f6f5f26955e76cfb97e88a7eb20cd7431082ec363eb3dd8f255ba705a9212).
+- Query cost: **0.01 USDC**. The service verified the successful Base receipt
+  and matching USDC transfer to The Graph's recipient.
+- WETH price: **2469.233244628033104191335313461433 USDC**, indexed Base block
+  **51258594**, Uniswap V3 pool `0x6c561b446416e1a00e8e93e221854d6ea4171372`.
+- A second Telegram command completed from the persistent answer cache at
+  **0 USDC**, with the same transaction reference and no second signature or
+  payer invocation. Both operations are saved as `succeeded`.
+
+The owner confirmed receiving the price and BaseScan link in Telegram and
+sent the second command for the free cached response. Access was corrected to the owner's
+confirmed current account after the first command was rejected by the owner
+filter. No payment was created by that rejected command.
+
+The main production gateway and Trezor configuration were not redeployed.
+Ledger supplies off-chain spending consent; the operator gateway wallet funds
+the x402 payment. The demo remains limited to one paid query in its durable
+state directory, with the local Mac service and SSH connection required.
+
+Validation: **71 focused gateway tests**, including 10 combined-flow tests,
+and **310 Hermes plugin tests** passed. The live payment and cached repeat
+above supplement those automated checks.

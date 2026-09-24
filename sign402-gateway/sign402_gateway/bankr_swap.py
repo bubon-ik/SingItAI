@@ -2,6 +2,7 @@ import json
 import os
 import re
 import subprocess
+import uuid
 import urllib.error
 import urllib.request
 from decimal import Decimal
@@ -17,6 +18,17 @@ MIN_RE = re.compile(rf"Min received:\s*{AMOUNT_PATTERN}\s+([A-Za-z0-9_.$-]+)")
 DEFAULT_BANKR_API_BASE_URL = "https://api.bankr.bot"
 BASE_USDC_MAINNET = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 MAX_BANKR_RESPONSE_BYTES = 1024 * 1024
+# Bankr dedupes /wallet/swap by ``idempotencyKey``, so the key must stay the
+# same across a retry of one logical swap. Sign402 quote ids are not UUIDs,
+# so derive a stable UUIDv5 from the quote id instead of a fresh uuid4.
+SWAP_IDEMPOTENCY_NAMESPACE = uuid.UUID("6f0d6bd6-2f1f-5a1a-9d0e-7a0a1c6a4f11")
+
+
+def swap_idempotency_key(quote_id: str | None) -> str | None:
+    value = str(quote_id or "").strip()
+    if not value:
+        return None
+    return str(uuid.uuid5(SWAP_IDEMPOTENCY_NAMESPACE, f"sign402-swap:{value}"))
 
 
 def usdc_balance_from_portfolio(payload: dict[str, Any], *, chain: str = "base") -> Decimal:
@@ -142,6 +154,7 @@ class BankrWalletApiClient:
         to_token: str,
         amount: str,
         chain: str = "base",
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         quote = self.quote(
             from_token=from_token,
@@ -158,6 +171,11 @@ class BankrWalletApiClient:
                 "toToken": self._normalize_token(to_token),
                 "amount": str(amount),
                 "minBuyAmount": str(quote["minToAmount"]),
+                **(
+                    {"idempotencyKey": str(idempotency_key)}
+                    if idempotency_key
+                    else {}
+                ),
             },
         )
         tx_id = payload.get("hash")
@@ -192,7 +210,9 @@ class BankrWalletApiClient:
     ) -> dict[str, Any]:
         data = None
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            # Bankr documents X-API-Key for api.bankr.bot; Authorization: Bearer
+            # is the LLM-gateway form and is undocumented here.
+            "X-API-Key": self.api_key,
             "Content-Type": "application/json",
         }
         if payload is not None:
@@ -276,7 +296,11 @@ class BankrSwapClient:
         to_token: str,
         amount: str,
         chain: str = "base",
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
+        # The CLI exposes no idempotency flag; the parameter keeps this client
+        # interchangeable with BankrWalletApiClient.
+        del idempotency_key
         command = self._command(
             from_token=from_token,
             to_token=to_token,

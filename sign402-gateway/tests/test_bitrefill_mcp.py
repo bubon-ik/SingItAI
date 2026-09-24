@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from sign402_gateway.bitrefill_mcp import (
+    SEARCH_INTENT,
     McpBitrefillClient,
     McpToolCaller,
     decode_mcp_tool_result,
@@ -1098,6 +1099,28 @@ class BitrefillMcpCatalogTests(unittest.TestCase):
             },
         )
 
+    def test_every_search_carries_the_intent_bitrefill_now_requires(self):
+        # Break caught: Bitrefill made `intent` required on search-products.
+        # Without it the tool rejects the whole call, so every country whose
+        # catalog was not already cached stopped loading in the bot.
+        caller = FakeMcpCaller([{"products": []}, {"products": []}])
+        client = McpBitrefillClient(api_key="key_123", call_tool=caller)
+
+        client.search_products(
+            query="Steam",
+            country="US",
+            category="",
+            product_type="",
+            include_test_products=False,
+        )
+        client._fetch_catalog_snapshot("US", include_test_products=False)
+
+        self.assertEqual(len(caller.calls), 2)
+        for name, arguments in caller.calls:
+            self.assertEqual(name, "search-products")
+            self.assertEqual(arguments["intent"], SEARCH_INTENT)
+            self.assertTrue(arguments["intent"].strip())
+
     def test_search_uses_mcp_and_normalizes_products(self):
         caller = FakeMcpCaller(
             [
@@ -1135,6 +1158,7 @@ class BitrefillMcpCatalogTests(unittest.TestCase):
                 (
                     "search-products",
                     {
+                        "intent": SEARCH_INTENT,
                         "query": "Steam",
                         "country": "US",
                         "category": "games",
@@ -1191,6 +1215,7 @@ class BitrefillMcpCatalogTests(unittest.TestCase):
             [arguments for _, arguments in caller.calls],
             [
                 {
+                    "intent": SEARCH_INTENT,
                     "query": "*",
                     "country": "CZ",
                     "include_test_products": False,

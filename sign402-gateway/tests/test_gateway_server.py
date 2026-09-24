@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -16,6 +17,7 @@ from unittest.mock import ANY, Mock, patch
 from cryptography.fernet import Fernet
 
 from sign402_gateway.bankr_llm_purchase import BankrLlmError
+from sign402_gateway.bankr_swap import swap_idempotency_key
 from sign402_gateway.bitrefill import TestBitrefillClient
 from sign402_gateway.bitrefill_mcp import McpBitrefillClient
 from sign402_gateway.bitrefill_runner import CdpWalletServiceError
@@ -25,7 +27,10 @@ from sign402_gateway.secure_state import (
     SensitiveStateDecryptionError,
     SensitiveStateError,
 )
+from spending_memory import SpendingMemory, SpendingPolicy
+
 from sign402_gateway.user_wallets import BASE_NATIVE_ETH_ASSET_ID
+from sign402_gateway import server as gateway_server
 from sign402_gateway.server import (
     FUND_MOVING_POST_PATHS,
     MAX_REQUEST_BODY_BYTES,
@@ -151,6 +156,14 @@ class DummyServer:
         self.user_spend_limit_store.reserve_within_limits.side_effect = (
             self._reserve_within_limits
         )
+        # A real policy on a database of its own, not a Mock: every merchant in
+        # these tests is one nobody has paid before, so memory escalates and
+        # the human approval path each test is about is the one that runs.
+        self.spending_policy = SpendingPolicy(
+            SpendingMemory.local(str(Path(tempfile.mkdtemp()) / "memory.db")),
+            daily_cap_usd=Decimal("5"),
+        )
+        self.spending_memory_holds: dict[str, dict] = {}
 
     def _reserve_within_limits(
         self,
@@ -523,6 +536,7 @@ class GatewayServerTests(unittest.TestCase):
             with ExitStack() as stack:
                 stack.enter_context(patch.dict(os.environ, {}, clear=True))
                 for target in (
+                    "sign402_gateway.server.BuyerEmailStore",
                     "sign402_gateway.server.build_approval_client_from_env",
                     "sign402_gateway.server.build_payment_executor",
                     (
@@ -546,6 +560,10 @@ class GatewayServerTests(unittest.TestCase):
                         "build_bitrefill_funding_runner_from_env"
                     ),
                     "sign402_gateway.server.build_usdc_reserve_guard_from_env",
+                    # Stubbed like every other builder here: this test is about
+                    # the master key, and the real one refuses to build without
+                    # an autonomy cap, which a cleared environment cannot have.
+                    "sign402_gateway.server.build_spending_policy_from_env",
                     (
                         "sign402_gateway.server."
                         "build_singit_settlement_verifier_from_env"
@@ -555,6 +573,7 @@ class GatewayServerTests(unittest.TestCase):
                         "build_bitrefill_user_funding_runner_from_env"
                     ),
                     "sign402_gateway.server.UserWalletBaseX402PaymentClient",
+                    "sign402_gateway.server.BuyerEmailStore",
                     "sign402_gateway.server.UserWalletTokenTransferClient",
                     "sign402_gateway.server.BankrLlmCreditsTopUpClient",
                     (
@@ -587,6 +606,7 @@ class GatewayServerTests(unittest.TestCase):
                     bitrefill_commerce_store_path=root / "orders.sqlite3",
                     user_wallet_store_path=root / "user-wallets.json",
                     user_spend_limit_store_path=root / "spend-limits.json",
+                    buyer_email_store_path=root / "emails.sqlite3",
                     imessage_approval_store_path=root / "approvals.json",
                 )
 
@@ -611,6 +631,7 @@ class GatewayServerTests(unittest.TestCase):
                         bitrefill_commerce_store_path=root / "orders.sqlite3",
                         user_wallet_store_path=root / "user-wallets.json",
                         user_spend_limit_store_path=root / "spend-limits.json",
+                        buyer_email_store_path=root / "emails.sqlite3",
                         imessage_approval_store_path=root / "approvals.json",
                     )
 
@@ -928,6 +949,7 @@ class GatewayServerTests(unittest.TestCase):
             to_token="USDC",
             amount="25000",
             chain="base",
+            idempotency_key=swap_idempotency_key("quote_1"),
         )
 
     def test_bankr_singit_to_usdc_funding_runner_rejects_underfilled_swap(self):
@@ -1945,6 +1967,7 @@ class GatewayServerTests(unittest.TestCase):
             "/execute-payment": "_handle_execute_payment",
             "/agent/buy-probe": "_handle_agent_buy_probe",
             "/agent/buy-tool": "_handle_agent_buy_tool",
+            "/agent/ledger-approve": "_handle_ledger_operation",
             "/agent/buy-x402": "_handle_agent_buy_x402",
             "/agent/top-up-llm-credits": "_handle_agent_top_up_llm_credits",
             "/agent/buy-bitrefill": "_handle_agent_buy_bitrefill",
@@ -4938,6 +4961,363 @@ class GatewayServerTests(unittest.TestCase):
         )
         server.user_spend_limit_store.settle_reservation.assert_not_called()
 
+    # ---------------------------------------------------------------- memory
+
+    MEMORY_RESOURCE_URL = "https://x402.ottoai.services/crypto-news"
+
+    def memory_payment_requirements(self):
+        return {
+            "scheme": "exact",
+            "network": "base-mainnet",
+            "x402Network": "eip155:8453",
+            "amountAtomic": "1000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "receiver": "0x0E84dDEdAaE6A779c462C22a59F301EC31B6b808",
+            "paymentIntent": "crypto-news-1",
+            "purpose": "x402_api_access",
+            "extra": {"name": "USD Coin", "version": "2"},
+        }
+
+    def memory_server(self, requirements, *, buyer_ok=True):
+        """A server whose only unusual feature is that memory is switched on."""
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
+        server.event_store = Mock()
+        server.user_event_store = Mock()
+        server.imessage_approval_service.request_purchase_approval.return_value = {
+            "ok": True,
+            "status": "approved",
+            "approvalId": "approval-1",
+            "commitmentHash": "c" * 64,
+        }
+        server.user_wallet_service.decrypt_private_key_for_future_signing.return_value = (
+            "0xUSER_PRIVATE_KEY"
+        )
+        server.user_x402_buyer.return_value = {
+            "decision": "approved_and_executed",
+            "ok": buyer_ok,
+            "mode": "official_x402_base_user_wallet",
+            "resourceUrl": self.MEMORY_RESOURCE_URL,
+            "txId": "0xTX",
+            "amountAtomic": requirements["amountAtomic"],
+            "asset": requirements["asset"],
+            "network": requirements["network"],
+            "telegramText": "✅ Crypto News unlocked.",
+        }
+        return server
+
+    def memory_payment(self, server, requirements):
+        return gateway_server._payment_from_requirements(
+            requirements, owner="1045618308", resource_url=self.MEMORY_RESOURCE_URL
+        )
+
+    def teach_memory(self, server, requirements, times=3):
+        """Settle the same purchase a few times, the way the owner approving it would."""
+        payment = self.memory_payment(server, requirements)
+        for _ in range(times):
+            server.spending_policy.memory.remember_settlement(payment, tx_id="0xseed")
+        return payment
+
+    def run_memory_buy(self, server, requirements, request_id=None):
+        with patch("sys.stderr", io.StringIO()):
+            with (
+                patch(
+                    "sign402_gateway.server.fetch_x402_payment_required",
+                    return_value={"x402Version": 2, "accepts": [{}]},
+                ),
+                patch(
+                    "sign402_gateway.server.normalize_x402_payment_required",
+                    return_value=requirements,
+                ),
+            ):
+                handler = self.make_handler(
+                    "/agent/buy-tool",
+                    {
+                        "tool": "news",
+                        "telegramUserId": "1045618308",
+                        **({"requestId": request_id} if request_id else {}),
+                    },
+                    server=server,
+                    headers=self.llm_auth_headers(),
+                )
+        response = self.response_text(handler)
+        return response, json.loads(response.split("\r\n\r\n", 1)[1])
+
+    def test_a_merchant_memory_knows_is_paid_without_asking_anyone(self):
+        """The one branch that spends money with no human in it.
+
+        Same merchant, same address, same price as three settled purchases, so
+        there is nothing left to ask about — and the approval that authorises
+        the payment points at the journal entry that decided it.
+        """
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+        self.teach_memory(server, requirements)
+
+        response, body = self.run_memory_buy(server, requirements)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertTrue(body["ok"])
+        server.imessage_approval_service.request_purchase_approval.assert_not_called()
+
+        approval = server.user_x402_buyer.call_args.kwargs["approval"]
+        self.assertEqual(approval["status"], "approved")
+        self.assertEqual(approval["source"], "spending_memory")
+        self.assertEqual(approval["rule"], "known_good")
+        self.assertTrue(approval["approvalId"].startswith("sm-"))
+
+        journal_id = approval["approvalId"][len("sm-"):]
+        entry = next(
+            e
+            for e in server.spending_policy.memory.journal(limit=20)
+            if e["id"] == journal_id
+        )
+        self.assertEqual(entry["extra"]["rule"], "known_good")
+        self.assertIn(approval["reason"], entry["acted"][0])
+
+    def test_a_merchant_memory_does_not_know_still_asks(self):
+        """The other side of the same branch: no history, no autonomy."""
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+
+        response, body = self.run_memory_buy(server, requirements)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        server.imessage_approval_service.request_purchase_approval.assert_called_once()
+        approval = server.user_x402_buyer.call_args.kwargs["approval"]
+        self.assertEqual(approval["approvalId"], "approval-1")
+
+    def test_a_blocked_payment_gives_the_hold_back_and_says_why(self):
+        """A second identical payment while the first is still in flight.
+
+        Nothing is spent, so nothing may stay held, and the person gets the
+        sentence memory wrote rather than a generic refusal.
+        """
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+        payment = self.teach_memory(server, requirements)
+
+        # The first attempt takes the claim and never finishes. Same request
+        # id as the retry below, because that is what makes it the same
+        # purchase rather than a new one.
+        first, claim_id = server.spending_policy.authorise(
+            payment, claim_scope=gateway_server._claim_scope("take-1")
+        )
+        self.assertEqual(first.action.value, "PAY")
+        self.assertIsNotNone(claim_id)
+
+        response, body = self.run_memory_buy(server, requirements, request_id="take-1")
+
+        self.assertIn("HTTP/1.0 400 Bad Request", response)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["decision"], "blocked_by_memory")
+        self.assertEqual(body["rule"], "already_in_flight")
+        self.assertIn("not sending a second one", body["telegramText"])
+        self.assertEqual(body["evidence"]["claim_status"], "held")
+        server.user_spend_limit_store.release_reservation.assert_called_once_with(
+            "hold_test"
+        )
+        server.user_x402_buyer.assert_not_called()
+        server.imessage_approval_service.request_purchase_approval.assert_not_called()
+
+    def test_a_new_request_for_the_same_thing_is_not_a_replay(self):
+        """The defect this closes, end to end.
+
+        A fixed-price API is the same owner, merchant, address and amount every
+        time. Without a scope the first settled purchase made every later one
+        impossible — settled claims are permanent, which is the replay
+        protection — so asking again tomorrow was refused as a replay.
+        """
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+        payment = self.teach_memory(server, requirements)
+
+        first, claim_id = server.spending_policy.authorise(
+            payment, claim_scope=gateway_server._claim_scope("yesterday")
+        )
+        self.assertIsNotNone(claim_id)
+        server.spending_policy.memory.settle_claim(claim_id, tx_id="0xsettled")
+
+        response, body = self.run_memory_buy(server, requirements, request_id="today")
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertTrue(body["ok"])
+
+    def test_initial_approvals_do_not_block_a_successfully_paid_merchant(self):
+        """Three cold-start prompts followed by settlement, as in the incident."""
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+        payment = self.memory_payment(server, requirements)
+        for _ in range(3):
+            decision = server.spending_policy.decide(payment)
+            self.assertEqual(decision.rule, "unknown_merchant")
+        server.spending_policy.memory.remember_settlement(payment, tx_id="0xfirst")
+
+        response, body = self.run_memory_buy(server, requirements, request_id="repeat")
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertTrue(body["ok"])
+        server.imessage_approval_service.request_purchase_approval.assert_not_called()
+        server.user_x402_buyer.assert_called_once()
+
+    def test_repeated_price_spikes_still_block_a_paid_tool(self):
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+        self.teach_memory(server, requirements)
+        expensive = self.memory_payment(server, {**requirements, "amountAtomic": "10000"})
+        for _ in range(3):
+            self.assertEqual(server.spending_policy.decide(expensive).rule, "price_spike")
+
+        response, body = self.run_memory_buy(server, requirements, request_id="repeat")
+
+        self.assertIn("HTTP/1.0 400 Bad Request", response)
+        self.assertEqual(body["decision"], "blocked_by_memory")
+        self.assertEqual(body["rule"], "repeated_escalations")
+        self.assertTrue(body["telegramText"])
+        server.user_x402_buyer.assert_not_called()
+        server.imessage_approval_service.request_purchase_approval.assert_not_called()
+
+    def test_memory_failure_releases_the_budget_before_returning_a_reservation(self):
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+        with patch.object(server.spending_policy, "authorise", side_effect=RuntimeError("memory unavailable")):
+            response, body = self.run_memory_buy(server, requirements)
+
+        self.assertIn("HTTP/1.0 400 Bad Request", response)
+        self.assertFalse(body["ok"])
+        server.user_spend_limit_store.release_reservation.assert_called_once_with("hold_test")
+        server.user_x402_buyer.assert_not_called()
+        server.imessage_approval_service.request_purchase_approval.assert_not_called()
+
+    def test_the_kill_switch_puts_every_purchase_back_to_asking(self):
+        """The rescue lever, exercised.
+
+        With memory off, a merchant it would otherwise pay silently is asked
+        about like every other purchase — the behaviour of the week before this
+        existed, one restart away.
+        """
+        requirements = self.memory_payment_requirements()
+        server = self.memory_server(requirements)
+        self.teach_memory(server, requirements)
+        server.spending_policy = None  # SIGN402_SPENDING_MEMORY_ENABLED=0
+
+        response, body = self.run_memory_buy(server, requirements)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertTrue(body["ok"])
+        server.imessage_approval_service.request_purchase_approval.assert_called_once()
+        approval = server.user_x402_buyer.call_args.kwargs["approval"]
+        self.assertEqual(approval["approvalId"], "approval-1")
+
+    def test_the_kill_switch_needs_no_other_configuration(self):
+        """A rescue lever that itself needs configuring is not a rescue lever.
+
+        With the switch off the autonomy cap is never read, so a box that never
+        set one still boots.
+        """
+        self.assertIsNone(
+            gateway_server.build_spending_policy_from_env(
+                {"SIGN402_SPENDING_MEMORY_ENABLED": "0"}
+            )
+        )
+        for value in ("false", "no", "off", "0"):
+            with self.subTest(value=value):
+                self.assertIsNone(
+                    gateway_server.build_spending_policy_from_env(
+                        {"SIGN402_SPENDING_MEMORY_ENABLED": value}
+                    )
+                )
+
+    def test_an_explicit_env_mapping_is_the_environment(self):
+        """The dict a caller passes is read, not just the process environment.
+
+        The package reads its own variables from `os.environ`, so a mapping
+        given here has to be forwarded as arguments. A helper that checked the
+        flag in the dict and then built the policy from the process would let
+        a test pass for the wrong reason — and did.
+        """
+        db_path = Path(tempfile.mkdtemp()) / "memory.db"
+        policy = gateway_server.build_spending_policy_from_env(
+            {
+                "SIGN402_SPENDING_MEMORY_ENABLED": "1",
+                "SPENDING_MEMORY_DB": str(db_path),
+                "SPENDING_MEMORY_AUTONOMY_CAP": "0.25",
+            }
+        )
+        self.assertEqual(policy.daily_cap_usd, Decimal("0.25"))
+
+        with self.assertRaises(ValueError):
+            gateway_server.build_spending_policy_from_env(
+                {
+                    "SIGN402_SPENDING_MEMORY_ENABLED": "1",
+                    "SPENDING_MEMORY_DB": str(Path(tempfile.mkdtemp()) / "memory.db"),
+                    "SPENDING_MEMORY_AUTONOMY_CAP": "banana",
+                }
+            )
+
+    def test_the_same_purchase_can_be_made_again_tomorrow(self):
+        """The defect a scope closes.
+
+        A fixed-price API costs the same cent to the same address every time,
+        so owner-merchant-address-amount is the same claim for every purchase
+        anyone ever makes of it. Settled claims are permanent — that is the
+        replay protection — so without a scope the first successful purchase
+        refuses every later one for ever.
+        """
+        scopes = {
+            gateway_server._claim_scope("request-1"),
+            gateway_server._claim_scope("request-2"),
+        }
+        self.assertEqual(len(scopes), 2)
+
+    def test_a_resent_request_is_the_same_purchase(self):
+        """The retry the claim exists to catch keeps its id, and its scope."""
+        self.assertEqual(
+            gateway_server._claim_scope("request-1"),
+            gateway_server._claim_scope("request-1"),
+        )
+
+    def test_a_caller_without_a_request_id_still_collapses_a_retry(self):
+        """No id means guessing, and the guess is a window, not for ever."""
+        with patch.object(gateway_server.time, "time", return_value=1_000.0):
+            first = gateway_server._claim_scope(None)
+            immediate_retry = gateway_server._claim_scope("")
+        self.assertEqual(first, immediate_retry)
+
+        with patch.object(gateway_server.time, "time", return_value=1_000.0 + 600):
+            later = gateway_server._claim_scope(None)
+        self.assertNotEqual(first, later)
+
+    def test_a_decision_whose_purchase_never_finished_stops_answering(self):
+        """The leak that matters is not the memory, it is the wrong answer.
+
+        Holds are found by owner, so a verdict left behind by a purchase that
+        died would wave through the buyer's next one — a purchase nobody
+        decided about, approved on the strength of an old decision.
+        """
+        server = DummyServer()
+        server.spending_memory_holds = {
+            "res-crashed": {
+                "owner": "1045618308",
+                "decision": object(),
+                "heldAt": time.time() - gateway_server.SPENDING_MEMORY_HOLD_TTL_SECONDS - 1,
+            },
+            "res-live": {
+                "owner": "2222222222",
+                "decision": object(),
+                "heldAt": time.time(),
+            },
+        }
+
+        self.assertIsNone(
+            gateway_server._memory_hold_for_owner(server, "1045618308")
+        )
+        self.assertNotIn("res-crashed", server.spending_memory_holds)
+
+        still_going = gateway_server._memory_hold_for_owner(server, "2222222222")
+        self.assertIsNotNone(still_going)
+        self.assertIn("res-live", server.spending_memory_holds)
+
     def test_agent_buy_tool_for_user_releases_the_hold_when_payment_fails(self):
         server = DummyServer()
         server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
@@ -7898,3 +8278,220 @@ class AgentStateStoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UserWalletBaseX402PostTests(unittest.TestCase):
+    """Venice's top-up is a POST; the approved terms must still gate signing."""
+
+    def make_client(self, calls):
+        with tempfile.TemporaryDirectory() as tmp:
+            service_dir = Path(tmp)
+            (service_dir / "src").mkdir()
+            (service_dir / "src" / "index.mjs").write_text("//")
+
+            def runner(command, **kwargs):
+                calls.append(command)
+                return subprocess.CompletedProcess(
+                    command, 0, stdout='{"ok":true}', stderr=""
+                )
+
+            client = UserWalletBaseX402PaymentClient(service_dir, runner=runner)
+            yield client
+
+    def run_client(self, calls, **kwargs):
+        with tempfile.TemporaryDirectory() as tmp:
+            service_dir = Path(tmp)
+            (service_dir / "src").mkdir()
+            (service_dir / "src" / "index.mjs").write_text("//")
+
+            def runner(command, **runner_kwargs):
+                calls.append(command)
+                return subprocess.CompletedProcess(
+                    command, 0, stdout='{"ok":true}', stderr=""
+                )
+
+            client = UserWalletBaseX402PaymentClient(service_dir, runner=runner)
+            return client(
+                "https://api.venice.ai/api/v1/x402/top-up",
+                private_key="0x" + "11" * 32,
+                max_atomic="5000000",
+                expected_receiver="0x2670b922ef37c7df47158725c0cc407b5382293f",
+                expected_asset="0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                **kwargs,
+            )
+
+    def test_a_post_passes_the_method_and_body_through(self):
+        calls = []
+        self.run_client(calls, method="POST", request_body={})
+
+        command = calls[0]
+        self.assertIn("--method", command)
+        self.assertEqual(command[command.index("--method") + 1], "POST")
+        self.assertIn("--body-json", command)
+
+    def test_a_get_stays_exactly_as_before(self):
+        calls = []
+        self.run_client(calls)
+
+        self.assertNotIn("--method", calls[0])
+        self.assertNotIn("--body-json", calls[0])
+
+    def test_a_post_still_refuses_without_approved_terms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service_dir = Path(tmp)
+            (service_dir / "src").mkdir()
+            (service_dir / "src" / "index.mjs").write_text("//")
+            client = UserWalletBaseX402PaymentClient(
+                service_dir, runner=lambda *a, **k: None
+            )
+            with self.assertRaises(ValueError):
+                client(
+                    "https://api.venice.ai/api/v1/x402/top-up",
+                    private_key="0x" + "11" * 32,
+                    method="POST",
+                    request_body={},
+                )
+
+
+class GatewayWalletSearchPaymentTests(unittest.TestCase):
+    """The gateway's own account pays for the free-trial searches.
+
+    It is the same lane as a user purchase and gets the same guard: paying
+    from our wallet is not a reason to skip the approved-terms check.
+    """
+
+    def _client(self, runner):
+        from sign402_gateway.server import CdpBaseX402PaymentClient
+
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        service_dir = Path(tmpdir.name)
+        script = service_dir / "src" / "index.mjs"
+        script.parent.mkdir(parents=True)
+        script.write_text("// test", encoding="utf-8")
+        return CdpBaseX402PaymentClient(service_dir, runner=runner)
+
+    def _completed(self):
+        return subprocess.CompletedProcess(
+            args=["node"],
+            returncode=0,
+            stdout=json.dumps({"ok": True, "status": 200, "body": {}}),
+            stderr="",
+        )
+
+    def test_a_post_with_approved_terms_reaches_the_node_buyer(self):
+        runner = Mock(return_value=self._completed())
+        client = self._client(runner)
+
+        result = client(
+            "https://api.exa.ai/search",
+            max_atomic="7000",
+            expected_receiver="0x6d6E695b09861467c7d462f5AAF31cF3540B9192",
+            expected_asset="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            method="POST",
+            request_body={"query": "q", "numResults": 3},
+        )
+
+        self.assertTrue(result["ok"])
+        args = runner.call_args.args[0]
+        self.assertEqual(args[2:5], ["buy", "--url", "https://api.exa.ai/search"])
+        self.assertIn("--max-atomic", args)
+        self.assertIn("--expected-receiver", args)
+        self.assertIn("--method", args)
+        self.assertIn("POST", args)
+        self.assertIn(json.dumps({"query": "q", "numResults": 3}), args)
+
+    def test_partial_terms_never_reach_the_signer(self):
+        runner = Mock()
+        client = self._client(runner)
+
+        with self.assertRaises(ValueError):
+            client(
+                "https://api.exa.ai/search",
+                max_atomic="7000",
+                method="POST",
+                request_body={"query": "q"},
+            )
+
+        runner.assert_not_called()
+
+    def test_the_plain_get_purchase_is_unchanged(self):
+        runner = Mock(return_value=self._completed())
+        client = self._client(runner)
+
+        client("https://x402.example/paid")
+
+        args = runner.call_args.args[0]
+        self.assertEqual(args[2:5], ["buy", "--url", "https://x402.example/paid"])
+        self.assertNotIn("--method", args)
+        self.assertNotIn("--max-atomic", args)
+
+
+class SearchSettleHelperTests(unittest.TestCase):
+    """The settle helpers must not reach through the server for a collaborator.
+
+    A missing attribute here is invisible until someone pays: the search
+    client catches the failure, logs it, and answers without the web. That is
+    how `user_wallet_base_x402_client` survived to production once already.
+    """
+
+    def test_the_gateway_settle_uses_the_client_it_was_given(self):
+        from sign402_gateway.server import _settle_search_from_gateway
+
+        calls = []
+
+        def pay(url, **kwargs):
+            calls.append((url, kwargs))
+            return {"ok": True, "status": 200, "body": {"results": []}}
+
+        result = _settle_search_from_gateway(
+            pay,
+            {
+                "resource": "https://api.exa.ai/search",
+                "amount": "7000",
+                "payTo": "0x6d6E695b09861467c7d462f5AAF31cF3540B9192",
+                "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            },
+            request_body={"query": "q", "numResults": 3},
+        )
+
+        self.assertTrue(result["ok"])
+        url, kwargs = calls[0]
+        self.assertEqual(url, "https://api.exa.ai/search")
+        self.assertEqual(kwargs["method"], "POST")
+        self.assertEqual(kwargs["max_atomic"], "7000")
+        self.assertEqual(
+            kwargs["expected_receiver"],
+            "0x6d6E695b09861467c7d462f5AAF31cF3540B9192",
+        )
+        self.assertEqual(kwargs["request_body"], {"query": "q", "numResults": 3})
+
+    def test_every_attribute_the_settle_helpers_reach_for_exists(self):
+        """The check the AttributeError outage did not have.
+
+        Reads the helpers' own source for `server.<name>` and asserts the
+        built server actually carries each one.
+        """
+        import inspect
+
+        from sign402_gateway import server as server_module
+
+        names = set()
+        for helper in (
+            server_module._settle_search_from_user,
+            server_module._settle_chat_prefund,
+        ):
+            names.update(
+                re.findall(r"\bserver\.([a-z_0-9]+)", inspect.getsource(helper))
+            )
+
+        self.assertTrue(names, "no server attributes found to check")
+        missing = [
+            name
+            for name in sorted(names)
+            if name
+            not in inspect.signature(
+                server_module.Sign402GatewayServer.__init__
+            ).parameters
+        ]
+        self.assertEqual(missing, [])

@@ -35,6 +35,10 @@ MAX_MCP_RESPONSE_BYTES = 1024 * 1024
 MAX_CATALOG_CACHE_BYTES = 5 * 1024 * 1024
 MAX_CATALOG_CACHE_ENTRIES = 256
 MAX_CATALOG_PRODUCTS_PER_ENTRY = 200
+# Bitrefill made `intent` required on search-products. It is context only
+# and does not affect matching, but omitting it fails the whole call, so
+# every uncached country stopped loading until this was sent.
+SEARCH_INTENT = "buying a gift card or top-up with crypto"
 
 
 class _CatalogFlight:
@@ -465,6 +469,7 @@ class McpBitrefillClient:
         include_test_products: bool,
     ) -> list[dict[str, Any]]:
         arguments: dict[str, Any] = {
+            "intent": SEARCH_INTENT,
             "query": "*",
             "country": country,
             "include_test_products": bool(include_test_products),
@@ -652,6 +657,7 @@ class McpBitrefillClient:
         include_test_products: bool,
     ) -> list[dict[str, Any]]:
         arguments: dict[str, Any] = {
+            "intent": SEARCH_INTENT,
             "query": str(query).strip(),
             "country": str(country).strip().upper(),
             "include_test_products": bool(include_test_products),

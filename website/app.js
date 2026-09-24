@@ -215,3 +215,55 @@
     });
   }
 })();
+
+/* Copy the token contract. A misread address costs someone their money, so
+   the page offers the copy rather than trusting the eye — and says plainly
+   when the copy did not happen instead of pretending it did. */
+(function () {
+  function legacyCopy(text) {
+    var field = document.createElement('textarea');
+    field.value = text;
+    field.setAttribute('readonly', '');
+    field.style.position = 'fixed';
+    field.style.opacity = '0';
+    document.body.appendChild(field);
+    field.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    document.body.removeChild(field);
+    return ok;
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll('[data-copy]'), function (btn) {
+    var original = btn.textContent;
+    function say(word, copied) {
+      btn.textContent = word;
+      if (copied) { btn.setAttribute('data-copied', ''); }
+      setTimeout(function () {
+        btn.textContent = original;
+        btn.removeAttribute('data-copied');
+      }, 1600);
+    }
+
+    btn.addEventListener('click', function () {
+      var target = document.querySelector(btn.getAttribute('data-copy'));
+      if (!target) { return; }
+      var text = target.textContent.trim();
+
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(
+          function () { say('Copied', true); },
+          function () {
+            // Permission denied or an insecure context: try the old way
+            // before telling the reader to select it by hand.
+            var ok = legacyCopy(text);
+            say(ok ? 'Copied' : 'Select it manually', ok);
+          }
+        );
+        return;
+      }
+      var ok = legacyCopy(text);
+      say(ok ? 'Copied' : 'Select it manually', ok);
+    });
+  });
+})();
