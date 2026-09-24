@@ -316,6 +316,12 @@ says so and tells the user to revoke from the Trezor now.
 What it bounds: before the next pass, a stolen agent key can take at most one
 per-purchase amount through the limiter, plus the float it already holds.
 
+### Phase 6: production and the live run
+
+The deploy steps and the live Telegram run (T8) are in
+[trezor-allowance-deploy.md](trezor-allowance-deploy.md). Nothing in production
+changes until the owner approves it.
+
 ## Granting, changing and revoking
 
 **Grant** is one transaction from the device: `approve(limiter, total)` on USDC.
