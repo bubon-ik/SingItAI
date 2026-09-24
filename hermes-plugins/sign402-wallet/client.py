@@ -83,6 +83,15 @@ _CHAT_OPERATION_PATHS = {
     "end": "/agent/chat/end",
     "approve-policy": "/agent/chat/approve-policy",
     "models": "/agent/chat/models",
+    "network": "/agent/chat/network",
+    "quote": "/agent/chat/quote",
+    "pay": "/agent/chat/pay",
+    "payment": "/agent/chat/payment",
+    "search": "/agent/chat/search",
+    "search-prepare": "/agent/chat/search-prepare",
+    "search-approve": "/agent/chat/search-approve",
+    "search-disable": "/agent/chat/search-disable",
+    "search-payment": "/agent/chat/search-payment",
 }
 _MAX_RESPONSE_BYTES = 64 * 1024
 _NOT_CONFIGURED = "Wallet service is not configured. Please contact the operator."
@@ -157,13 +166,20 @@ class GatewayClient:
         operation: str,
         identity: TelegramIdentity,
         *,
+        chain: str = "base",
         user_access_token: str | None = None,
     ) -> str:
         path = _OPERATION_PATHS.get(operation)
         if path is None:
             raise GatewayClientError(_UNSUPPORTED)
 
+        if not isinstance(chain, str) or chain not in {"base", "solana"}:
+            raise GatewayClientError("Unsupported wallet network. Use base or solana.")
+        if chain == "solana" and operation not in {"wallet", "create-wallet", "balance"}:
+            raise GatewayClientError("This operation is not enabled on Solana yet.")
         payload = {"telegramUserId": identity.user_id}
+        if chain != "base":
+            payload["chain"] = chain
         if identity.username:
             payload["telegramUsername"] = identity.username
         result = self._post(
@@ -172,12 +188,23 @@ class GatewayClient:
             token=self.api_token,
             operation=operation,
             user_token=user_access_token,
+            timeout=15.0 if chain == "solana" else self.timeout,
         )
 
         telegram_text = result.get("telegramText")
         if not isinstance(telegram_text, str) or not telegram_text.strip():
             raise GatewayClientError(_INVALID_RESPONSE)
         return telegram_text.strip()
+
+    def purchases(self, identity: TelegramIdentity, *, purchase_id: str = "",
+                  offset: int = 0, reveal: bool = False,
+                  user_access_token: str | None = None) -> dict[str, Any]:
+        payload = {"telegramUserId": identity.user_id, "offset": offset}
+        if purchase_id:
+            payload.update(purchaseId=purchase_id, reveal=reveal)
+        return self._post("/agent/purchases", payload, token=self.api_token,
+                          operation="purchases", user_token=user_access_token,
+                          timeout=self.purchase_timeout if reveal else self.timeout)
 
     def execute_imessage(
         self,
@@ -203,9 +230,13 @@ class GatewayClient:
             operation=operation,
         )
 
-    def create_wallet(self, identity: TelegramIdentity) -> dict[str, Any]:
+    def create_wallet(self, identity: TelegramIdentity, *, chain: str = "base") -> dict[str, Any]:
         """Create/return the user's wallet, exposing the per-user access token."""
+        if not isinstance(chain, str) or chain not in {"base", "solana"}:
+            raise GatewayClientError("Unsupported wallet network. Use base or solana.")
         payload = {"telegramUserId": identity.user_id}
+        if chain != "base":
+            payload["chain"] = chain
         if identity.username:
             payload["telegramUsername"] = identity.username
         return self._post(
@@ -551,7 +582,8 @@ class GatewayClient:
             body,
             token=self.api_token,
             operation=f"chat-{operation}",
-            timeout=self.purchase_timeout,
+            # A Solana turn may include decision, x402 settlement and final answer.
+            timeout=max(self.purchase_timeout, 600.0) if operation == 'message' and body.get('chain') == 'solana' else self.purchase_timeout,
             user_token=user_token,
         )
 

@@ -14,14 +14,13 @@ or touches the device.
 
 On the VPS (`hermes@164.68.104.44`, checkout `~/apps/sign402`):
 
-1. Record the running commit: `git -C ~/apps/sign402 rev-parse HEAD` (expected
-   `21dc310`, branch `fix-crypto-news-memory`).
+1. Record the running commit: `git -C ~/apps/sign402 rev-parse HEAD`. On
+   September 24, 2026 it was `5be0d7a` on `release/exa-auto-search-20260922`,
+   the singit-solana work, with a clean tree; that branch is merged into this one.
+   Anything newer on the server must be merged here first, never overwritten.
 2. Back up runtime state as [recovery-runbook.md](recovery-runbook.md) says.
-3. Preserve the server's local edits — `cdp-x402-service/package-lock.json`,
-   `hermes-plugins/sign402-wallet/__init__.py`, untracked
-   `hermes-plugins/sign402-wallet/graph_demo.py` — with `git diff > ~/pre-allowance.diff`
-   and a copy of the untracked file, and compare them with this branch before
-   switching. The plugin file is also changed on this branch.
+3. `git status --short` must be empty; if it is not, save the diff and merge it
+   here before switching.
 
 Rollback at any point: check out the recorded commit, reinstall its dependencies,
 restart both units. Allowance state lives in its own database

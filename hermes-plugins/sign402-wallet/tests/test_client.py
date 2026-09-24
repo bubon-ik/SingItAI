@@ -87,6 +87,32 @@ class GatewayClientTests(GatewayClientFixture, unittest.TestCase):
         )
         self.assertEqual(response.requested_size, 65537)
 
+    def test_solana_network_is_forwarded_with_bound_identity_and_token(self):
+        opener = RecordingOpener(response=FakeResponse(b'{"telegramText":"Solana balance"}'))
+        client = self.make_client(opener)
+        client.execute("balance", TelegramIdentity(user_id="alice"), chain="solana", user_access_token="alice-token")
+        request, timeout = opener.requests[0]
+        self.assertEqual(json.loads(request.data), {"telegramUserId": "alice", "chain": "solana"})
+        self.assertEqual(request.get_header("X-sign402-user-token"), "alice-token")
+        self.assertEqual(timeout, 15.0)
+
+    def test_solana_cannot_request_legacy_base_purchase_history(self):
+        opener = RecordingOpener(response=FakeResponse(b'{"telegramText":"unused"}'))
+        with self.assertRaisesRegex(GatewayClientError, "not enabled on Solana"):
+            self.make_client(opener).execute("last-purchase", TelegramIdentity(user_id="alice"), chain="solana")
+        self.assertEqual(opener.requests, [])
+
+    def test_solana_create_and_unknown_network(self):
+        opener = RecordingOpener(response=FakeResponse(b'{"telegramText":"Solana wallet"}'))
+        client = self.make_client(opener)
+        client.create_wallet(TelegramIdentity(user_id="alice"), chain="solana")
+        self.assertEqual(json.loads(opener.requests[0][0].data), {"telegramUserId": "alice", "chain": "solana"})
+        for operation in [lambda: client.create_wallet(TelegramIdentity(user_id="alice"), chain="devnet"),
+                          lambda: client.execute("balance", TelegramIdentity(user_id="alice"), chain="devnet")]:
+            with self.assertRaises(GatewayClientError):
+                operation()
+        self.assertEqual(len(opener.requests), 1)
+
     def test_execute_maps_every_operation_to_expected_endpoint(self):
         cases = {
             "wallet": "/agent/wallet",
@@ -1138,7 +1164,6 @@ class ChatClientTests(GatewayClientFixture, unittest.TestCase):
         self.assertEqual(opener.requests, [])
 
 
-
 class AllowanceClientTests(unittest.TestCase):
     def make_client(self, opener):
         return GatewayClient(base_url="http://127.0.0.1:8099", api_token="api-token", opener=opener)
@@ -1175,3 +1200,36 @@ class AllowanceClientTests(unittest.TestCase):
             self.make_client(RecordingOpener(error=error)).execute_allowance(
                 "grant", TelegramIdentity(user_id="1"), payload={"amount": "300"}, user_access_token="t")
         self.assertEqual(caught.exception.user_message, text)
+
+
+class PurchaseHistoryClientTests(GatewayClientFixture, unittest.TestCase):
+    def test_history_is_bound_to_user_token_and_returns_structured_data(self):
+        opener = RecordingOpener(response=FakeResponse(b'{"ok":true,"purchases":[],"hasNext":false}'))
+        result = self.make_client(opener).purchases(TelegramIdentity("alice"), offset=6, user_access_token="alice-token")
+        request, _ = opener.requests[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:8099/agent/purchases")
+        self.assertEqual(request.get_header("X-sign402-user-token"), "alice-token")
+        self.assertEqual(json.loads(request.data), {"telegramUserId": "alice", "offset": 6})
+        self.assertEqual(result["purchases"], [])
+
+    def test_reveal_is_explicit_and_targets_one_record(self):
+        opener = RecordingOpener(response=FakeResponse(b'{"ok":true,"telegramText":"Code: fixture"}'))
+        self.make_client(opener).purchases(TelegramIdentity("alice"), purchase_id="a" * 24, reveal=True, user_access_token="alice-token")
+        request, timeout = opener.requests[0]
+        self.assertEqual(json.loads(request.data)["purchaseId"], "a" * 24)
+        self.assertIs(json.loads(request.data)["reveal"], True)
+        self.assertEqual(timeout, 180)
+
+
+class SolanaSemanticChatTimeoutTests(GatewayClientFixture, unittest.TestCase):
+    def test_only_solana_messages_allow_time_for_two_completions_and_payment(self):
+        for chain, operation, configured, expected in [
+            ('solana', 'message', 180.0, 600.0), ('solana', 'message', 900.0, 900.0),
+            ('base', 'message', 180.0, 180.0), ('solana', 'search-prepare', 180.0, 180.0),
+            ('solana', 'pay', 180.0, 180.0),
+        ]:
+            with self.subTest(chain=chain, operation=operation, configured=configured):
+                opener = RecordingOpener(response=FakeResponse(b'{"ok":true}'))
+                self.make_client(opener, purchase_timeout=configured).execute_chat(operation,
+                    TelegramIdentity(user_id='1'), payload={'chain': chain}, user_access_token='user-token')
+                self.assertEqual(opener.requests[0][1], expected)

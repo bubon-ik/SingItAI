@@ -608,10 +608,12 @@ class ChatService:
         # misstate what the user can actually do.
         remaining = max(0, cap - session.spent_atomic_this_window)
         chosen_id = session.model or self.default_model
+        chosen = None
         try:
-            chosen_label = self._catalogue().resolve(chosen_id).label
-        except (UnknownModel, Exception):
-            chosen_label = chosen_id
+            chosen = self._catalogue().resolve(chosen_id)
+        except Exception:
+            pass
+        chosen_label = chosen.label if chosen else chosen_id
         return {
             "ok": True,
             "hasPolicy": bool(session.bound_pay_to),
@@ -619,6 +621,9 @@ class ChatService:
             "dailyCapUsdc": _usd_plain(cap),
             "model": chosen_id,
             "modelLabel": chosen_label,
+            "inputUsdPerMTok": chosen.input_usd_per_mtok if chosen else None,
+            "outputUsdPerMTok": chosen.output_usd_per_mtok if chosen else None,
+            "policyExpired": session.policy_expired,
             "spentTodayAtomic": session.spent_atomic_this_window,
             "remainingWindowAtomic": remaining,
             "remainingWindowUsdc": _usd_plain(remaining),

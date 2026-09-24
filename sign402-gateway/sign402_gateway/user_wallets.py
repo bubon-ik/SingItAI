@@ -38,17 +38,18 @@ class UserWalletStore:
         _best_effort_chmod(self.path, 0o600)
 
     def get_wallet_by_telegram_user_id(
-        self, telegram_user_id: str
+        self, telegram_user_id: str, *, chain: str = "base"
     ) -> dict[str, Any] | None:
+        table = _wallet_table(chain)
         with self.lock, self._database() as db:
             row = db.execute(
-                """
+                f"""
                 SELECT telegram_user_id, telegram_username, chain, wallet_address,
                        encrypted_private_key, status, created_at, updated_at
-                FROM user_wallets
-                WHERE telegram_user_id = ?
+                FROM {table}
+                WHERE telegram_user_id = ? AND chain = ?
                 """,
-                (str(telegram_user_id),),
+                (str(telegram_user_id), chain),
             ).fetchone()
         return _row_to_dict(row)
 
@@ -62,11 +63,12 @@ class UserWalletStore:
         encrypted_private_key: str,
         status: str,
     ) -> dict[str, Any]:
+        table = _wallet_table(chain)
         now = int(time.time())
         with self.lock, self._database() as db:
             db.execute(
-                """
-                INSERT INTO user_wallets (
+                f"""
+                INSERT INTO {table} (
                     telegram_user_id, telegram_username, chain, wallet_address,
                     encrypted_private_key, status, created_at, updated_at
                 )
@@ -83,7 +85,7 @@ class UserWalletStore:
                     now,
                 ),
             )
-        wallet = self.get_wallet_by_telegram_user_id(telegram_user_id)
+        wallet = self.get_wallet_by_telegram_user_id(telegram_user_id, chain=chain)
         if wallet is None:
             raise RuntimeError("wallet insert failed")
         return wallet
@@ -121,6 +123,21 @@ class UserWalletStore:
                     telegram_user_id TEXT PRIMARY KEY,
                     telegram_username TEXT NOT NULL DEFAULT '',
                     chain TEXT NOT NULL,
+                    wallet_address TEXT NOT NULL UNIQUE,
+                    encrypted_private_key TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+                """
+            )
+            # Additive migration: existing Base rows, ciphertext and tokens stay intact.
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS solana_user_wallets (
+                    telegram_user_id TEXT PRIMARY KEY,
+                    telegram_username TEXT NOT NULL DEFAULT '',
+                    chain TEXT NOT NULL CHECK (chain = 'solana'),
                     wallet_address TEXT NOT NULL UNIQUE,
                     encrypted_private_key TEXT NOT NULL,
                     status TEXT NOT NULL,
@@ -493,10 +510,16 @@ def build_wallet_service_from_env(
     env: dict[str, str],
     store_path: Path | None = None,
 ) -> ManagedBaseWalletService:
-    return ManagedBaseWalletService(
+    from .solana_wallets import ManagedWalletService
+    from .solana_balances import SolanaBalanceProvider
+
+    return ManagedWalletService(
         store=UserWalletStore(store_path or DEFAULT_USER_WALLET_STORE_PATH),
         master_key=env.get("SIGN402_WALLET_MASTER_KEY", ""),
         balance_provider=build_base_balance_provider_from_env(env),
+        solana_balance_provider=SolanaBalanceProvider(
+            endpoint_url=env.get("SIGN402_SOLANA_RPC_URL") or "https://api.mainnet-beta.solana.com"
+        ),
     )
 
 
@@ -693,3 +716,12 @@ def _short_address(address: str) -> str:
     if len(text) < 12:
         return text
     return f"{text[:8]}...{text[-4:]}"
+
+
+def _wallet_table(chain: str) -> str:
+    # The table name never comes from an unvalidated request value.
+    if chain == "base":
+        return "user_wallets"
+    if chain == "solana":
+        return "solana_user_wallets"
+    raise ValueError("Unsupported wallet network. Use base or solana.")

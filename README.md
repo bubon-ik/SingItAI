@@ -1,4 +1,67 @@
-# SingIt
+# SingIt Solana
+
+A separate repository for adding Solana support to the SingIt Telegram agent.
+Based on `SingItAI/main` at commit `f39959059922b693f14c2a3e9bec97c87881e07b`.
+
+## Hackathon development record
+
+See [HACKATHON.md](HACKATHON.md) for the existing SingIt foundation, recorded Solana work, verification evidence, and pending milestones. [Compare changes with the imported baseline](https://github.com/bubon-ik/singit-solana/compare/singit-base-baseline...main).
+
+## Current status
+
+- The full agent code has been imported from the committed `main` branch.
+- The Venice/x402 client for Solana mainnet lives in `solana-x402-service/`.
+- **The agent supports managed Solana wallets and Venice chat with exact-quote phone approval for x402 top-ups.** [Flow, recovery and verification](docs/venice-solana-agent.md).
+- **Opt-in Exa web search is integrated with Solana Venice chat**, with model-selected search, a separate phone-approved budget, numbered sources and a payment receipt. [Flow and verification](docs/exa-solana-chat.md). A funded Exa payment remains unverified.
+- A real Bitrefill purchase was completed with USDC on Solana: [Alza CZ 200 CZK, live verification](docs/bitrefill-solana-checks.md). This was an operator-assisted run; agent purchasing integration remains pending.
+- Native Telegram navigation, inline shopping controls and private purchase history are implemented: [UI checks and limitations](docs/telegram-ui-checks.md). The navigation update is deployed to the existing bot.
+- No real Venice top-up or paid Venice model request has been completed.
+- Public repository: [bubon-ik/singit-solana](https://github.com/bubon-ik/singit-solana).
+
+## Solana wallet commands
+
+- `/wallet` — choose Base or Solana.
+- `/wallet solana` — ensure your managed Solana wallet exists and show its balance.
+- `/deposit solana` — show its deposit address.
+- `/balance solana` — read SOL and native-USDC balances.
+- `/balance` — show Base balances by default; explicit network commands never change that default.
+
+These commands are deployed to the running Telegram bot. Solana keys are encrypted
+in the gateway store. Venice top-ups have a separate explicit approval flow;
+Solana shop payments and withdrawals remain disabled. See
+[wallet integration checks](docs/solana-wallet-checks.md).
+
+## Checking the Solana module
+
+Requires Node.js 24+. The rest of the project retains the baseline requirements below.
+
+```sh
+cd solana-x402-service
+npm ci --ignore-scripts
+npm test
+npm run check
+npm start -- --help
+```
+
+Quote and payment instructions: [Solana service](solana-x402-service/README.md).
+Next steps and acceptance criteria: [integration plan](docs/solana-integration.md).
+
+## Deployment
+
+The existing VPS bot runs the approved `release/exa-solana-20260922` release
+at `12d8dc0`. See [deployment evidence](docs/exa-solana-chat.md#existing-vps-deployment)
+and [runtime setup](docs/venice-solana-agent.md). Real funded Exa and Venice
+requests remain user-approved live acceptance steps.
+
+Before starting a separate Telegram agent, configure its own bot token,
+encryption key, wallet and operation databases, ports, and runtime directories.
+The original gateway defaults to some paths in the user's home directory;
+this repository does not yet override those paths automatically. Do not start
+this copy with the running Base bot's configuration. Secrets and databases from
+the original project have not been imported. The prototype Solana wallet is
+stored separately from the gateway.
+
+## Existing SingIt capabilities
 
 **Payments for AI agents, with spending limits and human approval.**
 
@@ -8,7 +71,7 @@ payment gateway handles wallet keys, spending controls, approvals and receipts.
 
 [Website](https://singitai.app) · [Telegram bot](https://t.me/SingIt0qk_bot) · [Documentation](docs/README.md)
 
-[![Security gate](https://github.com/bubon-ik/SingItAI/actions/workflows/security-gate.yml/badge.svg?branch=main)](https://github.com/bubon-ik/SingItAI/actions/workflows/security-gate.yml)
+[![Security gate](https://github.com/bubon-ik/singit-solana/actions/workflows/security-gate.yml/badge.svg?branch=main)](https://github.com/bubon-ik/singit-solana/actions/workflows/security-gate.yml)
 
 ## Features
 
@@ -58,8 +121,11 @@ Wallet commands run through the gateway without calling an LLM.
 
 | Command | Purpose |
 | --- | --- |
-| `/wallet` | Create or show your Base wallet. |
-| `/balance` | Check wallet balances. |
+| `/wallet [base\|solana]` | Choose a network, or show its wallet balance. |
+| `/deposit [base\|solana]` | Show a deposit address; defaults to Base. |
+| `/purchases` | Browse saved receipts and explicitly reveal a code. |
+| `/settings` | Delivery email, approvals and spending limits. |
+| `/balance [base\|solana]` | Check wallet balances; defaults to Base. |
 | `/limits` | View or change spending limits. |
 | `/bitrefill` | Browse products and start a purchase. |
 | `/last_purchase` | Check the most recent purchase. |
@@ -75,10 +141,10 @@ supports Python 3.11 or later. Clone the full repository: the gateway imports
 shared code from sibling directories.
 
 ```bash
-git clone https://github.com/bubon-ik/SingItAI.git
-cd SingItAI
+git clone https://github.com/bubon-ik/singit-solana.git
+cd singit-solana
 python3.12 -m venv sign402-gateway/.venv
-sign402-gateway/.venv/bin/python -m pip install -e ./sign402-gateway
+sign402-gateway/.venv/bin/python -m pip install -e ./sign402-gateway python-telegram-bot==22.5
 ```
 
 Run the Python unit tests from the repository root:
@@ -115,6 +181,7 @@ Hermes, and the chosen approval channel. Start with the
 | --- | --- |
 | `sign402-gateway/` | Python gateway: wallets, payment policy, approvals, orders and APIs. |
 | `hermes-plugins/sign402-wallet/` | Telegram wallet commands and purchase flows for Hermes. |
+| `solana-x402-service/` | Solana mainnet Venice/x402 client and private gateway bridge with exact payment approval. |
 | `cdp-x402-service/` | Node.js payment and swap integration for Base through CDP and x402. |
 | `tools/ledger-approve/` | Local Ledger purchase-approval client. |
 | `singit-risk-check/` | SINGIT-paid x402 endpoint for payment-requirement risk analysis. |
