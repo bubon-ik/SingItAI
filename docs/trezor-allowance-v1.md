@@ -30,8 +30,9 @@ the Bitrefill purchase lane, a Trezor at `m/44'/60'/0'/0/0`. The existing
 `trezor-local-sidecar` sidecar is the only component that talks to the
 device, over Trezor Suite MCP on `127.0.0.1:21340`, exactly as it does now.
 
-Not in v1: x402 lanes that require a payer-signed payment payload (see
-[The x402 gap](#the-x402-gap)); Solana (see [Solana](#solana-not-in-v1));
+x402 resources on Base are in v1 too, through the agent key as payer (see
+[x402](#x402-the-agent-pays-the-limiter-funds-it)). Not in v1: Solana (see
+[Solana](#solana-not-in-v1));
 multiple owners; multiple agents against one allowance; an upgradeable or
 governable limiter; recovering tokens sent to the limiter by mistake.
 
@@ -183,19 +184,67 @@ The agent key needs ETH for gas and must hold no USDC. A balance monitor that
 warns before gas runs out belongs in this lane, because an agent that cannot pay
 gas looks exactly like an agent that is refusing to buy.
 
-## The x402 gap
+## x402: the agent pays, the limiter funds it
 
 The Bitrefill lane pays by a plain USDC transfer to an invoice address — the
 sidecar already builds exactly that calldata (`encode_usdc_transfer` in
-`trezor-sidecar/trezor_sidecar/base.py`), so `spend` substitutes directly.
+`trezor-sidecar/trezor_sidecar/base.py`), so `spend` pays the invoice directly.
 
-x402 resources are different: the exact-EVM scheme wants a payment payload
-signed by the payer for each call. An allowance does not produce one. The
-intended answer, deferred to v2, is just-in-time funding — `spend` moves the
-exact quoted amount to a session address that signs the x402 payload — so the
-USDC rest at the owner's address at all times except the seconds between two
-transactions. Which gateway lanes need this is a code question, answerable
-without the device, and is listed as check T0.
+x402 cannot be paid that way. The `exact` scheme on EVM wants an authorization
+signed by the payer for every payment — EIP-3009 `transferWithAuthorization` for
+USDC — which the seller's facilitator then settles from the payer's address. If
+the payer were the owner's Trezor address, every x402 call would need the device.
+
+So the payer is the **agent key**, and the limiter funds it. To the seller and
+the facilitator the agent is an ordinary payer, so this works with any x402
+service unchanged. The limiter needs no change: the agent's address is a valid
+`spend` payee. The owner's USDC still rest at the owner's address; what the
+agent holds is what the limiter released to it, inside the same caps.
+
+Two ways to fund it, both used:
+
+**The float, for micro-payments.** The agent keeps a small USDC balance. When a
+payment would take it below the low-water mark, `spend(agent, refill, ref)`
+tops it up to the target first. Many x402 calls, one `spend`. Without it, a
+$0.01 query would carry a `spend` of its own costing a comparable amount in gas,
+and every call would wait for a block and for the facilitator's node to see it.
+
+**Exact funding, for anything above the float threshold.** `spend(agent,
+amount, ref)` for exactly the quoted amount, then the x402 payment. The agent
+holds nothing beyond the seconds between the two.
+
+| Setting | T7 value | Meaning |
+| --- | --- | --- |
+| Float target | 0.05 USDC | Refill up to this |
+| Float low-water | 0.01 USDC | Refill when a payment would leave less than this |
+| Float threshold | 0.01 USDC | Payments above it are funded exactly instead |
+
+Every refill and every exact funding is a `spend`, so the per-purchase cap bounds
+each one and the daily cap bounds their sum. The `ref` of an exact funding
+commits the resource and the quoted amount; a refill's commits a counter.
+
+Before any funding, the x402 terms are read from the seller's `402` and shown:
+network, asset, amount, recipient. The payment is then signed only for those
+terms — `cdp-x402-service buy-user` refuses anything else — so a seller that
+changes the price or the recipient between the quote and the payment gets
+nothing.
+
+What this costs, stated as plainly as the rest:
+
+- **Money passes through the hot key.** The float sits there permanently, up to
+  its target; exact funding for seconds. A stolen agent key takes the float at
+  once, and then whatever the caps allow, as before. The float target is
+  therefore a second number the owner chooses, next to the caps.
+- **The agent paying itself is the design here,** not a hole: the x402 lane is
+  exactly `spend` to the agent. The caps are the only bound, which the threat
+  model already says for every lane.
+- **The facilitator's node must see the funding.** After a `spend` to the agent,
+  the facilitator verifies the agent's balance on its own node, which can be
+  blocks behind (T4 saw public nodes lag). The payment waits until the balance is
+  visible, and retries once on an insufficient-balance refusal. The float makes
+  this rare.
+- **A failed payment leaves USDC with the agent.** It stays in the float for the
+  next call, and is returned to the owner when the float is closed.
 
 ## Threat model
 
@@ -316,7 +365,7 @@ Conclusions:
 - **Invoice addresses come from each invoice** (`payment["address"]`). That is
   consistent with a fresh address per invoice but does not prove it. The payee
   allowlist question stays open until a few real invoices are compared.
-- **Just-in-time funding for x402 is weaker, and should be described as such.**
+- **Funding the agent for x402 is weaker, and should be described as such.**
   `spend` pays the agent's own session address, which then signs the x402
   payment. In that path the agent paying itself is the design, not a hole, and
   the caps are the only bound. The money still rests at the owner's address
@@ -337,6 +386,7 @@ they can end this design.
 | T3b | The same limiter on Base Sepolia | Testnet | **Skipped** by the owner's decision, 24 September: covered by T4 on mainnet, where the worst case is the 1.00 USDC grant |
 | T4 | Mainnet run: deploy, publish source, grant 1.00 from the device, one real 0.30 purchase, every refusal by `eth_call`, revoke, prove the same purchase now fails in USDC. Procedure: [trezor-allowance-t4-runbook.md](trezor-allowance-t4-runbook.md) | Device, 1.00 USDC at risk, 0.30 moved between the owner's own addresses | **Pass**, 24 September, 9/9 |
 | T5 | Whether a Trezor signs an SPL `approve`, and what it displays | Device, Solana | The Solana variant |
+| T7 | x402 on Base mainnet through the limiter: a float refill and a 0.005 payment to `vet-service`, a second 0.005 from the float with no refill, a 0.02 payment to `vet-shortlist` funded exactly, each settlement read back on chain, the float returned and the allowance revoked. Procedure: `agent-allowance/script/t7-x402.sh` | Device, the owner's own x402 services, cents | The x402 lane |
 | T6 | Bitrefill credits an invoice paid by `transferFrom` through a contract, not a direct `transfer` from the payer. Procedure: `agent-allowance/script/t6-bitrefill.sh` (a limiter sized to the product, the invoice created through the Bitrefill MCP server after the owner confirms it, paid by `spend`, then revoked) | A limiter and a ~$1–3 invoice | The direct-payment path; if it fails, `spend` pays a session address that pays the invoice |
 
 T3 is also the automated suite: the reverts are the specification, and a limiter
