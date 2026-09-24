@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
-# T6: does Bitrefill credit an invoice paid through the limiter?
+# T6: a Bitrefill purchase through x402, paid by the agent, funded by the limiter.
 #
-# A Base USDC invoice is normally paid by a direct `transfer` from the payer.
-# Here the payment is `spend` on AgentAllowance, which moves the owner's USDC
-# with `transferFrom`: the same Transfer event on chain, sent by a contract.
+# The owner chose x402 over Bitrefill's MCP route for this (an exception to
+# AGENTS.md they authorised); confirmation before every order still applies.
 # Design: docs/trezor-allowance-v1.md, check T6.
 #
-#   ./script/t6-bitrefill.sh setup <cap-usdc>     new limiter sized to the product, grant from the Trezor
-#   ./script/t6-bitrefill.sh pay <address> <amount-usdc> <invoice-id>
-#   ./script/t6-bitrefill.sh revoke
+#   ./script/t6-bitrefill.sh grant <usdc>                 grant the limiter from the Trezor
+#   ./script/t6-bitrefill.sh buy <slug> "<package>" [--dry-run]
+#   ./script/t6-bitrefill.sh revoke                       revoke it from the Trezor
 #   ./script/t6-bitrefill.sh status
+#   ./script/t6-bitrefill.sh setup <cap-usdc>             a new limiter, for products above the T4 caps
 #
-# The invoice itself is created through the Bitrefill MCP server, after the
-# owner confirms the product and price (AGENTS.md). This script only pays it.
+# The limiter is the one `setup` deployed if any, else the T4 limiter.
 # Reuses the agent and guardian keys from T4 (~/.sign402-trezor-poc/t4.env).
 set -euo pipefail
 
@@ -28,13 +27,15 @@ OWNER="${OWNER:-0xB80b5Ca13583fB7E0236db4bD8834B9035654558}"
 read -r -a AGENT_SIGNER <<< "${AGENT_SIGNER:---account sign402-agent}"
 ASSUME_YES="${ASSUME_YES:-0}"
 SKIP_VERIFY="${SKIP_VERIFY:-0}"
-TRANSFER_TOPIC=0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
 
 mkdir -p "$STATE_DIR"; touch "$STATE" "$LOG"; chmod 600 "$STATE" "$LOG"
 # shellcheck disable=SC1090
-source "$STATE_DIR/t4.env"   # AGENT, GUARDIAN
+source "$STATE_DIR/t4.env"   # AGENT, GUARDIAN, LIMITER (T4's)
+T4_LIMITER="${LIMITER:-}"
+LIMITER=""
 # shellcheck disable=SC1090
 source "$STATE"
+LIMITER="${LIMITER:-$T4_LIMITER}"
 
 save() {
   grep -v "^$1=" "$STATE" > "$STATE.tmp" || true
@@ -99,41 +100,18 @@ cmd_setup() {
   log "- granted: allowanceLeft $(word "$LIMITER" 'allowanceLeft()(uint256)')"
 }
 
-cmd_pay() {
+cmd_grant() {
   require_limiter
-  local to=${1:?usage: pay <address> <amount-usdc> <invoice-id>} amount_text=${2:?} invoice=${3:?} amount ref out tx receipt
-  [[ "$to" =~ ^0x[0-9a-fA-F]{40}$ ]] || { echo "Not an address: $to"; exit 1; }
+  local amount_text=${1:?usage: grant <usdc>} amount
   amount=$(atomic "$amount_text")
-  ref=$(cast keccak "bitrefill:$invoice")
-  local left today used
-  left=$(word "$LIMITER" 'allowanceLeft()(uint256)'); today=$(word "$LIMITER" 'remainingToday()(uint256)')
-  used=$(rcast call "$LIMITER" 'usedRef(bytes32)(bool)' "$ref")
-  [[ "$used" == false ]] || { echo "This invoice was already paid through the limiter."; exit 1; }
-  (( amount <= CAP )) || { echo "Amount $amount exceeds the limiter cap $CAP."; exit 1; }
-  (( amount <= left && amount <= today )) || { echo "Not enough allowance ($left) or daily budget ($today)."; exit 1; }
-  echo "Pay Bitrefill invoice $invoice"
-  echo "    $amount_text USDC on Base, from the Trezor address through the limiter, to"
-  echo "    $to"
-  ask "Send it?" || { echo "Not sent."; exit 0; }
-  out=$(cast send "$LIMITER" "spend(address,uint256,bytes32)" "$to" "$amount" "$ref" \
-    "${AGENT_SIGNER[@]}" --rpc-url "$RPC" --json)
-  tx=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["transactionHash"])' <<< "$out")
-  save PAY_TX "$tx"; save INVOICE "$invoice"
-  receipt=$(rcast receipt "$tx" --json)
-  python3 - "$receipt" "$TRANSFER_TOPIC" "$OWNER" "$to" "$amount" <<'PY'
-import json, sys
-rc, topic, owner, to, amount = json.loads(sys.argv[1]), *sys.argv[2:]
-hits = [l for l in rc["logs"] if l["topics"][0] == topic
-        and l["topics"][1][-40:].lower() == owner[2:].lower()
-        and l["topics"][2][-40:].lower() == to[2:].lower()
-        and int(l["data"], 16) == int(amount)]
-if int(rc["status"], 16) != 1 or len(hits) != 1:
-    sys.exit("The transaction did not produce exactly the expected USDC transfer.")
-print(f"On chain: USDC Transfer {owner} -> {to} {amount}, block {int(rc['blockNumber'], 16)}")
-PY
-  log "## T6 payment $(date -u '+%Y-%m-%d %H:%M UTC')"
-  log "- invoice $invoice, $amount atomic USDC to $to, tx $tx"
-  echo "Paid on chain. Whether Bitrefill credits it is the question T6 answers."
+  if [[ -n "${GRANT_CMD:-}" ]]; then eval "$GRANT_CMD"; else sidecar grant "$LIMITER" "$amount_text"; fi
+  wait_for "allowanceLeft()" "$amount" word "$LIMITER" 'allowanceLeft()(uint256)'
+  log "- granted $amount to $LIMITER"
+}
+
+cmd_buy() {
+  require_limiter
+  LIMITER="$LIMITER" "$SIDECAR/.venv/bin/python" "$HERE/script/bitrefill_x402.py" "$@"
 }
 
 cmd_revoke() {
@@ -145,16 +123,16 @@ cmd_revoke() {
 
 cmd_status() {
   require_limiter
-  echo "limiter $LIMITER cap ${CAP:-?}"
+  echo "limiter $LIMITER per purchase $(word "$LIMITER" 'perPurchaseCap()(uint256)')"
   echo "allowanceLeft $(word "$LIMITER" 'allowanceLeft()(uint256)') remainingToday $(word "$LIMITER" 'remainingToday()(uint256)')"
   echo "owner USDC $(word "$USDC" 'balanceOf(address)(uint256)' "$OWNER")"
-  [[ -n "${PAY_TX:-}" ]] && echo "paid invoice ${INVOICE:-?} in $PAY_TX"
   return 0
 }
 
 case "${1:-}" in
   setup) shift; cmd_setup "$@" ;;
-  pay) shift; cmd_pay "$@" ;;
+  grant) shift; cmd_grant "$@" ;;
+  buy) shift; cmd_buy "$@" ;;
   revoke) cmd_revoke ;;
   status) cmd_status ;;
   *) sed -n '2,20p' "$0"; exit 2 ;;
