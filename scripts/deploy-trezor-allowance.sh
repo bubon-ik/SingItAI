@@ -43,9 +43,9 @@ git cat-file -e "$COMMIT^{commit}" 2>/dev/null || fail "$COMMIT is not on base-o
 git merge-base --is-ancestor "$PREV" "$COMMIT" || fail "$COMMIT does not contain the running $PREV; merge it first"
 git checkout -q -B "release/trezor-allowance-$(date -u +%Y%m%d)" "$COMMIT"
 "$GW/.venv/bin/python" -m pip install -q -e "$GW"
-result=$(cd "$GW" && .venv/bin/python -m unittest discover -s tests 2>&1 | tail -1)
+result=$(cd "$GW" && .venv/bin/python -m unittest discover -s tests 2>&1 | tail -1 || true)
 case "$result" in OK*) ;; *) fail "gateway tests: $result (roll back: git checkout $PREV)" ;; esac
-result=$(cd "$APP/hermes-plugins/sign402-wallet" && "$GW/.venv/bin/python" -m unittest discover -s tests 2>&1 | tail -1)
+result=$(cd "$APP/hermes-plugins/sign402-wallet" && "$GW/.venv/bin/python" -m unittest discover -s tests 2>&1 | tail -1 || true)
 case "$result" in OK*) ;; *) fail "plugin tests: $result (roll back: git checkout $PREV)" ;; esac
 echo "on $(git rev-parse --short HEAD); gateway and plugin tests pass"
 plugin_link=$(readlink "$HOME/.hermes/plugins/sign402-wallet" 2>/dev/null || true)

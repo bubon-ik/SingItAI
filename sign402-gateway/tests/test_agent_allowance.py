@@ -228,6 +228,13 @@ class FakeEvm:
         return 7_000_000
 
 
+def funded(evm):
+    """The key of a gas wallet holding 0.003 ETH on the fake chain."""
+    funder = Account.create()
+    evm.balances[funder.address] = 3_000_000_000_000_000
+    return lambda: funder.key.to_0x_hex()
+
+
 class AllowanceServiceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -237,6 +244,7 @@ class AllowanceServiceTests(unittest.TestCase):
         self.guardian = Account.create()
         self.artifact = aa.Artifact.load()
         self.evm = FakeEvm(self.artifact)
+        self.evm.balances[self.funder.address] = 3_000_000_000_000_000
         self.published = []
         self.service = self.make_service()
 
@@ -307,6 +315,14 @@ class AllowanceServiceTests(unittest.TestCase):
         with self.assertRaises(aa.AllowanceError) as raised:
             self.service.setup(USER, "100", "10", "30")
         self.assertIn("unusually expensive", str(raised.exception))
+        self.assertEqual(self.evm.sent, [])
+
+    def test_an_empty_gas_wallet_is_named_before_anything_is_sent(self):
+        self.evm.balances[self.funder.address] = 0
+        with self.assertRaises(aa.AllowanceError) as raised:
+            self.service.setup(USER, "100", "10", "30")
+        self.assertIn(f"gas wallet {self.funder.address} has 0 ETH", str(raised.exception))
+        self.assertIn("send ETH on Base to that address", str(raised.exception))
         self.assertEqual(self.evm.sent, [])
 
     def test_gas_is_not_sent_to_an_agent_that_has_enough(self):
@@ -512,7 +528,7 @@ class DeviceLaneTests(unittest.TestCase):
             store=aa.AllowanceStore(Path(self.tmp.name) / "allowance.db"), evm=self.evm,
             fernet=Fernet(Fernet.generate_key()), owners={USER: self.owner.address},
             guardian_key=lambda: self.guardian.key.to_0x_hex(),
-            gas_funder_key=lambda: Account.create().key.to_0x_hex(), artifact=self.artifact,
+            gas_funder_key=funded(self.evm), artifact=self.artifact,
             max_daily=100_000_000, max_per_purchase=25_000_000, max_days=90, broker=self.broker,
             max_grant=300_000_000, now=lambda: self.clock[0],
         )
@@ -747,7 +763,7 @@ class SpendingLaneTests(unittest.TestCase):
             store=aa.AllowanceStore(Path(self.tmp.name) / "allowance.db"), evm=self.evm,
             fernet=Fernet(Fernet.generate_key()), owners={USER: self.owner.address},
             guardian_key=lambda: Account.create().key.to_0x_hex(),
-            gas_funder_key=lambda: Account.create().key.to_0x_hex(), artifact=self.artifact,
+            gas_funder_key=funded(self.evm), artifact=self.artifact,
             max_daily=100_000_000, max_per_purchase=25_000_000, max_days=90, broker=FakeBroker(self.owner.address),
             float_target=200_000, float_low=50_000, exact_above=50_000, now=lambda: self.clock[0],
         )
@@ -840,7 +856,7 @@ class SpendingLaneTests(unittest.TestCase):
             store=aa.AllowanceStore(Path(self.tmp.name) / "allowance.db"), evm=self.evm,
             fernet=self.service.fernet, owners={USER: self.owner.address},
             guardian_key=lambda: Account.create().key.to_0x_hex(),
-            gas_funder_key=lambda: Account.create().key.to_0x_hex(), artifact=self.artifact,
+            gas_funder_key=funded(self.evm), artifact=self.artifact,
             max_daily=100_000_000, max_per_purchase=25_000_000, max_days=90,
             float_target=200_000, float_low=50_000, exact_above=50_000, now=lambda: self.clock[0],
         )

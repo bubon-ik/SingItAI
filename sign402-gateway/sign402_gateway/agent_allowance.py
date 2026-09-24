@@ -85,6 +85,11 @@ USER_AGENT = "sign402-gateway/0.1 (+allowance)"
 AGENT_GAS_TARGET_WEI = 200_000_000_000_000  # 0.0002 ETH: a deployment and many purchases
 AGENT_GAS_MINIMUM_WEI = 50_000_000_000_000   # top up below 0.00005 ETH
 MAX_GAS_TOP_UP_WEI = 2_000_000_000_000_000   # never send an agent more than 0.002 ETH at once
+FUNDER_FEE_RESERVE_WEI = 1_000_000_000_000   # 0.000001 ETH: the funder's own fee for a top-up
+
+
+def _eth_text(wei: int) -> str:
+    return f"{Decimal(wei) / Decimal(10**18):.6f}".rstrip("0").rstrip(".") + " ETH"
 RECEIPT_WAIT_SECONDS = 120
 SETTLE_WAIT_SECONDS = 40
 
@@ -855,7 +860,17 @@ class AllowanceService:
         top_up = max(AGENT_GAS_TARGET_WEI, 2 * next_cost_wei) - balance
         if top_up > MAX_GAS_TOP_UP_WEI:
             raise AllowanceError("Gas on Base is unusually expensive right now. Nothing was changed; try again later.")
-        tx = self.evm.send(self.gas_funder_key(), to=agent, value=top_up)
+        funder_key = self.gas_funder_key()
+        funder = Account.from_key(funder_key).address
+        available = self.evm.balance(funder)
+        if available < top_up + FUNDER_FEE_RESERVE_WEI:
+            logger.warning("allowance: gas funder %s has %s wei, needs %s", funder, available, top_up)
+            raise AllowanceError(
+                f"The operator's gas wallet {funder} has {_eth_text(available)} on Base, not enough to fund "
+                f"your agent ({_eth_text(top_up + FUNDER_FEE_RESERVE_WEI)}). Nothing was changed; "
+                "send ETH on Base to that address and try again."
+            )
+        tx = self.evm.send(funder_key, to=agent, value=top_up)
         self.evm.wait_receipt(tx)
         self.evm.wait_until(lambda: self.evm.balance(agent), lambda wei: wei >= balance + top_up)
         logger.info("allowance: funded agent %s with %s wei in %s", agent, top_up, tx)
