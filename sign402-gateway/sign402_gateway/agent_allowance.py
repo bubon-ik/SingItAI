@@ -134,6 +134,16 @@ class JsonRpc:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 reply = json.loads(response.read(1024 * 1024))
+        except urllib.error.HTTPError as error:
+            # Providers answer a refused call (a getLogs range above the plan,
+            # say) with HTTP 400 and a JSON-RPC error body: that is an answer.
+            try:
+                reply = json.loads(error.read(64 * 1024))
+            except (OSError, ValueError):
+                reply = None
+            if not (isinstance(reply, dict) and isinstance(reply.get("error"), dict)):
+                raise BaseBalanceError(f"Base RPC answered HTTP {error.code}") from None
+            reply["id"] = request_id
         except (urllib.error.URLError, TimeoutError, OSError, ValueError):
             raise BaseBalanceError("Base RPC is unavailable") from None
         if not isinstance(reply, dict) or reply.get("id") != request_id:

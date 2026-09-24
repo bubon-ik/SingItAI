@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 from eth_utils import to_checksum_address
 
 from sign402_gateway import allowance_watcher as aw
-from sign402_gateway.agent_allowance import USDC, TRANSFER_TOPIC, AllowanceStore, _word
+from sign402_gateway.agent_allowance import USDC, TRANSFER_TOPIC, AllowanceError, AllowanceStore, _word
 
 USER = "4242"
 LIMITER = to_checksum_address("0x" + "11" * 20)
@@ -19,15 +19,20 @@ class ChainLogs:
     def __init__(self):
         self.block = 100
         self.logs = []
+        self.max_range = None
+        self.queries = []
 
     def call(self, method, params):
         if method == "eth_blockNumber":
-            return hex(self.block)
+            return hex(self.block + aw.HEAD_MARGIN_BLOCKS)  # the chain has moved past the last event
         if method == "eth_getTransactionReceipt":
             return {"blockNumber": hex(90)}
         if method == "eth_getLogs":
             query = params[0]
             low, high = int(query["fromBlock"], 16), int(query["toBlock"], 16)
+            self.queries.append((low, high))
+            if self.max_range is not None and high - low + 1 > self.max_range:
+                raise AllowanceError("Base refused eth_getLogs: block range is too wide")
             return [log for log in self.logs
                     if log["address"].lower() == query["address"].lower()
                     and log["topics"][:len(query["topics"])] == query["topics"]
@@ -120,6 +125,27 @@ class WatcherTests(unittest.TestCase):
         self.clock[0] += aw.OUTFLOW_GRACE_SECONDS + 1
         self.watcher.run_once()
         self.service.pause.assert_not_called()
+
+    def test_a_node_that_allows_only_ten_blocks_is_read_ten_at_a_time(self):
+        self.chain.max_range = aw.MIN_BLOCK_RANGE
+        self.chain.block = 150  # sixty blocks since the deployment at 90
+        self.chain.spent(AGENT, 200_000)
+        self.watcher.run_once()
+        self.assertIn("0.2 USDC moved from your Trezor to your agent", self.sent[0][1])
+        read = [q for q in self.chain.queries if q[1] - q[0] + 1 <= aw.MIN_BLOCK_RANGE]
+        self.assertEqual(read[0][0], 90)
+        self.assertTrue(all(b[0] == a[1] + 1 for a, b in zip(read, read[1:]) if b[0] > a[0]))
+        self.watcher.run_once()
+        self.assertEqual(len(self.alerts()), 1)
+
+    def test_a_node_that_refuses_even_the_smallest_range_skips_the_pass_without_moving_on(self):
+        self.chain.max_range = 1
+        self.chain.spent(AGENT, 200_000)
+        self.watcher.run_once()
+        self.assertEqual(self.sent, [])
+        self.chain.max_range = None
+        self.watcher.run_once()
+        self.assertIn("0.2 USDC moved", self.sent[0][1])
 
     def test_a_failed_pause_says_to_revoke_now(self):
         self.service.pause.side_effect = RuntimeError("guardian has no gas")

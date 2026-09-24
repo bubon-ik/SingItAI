@@ -131,6 +131,30 @@ class EvmClientTests(unittest.TestCase):
             self.client(rpc).wait_receipt("0x" + "00" * 32)
 
 
+class JsonRpcTests(unittest.TestCase):
+    def http_error(self, code, body):
+        import io
+        import urllib.error
+        return urllib.error.HTTPError("https://rpc.example", code, "error", {}, io.BytesIO(body))
+
+    def test_a_refusal_sent_as_http_400_is_an_answer_not_an_outage(self):
+        from unittest.mock import patch
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "error": {
+            "code": -32600, "message": "eth_getLogs is limited to a 10 block range"}}).encode()
+        with patch("urllib.request.urlopen", side_effect=self.http_error(400, body)):
+            with self.assertRaises(aa.RpcRejected) as raised:
+                aa.JsonRpc("https://rpc.example").call("eth_getLogs", [{}])
+        self.assertIn("10 block range", str(raised.exception))
+
+    def test_rate_limits_and_bare_http_errors_stay_retryable(self):
+        from unittest.mock import patch
+        for code, body in ((429, b'{"error":{"code":429,"message":"Too many requests"}}'), (502, b"<html>bad gateway")):
+            with self.subTest(code=code):
+                with patch("urllib.request.urlopen", side_effect=self.http_error(code, body)):
+                    with self.assertRaises(BaseBalanceError):
+                        aa.JsonRpc("https://rpc.example").call("eth_blockNumber", [])
+
+
 class ArtifactTests(unittest.TestCase):
     def setUp(self):
         self.artifact = aa.Artifact.load()

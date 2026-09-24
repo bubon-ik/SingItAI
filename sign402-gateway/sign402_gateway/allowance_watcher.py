@@ -48,6 +48,9 @@ DEFAULT_MAX_SPENDS = 20
 DEFAULT_INTERVAL = 30
 OUTFLOW_GRACE_SECONDS = 600
 MAX_BLOCK_RANGE = 2_000
+MIN_BLOCK_RANGE = 10       # what the smallest paid-RPC plans allow for eth_getLogs
+MAX_CHUNKS_PER_PASS = 200  # enough to catch up a day at the smallest range
+HEAD_MARGIN_BLOCKS = 2     # load-balanced nodes lag the newest block by one or two
 
 
 def _usdc(atomic: int) -> str:
@@ -93,11 +96,12 @@ class AllowanceWatcher:
         self.max_spends_per_hour = max_spends_per_hour
         self.now = now
         self._recent_spends: dict[str, list[float]] = {}
+        self.block_range = MAX_BLOCK_RANGE
 
     # -- one pass over every active limiter --
 
     def run_once(self) -> None:
-        latest = int(self.evm.call("eth_blockNumber", []), 16)
+        latest = int(self.evm.call("eth_blockNumber", []), 16) - HEAD_MARGIN_BLOCKS
         for limiter in self.store.active_limiters():
             try:
                 self._watch_limiter(limiter, latest)
@@ -114,16 +118,38 @@ class AllowanceWatcher:
             start += 1
         if start > latest:
             return None
-        return start, min(latest, start + MAX_BLOCK_RANGE - 1)
+        return start, min(latest, start + self.block_range - 1)
+
+    def _chunks(self, subject: str, deploy_tx: str, latest: int, query: Mapping[str, Any]):
+        """(logs, last block) from this subject's cursor up to `latest`, one range at a time.
+
+        A node that refuses the range gets a smaller one: free RPC plans allow
+        as few as MIN_BLOCK_RANGE blocks per eth_getLogs. The caller moves the
+        cursor after handling each chunk, so nothing is skipped or seen twice.
+        """
+        for _ in range(MAX_CHUNKS_PER_PASS):
+            span = self._range(subject, deploy_tx, latest)
+            if span is None:
+                return
+            try:
+                logs = self.evm.call("eth_getLogs", [{**query, "fromBlock": hex(span[0]), "toBlock": hex(span[1])}])
+            except AllowanceError as exc:
+                if self.block_range <= MIN_BLOCK_RANGE:
+                    raise
+                self.block_range = max(MIN_BLOCK_RANGE, self.block_range // 4)
+                logger.info("allowance watcher: %s; reading %s blocks at a time", exc, self.block_range)
+                continue
+            yield logs or [], span[1]
 
     def _watch_limiter(self, row: Mapping[str, Any], latest: int) -> None:
+        limiter = row["limiter_address"]
+        subject = f"spent:{limiter}"
+        for logs, end in self._chunks(subject, row["deploy_tx"], latest, {"address": limiter, "topics": [SPENT_TOPIC]}):
+            self._report_spends(row, logs)
+            self.store.set_cursor(subject, end)
+
+    def _report_spends(self, row: Mapping[str, Any], logs: list) -> None:
         limiter, user, agent = row["limiter_address"], row["user_id"], row["agent_address"]
-        span = self._range(f"spent:{limiter}", row["deploy_tx"], latest)
-        if span is None:
-            return
-        logs = self.evm.call("eth_getLogs", [{
-            "fromBlock": hex(span[0]), "toBlock": hex(span[1]), "address": limiter, "topics": [SPENT_TOPIC],
-        }]) or []
         for entry in logs:
             payee = _address_topic(entry["topics"][2])
             amount = int(entry["data"][2:66], 16)
@@ -143,23 +169,19 @@ class AllowanceWatcher:
                     f"{len(spends)} spends through your limiter in the last hour, more than the "
                     f"{self.max_spends_per_hour} expected: it has been paused. Check /allowance."
                 ))
-        self.store.set_cursor(f"spent:{limiter}", span[1])
 
     def _watch_agent(self, row: Mapping[str, Any], latest: int) -> None:
         user, agent, owner = row["user_id"], row["agent_address"], row["owner_address"]
-        span = self._range(f"agent:{agent}", row["deploy_tx"], latest)
-        if span is not None:
-            logs = self.evm.call("eth_getLogs", [{
-                "fromBlock": hex(span[0]), "toBlock": hex(span[1]), "address": USDC,
-                "topics": [TRANSFER_TOPIC, "0x" + _word(agent)],
-            }]) or []
+        subject = f"agent:{agent}"
+        query = {"address": USDC, "topics": [TRANSFER_TOPIC, "0x" + _word(agent)]}
+        for logs, end in self._chunks(subject, row["deploy_tx"], latest, query):
             for entry in logs:
                 recipient = _address_topic(entry["topics"][2])
                 if recipient == to_checksum_address(owner):
                     continue  # the float returned to its owner
                 self.store.note_outflow(entry["transactionHash"], str(entry.get("logIndex", "0x0")), user,
                                         recipient, int(entry["data"], 16), int(self.now()))
-            self.store.set_cursor(f"agent:{agent}", span[1])
+            self.store.set_cursor(subject, end)
         counted = self.store.counted_settlements(user)
         for outflow in self.store.open_outflows(user):
             if (outflow["tx_hash"], outflow["log_index"]) in counted:
