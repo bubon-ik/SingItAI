@@ -452,3 +452,26 @@ Gateway: "not enabled for this account" is a 400, not a 403 — the plugin reads
 `/limits` appends the limiter's status for users on the lane.
 
 Plugin suite 283/283, gateway suite 1284/1284.
+
+
+## Phase 5 — a real theft and the watcher, 24 September
+
+**Status: PASS on a local fork of Base mainnet; not yet running in production.**
+
+A limiter deployed by the service for the owner's real Trezor address, 1 USDC
+allowed (by impersonation), and the watcher on the fork:
+
+| Step | Result |
+| --- | --- |
+| an ordinary x402 purchase | refill to the float; the watcher reported "0.2 USDC moved from your Trezor to your agent"; not paused |
+| the agent key, as a thief would use it, sends `spend(attacker, 0.25)` | 0.25 reached the attacker |
+| the next watcher pass | **alarm, and a real guardian `pause()` on chain**; `paused()` reads true |
+| the thief tries again | **refused by the contract** (`IsPaused`, `0x1309a563`); the attacker still holds 0.25 |
+
+The loss was one per-purchase amount, as the design says it would be.
+
+Unit coverage: eight watcher tests — a spend to the agent is reported, to anyone
+else pauses, a burst pauses, no event is reported twice, agent outflows are
+matched to settlements or returns or raised after the grace period, a settlement
+counted late is not an alarm, a failed pause says to revoke now, and a failed
+Telegram notice never logs the bot token. Removing rule 1 fails two of them.

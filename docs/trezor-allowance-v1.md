@@ -158,7 +158,7 @@ Build order, each phase ending with tests and a live check:
 | 2 | Grant and revoke as broker jobs signed through the companion; guardian pause (done: see below) |
 | 3 | The purchase lane in the gateway: funding, x402 payment by the agent key, Bitrefill x402, settlement on chain, spending memory in front (done: see below) |
 | 4 | Bot commands and `/limits` from the chain (done: see below) |
-| 5 | The watcher: notifications and automatic pause |
+| 5 | The watcher: notifications and automatic pause (done: see below) |
 | 6 | A live run through Telegram on mainnet, recorded in the checks |
 
 ### Phase 1 in the gateway
@@ -290,6 +290,31 @@ on this lane — refusals included — are written for the user and shown as the
 `/limits` for a user on the lane adds the limiter's status, read from the chain.
 x402 purchases through the existing menu need no new command: the gateway pays
 them from the lane for a user on it.
+
+### Phase 5: the watcher
+
+`python -m sign402_gateway.allowance_watcher`, a separate process beside the
+gateway, reads Base every `SIGN402_ALLOWANCE_WATCH_INTERVAL_SECONDS` (30):
+
+1. **A `Spent` to anyone but the user's own agent pauses at once.** The gateway
+   only ever spends through a limiter to that user's agent, for x402 and Bitrefill
+   alike, so this rule needs nothing from the server to be true: it is the agent
+   key being used by someone else.
+2. **More spends in an hour than `SIGN402_ALLOWANCE_WATCH_MAX_SPENDS_PER_HOUR`
+   (20)** pause.
+3. **USDC leaving the agent** that is neither a counted settlement nor a return to
+   the owner, still unexplained after ten minutes, pauses. This rule trusts the
+   gateway's settlement records and is weaker than rule 1; a watcher on another
+   host, with records of its own, would be stronger.
+4. Every other spend through the limiter is reported.
+
+Alerts are stored and shown by `/allowance`; with
+`SIGN402_ALLOWANCE_TELEGRAM_BOT_TOKEN` they are also sent to the user by the Bot
+API. The token never reaches a log line. If the pause itself fails, the alarm
+says so and tells the user to revoke from the Trezor now.
+
+What it bounds: before the next pass, a stolen agent key can take at most one
+per-purchase amount through the limiter, plus the float it already holds.
 
 ## Granting, changing and revoking
 

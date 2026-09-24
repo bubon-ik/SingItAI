@@ -383,6 +383,27 @@ class AllowanceStore:
                     user_id TEXT NOT NULL,
                     revealed_at INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS watch_cursors (
+                    subject TEXT PRIMARY KEY,
+                    block INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS alerts (
+                    alert_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    severity TEXT NOT NULL CHECK(severity IN ('INFO', 'ALARM')),
+                    text TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS agent_outflows (
+                    tx_hash TEXT NOT NULL,
+                    log_index TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    recipient TEXT NOT NULL,
+                    amount INTEGER NOT NULL,
+                    first_seen INTEGER NOT NULL,
+                    resolved INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (tx_hash, log_index)
+                );
                 """
             )
         os.chmod(self.path, 0o600)
@@ -515,6 +536,44 @@ class AllowanceStore:
     def unreveal(self, invoice_id: str) -> None:
         with self._db() as db:
             db.execute("DELETE FROM bitrefill_reveals WHERE invoice_id = ?", (invoice_id,))
+
+    def active_limiters(self) -> list[sqlite3.Row]:
+        with self._db() as db:
+            return db.execute("SELECT * FROM limiters WHERE status = 'ACTIVE' ORDER BY created_at").fetchall()
+
+    def cursor(self, subject: str) -> int | None:
+        with self._db() as db:
+            row = db.execute("SELECT block FROM watch_cursors WHERE subject = ?", (subject,)).fetchone()
+        return None if row is None else int(row["block"])
+
+    def set_cursor(self, subject: str, block: int) -> None:
+        with self._db() as db:
+            db.execute("INSERT INTO watch_cursors (subject, block) VALUES (?, ?) "
+                       "ON CONFLICT(subject) DO UPDATE SET block = excluded.block", (subject, block))
+
+    def add_alert(self, user_id: str, severity: str, text: str, now: int) -> None:
+        with self._db() as db:
+            db.execute("INSERT INTO alerts (user_id, severity, text, created_at) VALUES (?, ?, ?, ?)",
+                       (user_id, severity, text, now))
+
+    def recent_alerts(self, user_id: str, limit: int = 3) -> list[sqlite3.Row]:
+        with self._db() as db:
+            return db.execute("SELECT * FROM alerts WHERE user_id = ? ORDER BY alert_id DESC LIMIT ?",
+                              (user_id, limit)).fetchall()
+
+    def note_outflow(self, tx_hash: str, log_index: str, user_id: str, recipient: str, amount: int, now: int) -> None:
+        with self._db() as db:
+            db.execute("INSERT OR IGNORE INTO agent_outflows (tx_hash, log_index, user_id, recipient, amount, first_seen) "
+                       "VALUES (?, ?, ?, ?, ?, ?)", (tx_hash.lower(), log_index, user_id, recipient, amount, now))
+
+    def open_outflows(self, user_id: str) -> list[sqlite3.Row]:
+        with self._db() as db:
+            return db.execute("SELECT * FROM agent_outflows WHERE user_id = ? AND resolved = 0", (user_id,)).fetchall()
+
+    def resolve_outflow(self, tx_hash: str, log_index: str) -> None:
+        with self._db() as db:
+            db.execute("UPDATE agent_outflows SET resolved = 1 WHERE tx_hash = ? AND log_index = ?",
+                       (tx_hash.lower(), log_index))
 
     def set_source(self, limiter: str, source: str) -> None:
         with self._db() as db:
@@ -1143,6 +1202,11 @@ class AllowanceService:
         if active is None:
             return {"configured": False, "telegramText": "No Trezor allowance yet. Set one up with /allowance_setup <daily> <per purchase> <days>."}
         described = self._describe(active)
+        alerts = self.store.recent_alerts(user_id)
+        if alerts:
+            described["telegramText"] += "\n\nWatcher:\n" + "\n".join(
+                f"{time.strftime('%m-%d %H:%M UTC', time.gmtime(a['created_at']))} "
+                f"{'ALARM ' if a['severity'] == 'ALARM' else ''}{a['text']}" for a in alerts)
         operations = [self._op_text(op) for op in self.store.recent_ops(user_id)]
         if operations:
             described["telegramText"] += "\n\nRecent requests:\n" + "\n".join(operations)
