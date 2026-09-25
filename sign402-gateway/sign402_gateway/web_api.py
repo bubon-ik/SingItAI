@@ -217,6 +217,10 @@ class WebApi:
                 self.permit_by_account.hit(account)  # each one costs us gas
                 return 200, self.allowance.submit_permit(account, op["op_id"], body.get("signature")), {}
             return 200, self.allowance.submit_wallet(account, op["op_id"], body.get("txHash")), {}
+        if method == "POST" and path == "/allowance/pause":
+            # The panic button: our guardian pauses the limiter for good, no wallet needed.
+            self.setup_by_account.hit(account)
+            return 200, self._public(self.allowance.pause(account)), {}
         if method == "GET" and path.startswith("/allowance/operations/"):
             return 200, self.allowance.operation(account, path.rsplit("/", 1)[1]), {}
         raise WebError(404, "not_found", "No such endpoint.")

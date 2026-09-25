@@ -272,6 +272,26 @@ class WebShopRoutesTests(unittest.TestCase):
         self.assertFalse(self.call("GET", "/session")[1]["telegramLinked"])
 
 
+class WebPauseTests(unittest.TestCase):
+    def test_the_panic_button_pauses_through_the_guardian(self):
+        from tests.test_web_api import WebApiTests
+
+        base = WebApiTests()
+        base.setUp()
+        self.addCleanup(base.tmp.cleanup)
+        token, csrf, _ = base.sign_in()
+        base.call("POST", "/allowance/setup", {"dailyCap": "5", "perPurchaseCap": "1", "days": "30"},
+                  token=token, csrf=csrf)
+        with self.assertRaises(wa.WebAuthError):
+            base.call("POST", "/allowance/pause", token=token)
+        base.evm.send = Mock(wraps=base.evm.send)
+        base.evm.wait_until = lambda read, accept: 1
+        status, body, _ = base.call("POST", "/allowance/pause", token=token, csrf=csrf)
+        self.assertEqual(status, 200)
+        self.assertNotIn("telegramText", body)
+        self.assertEqual(base.evm.send.call_args.kwargs["data"], "0x8456cb59")  # pause()
+
+
 class WebAbuseTests(unittest.TestCase):
     def setUp(self):
         from tests.test_web_api import WebApiTests
@@ -340,3 +360,76 @@ class GatewayShopClientTests(unittest.TestCase):
         with self.assertRaises(wa.WebError) as raised:
             closed("tools", ACCOUNT)
         self.assertEqual(raised.exception.status, 503)
+
+
+class EndToEndShopTests(unittest.TestCase):
+    """Browser → web API over HTTP → gateway over HTTP → a purchase on the account's lane."""
+
+    def test_sign_in_quote_and_buy_across_both_processes(self):
+        import threading
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+
+        from eth_account.messages import encode_defunct
+
+        from sign402_gateway.server import UserSpendLimitStore
+        from sign402_gateway.web_internal import ToolQuotes
+        from tests.test_web_api import WebApiTests
+
+        base = WebApiTests()
+        base.setUp()
+        self.addCleanup(base.tmp.cleanup)
+        env = patch.dict(os.environ, {"SIGN402_WEB_INTERNAL_TOKEN": TOKEN})
+        env.start()
+        self.addCleanup(env.stop)
+
+        class LiveGateway(DummyServer, ThreadingHTTPServer):
+            daemon_threads = True
+
+            def __init__(self):
+                DummyServer.__init__(self)
+                ThreadingHTTPServer.__init__(self, ("127.0.0.1", 0), Sign402GatewayHandler)
+
+        gateway = LiveGateway()
+        gateway.allowance = base.service
+        base.service.lane_for = Mock(return_value={"limiter_address": "0xLIMITER"})
+        base.service.pay_x402 = Mock(return_value=dict(PAID))
+        gateway.user_event_store = Mock()
+        gateway.user_spend_limit_store = UserSpendLimitStore(Path(base.tmp.name) / "limits.json")
+        gateway.web_tool_quotes = ToolQuotes()
+        threading.Thread(target=gateway.serve_forever, daemon=True).start()
+        self.addCleanup(gateway.server_close)
+        self.addCleanup(gateway.shutdown)
+
+        base.api.shop = wa.GatewayShop(f"http://127.0.0.1:{gateway.server_address[1]}", TOKEN)
+        web = wa.WebServer(("127.0.0.1", 0), base.api, "https://app.singit.test")
+        threading.Thread(target=web.serve_forever, daemon=True).start()
+        self.addCleanup(web.server_close)
+        self.addCleanup(web.shutdown)
+        url = f"http://127.0.0.1:{web.server_address[1]}/web/v1"
+        cookie, csrf = {}, {}
+
+        def call(method, path, body=None):
+            headers = {"Content-Type": "application/json", **cookie, **csrf}
+            data = json.dumps(body).encode() if body is not None else None
+            with urllib.request.urlopen(urllib.request.Request(url + path, data=data, method=method,
+                                                               headers=headers), timeout=30) as reply:
+                return dict(reply.headers), json.loads(reply.read())
+
+        _, issued = call("POST", "/auth/nonce", {"address": base.user.address})
+        signature = Account.sign_message(encode_defunct(text=issued["message"]), base.user.key).signature.to_0x_hex()
+        headers, signed = call("POST", "/auth/verify", {"message": issued["message"], "signature": signature})
+        cookie["Cookie"] = headers["Set-Cookie"].split(";")[0]
+        csrf[wa.CSRF_HEADER] = signed["csrfToken"]
+        base.store.ensure_account(base.user.address, 1)
+
+        with (patch("sign402_gateway.server.fetch_x402_payment_required", return_value={}),
+              patch("sign402_gateway.server.normalize_x402_payment_required", return_value=dict(REQUIREMENTS))):
+            _, quote = call("POST", "/shop/tools/quote", {"tool": "news"})
+            self.assertEqual((quote["priceUsd"], quote["payTo"]), ("0.001", SELLER))
+            _, bought = call("POST", "/shop/tools/buy", {"quoteId": quote["quoteId"]})
+        self.assertTrue(bought["ok"])
+        self.assertIn("text", bought)
+        self.assertNotIn("telegramText", bought)
+        self.assertEqual(base.service.pay_x402.call_args.args[0], signed["account"])
+        self.assertEqual(gateway.user_event_store.write.call_args.args[0], signed["account"])

@@ -151,23 +151,65 @@ decimals); every response that changes something carries `state`.
 
 | Method and path | Body | Returns |
 | --- | --- | --- |
-| `POST /auth/nonce` | `{address}` | `{nonce, message}` — the exact EIP-4361 text to sign |
-| `POST /auth/verify` | `{message, signature}` | session cookie, `{account, address, telegramLinked}` |
-| `POST /auth/logout` | — | — |
-| `GET /allowance` | — | the v1 status: `limiter, owner, agent, guardian, dailyCapAtomic, perPurchaseCapAtomic, expiry, paused, allowanceAtomic, remainingTodayAtomic, floatAtomic, ownerUsdcAtomic, source, state, operations[]`, plus `alerts[]` and `ownerEthWei` |
-| `POST /allowance/setup` | `{dailyCap, perPurchaseCap, days}` | `{limiter, deployTx, source, state}` |
-| `POST /allowance/grant/prepare` | `{amount, method: "approve" \| "permit"}` | `{operation, method, tx}` or `{operation, method, typedData}`; expires in 15 minutes |
-| `POST /allowance/grant/submit` | `{operation, txHash}` or `{operation, signature}` | `{operation, state}` |
+| `POST /auth/nonce` | `{address}` | `{nonce, message, expiresAt}` — the exact EIP-4361 text to sign; `smart_wallet_unsupported` for contract wallets |
+| `POST /auth/verify` | `{message, signature}` | session cookie, `{account, address, csrfToken, expiresAt, telegramLinked}` |
+| `POST /auth/logout` | — | clears the cookie |
+| `GET /session` | — | `{account, address, telegramLinked}` |
+| `GET /allowance` | — | `configured`, and with a limiter: `limiter, owner, agent, guardian, dailyCapAtomic, perPurchaseCapAtomic, expiry, paused, allowanceAtomic, remainingTodayAtomic, floatAtomic, ownerUsdcAtomic, ownerEthWei, source, state, operations[], alerts[]`; `state` is `waiting_for_grant`, `granted`, `paused` or `expired` |
+| `POST /allowance/setup` | `{dailyCap, perPurchaseCap, days}` | the new limiter as above, `created` |
+| `POST /allowance/grant/prepare` | `{amount, method: "approve" \| "permit"}` | `{operation, kind, method, state, limiter, amountAtomic, expiresAt, walletShows}` and `tx` (approve) or `typedData` (permit) |
+| `POST /allowance/grant/submit` | `{operation, txHash}` (approve) or `{operation, signature}` (permit) | the operation |
 | `POST /allowance/revoke/prepare` | `{method, limiter?}` | as grant, amount 0 |
-| `POST /allowance/revoke/submit` | as grant | `{operation, state}` |
-| `GET /allowance/operations/{id}` | — | `{state, txHash, detail}`; the page polls every 2 s |
-| `POST /link/telegram` | — | `{code, expiresAt}` |
-| `GET /purchases` | — | the v1 purchase history (no codes) |
-| `POST /shop/...` | — | the Bitrefill quote / buy / reveal of v1, for the web account |
+| `POST /allowance/revoke/submit` | as grant | the operation |
+| `GET /allowance/operations/{id}` | — | `{operation, kind, method, state, limiter, amountAtomic, txHash, detail, createdAt, updatedAt}`; poll every 2 s |
+| `POST /allowance/pause` | — | the limiter, paused for good by our guardian (the panic button; no wallet needed) |
+| `POST /link/telegram` | — | `{code, expiresAt, text}`: send `/link <code>` to the bot within 10 minutes |
+| `POST /link/telegram/remove` | — | `{telegramLinked: false}` |
+| `GET /shop/tools` | — | `{tools: [{id, name, description, source, resourceUrl, inputSchema}]}` |
+| `POST /shop/tools/quote` | `{tool, …template fields}` | `{quoteId, tool, priceAtomic, priceUsd, payTo, network, resourceUrl, expiresAt, text}`, 10 minutes |
+| `POST /shop/tools/buy` | `{quoteId}` | the purchase: `ok`, `text`, `txId`, the tool's result |
+| `POST /shop/bitrefill/search` | `{query, country?, kind?}` | `{products, text}` |
+| `POST /shop/bitrefill/quote` | `{productId, package}` | `{quoteId, name, package, priceUsd, priceAtomic, expiresAt, text}` — show product, denomination, price, network and recipient before buying |
+| `POST /shop/bitrefill/buy` | `{quoteId}` | `{invoiceId, delivered, text}` (no code) |
+| `GET /purchases?offset=` | — | `{purchases, hasNext}`, 20 at a time, no codes |
+| `POST /purchases/reveal` | `{purchaseId}` | a Bitrefill code, shown once |
+
+Errors are `{ok: false, error, message}` (or `text` from the shop) with 400
+(refused, and the reason says why), 401 (sign in / CSRF), 403 (not enabled), 404,
+413, 415 (JSON only), 429 (rate limited) or 503 (shop or deployment budget).
+Every POST needs `Content-Type: application/json` and, once signed in,
+`X-SingIt-CSRF: <csrfToken>`; send cookies (`credentials: "include"`).
 
 Operation states: `PREPARED → SUBMITTED → DONE | FAILED | EXPIRED`. The server
 moves them on by reading the chain, not by trusting the page, and a new
 prepare first moves the open ones on (the T8 lesson, 2ba7762).
+
+## Running it
+
+`python -m sign402_gateway.web_api` (the systemd unit `sign402-web-api`, which
+`scripts/deploy-trezor-allowance.sh` installs and starts once the gateway env
+has `SIGN402_WEB_ENABLED=1`, `SIGN402_WEB_DOMAIN`, `SIGN402_WEB_URI` and
+`SIGN402_WEB_ALLOWED_ADDRESSES`; the script adds `SIGN402_WEB_INTERNAL_TOKEN`).
+It listens on `127.0.0.1:8130`. Serve the page and the API from one origin, so
+the SameSite=Strict cookie works and no CORS is needed, for example with Caddy:
+
+```text
+app.example.com {
+    handle /web/v1/* {
+        reverse_proxy 127.0.0.1:8130
+    }
+    handle {
+        root * /srv/singit-web
+        try_files {path} /index.html
+        file_server
+    }
+}
+```
+
+The proxy must pass `X-Forwarded-For`; the API trusts it only from loopback.
+Optional settings: `SIGN402_WEB_CORS_ORIGIN` (a page on another origin),
+`SIGN402_WEB_MIN_OWNER_USDC` (1), `SIGN402_WEB_MAX_LIMITERS_PER_30_DAYS` (3),
+`SIGN402_WEB_MAX_DEPLOYS_PER_DAY` (50), `SIGN402_WEB_DB` (`~/.sign402/web.db`).
 
 ## What the server verifies
 
@@ -250,7 +292,7 @@ New tables beside the v1 `allowance.db`:
 - `link_codes(code_hash, account_id, expires_at, used_at)`.
 
 `operations` gains `method` (`device` | `approve` | `permit`) and
-`prepared_json`. `SIGN402_ALLOWANCE_OWNERS` stays as an allowlist during the
+`prepared` (the permit nonce and deadline). `SIGN402_ALLOWANCE_OWNERS` stays as an allowlist during the
 rollout and is removed at general availability.
 
 ## Rollout
@@ -326,6 +368,14 @@ and `/limits` use the web account's limiter and agent, the chat keeps its own
 purchase history, and watcher notices go to the chat. Smart-contract wallets
 are refused at sign-in (EIP-7702 accounts are not), and at most
 `SIGN402_WEB_MAX_DEPLOYS_PER_DAY` (50) limiters are deployed for everyone per day.
+
+**The backend is complete** (steps 1–5 and the deployment): the whole chain —
+sign-in over HTTP, a quote, a purchase forwarded by the web API to the gateway
+over HTTP and paid from the account's lane — runs in one end-to-end test, and
+a live quote from Otto's crypto-news endpoint read price and recipient
+correctly. What remains is step 6: the page itself (the owner's design), a
+domain for `SIGN402_WEB_DOMAIN`, the reverse proxy, then a mainnet check with a
+real wallet recorded as T9.
 
 Each step with unit tests and a mainnet check recorded in
 [trezor-allowance-checks.md](trezor-allowance-checks.md), as T4–T8 were.

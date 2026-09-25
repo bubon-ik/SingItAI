@@ -21,6 +21,7 @@ CONF="$HOME/.config/sign402"
 ENV_FILE=/etc/sign402-gateway.env
 BROKER_UNIT="$HOME/.config/systemd/user/sign402-trezor-broker.service"
 WATCHER_UNIT=/etc/systemd/system/sign402-allowance-watcher.service
+WEB_UNIT=/etc/systemd/system/sign402-web-api.service
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 
 step() { printf '\n== %s\n' "$*"; }
@@ -150,6 +151,39 @@ RestartSec=30
 [Install]
 WantedBy=multi-user.target
 UNIT
+
+# The web page's API (docs/allowance-web-v1.md): only when the operator has
+# turned it on in the gateway env with its domain and beta allowlist.
+WEB_ON=0
+if sudo grep -q '^SIGN402_WEB_ENABLED=1' "$ENV_FILE"; then
+  for name in SIGN402_WEB_DOMAIN SIGN402_WEB_URI SIGN402_WEB_ALLOWED_ADDRESSES; do
+    sudo grep -q "^$name=." "$ENV_FILE" || fail "SIGN402_WEB_ENABLED=1 needs $name in $ENV_FILE"
+  done
+  if ! sudo grep -q '^SIGN402_WEB_INTERNAL_TOKEN=.\{32,\}' "$ENV_FILE"; then
+    printf 'SIGN402_WEB_INTERNAL_TOKEN=%s\n' "$("$GW/.venv/bin/python" -c 'import secrets; print(secrets.token_urlsafe(32))')" \
+      | sudo tee -a "$ENV_FILE" >/dev/null
+  fi
+  sudo tee "$WEB_UNIT" >/dev/null <<UNIT
+[Unit]
+Description=SingIt web API (/web/v1, loopback; exposed by the reverse proxy)
+After=network-online.target sign402-gateway.service
+
+[Service]
+User=hermes
+WorkingDirectory=$GW
+EnvironmentFile=$ENV_FILE
+ExecStart=$GW/.venv/bin/python -m sign402_gateway.web_api
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  WEB_ON=1
+  echo "web API unit installed"
+else
+  echo "web API off (set SIGN402_WEB_ENABLED=1, SIGN402_WEB_DOMAIN, SIGN402_WEB_URI and SIGN402_WEB_ALLOWED_ADDRESSES to turn it on)"
+fi
 sudo systemctl daemon-reload
 
 step "6. Restart the gateway, the watcher and the bot"
@@ -165,6 +199,16 @@ sudo systemctl restart sign402-allowance-watcher
 sleep 3
 systemctl is-active -q sign402-allowance-watcher || fail "watcher: sudo journalctl -u sign402-allowance-watcher -n 30"
 echo "watcher running"
+if [ "$WEB_ON" = 1 ]; then
+  sudo systemctl enable -q sign402-web-api
+  sudo systemctl restart sign402-web-api
+  for _ in $(seq 20); do listening 8130 && break; sleep 0.5; done
+  listening 8130 || fail "web API: sudo journalctl -u sign402-web-api -n 30"
+  echo "web API listening on 127.0.0.1:8130; point the reverse proxy's /web/v1 at it"
+elif systemctl is-active -q sign402-web-api 2>/dev/null; then
+  sudo systemctl disable -q --now sign402-web-api
+  echo "web API stopped (turned off in the env)"
+fi
 systemctl --user restart hermes-gateway
 sleep 3
 systemctl --user is-active -q hermes-gateway || fail "bot: journalctl --user -u hermes-gateway -n 30"
@@ -179,5 +223,5 @@ and tops up the guardian and your agent. Then, in Telegram: /allowance.
 
 Rolled back by: git -C $APP checkout $PREV, reinstall, restore
 $BACKUP/sign402-gateway.env to $ENV_FILE, restart sign402-gateway and hermes-gateway,
-stop sign402-allowance-watcher.
+stop sign402-allowance-watcher (and sign402-web-api).
 TEXT
