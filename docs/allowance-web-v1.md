@@ -65,9 +65,16 @@ before their device shows anything (see "Two signing paths").
 
 ### 1. Connect and sign in
 
-Wallet discovery by EIP-6963 (wagmi + viem, or Reown AppKit). If the wallet is
-not on Base, ask it to switch (`wallet_switchEthereumChain`, 8453). Phantom is
-used in its EVM mode. Then SIWE.
+Two transports, one flow: browser extensions found by EIP-6963 (Rabby,
+MetaMask, Phantom on desktop) and **WalletConnect** (QR code or deep link, for
+mobile wallets). Use a kit that offers both behind one "Connect" button — Reown
+AppKit, RainbowKit or ConnectKit on wagmi + viem; WalletConnect needs a
+`projectId` from Reown Cloud. The backend does not know or care which
+transport was used: it receives the same SIWE signature, transaction hash or
+permit signature and checks them against the chain. `SIGN402_WEB_DOMAIN` must be
+the page's host, or wallets (WalletConnect's domain verification especially)
+flag the sign-in as suspicious. If the wallet is not on Base, ask it to switch
+(`wallet_switchEthereumChain`, 8453). Phantom is used in its EVM mode. Then SIWE.
 
 ### 2. Limits and the limiter
 
