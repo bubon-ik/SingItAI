@@ -1,8 +1,13 @@
-// The user's wallet, through EIP-1193. Browser extensions announce themselves
-// by EIP-6963 (Rabby, MetaMask, Phantom…); WalletConnect is added when a
-// project id is configured. Everything that gets signed is prepared by the
-// server; the page only hands it to the wallet.
+// The user's wallet, through EIP-1193.
+//
+// With a WalletConnect project id (config.js) the connection goes through
+// Reown AppKit — the standard wallet modal: browser extensions, WalletConnect
+// QR for mobile wallets, and a session that survives a reload. Without one,
+// the page lists the extensions that announce themselves by EIP-6963.
+// Everything that gets signed is prepared by the server; the page only hands
+// it to the wallet.
 
+const APPKIT = "https://cdn.jsdelivr.net/npm/@reown/appkit-cdn@1.8.24/dist/appkit.js";
 const BASE = {
   chainId: "0x2105",
   chainName: "Base",
@@ -25,45 +30,22 @@ export function discover(onChange) {
 
 export function wallets() {
   const list = [...found.values()];
-  // An old-style wallet that does not announce itself.
   if (!list.length && window.ethereum) {
     list.push({ info: { uuid: "injected", name: "Browser wallet", icon: "" }, provider: window.ethereum });
   }
   return list;
 }
 
-export function walletConnectAvailable() {
-  return Boolean(window.SINGIT_APP_CONFIG?.walletConnectProjectId);
-}
-
-async function walletConnectProvider() {
-  const { EthereumProvider } = await import("https://esm.sh/@walletconnect/ethereum-provider@2.17.0");
-  const provider = await EthereumProvider.init({
-    projectId: window.SINGIT_APP_CONFIG.walletConnectProjectId,
-    chains: [8453],
-    showQrModal: true,
-    metadata: {
-      name: "SingIt",
-      description: "Agent allowance",
-      url: location.origin,
-      icons: [new URL("../assets/favicon.svg", location.href).href],
-    },
-  });
-  await provider.connect();
-  return provider;
-}
-
 export class Wallet {
-  constructor(provider, name) {
+  constructor(provider, name, address) {
     this.provider = provider;
     this.name = name;
-    this.address = null;
+    this.address = address || null;
   }
 
-  static async connect(choice) {
-    const provider = choice === "walletconnect" ? await walletConnectProvider() : choice.provider;
-    const wallet = new Wallet(provider, choice === "walletconnect" ? "WalletConnect" : choice.info.name);
-    const accounts = await provider.request({ method: "eth_requestAccounts" });
+  static async fromInjected(choice) {
+    const wallet = new Wallet(choice.provider, choice.info.name);
+    const accounts = await wallet.provider.request({ method: "eth_requestAccounts" });
     if (!accounts?.length) throw new Error("The wallet shared no account.");
     wallet.address = accounts[0];
     await wallet.ensureBase();
@@ -100,11 +82,73 @@ export class Wallet {
 
   async signTypedData(typedData) {
     await this.ensureBase();
-    return this.provider.request({
-      method: "eth_signTypedData_v4",
-      params: [this.address, JSON.stringify(typedData)],
-    });
+    return this.provider.request({ method: "eth_signTypedData_v4", params: [this.address, JSON.stringify(typedData)] });
   }
+}
+
+// -- Reown AppKit (WalletConnect) --
+
+let kit = null;
+
+export function appKitConfigured() {
+  return Boolean(window.SINGIT_APP_CONFIG?.walletConnectProjectId);
+}
+
+async function appKit() {
+  if (kit) return kit;
+  const { createAppKit, WagmiAdapter, networks } = await import(APPKIT);
+  const projectId = window.SINGIT_APP_CONFIG.walletConnectProjectId;
+  const adapter = new WagmiAdapter({ projectId, networks: [networks.base] });
+  kit = createAppKit({
+    adapters: [adapter],
+    networks: [networks.base],
+    defaultNetwork: networks.base,
+    projectId,
+    metadata: {
+      name: "SingIt",
+      description: "Give your AI agent an allowance from your own wallet.",
+      url: location.origin,
+      icons: [new URL("../assets/favicon.svg", location.href).href],
+    },
+    themeMode: "dark",
+    themeVariables: {
+      "--w3m-accent": "#3ecf8e",
+      "--w3m-color-mix": "#050505",
+      "--w3m-color-mix-strength": 25,
+      "--w3m-font-family": "Geist, 'Helvetica Neue', sans-serif",
+      "--w3m-border-radius-master": "3px",
+    },
+    features: { analytics: false, email: false, socials: false, swaps: false, onramp: false, send: false, history: false },
+    allowUnsupportedChain: false,
+  });
+  return kit;
+}
+
+function kitWallet(k, address) {
+  const provider = k.getWalletProvider?.() || k.getProvider?.("eip155");
+  if (!provider) throw new Error("The wallet connected but gave no provider. Try again.");
+  return new Wallet(provider, "WalletConnect", address);
+}
+
+// Watch AppKit: a restored session, a new connection, a switch or a disconnect.
+export async function watchAppKit(onWallet) {
+  const k = await appKit();
+  k.subscribeAccount((account) => {
+    if (account?.isConnected && account.address) {
+      try { onWallet(kitWallet(k, account.address)); } catch { /* provider not ready yet; the next event has it */ }
+    } else if (account && account.status === "disconnected") {
+      onWallet(null);
+    }
+  });
+}
+
+export async function openAppKit() {
+  const k = await appKit();
+  await k.open({ view: "Connect" });
+}
+
+export async function disconnectAppKit() {
+  if (kit) await kit.disconnect?.();
 }
 
 export function walletError(error) {

@@ -6,6 +6,7 @@
 <title>SingIt — Agent allowance</title>
 <meta name="description" content="Give your AI agent a spending limit from your own wallet. Your money stays with you; the agent buys inside the limit.">
 <meta name="robots" content="noindex">
+<meta name="theme-color" content="#050505">
 <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -14,27 +15,56 @@
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<header class="topbar">
-  <a class="brand" href="../">
-    <img src="../assets/favicon.svg" alt="" width="28" height="28">
-    <span>SingIt</span>
-    <span class="brand-sub">Agent allowance</span>
-  </a>
-  <div id="account" class="account"></div>
-</header>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="singit-mark" viewBox="0 0 240 240" fill="none">
+    <path d="M192 108 V152 Q192 176 168 176 H112 Q88 176 88 152 V88 Q88 64 112 64 H168 Q192 64 192 78"
+          stroke="currentColor" stroke-width="12.5" stroke-linecap="round"/>
+    <path d="M116 118 L139 143 L188 86 H206" stroke="currentColor" stroke-width="11.5"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="216" cy="86" r="8" stroke="currentColor" stroke-width="8.5"/>
+    <g stroke="currentColor" stroke-width="9" stroke-linecap="round">
+      <line x1="58" y1="94"  x2="88" y2="94"/>
+      <line x1="58" y1="121" x2="88" y2="121"/>
+      <line x1="58" y1="148" x2="88" y2="148"/>
+    </g>
+    <g fill="currentColor">
+      <circle cx="49" cy="94"  r="9"/>
+      <circle cx="49" cy="121" r="9"/>
+      <circle cx="49" cy="148" r="9"/>
+    </g>
+  </symbol>
+</svg>
+
+<div class="orbs" aria-hidden="true">
+  <div class="orb orb-a"></div>
+  <div class="orb orb-b"></div>
+  <div class="orb orb-c"></div>
+</div>
+<canvas id="pixel-stars" class="pixel-stars" aria-hidden="true"></canvas>
+<div class="grain" aria-hidden="true"></div>
+
+<div class="nav-wrap">
+  <nav class="nav-pill" aria-label="SingIt">
+    <a class="brand" href="https://singitai.app/"><svg class="mark" aria-hidden="true"><use href="#singit-mark"/></svg><span>SingIt</span></a>
+    <div id="tabs" class="tabs" hidden>
+      <button type="button" data-tab="allowance" class="tab">Allowance</button>
+      <button type="button" data-tab="shop" class="tab">Shop</button>
+      <button type="button" data-tab="purchases" class="tab">Purchases</button>
+    </div>
+    <div id="account"></div>
+  </nav>
+</div>
 
 <main class="shell">
-  <nav id="tabs" class="tabs" hidden>
-    <button type="button" data-tab="allowance" class="tab">Allowance</button>
-    <button type="button" data-tab="shop" class="tab">Shop</button>
-    <button type="button" data-tab="purchases" class="tab">Purchases</button>
-  </nav>
   <div id="view" aria-live="polite"></div>
 </main>
 
+<div id="modal"></div>
 <div id="toast" class="toast" role="status" hidden></div>
 
 <script src="config.js"></script>
+<script src="stars.js" defer></script>
 <script type="module" src="main.js"></script>
 </body>
 </html>

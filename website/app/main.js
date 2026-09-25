@@ -1,45 +1,57 @@
-// SingIt agent allowance: connect a wallet, set limits, sign once, let the agent buy.
+// SingIt agent allowance: connect a wallet, set limits, allow once, let the agent buy.
 // Design: docs/allowance-web-v1.md. Every rule is enforced by the API and the
-// chain; this page only shows state and hands prepared requests to the wallet.
+// chain; this page shows state and hands prepared requests to the wallet.
 
 import { api, ApiError, csrf, setCsrf } from "./api.js";
-import { discover, wallets, walletConnectAvailable, Wallet, walletError } from "./wallet.js";
+import {
+  appKitConfigured, disconnectAppKit, discover, openAppKit, Wallet, wallets, walletError, watchAppKit,
+} from "./wallet.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const view = $("#view");
 const accountEl = $("#account");
 const tabsEl = $("#tabs");
+const modalEl = $("#modal");
 
 const state = {
   wallet: null,        // the connected wallet (needed to sign)
   session: null,       // {account, address, telegramLinked}
   allowance: null,     // GET /allowance
   tab: "allowance",
-  busy: "",            // what we are waiting for, shown instead of the actions
-  confirmPause: false,
+  modal: null,         // {type: "busy" | "wallets" | "quote" | "pause", …}
+  preset: 0,           // index into PRESETS
+  method: null,        // "approve" | "permit"; null = pick from the wallet's ETH
   linkCode: null,
   tools: null,
-  pickWallet: false,   // signed in (cookie) but no wallet connected yet: show the choices
-  quote: null,         // a tool or Bitrefill quote waiting for "Buy"
-  result: null,        // {title, text}
+  quote: null,
+  result: null,
   products: null,
-  search: null,        // the last Bitrefill search, kept in the form
+  search: null,
   purchases: null,
   revealed: {},
 };
 
-// -- small helpers --
+const PRESETS = [
+  { daily: "5", per: "1", days: "30", name: "Starter" },
+  { daily: "20", per: "5", days: "30", name: "Everyday" },
+  { daily: "100", per: "10", days: "90", name: "Power" },
+];
+
+// -- helpers --
 
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const short = (address) => (address ? `${address.slice(0, 6)}…${address.slice(-4)}` : "");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const mark = (cls = "mark") => `<svg class="${cls}" aria-hidden="true"><use href="#singit-mark"/></svg>`;
+const orb = `<span class="btn-orb" aria-hidden="true">↗</span>`;
 
-function usdc(atomic) {
+function amount(atomic) {
   const n = BigInt(String(atomic ?? 0));
   const whole = n / 1000000n;
   const frac = (n % 1000000n).toString().padStart(6, "0").replace(/0+$/, "");
-  return `${whole}${frac ? "." + frac : ""} USDC`;
+  return `${whole.toLocaleString("en-US")}${frac ? "." + frac.slice(0, 4) : ""}`;
 }
+const usdc = (atomic) => `${amount(atomic)} USDC`;
 
 function atomicFromUsdc(text) {
   const clean = String(text).trim();
@@ -47,8 +59,6 @@ function atomicFromUsdc(text) {
   const [whole, frac = ""] = clean.split(".");
   return BigInt(whole) * 1000000n + BigInt(frac.padEnd(6, "0"));
 }
-
-const usdcInput = (atomic) => usdc(atomic).replace(" USDC", "");
 
 function toast(message, error = false) {
   const el = $("#toast");
@@ -61,7 +71,7 @@ function toast(message, error = false) {
 
 function explain(error) {
   if (error instanceof ApiError) {
-    if (error.status === 401) {
+    if (error.status === 401 && state.session) {
       state.session = null;
       setCsrf(null);
       return "Your session ended. Sign in again.";
@@ -71,8 +81,8 @@ function explain(error) {
   return walletError(error);
 }
 
-async function busy(label, task) {
-  state.busy = label;
+async function busy(text, task) {
+  state.modal = { type: "busy", text };
   render();
   try {
     return await task();
@@ -80,40 +90,58 @@ async function busy(label, task) {
     toast(explain(error), true);
     return undefined;
   } finally {
-    state.busy = "";
+    if (state.modal?.type === "busy") state.modal = null;
     render();
   }
 }
 
-function setBusy(label) {
-  state.busy = label;
-  render();
+function say(text) {
+  state.modal = { type: "busy", text };
+  renderModal();
 }
 
-// -- the wallet and the session --
+// -- wallet and session --
+
+function setWallet(wallet) {
+  const changed = (wallet?.address || "").toLowerCase() !== (state.wallet?.address || "").toLowerCase();
+  state.wallet = wallet;
+  if (changed) render();
+}
 
 async function needWallet() {
-  if (!state.wallet) throw new Error("Connect your wallet first (top right).");
+  if (!state.wallet) {
+    connectWallet();
+    throw new Error("Connect your wallet, then try again.");
+  }
   if (state.session && state.wallet.address.toLowerCase() !== state.session.address.toLowerCase()) {
     throw new Error(`Switch your wallet to ${short(state.session.address)}, the address you signed in with.`);
   }
   return state.wallet;
 }
 
-async function connect(choice) {
+function connectWallet() {
+  if (appKitConfigured()) {
+    openAppKit().catch((error) => toast(explain(error), true));
+  } else {
+    state.modal = { type: "wallets" };
+    render();
+  }
+}
+
+async function connectInjected(uuid) {
+  const choice = wallets().find((w) => w.info.uuid === uuid);
   await busy("Connecting your wallet…", async () => {
-    const wallet = await Wallet.connect(choice);
+    const wallet = await Wallet.fromInjected(choice);
     wallet.on("accountsChanged", (accounts) => {
       wallet.address = accounts?.[0] || null;
-      if (!wallet.address) state.wallet = null;
-      render();
+      setWallet(wallet.address ? wallet : null);
     });
     state.wallet = wallet;
   });
 }
 
 async function signIn() {
-  await busy("Sign the message in your wallet. It does not move funds.", async () => {
+  await busy("Sign the message in your wallet. It does not move any funds.", async () => {
     const wallet = await needWallet();
     const { message } = await api.nonce(wallet.address);
     const signature = await wallet.signMessage(message);
@@ -127,7 +155,9 @@ async function signIn() {
 async function signOut() {
   try { await api.logout(); } catch { /* the cookie may already be gone */ }
   setCsrf(null);
-  Object.assign(state, { session: null, allowance: null, quote: null, result: null, purchases: null, linkCode: null, revealed: {} });
+  await disconnectAppKit().catch(() => {});
+  Object.assign(state, { session: null, wallet: null, allowance: null, quote: null, result: null, purchases: null,
+                         linkCode: null, revealed: {}, tab: "allowance", modal: null });
   render();
 }
 
@@ -135,35 +165,38 @@ async function loadAllowance() {
   state.allowance = await api.allowance();
 }
 
-// -- actions: the limiter --
-
-function readSetup() {
-  const daily = $("#daily").value.trim();
-  const per = $("#per").value.trim();
-  const days = $("#days").value.trim();
-  if (atomicFromUsdc(per) > atomicFromUsdc(daily)) throw new Error("The per-purchase cap cannot be above the daily cap.");
-  return [daily, per, days];
-}
+// -- the limiter --
 
 async function createLimiter() {
-  let fields;
-  try { fields = readSetup(); } catch (error) { toast(error.message, true); return; }
-  await busy("Creating your limiter on Base. This takes about a minute…", async () => {
-    await api.setup(...fields);
+  let daily, per, days;
+  try {
+    daily = $("#daily").value.trim(); per = $("#per").value.trim(); days = $("#days").value.trim();
+    if (atomicFromUsdc(per) > atomicFromUsdc(daily)) throw new Error("The per-purchase limit cannot be above the daily limit.");
+  } catch (error) { toast(error.message, true); return; }
+  await busy("Creating your limiter on Base. This takes about a minute.", async () => {
+    await api.setup(daily, per, days);
     await loadAllowance();
-    toast("Your limiter is ready. Now allow it to spend from your wallet.");
+    toast("Your limiter is ready. Now allow it to spend.");
   });
+}
+
+function hasGas() {
+  return BigInt(state.allowance?.ownerEthWei || "0") >= 50000000000000n;
+}
+
+function method() {
+  return state.method || (hasGas() ? "approve" : "permit");
 }
 
 async function walletOperation(kind, body) {
   await busy("Preparing…", async () => {
     const wallet = await needWallet();
     const prepared = await api.prepare(kind, body);
-    setBusy(`${prepared.walletShows} Confirm it in your wallet.`);
+    say(`${prepared.walletShows} Confirm it in your wallet.`);
     const answer = prepared.method === "permit"
       ? { operation: prepared.operation, signature: await wallet.signTypedData(prepared.typedData) }
       : { operation: prepared.operation, txHash: await wallet.sendTransaction(prepared.tx) };
-    setBusy("Waiting for Base to confirm it…");
+    say("Waiting for Base to confirm it…");
     let op = await api.submit(kind, answer);
     const deadline = Date.now() + 180000;
     while (!["DONE", "FAILED", "EXPIRED"].includes(op.state) && Date.now() < deadline) {
@@ -176,70 +209,51 @@ async function walletOperation(kind, body) {
   });
 }
 
-function chosenMethod(name) {
-  return document.querySelector(`input[name="${name}"]:checked`)?.value || "approve";
-}
-
 function grant() {
-  let amount;
-  try { amount = usdcInput(atomicFromUsdc($("#grant-amount").value)); } catch (error) { toast(error.message, true); return; }
-  walletOperation("grant", { amount, method: chosenMethod("grant-method") });
-}
-
-function revoke() {
-  walletOperation("revoke", { method: chosenMethod("revoke-method") });
+  let value;
+  try { value = $("#grant-amount").value.trim(); atomicFromUsdc(value); }  // exact, as typed; checked only
+  catch (error) { toast(error.message, true); return; }
+  walletOperation("grant", { amount: value, method: method() });
 }
 
 async function pause() {
-  state.confirmPause = false;
+  state.modal = null;
   await busy("Pausing your limiter…", async () => {
     await api.pause();
     await loadAllowance();
-    toast("Paused for good. To be thorough, also revoke the allowance from your wallet.");
+    toast("Paused for good. To be thorough, also revoke the allowance.");
   });
 }
 
-async function linkTelegram() {
-  await busy("Getting a code…", async () => {
-    state.linkCode = await api.linkTelegram();
-  });
-}
-
-async function unlinkTelegram() {
-  await busy("Unlinking…", async () => {
-    await api.unlinkTelegram();
-    state.session = { ...state.session, telegramLinked: false };
-    state.linkCode = null;
-  });
-}
-
-// -- actions: the shop --
+// -- the shop --
 
 async function loadTools() {
-  await busy("Loading the catalog…", async () => {
-    state.tools = (await api.tools()).tools;
-  });
-  state.tools ??= [];  // a failure is shown once, not retried on every render
+  await busy("Loading the catalog…", async () => { state.tools = (await api.tools()).tools; });
+  state.tools ??= [];
   render();
+}
+
+function requiredFields(tool) {
+  const schema = tool?.inputSchema || {};
+  return (schema.required || []).filter((name) => schema.properties?.[name]);
 }
 
 async function quoteTool(id) {
   const tool = state.tools.find((t) => t.id === id);
   const body = { tool: id };
   for (const name of requiredFields(tool)) {
-    const value = document.querySelector(`[data-field="${id}:${name}"]`)?.value.trim();
+    const value = document.querySelector(`[data-field="${CSS.escape(id + ":" + name)}"]`)?.value.trim();
     if (!value) { toast(`Fill in ${name}.`, true); return; }
     body[name] = value;
   }
   await busy("Asking the seller for the price…", async () => {
-    const quote = await api.toolQuote(body);
-    state.quote = { kind: "tool", ...quote };
+    state.quote = { kind: "tool", ...(await api.toolQuote(body)) };
     state.result = null;
   });
+  if (state.quote) { state.modal = { type: "quote" }; render(); }
 }
 
 async function searchBitrefill() {
-  // Read the form before busy() redraws the page.
   const query = $("#bf-query").value.trim();
   const country = $("#bf-country").value.trim().toUpperCase();
   state.search = { query, country };
@@ -251,16 +265,17 @@ async function searchBitrefill() {
 
 async function quoteBitrefill(slug) {
   const pkg = document.querySelector(`[data-package="${CSS.escape(slug)}"]`)?.value.trim();
-  if (!pkg) { toast("Enter the denomination you want.", true); return; }
+  if (!pkg) { toast("Enter the amount you want on the card.", true); return; }
   await busy("Asking Bitrefill for the price…", async () => {
-    const quote = await api.bitrefillQuote(slug, pkg);
-    state.quote = { kind: "bitrefill", ...quote };
+    state.quote = { kind: "bitrefill", ...(await api.bitrefillQuote(slug, pkg)) };
     state.result = null;
   });
+  if (state.quote) { state.modal = { type: "quote" }; render(); }
 }
 
 async function buy() {
   const quote = state.quote;
+  state.modal = null;
   await busy("Buying from your allowance…", async () => {
     const result = quote.kind === "tool" ? await api.toolBuy(quote.quoteId) : await api.bitrefillBuy(quote.quoteId);
     state.quote = null;
@@ -271,168 +286,190 @@ async function buy() {
 }
 
 async function loadPurchases() {
-  await busy("Loading your purchases…", async () => {
-    state.purchases = (await api.purchases()).purchases || [];
-  });
+  await busy("Loading your purchases…", async () => { state.purchases = (await api.purchases()).purchases || []; });
   state.purchases ??= [];
   render();
 }
 
-async function reveal(id) {
-  await busy("Fetching the code…", async () => {
-    state.revealed[id] = (await api.reveal(id)).text || "No code.";
-  });
-}
+// -- views --
 
-function requiredFields(tool) {
-  const schema = tool?.inputSchema || {};
-  return (schema.required || []).filter((name) => schema.properties?.[name]);
-}
-
-// -- rendering --
-
-function renderAccount() {
-  if (state.session) {
-    accountEl.innerHTML = `
-      <span class="badge ok">${esc(short(state.session.address))}</span>
-      ${state.wallet ? "" : `<button class="btn small" data-action="pick-wallet">Connect wallet</button>`}
-      <button class="btn small" data-action="sign-out">Sign out</button>`;
+function renderNav() {
+  const signedIn = Boolean(state.session);
+  tabsEl.hidden = !signedIn;
+  for (const tab of tabsEl.querySelectorAll(".tab")) tab.classList.toggle("active", tab.dataset.tab === state.tab);
+  if (signedIn) {
+    accountEl.innerHTML = `<button class="account-chip" data-action="account" title="Sign out">
+      <span class="dot"></span><span class="addr">${esc(short(state.session.address))}</span></button>`;
   } else if (state.wallet) {
-    accountEl.innerHTML = `<span class="badge">${esc(short(state.wallet.address))}</span>`;
+    accountEl.innerHTML = `<button class="account-chip" data-action="account"><span class="dot"></span>
+      <span class="addr">${esc(short(state.wallet.address))}</span></button>`;
   } else {
-    accountEl.innerHTML = "";
+    accountEl.innerHTML = `<button class="btn btn-primary btn-sm" data-action="connect">Connect wallet</button>`;
   }
 }
 
-function walletChoices() {
-  const list = wallets();
-  const buttons = list.map(({ info }) => `
-    <button class="btn wallet-btn" data-action="connect" data-uuid="${esc(info.uuid)}">
-      ${info.icon ? `<img src="${esc(info.icon)}" alt="">` : ""}${esc(info.name)}
-    </button>`).join("");
-  const walletConnect = walletConnectAvailable()
-    ? `<button class="btn wallet-btn" data-action="connect" data-uuid="walletconnect">WalletConnect (mobile)</button>` : "";
-  if (!buttons && !walletConnect) {
-    return `<p class="notice warn">No wallet found in this browser. Install Rabby, MetaMask or Phantom, then reload.</p>`;
-  }
-  return `<div class="row">${buttons}${walletConnect}</div>`;
-}
-
-function renderSignIn() {
+function renderHero() {
+  const cta = state.wallet
+    ? `<button class="btn btn-primary btn-lg has-orb" data-action="sign-in">Sign in as ${esc(short(state.wallet.address))}${orb}</button>
+       <button class="btn btn-ghost btn-lg" data-action="connect">Use another wallet</button>`
+    : `<button class="btn btn-primary btn-lg has-orb" data-action="connect">Connect wallet${orb}</button>
+       <a class="btn btn-ghost btn-lg" href="https://singitai.app/#how">How it works</a>`;
   return `
-    <h1>Give your agent an allowance, not your keys.</h1>
-    <p class="lead">Your money stays in your wallet. You set a daily limit and a per-purchase limit once; the agent buys
-      inside them without asking again, and you can revoke it with one signature.</p>
-    <div class="card stack">
-      ${state.wallet ? `
-        <h2>Sign in</h2>
-        <p>Your wallet will ask you to sign a message for SingIt. It does not move funds or approve spending.</p>
-        <div class="row"><button class="btn primary" data-action="sign-in">Sign in as ${esc(short(state.wallet.address))}</button></div>`
-      : `<h2>Connect your wallet</h2>
-        <p>Rabby, MetaMask or Phantom on Base. A Trezor or Ledger behind them works too: the device shows every signature.</p>
-        ${walletChoices()}`}
-    </div>`;
-}
-
-function renderSetup(title) {
-  const presets = [["5", "1", "30"], ["20", "5", "30"], ["100", "10", "90"]];
-  return `
-    <div class="card stack">
-      <h2>${esc(title)}</h2>
-      <p>Your limiter is a small contract that only lets your agent spend within these limits. Creating it moves no money;
-        we pay its gas.</p>
-      <div class="choice">${presets.map(([d, p, n]) => `
-        <label><input type="radio" name="preset" data-action="preset" data-preset="${d},${p},${n}"> $${d}/day · $${p} per purchase · ${n} days</label>`).join("")}
+    <section class="hero">
+      <span class="eyebrow">Agent allowance · Base</span>
+      <h1>Your agent spends.<br><em>Your wallet</em> keeps the money.</h1>
+      <p class="sub">Set a daily limit and a per-purchase limit once. Your agent buys inside them without asking again,
+        and one signature takes it all back.</p>
+      <div class="row" style="justify-content:center">${cta}</div>
+      <div class="steps">
+        <div class="step"><span class="n">01</span><h3>Connect and sign in</h3>
+          <p>Rabby, MetaMask, Phantom or any WalletConnect wallet. Signing in moves nothing.</p></div>
+        <div class="step"><span class="n">02</span><h3>Set your limits</h3>
+          <p>We deploy a small contract that enforces them on Base. You pay no gas for it.</p></div>
+        <div class="step"><span class="n">03</span><h3>Allow once</h3>
+          <p>One approval from your wallet. Revoke it any time, here or on revoke.cash.</p></div>
       </div>
+    </section>`;
+}
+
+// What the agent can really spend today: the day's room within the allowance, plus what it already holds.
+function spendableToday(a) {
+  const left = BigInt(a.remainingTodayAtomic);
+  const allowed = BigInt(a.allowanceAtomic);
+  return (left < allowed ? left : allowed) + BigInt(a.floatAtomic || 0);
+}
+
+function statusPill(code) {
+  const map = { granted: ["ok", "Active"], waiting_for_grant: ["warn", "Waiting for your approval"],
+                paused: ["bad", "Paused"], expired: ["bad", "Expired"] };
+  const [cls, text] = map[code] || ["", code];
+  return `<span class="status ${cls}">${esc(text)}</span>`;
+}
+
+function renderSetup(heading) {
+  const p = PRESETS[state.preset] || PRESETS[0];
+  return `
+    <div class="bezel glow"><div class="core">
+      <h2>${heading}</h2>
+      <p>A small contract on Base that lets your agent spend only within these limits. Creating it moves no money,
+        and we pay its gas.</p>
+      <div class="presets">${PRESETS.map((x, i) => `
+        <button class="preset ${i === state.preset ? "selected" : ""}" data-action="preset" data-index="${i}">
+          <b>$${x.daily}<span> / day</span></b><span>${x.name} · up to $${x.per} a purchase · ${x.days} days</span>
+        </button>`).join("")}</div>
       <div class="fields">
-        <div><label for="daily">Daily limit (USDC)</label><input id="daily" type="text" inputmode="decimal" value="5"></div>
-        <div><label for="per">Per purchase (USDC)</label><input id="per" type="text" inputmode="decimal" value="1"></div>
-        <div><label for="days">Lasts (days)</label><input id="days" type="number" min="1" max="90" value="30"></div>
+        <div class="field"><label for="daily">Daily limit, USDC</label><input class="input" id="daily" inputmode="decimal" value="${esc(p.daily)}"></div>
+        <div class="field"><label for="per">Per purchase, USDC</label><input class="input" id="per" inputmode="decimal" value="${esc(p.per)}"></div>
+        <div class="field"><label for="days">Lasts, days</label><input class="input" id="days" type="number" min="1" max="90" value="${esc(p.days)}"></div>
       </div>
-      <div class="row"><button class="btn primary" data-action="create-limiter">Create my limiter</button></div>
-    </div>`;
+      <div class="row" style="margin-top:22px"><button class="btn btn-primary has-orb" data-action="create-limiter">Create my limiter${orb}</button></div>
+    </div></div>`;
 }
 
-function methodChoice(name, allowance) {
-  const hasGas = BigInt(allowance.ownerEthWei || "0") >= 50000000000000n;
-  const approve = hasGas ? "checked" : "";
-  const permit = hasGas ? "" : "checked";
+function methodSwitch() {
+  const m = method();
   return `
-    <div class="choice">
-      <label><input type="radio" name="${name}" value="approve" ${approve}> Transaction (you pay a little ETH gas)</label>
-      <label><input type="radio" name="${name}" value="permit" ${permit}> Signature only (no gas; we send it)</label>
-    </div>
-    ${hasGas ? "" : `<p class="muted">Your wallet has no ETH on Base, so a gas-free signature is selected.</p>`}`;
-}
-
-function stateBadge(stateCode) {
-  const map = { granted: ["ok", "active"], waiting_for_grant: ["warn", "waiting for your allowance"],
-                paused: ["bad", "paused"], expired: ["bad", "expired"] };
-  const [cls, text] = map[stateCode] || ["", stateCode];
-  return `<span class="badge ${cls}">${esc(text)}</span>`;
+    <div>
+      <div class="segmented" role="group" aria-label="How to approve">
+        <button class="${m === "approve" ? "on" : ""}" data-action="method" data-method="approve">Transaction</button>
+        <button class="${m === "permit" ? "on" : ""}" data-action="method" data-method="permit">Signature, no gas</button>
+      </div>
+      <p class="hint">${m === "permit"
+        ? "You sign a USDC permit; we send it to Base and pay the gas."
+        : "Your wallet sends an approve transaction; you pay a few cents of ETH gas."}${hasGas() ? "" : " Your wallet has no ETH on Base."}</p>
+    </div>`;
 }
 
 function renderAllowance() {
   const a = state.allowance;
-  if (!a) return `<div class="card"><p>Loading…</p></div>`;
-  if (!a.configured) return renderSetup("Set your limits");
-  const limiter = a.limiter;
+  if (!a) return `<p class="faint">Loading…</p>`;
+  if (!a.configured) {
+    return `<div class="page-head"><span class="eyebrow">Step 2 of 3</span>
+      <h1>Set your agent's <em>limits</em>.</h1>
+      <p>Your money stays in your wallet. These limits hold even if our server or the agent is compromised.</p></div>
+      ${renderSetup("Choose your limits")}`;
+  }
   const blocked = a.state === "paused" || a.state === "expired";
-  const spentToday = BigInt(a.dailyCapAtomic) - BigInt(a.remainingTodayAtomic);
-  return `
-    <div class="card">
-      <div class="row" style="justify-content:space-between">
-        <h2>Your agent's allowance</h2>${stateBadge(a.state)}
-      </div>
-      <div class="grid">
-        <div class="stat"><div class="label">Allowed from your wallet</div><div class="value">${usdc(a.allowanceAtomic)}</div></div>
-        <div class="stat"><div class="label">Left today</div><div class="value">${usdc(a.remainingTodayAtomic)}</div></div>
-        <div class="stat"><div class="label">Agent float</div><div class="value">${usdc(a.floatAtomic)}</div></div>
-        <div class="stat"><div class="label">Your wallet</div><div class="value">${usdc(a.ownerUsdcAtomic)}</div></div>
-      </div>
-      <p class="muted" style="margin-top:14px">
-        Limits: ${usdc(a.dailyCapAtomic)} a day (${usdc(spentToday)} spent today), ${usdc(a.perPurchaseCapAtomic)} a purchase,
-        until ${esc(new Date(a.expiry * 1000).toLocaleString())}.<br>
-        Limiter <span class="mono">${esc(limiter)}</span> ·
-        <a href="https://base.blockscout.com/address/${esc(limiter)}?tab=contract" target="_blank" rel="noopener">verified code</a> ·
-        <a href="https://revoke.cash/address/${esc(a.owner)}?chainId=8453" target="_blank" rel="noopener">revoke.cash</a>
-      </p>
-    </div>
+  const daily = BigInt(a.dailyCapAtomic);
+  const left = BigInt(a.remainingTodayAtomic);
+  const spent = daily - left;
+  const pct = daily > 0n ? Number((spent * 100n) / daily) : 0;
+  const granted = BigInt(a.allowanceAtomic) > 0n;
+  const canSpend = spendableToday(a);
+  const title = blocked ? `This limiter is <em>stopped</em>.`
+    : a.state === "granted" ? `Your agent is <em>ready</em>.` : `Now <em>allow</em> it, once.`;
+  const intro = blocked ? "Create a new limiter to continue."
+    : a.state === "granted" ? "It buys on its own, inside your limits. Everything below reads from Base."
+    : "One approval from your wallet lets the limiter pay for your agent, never more than your limits.";
 
-    ${blocked ? `
-      <div class="card stack"><p class="notice warn">This limiter is ${esc(a.state)}. Create a new one to continue;
-        if the old one still has an allowance, revoke it below.</p></div>
-      ${renderSetup("Create a new limiter")}` : `
-      <div class="card stack">
-        <h2>${a.state === "granted" ? "Change the allowance" : "Allow it to spend"}</h2>
-        <p>This is the total your agent may take from your wallet through the limiter, still at most
-          ${usdc(a.dailyCapAtomic)} a day. Your wallet will show the limiter's address: check it ends in
-          <span class="mono">${esc(limiter.slice(-4))}</span>.</p>
-        <div class="fields"><div><label for="grant-amount">Amount (USDC)</label>
-          <input id="grant-amount" type="text" inputmode="decimal" value="${esc(usdcInput(a.dailyCapAtomic))}"></div></div>
-        ${methodChoice("grant-method", a)}
-        <div class="row"><button class="btn primary" data-action="grant">Allow from my wallet</button></div>
+  return `
+    <div class="page-head"><span class="eyebrow">${a.state === "waiting_for_grant" ? "Step 3 of 3" : "Agent allowance"}</span>
+      <h1>${title}</h1><p>${intro}</p></div>
+
+    <div class="stack">
+      <div class="bezel"><div class="core">
+        <div class="balance">
+          <div>
+            <div class="spread"><span class="label">Your agent can spend today</span>${statusPill(a.state)}</div>
+            <div class="big">${amount(blocked ? 0 : canSpend)}<small>USDC</small></div>
+            <div class="meter"><span style="width:${Math.min(100, pct)}%"></span></div>
+            <p class="faint">${amount(spent)} of the ${amount(daily)} USDC daily limit used today · up to ${usdc(a.perPurchaseCapAtomic)} a purchase</p>
+          </div>
+          <div class="stats" style="grid-template-columns:1fr;margin-top:0;gap:8px">
+            <div class="stat"><div class="label">Allowed from your wallet</div><div class="v">${usdc(a.allowanceAtomic)}</div></div>
+            <div class="stat"><div class="label">Held by your agent</div><div class="v">${usdc(a.floatAtomic)}</div></div>
+            <div class="stat"><div class="label">In your wallet</div><div class="v">${usdc(a.ownerUsdcAtomic)}</div></div>
+          </div>
+        </div>
+        <div class="links">
+          <a class="chip" href="https://base.blockscout.com/address/${esc(a.limiter)}?tab=contract" target="_blank" rel="noopener">Limiter ${esc(short(a.limiter))} · verified code ↗</a>
+          <a class="chip" href="https://revoke.cash/address/${esc(a.owner)}?chainId=8453" target="_blank" rel="noopener">revoke.cash ↗</a>
+          <span class="chip">Until ${esc(new Date(a.expiry * 1000).toLocaleDateString())}</span>
+        </div>
+      </div></div>
+
+      ${blocked ? renderSetup("Create a new limiter") : `
+      <div class="grid-2">
+        <div class="bezel ${a.state === "granted" ? "" : "glow"}"><div class="core stack">
+          <div><h2>${a.state === "granted" ? "Change the allowance" : "Allow it to spend"}</h2>
+            <p>The total your agent may take through the limiter, still at most ${usdc(a.dailyCapAtomic)} a day.
+              Check the address in your wallet ends in <span class="mono">${esc(a.limiter.slice(-4))}</span>.</p></div>
+          <div class="field"><label for="grant-amount">Amount, USDC</label>
+            <input class="input" id="grant-amount" inputmode="decimal" value="${esc(amount(a.dailyCapAtomic).replace(/,/g, ""))}"></div>
+          ${methodSwitch()}
+          <button class="btn btn-primary has-orb" data-action="grant">Approve from my wallet${orb}</button>
+        </div></div>
+        ${renderTelegram()}
       </div>`}
 
-    ${BigInt(a.allowanceAtomic) > 0n ? `
-      <div class="card stack">
-        <h2>Revoke</h2>
-        <p>Sets the allowance to 0. The agent's float comes back to your wallet.</p>
-        ${methodChoice("revoke-method", a)}
-        <div class="row"><button class="btn" data-action="revoke">Revoke the allowance</button></div>
-      </div>` : ""}
+      ${renderActivity(a)}
 
-    ${renderActivity(a)}
-    ${renderTelegram()}
-    ${blocked ? "" : `
-      <div class="card danger stack">
-        <h2>Emergency stop</h2>
-        <p>Pauses the limiter forever. Nothing can move through it again; you would create a new one.</p>
-        <div class="row">${state.confirmPause
-          ? `<button class="btn danger" data-action="pause">Yes, pause it for good</button>
-             <button class="btn" data-action="cancel-pause">Cancel</button>`
-          : `<button class="btn danger" data-action="ask-pause">Pause the limiter</button>`}</div>
-      </div>`}`;
+      <div class="grid-2">
+        ${granted ? `
+        <div class="bezel"><div class="core stack">
+          <div><h2>Revoke</h2><p>Sets the allowance to 0. Whatever your agent still holds comes back to your wallet.</p></div>
+          ${methodSwitch()}
+          <button class="btn btn-ghost" data-action="revoke">Revoke the allowance</button>
+        </div></div>` : ""}
+        ${blocked ? "" : `
+        <div class="bezel danger"><div class="core stack">
+          <div><h2>Emergency stop</h2><p>Pauses the limiter forever. Nothing can move through it again; you would create a new one.</p></div>
+          <button class="btn btn-danger" data-action="ask-pause">Pause the limiter</button>
+        </div></div>`}
+      </div>
+    </div>`;
+}
+
+function renderTelegram() {
+  const linked = state.session?.telegramLinked;
+  const body = linked
+    ? `<p>Your SingIt bot uses this allowance and sends the watcher's notices.</p>
+       <button class="btn btn-ghost" data-action="unlink">Unlink Telegram</button>`
+    : state.linkCode
+      ? `<p class="note">Send <span class="mono">/link ${esc(state.linkCode.code)}</span> to the SingIt bot within 10 minutes, then reload.</p>`
+      : `<p>Shop from the SingIt bot with the same allowance, and get a message whenever money moves.</p>
+         <button class="btn btn-ghost" data-action="link">Link Telegram</button>`;
+  return `<div class="bezel"><div class="core stack"><div><h2>Telegram</h2></div>${body}</div></div>`;
 }
 
 function renderActivity(a) {
@@ -440,179 +477,206 @@ function renderActivity(a) {
   const ops = a.operations || [];
   if (!alerts.length && !ops.length) return "";
   return `
-    <div class="card">
+    <div class="bezel"><div class="core">
       <h2>Activity</h2>
-      <ul class="list">
+      <ul class="list feed">
         ${alerts.map((x) => `<li><span>${x.severity === "ALARM" ? "⚠️ " : ""}${esc(x.text)}</span>
-          <span class="muted">${esc(new Date(x.createdAt * 1000).toLocaleString())}</span></li>`).join("")}
+          <span class="when">${esc(new Date(x.createdAt * 1000).toLocaleString())}</span></li>`).join("")}
         ${ops.map((line) => `<li><span class="mono">${esc(line)}</span></li>`).join("")}
       </ul>
-    </div>`;
-}
-
-function renderTelegram() {
-  const linked = state.session?.telegramLinked;
-  return `
-    <div class="card stack">
-      <h2>Telegram</h2>
-      ${linked
-        ? `<p>Your SingIt bot chat uses this allowance and gets the watcher's notices.</p>
-           <div class="row"><button class="btn" data-action="unlink">Unlink Telegram</button></div>`
-        : state.linkCode
-          ? `<p class="notice">Send <span class="mono">/link ${esc(state.linkCode.code)}</span> to the SingIt bot within 10 minutes.
-               Then reload this page.</p>`
-          : `<p>Use the same allowance from the SingIt bot and get notices there.</p>
-             <div class="row"><button class="btn" data-action="link">Link Telegram</button></div>`}
-    </div>`;
-}
-
-function renderQuote() {
-  const q = state.quote;
-  if (!q) return "";
-  const rows = q.kind === "tool"
-    ? [["Product", q.tool.name], ["Price", `${q.priceUsd} USDC`], ["Network", "Base (USDC)"],
-       ["Paid to", q.payTo], ["Paid from", "your allowance"]]
-    : [["Product", q.name], ["Denomination", `${q.package} ${q.packageCurrency || ""}`.trim()],
-       ["Price", `${q.priceUsd} USDC`], ["Network", "Base (USDC)"],
-       ["Paid to", "Bitrefill (x402); the code comes to you"], ["Refunds", "none once delivered"]];
-  return `
-    <div class="confirm">
-      <h3>Confirm your purchase</h3>
-      <dl>${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
-      <div class="row">
-        <button class="btn primary" data-action="buy">Buy for ${esc(q.priceUsd)} USDC</button>
-        <button class="btn" data-action="cancel-quote">Cancel</button>
-      </div>
-      <p class="muted" style="margin-top:8px">Valid until ${esc(new Date(q.expiresAt * 1000).toLocaleTimeString())}.</p>
-    </div>`;
+    </div></div>`;
 }
 
 function renderShop() {
   const a = state.allowance;
   if (!a?.configured || a.state !== "granted") {
-    return `<div class="card"><p class="notice warn">Set up and allow your limiter first (Allowance tab).</p></div>`;
+    return `<div class="page-head"><span class="eyebrow">Shop</span><h1>Allow your agent <em>first</em>.</h1>
+      <p>Set up your limits and approve them on the Allowance tab; then everything here is paid from your allowance.</p>
+      <div class="row" style="margin-top:22px"><button class="btn btn-primary has-orb" data-tab="allowance">Go to Allowance${orb}</button></div></div>`;
   }
-  if (!state.tools && !state.busy) queueMicrotask(loadTools);
+  if (!state.tools && !state.modal) queueMicrotask(loadTools);
   return `
-    ${state.quote || state.result ? `<div class="card stack">
-      ${renderQuote()}
-      ${state.result ? `<h3>${esc(state.result.title)}</h3><pre class="result">${esc(state.result.text)}</pre>` : ""}
-    </div>` : ""}
-    <div class="card stack">
-      <h2>Paid tools</h2>
-      <p>The agent pays per call over x402, from your allowance.</p>
-      <ul class="list">${(state.tools || []).map((tool) => `
-        <li>
-          <div><h3>${esc(tool.name)}</h3><p class="muted">${esc(tool.description || "")}</p>
-            ${requiredFields(tool).map((name) => `<input type="text" placeholder="${esc(name)}" data-field="${esc(tool.id)}:${esc(name)}" style="margin-top:6px">`).join("")}
-          </div>
-          <button class="btn small" data-action="quote-tool" data-id="${esc(tool.id)}">Get price</button>
-        </li>`).join("")}</ul>
-    </div>
-    <div class="card stack">
-      <h2>Gift cards (Bitrefill)</h2>
-      <div class="fields">
-        <div><label for="bf-query">Search</label><input id="bf-query" type="text" placeholder="amazon, steam, netflix…" value="${esc(state.search?.query)}"></div>
-        <div><label for="bf-country">Country (optional)</label><input id="bf-country" type="text" maxlength="2" placeholder="DE" value="${esc(state.search?.country)}"></div>
-      </div>
-      <div class="row"><button class="btn" data-action="search-bitrefill">Search</button></div>
-      ${state.products ? `<ul class="list">${state.products.length ? state.products.slice(0, 10).map((p) => `
-        <li><div><h3>${esc(p.name)}</h3><p class="muted mono">${esc(p.slug)}</p></div>
-          <div class="row"><input type="text" placeholder="amount" data-package="${esc(p.slug)}" style="width:110px">
-          <button class="btn small" data-action="quote-bitrefill" data-slug="${esc(p.slug)}">Price</button></div></li>`).join("")
-        : "<li>Nothing found.</li>"}</ul>` : ""}
+    <div class="page-head"><span class="eyebrow">Shop</span><h1>Spend from your <em>allowance</em>.</h1>
+      <p>${usdc(spendableToday(a))} available today, up to ${usdc(a.perPurchaseCapAtomic)} a purchase. Every price is confirmed before you pay.</p></div>
+    <div class="stack">
+      ${state.result ? `<div class="bezel glow"><div class="core"><div class="spread"><h2>${esc(state.result.title)}</h2>
+        <span class="status ok">Delivered</span></div><pre class="result">${esc(state.result.text)}</pre></div></div>` : ""}
+      <div class="bezel"><div class="core">
+        <h2>Paid tools</h2><p>Your agent pays per call over x402.</p>
+        <div class="tool-grid">${(state.tools || []).map((tool) => `
+          <div class="tool">
+            <h3>${esc(tool.name)}</h3>
+            <p>${esc(tool.description || "")}</p>
+            ${requiredFields(tool).map((name) => `<input class="input" placeholder="${esc(name)}" data-field="${esc(tool.id)}:${esc(name)}">`).join("")}
+            <button class="btn btn-ghost btn-sm" data-action="quote-tool" data-id="${esc(tool.id)}">Get price</button>
+          </div>`).join("")}</div>
+      </div></div>
+      <div class="bezel"><div class="core">
+        <h2>Gift cards</h2><p>Thousands of brands through Bitrefill. The code is shown to you once.</p>
+        <div class="searchbar">
+          <input class="input" id="bf-query" placeholder="Amazon, Steam, Netflix…" value="${esc(state.search?.query)}">
+          <input class="input country" id="bf-country" maxlength="2" placeholder="DE" value="${esc(state.search?.country)}">
+          <button class="btn btn-primary" data-action="search-bitrefill">Search</button>
+        </div>
+        ${state.products ? `<ul class="list" style="margin-top:14px">${state.products.length ? state.products.slice(0, 12).map((p) => `
+          <li><div><h3>${esc(p.name)}</h3><p class="mono faint">${esc(p.slug)}</p></div>
+            <div class="row"><input class="input" style="width:110px" placeholder="amount" data-package="${esc(p.slug)}">
+            <button class="btn btn-ghost btn-sm" data-action="quote-bitrefill" data-slug="${esc(p.slug)}">Price</button></div></li>`).join("")
+          : `<li><p>Nothing found. Try another word or country.</p></li>`}</ul>` : ""}
+      </div></div>
     </div>`;
 }
 
 function renderPurchases() {
-  if (!state.purchases && !state.busy) queueMicrotask(loadPurchases);
+  if (!state.purchases && !state.modal) queueMicrotask(loadPurchases);
   const items = state.purchases || [];
   return `
-    <div class="card">
-      <h2>Purchases</h2>
+    <div class="page-head"><span class="eyebrow">Purchases</span><h1>What your agent <em>bought</em>.</h1>
+      <p>Gift card codes are shown once, on request. Store them safely.</p></div>
+    <div class="bezel"><div class="core">
       ${items.length ? `<ul class="list">${items.map((p) => `
         <li>
           <div>
             <h3>${esc(p.name)}</h3>
-            <p class="muted">${esc([p.denomination, p.paid, p.network, p.status].filter(Boolean).join(" · "))}
-              ${p.transactionUrl ? ` · <a href="${esc(p.transactionUrl)}" target="_blank" rel="noopener">transaction</a>` : ""}</p>
+            <p>${esc([p.denomination, p.paid, p.network, p.status].filter(Boolean).join(" · "))}
+              ${p.transactionUrl ? ` · <a href="${esc(p.transactionUrl)}" target="_blank" rel="noopener">transaction ↗</a>` : ""}</p>
             ${state.revealed[p.id] ? `<pre class="result">${esc(state.revealed[p.id])}</pre>` : ""}
           </div>
-          ${p.canReveal && !state.revealed[p.id] ? `<button class="btn small" data-action="reveal" data-id="${esc(p.id)}">Show code once</button>` : ""}
-        </li>`).join("")}</ul>` : `<p>${state.purchases ? "No purchases yet." : "Loading…"}</p>`}
-    </div>`;
+          ${p.canReveal && !state.revealed[p.id] ? `<button class="btn btn-ghost btn-sm" data-action="reveal" data-id="${esc(p.id)}">Show code once</button>` : ""}
+        </li>`).join("")}</ul>` : `<p>${state.purchases ? "Nothing yet." : "Loading…"}</p>`}
+    </div></div>`;
+}
+
+// -- modals --
+
+function modal(inner) {
+  return `<div class="overlay" data-action="dismiss"><div class="modal bezel" role="dialog" aria-modal="true"><div class="core">${inner}</div></div></div>`;
+}
+
+function renderModal() {
+  const m = state.modal;
+  if (!m) { modalEl.innerHTML = ""; return; }
+  if (m.type === "busy") {
+    modalEl.innerHTML = `<div class="overlay"><div class="modal bezel"><div class="core busy">
+      <div class="spinner"></div><p>${esc(m.text)}</p></div></div></div>`;
+    return;
+  }
+  if (m.type === "wallets") {
+    const list = wallets();
+    modalEl.innerHTML = modal(`
+      <div class="approval-head"><div class="avatar">${mark()}</div>
+        <div><strong>Connect a wallet</strong><span>Base · USDC</span></div></div>
+      ${list.length ? `<div class="wallets">${list.map(({ info }) => `
+        <button class="wallet-option" data-action="connect-injected" data-uuid="${esc(info.uuid)}">
+          ${info.icon ? `<img src="${esc(info.icon)}" alt="">` : `<span class="ph"></span>`}${esc(info.name)}</button>`).join("")}</div>`
+        : `<p class="note warn">No wallet found in this browser. Install Rabby, MetaMask or Phantom, then reload.</p>`}
+      <p class="hint">A Trezor or Ledger behind your wallet works too: the device shows every signature.</p>`);
+    return;
+  }
+  if (m.type === "quote") {
+    const q = state.quote;
+    const rows = q.kind === "tool"
+      ? [["Product", q.tool.name], ["Price", `${q.priceUsd} USDC`], ["Network", "Base"], ["Paid to", short(q.payTo)], ["Paid from", "your allowance"]]
+      : [["Product", q.name], ["Card value", `${q.package} ${q.packageCurrency || ""}`.trim()], ["Price", `${q.priceUsd} USDC`],
+         ["Network", "Base"], ["Paid to", "Bitrefill · code comes to you"], ["Refunds", "none once delivered"]];
+    modalEl.innerHTML = modal(`
+      <div class="approval-head"><div class="avatar">${mark()}</div>
+        <div><strong>Confirm your purchase</strong><span>Paid by your agent from your allowance</span></div></div>
+      <dl class="rows">${rows.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl>
+      <div class="actions">
+        <button class="btn btn-primary" data-action="buy">Buy · ${esc(q.priceUsd)} USDC</button>
+        <button class="btn btn-ghost" data-action="dismiss-button">Cancel</button>
+      </div>
+      <p class="hint">Price held until ${esc(new Date(q.expiresAt * 1000).toLocaleTimeString())}.</p>`);
+    return;
+  }
+  if (m.type === "pause") {
+    modalEl.innerHTML = modal(`
+      <div class="approval-head"><div class="avatar">${mark()}</div>
+        <div><strong>Pause the limiter for good?</strong><span>This cannot be undone</span></div></div>
+      <p>Nothing will be able to move through it again. Your allowance stays until you revoke it; you would create a new limiter to continue.</p>
+      <div class="actions" style="margin-top:20px">
+        <button class="btn btn-danger" data-action="pause">Pause for good</button>
+        <button class="btn btn-ghost" data-action="dismiss-button">Keep it</button>
+      </div>`);
+  }
 }
 
 function render() {
-  renderAccount();
-  const signedIn = Boolean(state.session);
-  tabsEl.hidden = !signedIn;
-  for (const tab of tabsEl.querySelectorAll(".tab")) tab.classList.toggle("active", tab.dataset.tab === state.tab);
-
-  if (state.busy) {
-    view.innerHTML = `<div class="card"><p class="row"><span class="spinner"></span> ${esc(state.busy)}</p></div>`;
-    return;
-  }
-  if (!signedIn) {
-    view.innerHTML = renderSignIn();
-    return;
-  }
-  if (state.pickWallet) {
-    view.innerHTML = `<div class="card stack"><h2>Connect your wallet</h2>
-      <p>To sign, connect the wallet for ${esc(short(state.session.address))}.</p>${walletChoices()}</div>`;
-    return;
-  }
-  view.innerHTML = { allowance: renderAllowance, shop: renderShop, purchases: renderPurchases }[state.tab]();
+  renderNav();
+  if (!state.session) view.innerHTML = renderHero();
+  else view.innerHTML = { allowance: renderAllowance, shop: renderShop, purchases: renderPurchases }[state.tab]();
+  renderModal();
 }
 
 // -- events --
 
 const actions = {
-  "connect": async (el) => {
-    const choice = el.dataset.uuid === "walletconnect" ? "walletconnect" : wallets().find((w) => w.info.uuid === el.dataset.uuid);
-    state.pickWallet = false;
-    await connect(choice);
-  },
-  "pick-wallet": () => { state.pickWallet = true; render(); },
+  connect: connectWallet,
+  "connect-injected": (el) => { state.modal = null; connectInjected(el.dataset.uuid); },
+  account: () => (state.session ? signOut() : connectWallet()),
   "sign-in": signIn,
-  "sign-out": signOut,
-  "refresh": () => busy("Refreshing…", loadAllowance),
-  "preset": (el) => {
-    const [d, p, n] = el.dataset.preset.split(",");
-    $("#daily").value = d; $("#per").value = p; $("#days").value = n;
+  preset: (el) => {
+    state.preset = Number(el.dataset.index);
+    const p = PRESETS[state.preset];
+    $("#daily").value = p.daily; $("#per").value = p.per; $("#days").value = p.days;
+    for (const b of document.querySelectorAll(".preset")) b.classList.toggle("selected", b === el);
   },
   "create-limiter": createLimiter,
-  "grant": grant,
-  "revoke": revoke,
-  "ask-pause": () => { state.confirmPause = true; render(); },
-  "cancel-pause": () => { state.confirmPause = false; render(); },
-  "pause": pause,
-  "link": linkTelegram,
-  "unlink": unlinkTelegram,
+  method: (el) => {
+    state.method = el.dataset.method;
+    const typed = $("#grant-amount")?.value;
+    render();
+    if (typed !== undefined && $("#grant-amount")) $("#grant-amount").value = typed;
+  },
+  grant,
+  revoke: () => walletOperation("revoke", { method: method() }),
+  "ask-pause": () => { state.modal = { type: "pause" }; render(); },
+  pause,
+  link: () => busy("Getting a code…", async () => { state.linkCode = await api.linkTelegram(); }),
+  unlink: () => busy("Unlinking…", async () => {
+    await api.unlinkTelegram();
+    state.session = { ...state.session, telegramLinked: false };
+    state.linkCode = null;
+  }),
   "quote-tool": (el) => quoteTool(el.dataset.id),
   "search-bitrefill": searchBitrefill,
   "quote-bitrefill": (el) => quoteBitrefill(el.dataset.slug),
-  "buy": buy,
-  "cancel-quote": () => { state.quote = null; render(); },
-  "reveal": (el) => reveal(el.dataset.id),
+  buy,
+  reveal: (el) => busy("Fetching the code…", async () => {
+    state.revealed[el.dataset.id] = (await api.reveal(el.dataset.id)).text || "No code.";
+  }),
+  dismiss: () => { state.modal = null; render(); },
+  "dismiss-button": () => { state.modal = null; render(); },
 };
 
 document.addEventListener("click", (event) => {
   const tab = event.target.closest("[data-tab]");
-  if (tab) {
+  if (tab && !state.modal) {
     state.tab = tab.dataset.tab;
     state.result = null;
     render();
+    window.scrollTo({ top: 0 });
     return;
   }
   const el = event.target.closest("[data-action]");
-  if (el && actions[el.dataset.action] && !state.busy) actions[el.dataset.action](el);
+  if (!el) return;
+  // A click inside a modal's card is not a click on its backdrop.
+  if (el.dataset.action === "dismiss" && event.target !== el) return;
+  if (state.modal?.type === "busy") return;
+  actions[el.dataset.action]?.(el);
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.modal && state.modal.type !== "busy") { state.modal = null; render(); }
+  if (event.key === "Enter" && event.target.id === "bf-query") searchBitrefill();
 });
 
 // -- start --
 
 async function start() {
-  discover(render);
+  discover(() => { if (state.modal?.type === "wallets") renderModal(); });
+  if (appKitConfigured()) watchAppKit(setWallet).catch((error) => toast(explain(error), true));
   if (csrf()) {
     try {
       state.session = await api.session();
