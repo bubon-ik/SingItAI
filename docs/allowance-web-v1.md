@@ -1,0 +1,271 @@
+# Allowance lane on the web — design, v1
+
+Status: draft, 25 September 2026. Builds on [trezor-allowance-v1.md](trezor-allowance-v1.md);
+everything verified there on Base mainnet (T4, T6, T7, T8) is kept.
+
+## Goal
+
+Anyone opens the SingIt web page, connects the wallet they already use —
+Rabby, MetaMask or Phantom, with or without a Trezor or Ledger behind it — sets
+limits, and signs **once**. From then on the agent buys (x402 tools, Bitrefill)
+from the web page or the Telegram bot without asking the wallet again, inside
+those limits. Money stays in the user's wallet until a purchase needs it.
+Revoking is one more signature.
+
+Nothing is installed on the user's computer. The tunnel, sidecar and companion
+remain an option for owners who want the limiter checked on their own machine
+before their device shows anything (see "Two signing paths").
+
+## What stays and what changes
+
+| Part | v1 (owner only, Telegram) | Web v1 (everyone) |
+| --- | --- | --- |
+| Limiter contract | `AgentAllowance`, one per user, deployed by us | unchanged |
+| Agent key, x402 payments, Bitrefill x402, float, watcher | as verified on mainnet | unchanged |
+| Who is an owner | `SIGN402_ALLOWANCE_OWNERS` in the server env | anyone who proves an address with Sign-In with Ethereum |
+| How the owner signs the grant | broker → tunnel → companion → sidecar → Trezor Suite | the page hands the transaction to the connected wallet |
+| Revoke | same device path | the same, from the wallet; also works from revoke.cash or any wallet without us |
+| Where purchases start | bot | bot and web page, one account |
+
+## Two signing paths
+
+1. **Wallet (default).** The page builds `approve(limiter, amount)` — or a
+   gasless `permit`, below — and the user's wallet shows and signs it. The
+   wallet, and the hardware device behind it if any, displays the spender and
+   amount. The limiter address comes from our server.
+2. **Companion (optional, advanced).** The v1 path. The owner's own machine
+   checks that the spender is the tested limiter owned by this address before
+   the device shows anything, so even a compromised server cannot substitute a
+   different spender. Needs the macOS launch agents
+   (`trezor-sidecar/macos/install-launch-agents.sh`) and, for other users, a
+   packaged app and an HTTPS broker endpoint instead of SSH. Not in web v1.
+
+## Accounts and identity
+
+- **Sign-In with Ethereum (EIP-4361).** The server issues a nonce (single use,
+  5 minutes); the wallet signs the message; the server checks it and opens a
+  session bound to that address. Domain and URI are the page's own; chain id
+  8453. Session: HttpOnly, Secure, SameSite=Strict cookie, 12 hours, rotated on
+  sign-in.
+- **One account, several identities.** An account holds one owner address and,
+  optionally, a Telegram id. Web-only accounts get the user id `wallet:0x…`
+  (checksummed); the existing Telegram accounts keep theirs.
+- **Linking Telegram.** Signed in on the web, the user presses "Link Telegram";
+  the page shows a one-time code (6 digits, 10 minutes); the user sends
+  `/link <code>` to the bot. The bot account and the address become one
+  account; watcher notices go to Telegram from then on.
+- **Changing the owner address** means a new limiter: the address is
+  immutable in the contract. The old one keeps its allowance until revoked, and
+  the page says so (as `/allowance_setup` already does).
+- **Smart-contract wallets** (Coinbase Smart Wallet, Safe) need ERC-1271 /
+  ERC-6492 signature checks and send approvals through their own batching. Not
+  in v1; the page refuses them with a clear message.
+
+## Flows
+
+### 1. Connect and sign in
+
+Wallet discovery by EIP-6963 (wagmi + viem, or Reown AppKit). If the wallet is
+not on Base, ask it to switch (`wallet_switchEthereumChain`, 8453). Phantom is
+used in its EVM mode. Then SIWE.
+
+### 2. Limits and the limiter
+
+The user picks a daily cap, a per-purchase cap and a lifetime (presets:
+$5/$1/30 days, $20/$5/30 days, $100/$10/90 days; custom within the server's
+ceilings). The page explains in one line that nothing leaves the wallet yet.
+
+"Create my limiter" deploys `AgentAllowance(USDC, owner, agent, guardian,
+caps, expiry)` from the user's agent key, gas paid by our gas funder — the v1
+`setup`, unchanged: code checked against the tested artifact, every immutable
+read back, source published to Sourcify. The page shows the limiter with a
+Blockscout link and the caps read from the contract, not from our database.
+
+### 3. Grant: approve or permit
+
+The page offers the amount (default: one day's cap; ceiling from the server)
+and one of two ways, chosen by what the wallet holds:
+
+**a. `approve` (the user has ETH on Base).** The server returns the exact
+transaction; the page sends it with `eth_sendTransaction`:
+
+```json
+{ "from": "<owner>", "to": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  "data": "0x095ea7b3<limiter><amount>", "value": "0x0", "chainId": "0x2105" }
+```
+
+Rabby and MetaMask show it as "approve / spending cap: N USDC to 0x…". The
+page then reports the transaction hash; the server verifies it (below).
+
+**b. `permit` (no ETH needed).** USDC on Base supports EIP-2612 (checked on
+chain: name "USD Coin", version "2", domain separator
+`0x02fa7265…834f`). The page asks the wallet for `eth_signTypedData_v4`:
+
+```json
+{ "domain": { "name": "USD Coin", "version": "2", "chainId": 8453,
+              "verifyingContract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" },
+  "primaryType": "Permit",
+  "message": { "owner": "<owner>", "spender": "<limiter>", "value": "<amount>",
+               "nonce": "<USDC.nonces(owner)>", "deadline": "<now + 15 min>" } }
+```
+
+The server submits `permit(...)` from the gas funder and the allowance appears
+without the user paying gas. Wallets warn about permits because they are a
+common phishing vector; the page says, before asking, exactly what the wallet
+will show and why. Hardware wallets display the typed fields (owner, spender,
+value, deadline). Default is `approve` when the wallet holds at least 0.00005
+ETH on Base, otherwise `permit`.
+
+### 4. Purchases
+
+Unchanged from v1 and the same for the web page and the bot: the gateway picks
+the lane, the limiter funds the agent (float refill or exact), the agent pays
+by x402, settlement is read from the chain. The web shop calls the same
+Bitrefill quote → confirm → buy sequence; the confirmation screen shows
+product, denomination, price, network and recipient before anything is paid.
+
+### 5. Revoke and pause
+
+- **Revoke:** `approve(limiter, 0)` from the wallet, or `permit` with value 0
+  (gasless). When it is mined and nothing stays granted, the agent's float goes
+  back to the owner (as in v1, 254cef8).
+- **Pause:** permanent; the owner can call `pause()` from the wallet, and the
+  guardian (our watcher) pauses on the v1 anomalies. After a pause, "create a
+  new limiter" is the only way forward.
+- The page always links to the limiter on revoke.cash, so users know they can
+  revoke without us.
+
+## API
+
+Base path `/web/v1`, JSON, session cookie from SIWE, CSRF header
+`X-SingIt-CSRF` on every POST. Public through the reverse proxy with TLS; CORS
+only for the page's origin. Amounts are strings of USDC atomic units (6
+decimals); every response that changes something carries `state`.
+
+| Method and path | Body | Returns |
+| --- | --- | --- |
+| `POST /auth/nonce` | `{address}` | `{nonce, message}` — the exact EIP-4361 text to sign |
+| `POST /auth/verify` | `{message, signature}` | session cookie, `{account, address, telegramLinked}` |
+| `POST /auth/logout` | — | — |
+| `GET /allowance` | — | the v1 status: `limiter, owner, agent, guardian, dailyCapAtomic, perPurchaseCapAtomic, expiry, paused, allowanceAtomic, remainingTodayAtomic, floatAtomic, ownerUsdcAtomic, source, state, operations[]`, plus `alerts[]` and `ownerEthWei` |
+| `POST /allowance/setup` | `{dailyCap, perPurchaseCap, days}` | `{limiter, deployTx, source, state}` |
+| `POST /allowance/grant/prepare` | `{amount, method: "approve" \| "permit"}` | `{operation, method, tx}` or `{operation, method, typedData}`; expires in 15 minutes |
+| `POST /allowance/grant/submit` | `{operation, txHash}` or `{operation, signature}` | `{operation, state}` |
+| `POST /allowance/revoke/prepare` | `{method, limiter?}` | as grant, amount 0 |
+| `POST /allowance/revoke/submit` | as grant | `{operation, state}` |
+| `GET /allowance/operations/{id}` | — | `{state, txHash, detail}`; the page polls every 2 s |
+| `POST /link/telegram` | — | `{code, expiresAt}` |
+| `GET /purchases` | — | the v1 purchase history (no codes) |
+| `POST /shop/...` | — | the Bitrefill quote / buy / reveal of v1, for the web account |
+
+Operation states: `PREPARED → SUBMITTED → DONE | FAILED | EXPIRED`. The server
+moves them on by reading the chain, not by trusting the page, and a new
+prepare first moves the open ones on (the T8 lesson, 2ba7762).
+
+## What the server verifies
+
+Before `prepare`:
+- the session's address is the limiter's `owner` on chain;
+- the limiter runs the tested code (immutables masked), is neither paused nor
+  expired, and its `agent` and `guardian` are ours for this account;
+- the amount is within the grant ceiling.
+
+On `submit` with a transaction hash:
+- the transaction is from the owner, to USDC, with exactly the prepared
+  `approve(limiter, amount)` calldata, on chain 8453;
+- the receipt succeeded; the allowance reads back (waiting out a lagging node
+  only while fresh).
+
+On `submit` with a permit signature:
+- it recovers to the owner over exactly the prepared typed data, the nonce is
+  current and the deadline in the future;
+- only then the gas funder sends `permit`; then as above.
+
+A hash or signature for anything else is refused and never broadcast.
+
+## What the user sees
+
+Screens, in order: Connect → Sign in → Limits → Create limiter → Grant →
+Dashboard. The dashboard shows: allowance left, spent today of the daily cap,
+the agent's float, recent spends with transaction links, watcher alerts, and
+the actions Grant more / Revoke / Pause / Link Telegram / Shop.
+
+Rules for the copy:
+- Addresses are shown the way wallets show them, `0x4F35…a46B`, with the full
+  address one tap away, so the user can match the wallet prompt.
+- Before every wallet prompt, one sentence saying what the wallet will show:
+  "Your wallet will ask you to approve up to 10 USDC for 0x4F35…a46B."
+- Every limit is shown as read from the contract, with its Blockscout link.
+- Never show redemption codes except on explicit "Reveal", once, as in v1.
+
+Errors the page must name: wrong network; not enough USDC for the grant (allowed
+but explained); no ETH for approve (offer permit); rejected in the wallet;
+reverted on chain; limiter paused or expired (offer a new one); prepare expired;
+rate limited.
+
+## Security model
+
+What changes from v1: in the wallet path **the spender address comes from our
+server**. A compromised server could hand the page a malicious spender. Limits
+on that:
+- the wallet shows the spender; the page shows the same short address with a
+  link to its verified code and read-only values (owner, agent, caps) on
+  Blockscout — a user who checks sees a mismatch;
+- grants are small by default (one day's cap) and capped server-side;
+- the watcher's rule 1 (a spend to anyone but the agent pauses at once) runs
+  against every limiter;
+- the page bundle is served with Subresource Integrity and a strict CSP; a
+  later step is an IPFS-pinned build whose hash is published;
+- the companion path stays available for owners who want the local check.
+
+Unchanged from v1: the user's keys never touch our server; the limiter caps
+what any compromise of the agent key or the server can take per day and per
+purchase; revoke works without us.
+
+## Cost and abuse
+
+Each account costs us gas: one limiter deployment (≈0.00001 ETH today), agent
+gas top-ups, and a permit submission per gasless grant or revoke. Limits:
+- one active limiter per address; a new one only after the old is revoked,
+  paused or expired, at most three per address per 30 days;
+- setup requires at least 1 USDC at the owner address (a cheap sybil filter);
+- per-IP and per-address rate limits on `auth` and `setup`;
+- a global daily deployment budget with an alert when it is reached;
+- the watcher gets its own RPC without the 10-block `eth_getLogs` limit.
+
+## Data model
+
+New tables beside the v1 `allowance.db`:
+- `accounts(account_id, owner_address, telegram_user_id NULL, created_at)`;
+- `auth_nonces(nonce, address, expires_at, used_at)`;
+- `sessions(session_hash, account_id, address, expires_at)` — the cookie holds
+  the token, the table only its hash;
+- `link_codes(code_hash, account_id, expires_at, used_at)`.
+
+`operations` gains `method` (`device` | `approve` | `permit`) and
+`prepared_json`. `SIGN402_ALLOWANCE_OWNERS` stays as an allowlist during the
+rollout and is removed at general availability.
+
+## Rollout
+
+1. Backend: SIWE, accounts, sessions, status and setup for web accounts,
+   behind `SIGN402_WEB_ENABLED` and an address allowlist.
+2. `approve` prepare/submit with server-side verification.
+3. `permit` for grant and revoke.
+4. Web shop (x402 tools, Bitrefill) on the web account.
+5. Link Telegram.
+6. The page (owner's design), then a private beta, then general availability
+   with the abuse limits on.
+
+Each step with unit tests and a mainnet check recorded in
+[trezor-allowance-checks.md](trezor-allowance-checks.md), as T4–T8 were.
+
+## Open questions
+
+- Default grant: one day's cap, or the whole lifetime budget? Smaller is safer,
+  larger means fewer signatures.
+- Should the web page also allow `increaseAllowance`-style top-ups, or always a
+  fresh approve of the new total?
+- Service fee on Bitrefill x402 orders, still not collected (open since v1).
+- Phantom's EVM support on Base is assumed; test it before promising it.
+- Solana users (Phantom's default chain) need a different lane; out of scope.
