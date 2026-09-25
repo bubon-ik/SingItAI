@@ -73,6 +73,14 @@ class PurchaseHistoryTests(unittest.TestCase):
         item["receipt"]["txId"] = "https://merchant.invalid/bearer"
         self.assertEqual(purchase_summary(item)["transactionUrl"], "")
 
+    def test_an_allowance_lane_bitrefill_order_can_show_its_code(self):
+        # Its code is fetched from Bitrefill once on request; nothing is stored to reveal.
+        event = {"ok": True, "mode": "bitrefill_x402_allowance", "invoiceId": "inv-9", "productName": "Hediyen Kart",
+                 "txId": "0x" + "b" * 64, "telegramText": "Bought."}
+        summary = purchase_summary(event)
+        self.assertEqual((summary["name"], summary["isBitrefill"], summary["canReveal"]), ("Hediyen Kart", True, True))
+        self.assertFalse(purchase_summary({"ok": True, "mode": "paid_tool", "txId": "0x" + "c" * 64})["canReveal"])
+
     def test_duplicates_replace_instead_of_creating_another_receipt(self):
         for number in (0, 1, 0):
             self.store.write("alice", order(number))

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SingIt — Agent allowance</title>
+<meta name="description" content="Give your AI agent a spending limit from your own wallet. Your money stays with you; the agent buys inside the limit.">
+<meta name="robots" content="noindex">
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://api.fontshare.com/v2/css?f[]=clash-display@500,600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../">
+    <img src="../assets/favicon.svg" alt="" width="28" height="28">
+    <span>SingIt</span>
+    <span class="brand-sub">Agent allowance</span>
+  </a>
+  <div id="account" class="account"></div>
+</header>
+
+<main class="shell">
+  <nav id="tabs" class="tabs" hidden>
+    <button type="button" data-tab="allowance" class="tab">Allowance</button>
+    <button type="button" data-tab="shop" class="tab">Shop</button>
+    <button type="button" data-tab="purchases" class="tab">Purchases</button>
+  </nav>
+  <div id="view" aria-live="polite"></div>
+</main>
+
+<div id="toast" class="toast" role="status" hidden></div>
+
+<script src="config.js"></script>
+<script type="module" src="main.js"></script>
+</body>
+</html>

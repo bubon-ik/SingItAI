@@ -25,7 +25,8 @@ def purchase_summary(event):
     # Telegram result text, buyer email, redemption or fulfillment credentials.
     receipt = event.get("receipt") if isinstance(event.get("receipt"), dict) else {}
     provider = event.get("bitrefill") if isinstance(event.get("bitrefill"), dict) else {}
-    bitrefill = "bitrefill" in event and bool(event.get("quoteId"))
+    allowance_order = event.get("mode") == "bitrefill_x402_allowance"  # its code is fetched once from Bitrefill
+    bitrefill = ("bitrefill" in event and bool(event.get("quoteId"))) or allowance_order
     name = str(receipt.get("name") or event.get("productName") or provider.get("productName")
                or event.get("toolName") or event.get("toolId") or ("Bitrefill order" if bitrefill else "Purchase"))[:120]
     network = str(receipt.get("network") or event.get("network") or "Base")
@@ -43,7 +44,8 @@ def purchase_summary(event):
             "status": str(receipt.get("status") or provider.get("status") or "Completed")[:64],
             "recordedAt": str(event.get("_recordedAt") or ""), "transactionUrl": url,
             "isBitrefill": bitrefill,
-            "canReveal": bitrefill and bool(event.get("encryptedFulfillmentToken") or event.get("fulfillmentToken"))}
+            "canReveal": allowance_order or (bitrefill and bool(event.get("encryptedFulfillmentToken")
+                                                              or event.get("fulfillmentToken")))}
 
 
 class UserPurchaseStore:
