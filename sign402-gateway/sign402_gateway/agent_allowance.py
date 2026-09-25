@@ -650,8 +650,11 @@ class AllowanceStore:
             db.execute("INSERT INTO alerts (user_id, severity, text, created_at) VALUES (?, ?, ?, ?)",
                        (user_id, severity, text, now))
 
-    def limiters_since(self, user_id: str, since: int) -> int:
+    def limiters_since(self, user_id: str | None, since: int) -> int:
+        """Limiters created since `since` for this user, or for everyone with None."""
         with self._db() as db:
+            if user_id is None:
+                return db.execute("SELECT COUNT(*) FROM limiters WHERE created_at >= ?", (since,)).fetchone()[0]
             return db.execute("SELECT COUNT(*) FROM limiters WHERE user_id = ? AND created_at >= ?",
                               (user_id, since)).fetchone()[0]
 

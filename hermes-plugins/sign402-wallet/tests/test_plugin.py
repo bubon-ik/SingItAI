@@ -5584,6 +5584,7 @@ class AllowanceCommandTests(unittest.TestCase):
             ("/allowance_bitrefill steam", "bitrefill-search", {"query": "steam", "country": ""}),
             ("/allowance_quote amazon_de-germany 5", "bitrefill-quote", {"productId": "amazon_de-germany", "package": "5"}),
             ("/allowance_buy aq_123", "bitrefill-buy", {"quoteId": "aq_123"}),
+            ("/link 123456", "link", {"code": "123456"}),
         ]
         for text, action, payload in cases:
             with self.subTest(text=text):
@@ -5594,11 +5595,11 @@ class AllowanceCommandTests(unittest.TestCase):
 
     def test_arguments_that_do_not_parse_print_usage_and_ask_nothing(self):
         for text in ("/allowance_setup 100 10", "/allowance_grant", "/allowance_grant 1 2", "/allowance_pause now",
-                     "/allowance_quote amazon", "/allowance_buy", "/allowance_bitrefill"):
+                     "/allowance_quote amazon", "/allowance_buy", "/allowance_bitrefill", "/link", "/link 1 2"):
             with self.subTest(text=text):
                 client = self.Client()
                 reply = self.send(text, client)
-                self.assertTrue(reply.startswith("Usage: /allowance"))
+                self.assertTrue(reply.startswith(("Usage: /allowance", "Usage: /link")))
                 self.assertEqual(client.allowance_calls, [])
 
     def test_a_quote_ends_with_the_command_that_buys_it(self):

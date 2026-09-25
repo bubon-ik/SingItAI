@@ -34,6 +34,7 @@ WEB_DB_ENV = "SIGN402_WEB_DB"
 DEFAULT_WEB_DB = "~/.sign402/web.db"
 CHAIN_ID = 8453
 NONCE_SECONDS = 300
+LINK_CODE_SECONDS = 600
 SESSION_SECONDS = 12 * 3600
 STATEMENT = "Sign in to SingIt. This signature does not move funds or approve any spending."
 ACCOUNT_PREFIX = "wallet:"
@@ -85,6 +86,12 @@ class WebAccountStore:
                     expires_at INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS sessions_by_expiry ON sessions(expires_at);
+                CREATE TABLE IF NOT EXISTS link_codes (
+                    code_hash TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    used_at INTEGER
+                );
                 """
             )
         try:
@@ -138,6 +145,51 @@ class WebAccountStore:
             return None
         row = self.account(str(user_id))
         return row["owner_address"] if row else None
+
+    # -- linking a Telegram account --
+
+    def new_link_code(self, account_id: str, now: int) -> str:
+        """A 6-digit one-time code for /link in the bot; earlier unused codes of this account die."""
+        with self._lock, self._db() as db:
+            db.execute("DELETE FROM link_codes WHERE expires_at < ? OR (account_id = ? AND used_at IS NULL)",
+                       (now, account_id))
+            while True:
+                code = f"{secrets.randbelow(1_000_000):06d}"
+                if db.execute("SELECT 1 FROM link_codes WHERE code_hash = ?", (_hash(code),)).fetchone() is None:
+                    break
+            db.execute("INSERT INTO link_codes(code_hash, account_id, expires_at) VALUES (?, ?, ?)",
+                       (_hash(code), account_id, now + LINK_CODE_SECONDS))
+        return code
+
+    def link_telegram(self, code: str, telegram_user_id: str, now: int) -> str | None:
+        """Use a code: the Telegram id joins its account (leaving any other). None if unknown, used or expired."""
+        code = str(code or "").strip()
+        if len(code) != 6 or not code.isdigit():
+            return None
+        with self._lock, self._db() as db:
+            row = db.execute("SELECT * FROM link_codes WHERE code_hash = ? AND used_at IS NULL AND expires_at >= ?",
+                             (_hash(code), now)).fetchone()
+            if row is None:
+                return None
+            db.execute("UPDATE link_codes SET used_at = ? WHERE code_hash = ?", (now, row["code_hash"]))
+            db.execute("UPDATE accounts SET telegram_user_id = NULL WHERE telegram_user_id = ?", (str(telegram_user_id),))
+            db.execute("UPDATE accounts SET telegram_user_id = ? WHERE account_id = ?",
+                       (str(telegram_user_id), row["account_id"]))
+            return row["account_id"]
+
+    def unlink_telegram(self, account_id: str) -> None:
+        with self._db() as db:
+            db.execute("UPDATE accounts SET telegram_user_id = NULL WHERE account_id = ?", (account_id,))
+
+    def account_for_telegram(self, telegram_user_id: str) -> str | None:
+        with self._db() as db:
+            row = db.execute("SELECT account_id FROM accounts WHERE telegram_user_id = ?",
+                             (str(telegram_user_id),)).fetchone()
+        return row["account_id"] if row else None
+
+    def telegram_for(self, account_id: str) -> str | None:
+        row = self.account(account_id)
+        return row["telegram_user_id"] if row else None
 
     # -- sessions --
 

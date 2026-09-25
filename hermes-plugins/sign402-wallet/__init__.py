@@ -108,6 +108,7 @@ _TELEGRAM_PUBLIC_COMMAND_STARTED_MESSAGES = {
     "allowance-bitrefill": "Searching Bitrefill…",
     "allowance-quote": "Asking Bitrefill for the price…",
     "allowance-buy": "Buying from your Trezor allowance…",
+    "link": "Linking your web account…",
 }
 # Commands of the Trezor allowance lane, and the usage each prints when its
 # arguments do not parse. They are not in the public menu: the lane is enabled
@@ -121,6 +122,7 @@ _ALLOWANCE_USAGE = {
     "allowance-bitrefill": "Usage: /allowance_bitrefill <search words> [country], e.g. /allowance_bitrefill amazon DE",
     "allowance-quote": "Usage: /allowance_quote <product id> <package>, e.g. /allowance_quote amazon_de-germany 5",
     "allowance-buy": "Usage: /allowance_buy <quote code>",
+    "link": "Usage: /link <6-digit code from the SingIt web page>",
 }
 _TELEGRAM_PUBLIC_COMMAND_MENU = (
     {"command": "shop", "description": "Gift cards, eSIMs and top-ups"},
@@ -5173,6 +5175,8 @@ def _allowance_payload(command: str, raw_args: str) -> tuple[str, dict] | None:
         return "bitrefill-quote", {"productId": args[0], "package": args[1]}
     if command == "allowance-buy" and len(args) == 1:
         return "bitrefill-buy", {"quoteId": args[0]}
+    if command == "link" and len(args) == 1:
+        return "link", {"code": args[0]}
     return None
 
 

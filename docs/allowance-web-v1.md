@@ -306,6 +306,27 @@ counts as done. Permits cost us gas, so each account may submit six a day.
 Rehearsed on a Base mainnet fork against the real USDC contract: permit grant
 2 USDC → allowance 2, permit revoke → 0, the user's ETH untouched.
 
+**Steps 4 and 5 are built.** The shop runs in the gateway
+(`sign402_gateway/web_internal.py`) behind `/internal/web/*`, which answers only
+loopback callers presenting `SIGN402_WEB_INTERNAL_TOKEN`; the web API forwards
+`/shop/*` and `/purchases` there as the signed-in account (the page cannot name
+another). A web account pays only from its own limiter. Tools are bought by
+quote → buy: the quote fixes price and recipient, and a seller asking more, or
+asking to be paid elsewhere, at buy time is refused with nothing paid. The
+page's "Buy" on a quote is the human approval spending memory may ask for
+(Bitrefill too), so no iMessage is involved; memory blocks, rate limits and the
+purchase pause still apply. A web account's gateway spending limits are set
+from its limiter's caps (under the operator's hard ceilings), because the page
+has no `/set_limits` and a second set of limits the user never chose would
+refuse what their limiter allows. History and the one-time code reveal are per
+account. Linking: `POST /link/telegram` returns a 6-digit code (10 minutes, a
+new one kills the old), `/link <code>` in the bot joins the chat to the account
+(5 tries per 10 minutes), after which the bot's allowance commands, purchases
+and `/limits` use the web account's limiter and agent, the chat keeps its own
+purchase history, and watcher notices go to the chat. Smart-contract wallets
+are refused at sign-in (EIP-7702 accounts are not), and at most
+`SIGN402_WEB_MAX_DEPLOYS_PER_DAY` (50) limiters are deployed for everyone per day.
+
 Each step with unit tests and a mainnet check recorded in
 [trezor-allowance-checks.md](trezor-allowance-checks.md), as T4–T8 were.
 

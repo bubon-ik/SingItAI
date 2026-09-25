@@ -226,6 +226,8 @@ class FakeEvm:
         return read()
 
     def code(self, address):
+        if self.limiter is None or str(address).lower() != self.limiter.lower():
+            return "0x"  # wallets and other addresses hold no code
         if self.code_override is not None:
             return self.code_override
         return self.artifact.deployed_bytecode if self.deployed else "0x"

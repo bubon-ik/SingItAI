@@ -51,7 +51,7 @@ _SPEND_LIMIT_PREFIX = "Raise your spending limit to continue."
 # user; unexpected failures there are already replaced by a fixed sentence.
 _ALLOWANCE_PATH_PREFIX = "/agent/allowance/"
 _ALLOWANCE_ACTIONS = frozenset({
-    "status", "setup", "grant", "revoke", "pause", "bitrefill-search", "bitrefill-quote", "bitrefill-buy",
+    "status", "setup", "grant", "revoke", "pause", "bitrefill-search", "bitrefill-quote", "bitrefill-buy", "link",
 })
 _SPEND_LIMIT_HINT = (
     "Send /limits to see your current limits, or "

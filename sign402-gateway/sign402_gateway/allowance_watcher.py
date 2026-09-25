@@ -225,9 +225,19 @@ def main() -> int:
         logger.error("allowance watcher: the lane is off (SIGN402_ALLOWANCE_ENABLED != 1)")
         return 1
     token = str(values.get(BOT_TOKEN_ENV, "")).strip()
+    notify: Callable[[str, str], None] | None = TelegramNotifier(token) if token else None
+    if notify is not None and values.get("SIGN402_WEB_ENABLED") == "1":
+        from pathlib import Path
+
+        from .web_accounts import DEFAULT_WEB_DB, WEB_DB_ENV, WebAccountStore
+
+        accounts = WebAccountStore(Path(str(values.get(WEB_DB_ENV, "") or DEFAULT_WEB_DB)).expanduser())
+        telegram = notify
+        # A web account's notices go to the Telegram chat linked to it, if any.
+        notify = lambda user, text: telegram(accounts.telegram_for(user) or user, text)  # noqa: E731
     watcher = AllowanceWatcher(
         service,
-        notify=TelegramNotifier(token) if token else None,
+        notify=notify,
         max_spends_per_hour=int(values.get(MAX_SPENDS_ENV, DEFAULT_MAX_SPENDS)),
     )
     interval = int(values.get(INTERVAL_ENV, DEFAULT_INTERVAL))
