@@ -293,8 +293,18 @@ states PREPARED, SUBMITTED and EXPIRED and a `method` column; an existing v1
 table is rebuilt with every row kept (checked against the production schema).
 Rehearsed on a Base mainnet fork with real signed transactions: grant 3 USDC →
 DONE, allowance 3 on chain; an approve to another spender → FAILED, not counted;
-revoke → DONE, allowance 0. `method: "permit"` answers `method_unavailable`
-until step 3.
+revoke → DONE, allowance 0.
+
+**Step 3 is built** (`method: "permit"` on prepare; `{operation, signature}` on
+submit). Prepare reads `USDC.nonces(owner)` and returns EIP-2612 typed data with
+a 15-minute deadline. Submit recovers the signer over exactly that typed data
+(it must be the owner), checks the nonce is still current and the deadline in
+the future, and only then sends `permit(owner, limiter, value, deadline, v, r,
+s)` from the gas funder. If someone else submits the same signed permit first,
+ours reverts but the allowance already reads what the owner signed, and that
+counts as done. Permits cost us gas, so each account may submit six a day.
+Rehearsed on a Base mainnet fork against the real USDC contract: permit grant
+2 USDC → allowance 2, permit revoke → 0, the user's ETH untouched.
 
 Each step with unit tests and a mainnet check recorded in
 [trezor-allowance-checks.md](trezor-allowance-checks.md), as T4–T8 were.

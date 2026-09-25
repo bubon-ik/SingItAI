@@ -272,6 +272,12 @@ class WalletChain(DeviceLaneEvm):
         self.txs = {}
         self.receipts = {}
         self.block_time = NOW
+        self.nonce = 4
+
+    def call_word(self, to, data):
+        if to == aa.USDC and data.startswith(aa.selector("nonces(address)")):
+            return self.nonce
+        return super().call_word(to, data)
 
     def call(self, method, params):
         if method == "eth_getTransactionByHash":
@@ -446,9 +452,8 @@ class WalletRoutesTests(WebApiTests):
         token, csrf, body = self.sign_in()
         self.call("POST", "/allowance/setup", {"dailyCap": "5", "perPurchaseCap": "1", "days": "30"},
                   token=token, csrf=csrf)
-        with self.assertRaises(wa.WebError) as raised:
-            self.call("POST", "/allowance/grant/prepare", {"amount": "5", "method": "permit"}, token=token, csrf=csrf)
-        self.assertEqual(raised.exception.code, "method_unavailable")
+        with self.assertRaises(aa.AllowanceError):
+            self.call("POST", "/allowance/grant/prepare", {"amount": "5", "method": "blind"}, token=token, csrf=csrf)
         with self.assertRaises(WebAuthError):
             self.call("POST", "/allowance/grant/prepare", {"amount": "5"}, token=token)
         _, prepared, _ = self.call("POST", "/allowance/grant/prepare", {"amount": "5"}, token=token, csrf=csrf)
@@ -501,3 +506,94 @@ class OperationsMigrationTests(unittest.TestCase):
             indexes = sqlite3.connect(path).execute(
                 "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'operations'").fetchall()
             self.assertIn(("operations_by_user",), indexes)
+
+
+def sign_permit(account, typed):
+    from eth_account.messages import encode_typed_data
+
+    message = {k: (int(v) if k in ("value", "nonce", "deadline") else v) for k, v in typed["message"].items()}
+    signable = encode_typed_data(full_message={**typed, "message": message})
+    return Account.sign_message(signable, account.key).signature.to_0x_hex()
+
+
+class PermitTests(WalletLaneTests):
+    """Grant and revoke without gas: the wallet signs EIP-2612, we send it."""
+
+    def permit(self, kind="GRANT", amount="5", signer=None):
+        prepared = self.service.prepare_wallet(self.USER, kind, amount=amount, method="permit")
+        signature = sign_permit(signer or self.owner, prepared["typedData"])
+        return prepared, signature
+
+    def test_the_wallet_gets_usdc_permit_typed_data_with_the_current_nonce(self):
+        prepared, _ = self.permit()
+        typed = prepared["typedData"]
+        self.assertEqual(typed["domain"], {"name": "USD Coin", "version": "2", "chainId": 8453,
+                                           "verifyingContract": aa.USDC})
+        self.assertEqual(typed["message"], {"owner": self.owner.address, "spender": self.limiter, "value": "5000000",
+                                            "nonce": "4", "deadline": str(NOW + aa.WALLET_PREPARE_SECONDS)})
+        self.assertNotIn("tx", prepared)
+        self.assertIn("costs you no gas", prepared["walletShows"])
+
+    def test_a_signed_permit_is_sent_by_us_and_read_back(self):
+        prepared, signature = self.permit()
+        sent = len(self.evm.sent)
+        op = self.service.submit_permit(self.USER, prepared["operation"], signature)
+        tx = self.evm.sent[sent]
+        self.assertEqual((tx["to"], tx["value"]), (aa.USDC, 0))
+        raw = bytes.fromhex(signature[2:])
+        v = raw[64] if raw[64] >= 27 else raw[64] + 27
+        self.assertEqual(tx["data"], aa.encode_call(
+            "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)", self.owner.address, self.limiter,
+            5_000_000, NOW + aa.WALLET_PREPARE_SECONDS, v, int.from_bytes(raw[:32], "big"),
+            int.from_bytes(raw[32:64], "big")))
+        self.assertEqual(op["state"], "BROADCAST")
+        self.evm.receipts[op["txHash"]] = {"status": "0x1", "blockNumber": "0x10"}
+        self.evm.allowances[self.limiter] = 5_000_000
+        self.assertEqual(self.service.operation(self.USER, prepared["operation"])["state"], "DONE")
+
+    def test_a_permit_someone_else_sent_first_still_counts(self):
+        prepared, signature = self.permit()
+        op = self.service.submit_permit(self.USER, prepared["operation"], signature)
+        self.evm.receipts[op["txHash"]] = {"status": "0x0", "blockNumber": "0x10"}
+        self.evm.allowances[self.limiter] = 5_000_000
+        self.assertEqual(self.service.operation(self.USER, prepared["operation"])["state"], "DONE")
+
+    def test_what_is_never_sent(self):
+        sent = len(self.evm.sent)
+        prepared, signature = self.permit(signer=Account.create())
+        with self.assertRaises(aa.AllowanceError) as raised:
+            self.service.submit_permit(self.USER, prepared["operation"], signature)
+        self.assertIn("not signed by your wallet", str(raised.exception))
+
+        prepared, signature = self.permit()
+        self.evm.nonce = 5  # the wallet used this nonce for another permit meanwhile
+        with self.assertRaises(aa.AllowanceError) as raised:
+            self.service.submit_permit(self.USER, prepared["operation"], signature)
+        self.assertIn("nonce", str(raised.exception))
+
+        self.evm.nonce = 4
+        prepared, signature = self.permit()
+        self.clock[0] += aa.WALLET_PREPARE_SECONDS
+        with self.assertRaises(aa.AllowanceError):
+            self.service.submit_permit(self.USER, prepared["operation"], signature)
+        self.assertEqual(self.service.operation(self.USER, prepared["operation"])["state"], "EXPIRED")
+
+        with self.assertRaises(aa.AllowanceError):
+            self.service.submit_permit(self.USER, prepared["operation"], "0x1234")
+        self.assertEqual(len(self.evm.sent), sent)
+
+    def test_approve_and_permit_requests_take_only_their_own_answer(self):
+        prepared, signature = self.permit()
+        with self.assertRaises(aa.AllowanceError):
+            self.service.submit_wallet(self.USER, prepared["operation"], tx_hash(1))
+        approve = self.service.prepare_wallet(self.USER, "GRANT", amount="5")
+        with self.assertRaises(aa.AllowanceError):
+            self.service.submit_permit(self.USER, approve["operation"], signature)
+
+    def test_a_gasless_revoke(self):
+        prepared, signature = self.permit(kind="REVOKE", amount=None)
+        self.assertEqual(prepared["typedData"]["message"]["value"], "0")
+        op = self.service.submit_permit(self.USER, prepared["operation"], signature)
+        self.evm.receipts[op["txHash"]] = {"status": "0x1", "blockNumber": "0x10"}
+        self.evm.allowances[self.limiter] = 0
+        self.assertEqual(self.service.operation(self.USER, prepared["operation"])["state"], "DONE")

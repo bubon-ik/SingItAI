@@ -331,6 +331,40 @@ class Artifact:
 
 # --- storage ---------------------------------------------------------------------------
 
+PERMIT_TYPES = {
+    "EIP712Domain": [
+        {"name": "name", "type": "string"}, {"name": "version", "type": "string"},
+        {"name": "chainId", "type": "uint256"}, {"name": "verifyingContract", "type": "address"},
+    ],
+    "Permit": [
+        {"name": "owner", "type": "address"}, {"name": "spender", "type": "address"},
+        {"name": "value", "type": "uint256"}, {"name": "nonce", "type": "uint256"},
+        {"name": "deadline", "type": "uint256"},
+    ],
+}
+
+
+def permit_typed_data(owner: str, spender: str, value: int, nonce: int, deadline: int) -> dict[str, Any]:
+    """EIP-2612 for USDC on Base (FiatToken v2: name "USD Coin", version "2"), for eth_signTypedData_v4."""
+    return {
+        "types": PERMIT_TYPES,
+        "primaryType": "Permit",
+        "domain": {"name": "USD Coin", "version": "2", "chainId": BASE_CHAIN_ID, "verifyingContract": USDC},
+        "message": {"owner": to_checksum_address(owner), "spender": to_checksum_address(spender),
+                    "value": str(value), "nonce": str(nonce), "deadline": str(deadline)},
+    }
+
+
+def permit_signer(typed: Mapping[str, Any], signature: str) -> str:
+    from eth_account.messages import encode_typed_data
+
+    message = dict(typed["message"])
+    for field in ("value", "nonce", "deadline"):
+        message[field] = int(message[field])
+    signable = encode_typed_data(full_message={**typed, "message": message})
+    return Account.recover_message(signable, signature=signature)
+
+
 OPERATIONS_SQL = """
 CREATE TABLE {name} (
     op_id TEXT PRIMARY KEY,
@@ -345,7 +379,8 @@ CREATE TABLE {name} (
     detail TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    method TEXT NOT NULL DEFAULT 'device' CHECK(method IN ('device', 'approve', 'permit'))
+    method TEXT NOT NULL DEFAULT 'device' CHECK(method IN ('device', 'approve', 'permit')),
+    prepared TEXT NOT NULL DEFAULT ''
 );
 """
 OPERATIONS_INDEX_SQL = "CREATE INDEX IF NOT EXISTS operations_by_user ON operations(user_id, created_at);"
@@ -440,6 +475,9 @@ class AllowanceStore:
         """
         row = db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'operations'").fetchone()
         if row is not None and "'PREPARED'" in row[0]:
+            columns = {c[1] for c in db.execute("PRAGMA table_info(operations)")}
+            if "prepared" not in columns:
+                db.execute("ALTER TABLE operations ADD COLUMN prepared TEXT NOT NULL DEFAULT ''")
             return
         if row is None:
             db.executescript(OPERATIONS_SQL.format(name="operations") + OPERATIONS_INDEX_SQL)
@@ -506,10 +544,10 @@ class AllowanceStore:
         with self._db() as db:
             db.execute(
                 """INSERT INTO operations (op_id, user_id, kind, limiter_address, amount, job_id, tx_hash,
-                   state, detail, created_at, updated_at, method)
+                   state, detail, created_at, updated_at, method, prepared)
                    VALUES (:op_id, :user_id, :kind, :limiter_address, :amount, :job_id, :tx_hash,
-                   :state, :detail, :created_at, :updated_at, :method)""",
-                {"method": "device", **dict(row)},
+                   :state, :detail, :created_at, :updated_at, :method, :prepared)""",
+                {"method": "device", "prepared": "", **dict(row)},
             )
 
     def update_op(self, op_id: str, now: int, **fields: Any) -> None:
@@ -1025,8 +1063,15 @@ class AllowanceService:
 
     # -- the owner's wallet: grant and revoke from the web page --
 
-    def prepare_wallet(self, user_id: str, kind: str, amount: Any = None, limiter: str | None = None) -> dict[str, Any]:
-        """The exact approve for the owner's wallet to send, after checking the limiter on chain."""
+    def prepare_wallet(self, user_id: str, kind: str, amount: Any = None, limiter: str | None = None,
+                       method: str = "approve") -> dict[str, Any]:
+        """What the owner's wallet will sign, after checking the limiter on chain.
+
+        approve: a transaction the wallet sends (the owner pays gas).
+        permit: EIP-2612 typed data the wallet signs; we send it (no ETH needed).
+        """
+        if method not in ("approve", "permit"):
+            raise AllowanceError("Choose approve or permit.")
         owner = self.owner_of(user_id)
         self.advance(user_id)
         if kind == "GRANT":
@@ -1051,6 +1096,11 @@ class AllowanceService:
             raise ValueError(kind)
         spender = to_checksum_address(row["limiter_address"])
         now = int(self.now())
+        deadline = now + WALLET_PREPARE_SECONDS
+        prepared = ""
+        if method == "permit":
+            nonce = self.evm.call_word(USDC, encode_call("nonces(address)", owner))
+            prepared = json.dumps({"nonce": nonce, "deadline": deadline})
         with self._ops_lock:
             for op in self.store.open_ops(user_id):
                 if op["state"] != "PREPARED":
@@ -1059,17 +1109,24 @@ class AllowanceService:
             op_id = "op_" + keccak(text=f"{user_id}:{kind}:{spender}:{amount_atomic}:{now}:{os.urandom(8).hex()}").hex()[:24]
             self.store.insert_op({
                 "op_id": op_id, "user_id": user_id, "kind": kind, "limiter_address": spender, "amount": amount_atomic,
-                "job_id": None, "tx_hash": None, "state": "PREPARED", "detail": "", "method": "approve",
-                "created_at": now, "updated_at": now,
+                "job_id": None, "tx_hash": None, "state": "PREPARED", "detail": "", "method": method,
+                "prepared": prepared, "created_at": now, "updated_at": now,
             })
         what = f"up to {_usdc_text(amount_atomic)}" if amount_atomic else "0 USDC (a revoke)"
-        return {
-            "operation": op_id, "kind": kind, "method": "approve", "state": "PREPARED",
-            "limiter": spender, "amountAtomic": str(amount_atomic), "expiresAt": now + WALLET_PREPARE_SECONDS,
-            "tx": {"from": owner, "to": USDC, "data": encode_call("approve(address,uint256)", spender, amount_atomic),
-                   "value": "0x0", "chainId": hex(BASE_CHAIN_ID)},
-            "walletShows": f"Your wallet will ask you to approve {what} for {spender[:6]}…{spender[-4:]}.",
+        short = f"{spender[:6]}…{spender[-4:]}"
+        out = {
+            "operation": op_id, "kind": kind, "method": method, "state": "PREPARED",
+            "limiter": spender, "amountAtomic": str(amount_atomic), "expiresAt": deadline,
         }
+        if method == "permit":
+            out["typedData"] = permit_typed_data(owner, spender, amount_atomic, json.loads(prepared)["nonce"], deadline)
+            out["walletShows"] = (f"Your wallet will ask you to sign a USDC permit: {what} for {short}. "
+                                  "It moves nothing and costs you no gas; we send it to Base for you.")
+        else:
+            out["tx"] = {"from": owner, "to": USDC, "data": encode_call("approve(address,uint256)", spender, amount_atomic),
+                         "value": "0x0", "chainId": hex(BASE_CHAIN_ID)}
+            out["walletShows"] = f"Your wallet will ask you to approve {what} for {short}."
+        return out
 
     def submit_wallet(self, user_id: str, op_id: str, tx_hash: Any) -> dict[str, Any]:
         """Record the hash the wallet returned; the chain decides the rest."""
@@ -1085,9 +1142,48 @@ class AllowanceService:
                 if op["tx_hash"] == tx_hash:
                     return self.operation(user_id, op_id)
                 raise AllowanceError("This request has already been submitted or has ended.")
+            if op["method"] != "approve":
+                raise AllowanceError("This request is a permit: send the signature, not a transaction.")
             if self.store.op_by_tx(tx_hash) is not None:
                 raise AllowanceError("That transaction is already counted for another request.")
             self.store.update_op(op["op_id"], int(self.now()), state="SUBMITTED", tx_hash=tx_hash)
+        self.advance(user_id)
+        return self.operation(user_id, op_id)
+
+    def submit_permit(self, user_id: str, op_id: str, signature: Any) -> dict[str, Any]:
+        """Check the owner's permit signature, then send it to Base from the gas funder."""
+        owner = self.owner_of(user_id)
+        signature = str(signature or "").strip()
+        with self._ops_lock:
+            op = self.store.op(user_id, str(op_id))
+            if op is None:
+                raise AllowanceError("No such request.")
+            if op["method"] != "permit":
+                raise AllowanceError("This request is an approve: send the transaction hash, not a signature.")
+            if op["state"] != "PREPARED":
+                raise AllowanceError("This request has already been submitted or has ended.")
+            params = json.loads(op["prepared"])
+            now = int(self.now())
+            if now >= params["deadline"]:
+                self.store.update_op(op["op_id"], now, state="EXPIRED", detail="Not signed in time. Nothing changed.")
+                raise AllowanceError("This request expired. Start again.")
+            typed = permit_typed_data(owner, op["limiter_address"], op["amount"], params["nonce"], params["deadline"])
+            try:
+                signer = permit_signer(typed, signature)
+            except Exception:
+                raise AllowanceError("The signature could not be read.") from None
+            if signer.lower() != owner.lower():
+                raise AllowanceError("The permit is not signed by your wallet. Nothing sent.")
+            if self.evm.call_word(USDC, encode_call("nonces(address)", owner)) != params["nonce"]:
+                raise AllowanceError("Your wallet has used this permit's nonce already. Start again.")
+            raw = bytes.fromhex(signature.removeprefix("0x"))
+            r, s_, v = int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:64], "big"), raw[64]
+            v = v + 27 if v < 27 else v
+            data = encode_call("permit(address,address,uint256,uint256,uint8,bytes32,bytes32)",
+                               owner, op["limiter_address"], op["amount"], params["deadline"], v, r, s_)
+            tx = self.evm.send(self.gas_funder_key(), to=USDC, data=data)
+            self.store.update_op(op["op_id"], int(self.now()), state="BROADCAST", tx_hash=tx)
+            logger.info("allowance: sent the permit of %s for %s in %s", owner, op["limiter_address"], tx)
         self.advance(user_id)
         return self.operation(user_id, op_id)
 
@@ -1174,9 +1270,15 @@ class AllowanceService:
         except Exception:
             return
         if isinstance(receipt, dict):
+            owner = self._owner(op["user_id"]) or ""
             if int(receipt.get("status", "0x0"), 16) != 1:
-                raise AllowanceError(f"The approve {op['tx_hash']} reverted on Base.")
-            if op["method"] != "device":
+                # Anyone may submit a signed permit; if someone did first, ours
+                # reverts and the allowance is already what the owner signed.
+                front_run = op["method"] == "permit" and self.evm.call_word(
+                    USDC, encode_call("allowance(address,address)", owner, op["limiter_address"])) == op["amount"]
+                if not front_run:
+                    raise AllowanceError(f"The approve {op['tx_hash']} reverted on Base.")
+            if op["method"] == "approve":
                 # A wallet transaction is named by the page: it must be one made
                 # for this request, not an older approve with the same calldata.
                 block = self.evm.call("eth_getBlockByNumber", [receipt["blockNumber"], False]) or {}
