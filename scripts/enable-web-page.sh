@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Turn on the web page's API on the VPS: https://api.singitai.app/web/v1 for
-# the page at https://singitai.app/app/ (docs/allowance-web-v1.md, "Running it").
+# Turn on the agent allowance page: https://app.singitai.app/app/ with its API
+# at /web/v1 on the same origin (docs/allowance-web-v1.md, "Running it").
+#
+# The web API serves the page and the API on 127.0.0.1:8130. Nothing opens on
+# this host: the page goes out through the existing Cloudflare Tunnel, like
+# decide.singitai.app (docs/decide-public-endpoint.md). One hostname is added
+# in the Cloudflare dashboard; this script says exactly which.
 #
 # Run as hermes, with a terminal for sudo, after deploy-trezor-allowance.sh:
 #
@@ -8,30 +13,24 @@
 #   ssh -t hermes@164.68.104.44 'bash ~/enable-web-page.sh 0xYourAddress[,0xAnother]'
 #
 # The argument is the beta allowlist: the only wallets that may sign in ("*"
-# opens it to everyone). Needs a DNS record api.singitai.app -> this server
-# (DNS only, not proxied, so Caddy can get its certificate). Safe to run again.
+# opens it to everyone). Safe to run again.
 set -euo pipefail
 umask 077
 
 ALLOWED="${1:?usage: enable-web-page.sh <allowed addresses, comma-separated, or *>}"
-API_HOST="api.singitai.app"
-PAGE_DOMAIN="singitai.app"
-PAGE_ORIGIN="https://singitai.app"
+HOST="app.singitai.app"
+ORIGIN="https://$HOST"
 ENV_FILE=/etc/sign402-gateway.env
-CADDYFILE=/etc/caddy/Caddyfile
-GW="$HOME/apps/sign402/sign402-gateway"
+APP="$HOME/apps/sign402"
+GW="$APP/sign402-gateway"
 WEB_UNIT=/etc/systemd/system/sign402-web-api.service
 
 step() { printf '\n== %s\n' "$*"; }
 fail() { printf 'STOP: %s\n' "$*" >&2; exit 1; }
 
-step "1. DNS"
-public_ip=$(curl -fsS -4 https://api.ipify.org)
-resolved=$(getent ahostsv4 "$API_HOST" | awk 'NR==1 {print $1}' || true)
-[ "$resolved" = "$public_ip" ] || fail "$API_HOST resolves to '${resolved:-nothing}', not this server ($public_ip). Add an A record (DNS only) and wait a minute."
-echo "$API_HOST -> $public_ip"
+[ -f "$APP/website/app/index.html" ] || fail "no page at $APP/website/app; deploy a commit that has it first"
 
-step "2. Settings (sudo)"
+step "1. Settings (sudo)"
 sudo -v
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 sudo cp -p "$ENV_FILE" "$ENV_FILE.bak-$stamp"
@@ -43,19 +42,20 @@ set_env() {  # name value: replace the line or add it
   fi
 }
 set_env SIGN402_WEB_ENABLED 1
-set_env SIGN402_WEB_DOMAIN "$PAGE_DOMAIN"
-set_env SIGN402_WEB_URI "$PAGE_ORIGIN"
-set_env SIGN402_WEB_CORS_ORIGIN "$PAGE_ORIGIN"
+set_env SIGN402_WEB_DOMAIN "$HOST"
+set_env SIGN402_WEB_URI "$ORIGIN"
+set_env SIGN402_WEB_CORS_ORIGIN "$ORIGIN"
 set_env SIGN402_WEB_ALLOWED_ADDRESSES "$ALLOWED"
+set_env SIGN402_WEB_STATIC_DIR "$APP/website"
 if ! sudo grep -q '^SIGN402_WEB_INTERNAL_TOKEN=.\{32,\}' "$ENV_FILE"; then
   set_env SIGN402_WEB_INTERNAL_TOKEN "$("$GW/.venv/bin/python" -c 'import secrets; print(secrets.token_urlsafe(32))')"
 fi
-echo "web settings written (previous env kept as $ENV_FILE.bak-$stamp)"
+echo "web settings written (the previous env is kept as $ENV_FILE.bak-$stamp)"
 
-step "3. The web API and the gateway"
+step "2. The web API and the gateway"
 sudo tee "$WEB_UNIT" >/dev/null <<UNIT
 [Unit]
-Description=SingIt web API (/web/v1, loopback; exposed by Caddy)
+Description=SingIt web API and page (127.0.0.1:8130; public through the Cloudflare Tunnel)
 After=network-online.target sign402-gateway.service
 
 [Service]
@@ -70,47 +70,35 @@ RestartSec=10
 WantedBy=multi-user.target
 UNIT
 sudo systemctl daemon-reload
-sudo systemctl restart sign402-gateway   # it reads the internal token and links Telegram to web accounts
+sudo systemctl restart sign402-gateway   # reads the internal token; links Telegram chats to web accounts
 for _ in $(seq 40); do curl -fsS http://127.0.0.1:8099/health >/dev/null 2>&1 && break; sleep 0.5; done
 sudo systemctl enable -q sign402-web-api
 sudo systemctl restart sign402-web-api
+sudo systemctl restart sign402-allowance-watcher  # notices for linked web accounts
 for _ in $(seq 20); do ss -ltn | grep -q "127.0.0.1:8130 " && break; sleep 0.5; done
 ss -ltn | grep -q "127.0.0.1:8130 " || fail "web API: sudo journalctl -u sign402-web-api -n 30"
-sudo systemctl restart sign402-allowance-watcher  # notices for linked web accounts
-echo "web API on 127.0.0.1:8130"
+page=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8130/app/)
+api=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8130/web/v1/session)
+[ "$page" = 200 ] && [ "$api" = 401 ] || fail "on this host the page answered $page and the API $api (expected 200 and 401)"
+echo "page and API answer on 127.0.0.1:8130"
 
-step "4. Caddy for https://$API_HOST"
-[ -f "$CADDYFILE" ] && sudo cp -p "$CADDYFILE" "$CADDYFILE.bak-$stamp"
-sudo tee "$CADDYFILE" >/dev/null <<CADDY
-# SingIt web API (scripts/enable-web-page.sh). The page lives at $PAGE_ORIGIN/app/.
-$API_HOST {
-	handle /web/v1/* {
-		reverse_proxy 127.0.0.1:8130
-	}
-	respond 404
-}
-CADDY
-sudo caddy validate --config "$CADDYFILE" --adapter caddyfile >/dev/null
-if command -v ufw >/dev/null && sudo ufw status | grep -q "Status: active"; then
-  sudo ufw allow 80/tcp >/dev/null
-  sudo ufw allow 443/tcp >/dev/null
+step "3. Public: $ORIGIN"
+outside=$(curl -s -o /dev/null -w '%{http_code}' "$ORIGIN/web/v1/session" || true)
+if [ "$outside" = 401 ]; then
+  echo "$ORIGIN answers from outside. Open $ORIGIN/app/ and sign in with one of: $ALLOWED"
+else
+  cat <<TEXT
+$ORIGIN is not published yet (answered '$outside'). In Cloudflare:
+  Zero Trust -> Networks -> Tunnels -> the running tunnel -> Public Hostnames -> Add
+    Subdomain: app    Domain: singitai.app    Path: (empty)
+    Service:   HTTP   URL: 127.0.0.1:8130
+Only the web API listens on 8130, and it serves only /app/, /assets/ and /web/v1.
+Then open $ORIGIN/app/ and sign in with one of: $ALLOWED
+TEXT
 fi
-sudo systemctl enable -q caddy
-sudo systemctl restart caddy
-
-step "5. From outside"
-for _ in $(seq 30); do
-  code=$(curl -s -o /dev/null -w '%{http_code}' "https://$API_HOST/web/v1/session" || true)
-  [ "$code" = "401" ] && break
-  sleep 2
-done
-[ "$code" = "401" ] || fail "https://$API_HOST/web/v1/session answered '$code' (expected 401 before sign-in): sudo journalctl -u caddy -n 40"
-echo "https://$API_HOST/web/v1 answers (401 until you sign in, as it should)"
 cat <<TEXT
 
-Done. Publish website/app/ with the site, open $PAGE_ORIGIN/app/ and sign in with
-one of: $ALLOWED
-
 Turn it off: set SIGN402_WEB_ENABLED=0 in $ENV_FILE, then
-  sudo systemctl disable --now sign402-web-api caddy && sudo systemctl restart sign402-gateway
+  sudo systemctl disable --now sign402-web-api && sudo systemctl restart sign402-gateway
+and remove the app hostname from the tunnel.
 TEXT

@@ -597,3 +597,61 @@ class PermitTests(WalletLaneTests):
         self.evm.receipts[op["txHash"]] = {"status": "0x1", "blockNumber": "0x10"}
         self.evm.allowances[self.limiter] = 0
         self.assertEqual(self.service.operation(self.USER, prepared["operation"])["state"], "DONE")
+
+
+class StaticPageTests(unittest.TestCase):
+    """The web API serves website/app and website/assets, and nothing else of the disk."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name) / "website"
+        (root / "app").mkdir(parents=True)
+        (root / "assets").mkdir()
+        (root / "app" / "index.html").write_text("<title>app</title>")
+        (root / "app" / "main.js").write_text("console.log(1)")
+        (root / "assets" / "favicon.svg").write_text("<svg/>")
+        (root / "index.html").write_text("landing")
+        (Path(self.tmp.name) / "secret.txt").write_text("SECRET")
+        self.api = unittest.mock.Mock()
+        self.api.handle.return_value = (200, {"ok": True}, {})
+        self.server = wa.WebServer(("127.0.0.1", 0), self.api, URI, root)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def get(self, path, headers=None):
+        import http.client
+
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=5)
+        connection.request("GET", path, headers=headers or {})
+        response = connection.getresponse()
+        body = response.read()
+        connection.close()
+        return response.status, dict(response.getheaders()), body
+
+    def test_the_page_and_its_assets_are_served_with_safe_headers(self):
+        status, headers, body = self.get("/app/")
+        self.assertEqual((status, body), (200, b"<title>app</title>"))
+        self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
+        self.assertEqual(headers["X-Frame-Options"], "DENY")
+        self.assertEqual(self.get("/app/main.js")[1]["Content-Type"], "text/javascript; charset=utf-8")
+        self.assertEqual(self.get("/assets/favicon.svg")[0], 200)
+        status, headers, _ = self.get("/")
+        self.assertEqual((status, headers["Location"]), (302, "/app/"))
+
+    def test_nothing_outside_app_and_assets_is_reachable(self):
+        for path in ("/index.html", "/../secret.txt", "/app/../../secret.txt", "/assets/../index.html",
+                     "/app/%2e%2e/%2e%2e/secret.txt", "/nope"):
+            with self.subTest(path=path):
+                status, _, body = self.get(path)
+                self.assertEqual(status, 404)
+                self.assertNotIn(b"SECRET", body)
+                self.assertNotIn(b"landing", body)
+
+    def test_api_paths_still_reach_the_api_and_the_client_is_cloudflares_view(self):
+        self.get("/web/v1/session", {"Cf-Connecting-Ip": "203.0.113.7", "X-Forwarded-For": "198.51.100.1"})
+        self.assertEqual(self.api.handle.call_args.kwargs["client"], "203.0.113.7")
+        self.get("/web/v1/session", {"X-Forwarded-For": "1.1.1.1, 198.51.100.2"})
+        self.assertEqual(self.api.handle.call_args.kwargs["client"], "198.51.100.2")

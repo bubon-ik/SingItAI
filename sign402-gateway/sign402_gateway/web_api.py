@@ -19,6 +19,7 @@ Environment:
     SIGN402_WEB_MAX_DEPLOYS_PER_DAY      limiters we pay to deploy for everyone together in 24 h (50)
     SIGN402_WEB_INTERNAL_TOKEN           shared with the gateway for the shop (32+ characters)
     SIGN402_WEB_GATEWAY_URL              the gateway on loopback (http://127.0.0.1:8099)
+    SIGN402_WEB_STATIC_DIR               the site's website/ folder: serves /app/ and /assets/ too
 plus everything SIGN402_ALLOWANCE_* the lane itself needs.
 """
 
@@ -51,6 +52,9 @@ COOKIE = "singit_session"
 CSRF_HEADER = "X-SingIt-CSRF"
 MAX_BODY = 16 * 1024
 DEFAULT_PORT = 8130
+STATIC_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+                ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png",
+                ".ico": "image/x-icon", ".json": "application/json"}
 
 
 class WebError(Exception):
@@ -284,11 +288,14 @@ class WebHandler(BaseHTTPRequestHandler):
 
     def _client(self) -> str:
         peer = self.client_address[0]
+        # Only a proxy on this host (cloudflared, or a reverse proxy) may say who the client is.
+        if not ip_address(peer).is_loopback:
+            return peer
+        cloudflare = self.headers.get("Cf-Connecting-Ip", "").strip()
+        if cloudflare:
+            return cloudflare
         forwarded = self.headers.get("X-Forwarded-For", "")
-        # Only a reverse proxy on this host may say who the client is.
-        if forwarded and ip_address(peer).is_loopback:
-            return forwarded.split(",")[-1].strip()
-        return peer
+        return forwarded.split(",")[-1].strip() if forwarded else peer
 
     def _send(self, status: int, body: dict[str, Any], headers: Mapping[str, str] | None = None) -> None:
         data = json.dumps(body).encode()
@@ -325,7 +332,38 @@ class WebHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
+        if not self.path.startswith(PREFIX + "/") and self.server.static_root is not None:
+            self._static()
+            return
         self._dispatch("GET")
+
+    def _static(self) -> None:
+        """The page itself (website/app and its assets), so page and API share one origin."""
+        path = self.path.split("?", 1)[0]
+        if path == "/":
+            self.send_response(302)
+            self.send_header("Location", "/app/")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if path.endswith("/"):
+            path += "index.html"
+        root = self.server.static_root
+        target = (root / path.lstrip("/")).resolve()
+        allowed = [(root / "app").resolve(), (root / "assets").resolve()]
+        if not any(target.is_relative_to(base) for base in allowed) or not target.is_file():
+            self._send(404, {"ok": False, "error": "not_found", "message": "No such page."})
+            return
+        data = target.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", STATIC_TYPES.get(target.suffix, "application/octet-stream"))
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")  # no clickjacking around wallet prompts
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def do_POST(self) -> None:
         self._dispatch("POST")
@@ -372,10 +410,12 @@ class WebHandler(BaseHTTPRequestHandler):
 class WebServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], api: WebApi, cors_origin: str):
+    def __init__(self, address: tuple[str, int], api: WebApi, cors_origin: str, static_root: Path | None = None):
         super().__init__(address, WebHandler)
         self.api = api
         self.cors_origin = cors_origin
+        # website/: /app/ and /assets/ are served from here when set.
+        self.static_root = Path(static_root).resolve() if static_root else None
 
 
 def build_web_api_from_env(allowance: AllowanceService, env: Mapping[str, str] | None = None) -> tuple[WebApi, str]:
@@ -420,7 +460,8 @@ def main() -> int:
         return 1
     api, cors_origin = build_web_api_from_env(allowance)
     port = int(os.environ.get("SIGN402_WEB_PORT", DEFAULT_PORT))
-    server = WebServer(("127.0.0.1", port), api, cors_origin)
+    static = os.environ.get("SIGN402_WEB_STATIC_DIR", "")
+    server = WebServer(("127.0.0.1", port), api, cors_origin, Path(static).expanduser() if static else None)
     logger.info("web api: listening on 127.0.0.1:%s for %s", port, cors_origin)
     server.serve_forever()
     return 0

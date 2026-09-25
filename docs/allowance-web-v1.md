@@ -186,28 +186,20 @@ prepare first moves the open ones on (the T8 lesson, 2ba7762).
 
 ## Running it
 
-`python -m sign402_gateway.web_api` (the systemd unit `sign402-web-api`, which
-`scripts/deploy-trezor-allowance.sh` installs and starts once the gateway env
-has `SIGN402_WEB_ENABLED=1`, `SIGN402_WEB_DOMAIN`, `SIGN402_WEB_URI` and
-`SIGN402_WEB_ALLOWED_ADDRESSES`; the script adds `SIGN402_WEB_INTERNAL_TOKEN`).
-It listens on `127.0.0.1:8130`. Serve the page and the API from one origin, so
-the SameSite=Strict cookie works and no CORS is needed, for example with Caddy:
+`scripts/enable-web-page.sh <beta addresses>` on the VPS: it writes the
+`SIGN402_WEB_*` settings (domain `app.singitai.app`, the beta allowlist, the
+internal token, `SIGN402_WEB_STATIC_DIR` pointing at `website/`), starts
+`sign402-web-api` on `127.0.0.1:8130` and checks it. The web API serves the page
+too (`/app/`, `/assets/`; `/` redirects to `/app/`; nothing else of the disk),
+so page and API share one origin: the SameSite=Strict cookie works and no CORS
+is involved.
 
-```text
-app.example.com {
-    handle /web/v1/* {
-        reverse_proxy 127.0.0.1:8130
-    }
-    handle {
-        root * /srv/singit-web
-        try_files {path} /index.html
-        file_server
-    }
-}
-```
-
-The proxy must pass `X-Forwarded-For`; the API trusts it only from loopback.
-Optional settings: `SIGN402_WEB_CORS_ORIGIN` (a page on another origin),
+Nothing opens on the host. The page goes public through the existing Cloudflare
+Tunnel, as `decide.singitai.app` does (docs/decide-public-endpoint.md): one
+Public Hostname, `app.singitai.app` → `http://127.0.0.1:8130`. Only the web API
+listens there, and it answers only `/app/`, `/assets/` and `/web/v1/*`. It
+takes the client address from `Cf-Connecting-Ip` (or `X-Forwarded-For`) only
+when the connection comes from this host. Optional settings:
 `SIGN402_WEB_MIN_OWNER_USDC` (1), `SIGN402_WEB_MAX_LIMITERS_PER_30_DAYS` (3),
 `SIGN402_WEB_MAX_DEPLOYS_PER_DAY` (50), `SIGN402_WEB_DB` (`~/.sign402/web.db`).
 
