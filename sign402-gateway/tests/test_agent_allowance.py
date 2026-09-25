@@ -725,7 +725,7 @@ class DeviceLaneTests(unittest.TestCase):
         self.assertEqual(transfer["data"], aa.encode_call("transfer(address,uint256)", self.owner.address, 7_000_000))
         self.assertEqual(len(self.evm.sent), sent + 1)
         self.assertEqual(op["state"], "DONE")
-        self.assertIn("float of 7 USDC went back to your Trezor address", op["detail"])
+        self.assertIn("float of 7 USDC went back to your wallet", op["detail"])
 
     def test_a_mined_grant_nobody_read_back_does_not_block_the_revoke(self):
         """Live: grant broadcast, a purchase spent part of it, no /allowance; then /allowance_revoke."""

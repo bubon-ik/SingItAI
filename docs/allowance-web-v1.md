@@ -277,6 +277,25 @@ Run it with `python -m sign402_gateway.web_api` behind a TLS reverse proxy that
 forwards `/web/v1` to `127.0.0.1:8130`. Messages from the lane still name the
 Trezor and bot commands; step 2 makes them neutral for the web.
 
+**Step 2 is built** (`AllowanceService.prepare_wallet`, `submit_wallet`,
+`operation`; routes `grant|revoke/prepare`, `grant|revoke/submit`,
+`GET /allowance/operations/{id}`). Prepare checks the limiter on chain (not
+paused or expired, tested code, every immutable) and returns the exact approve;
+a newer prepare replaces an unsubmitted one, anything already submitted blocks.
+Submit takes only a transaction hash. The server then reads the transaction
+from Base and counts it only if it is from the owner, to USDC, on Base, with no
+value, an `approve` of this limiter, an amount in (0, grant ceiling] for a grant
+(the amount the wallet actually signed is recorded, so a user who lowers the cap
+in Rabby or MetaMask is respected) or exactly 0 for a revoke, mined no earlier
+than the request, and not already counted for another request. A revoke that
+closes the lane returns the agent's float, as in v1. `operations` gained the
+states PREPARED, SUBMITTED and EXPIRED and a `method` column; an existing v1
+table is rebuilt with every row kept (checked against the production schema).
+Rehearsed on a Base mainnet fork with real signed transactions: grant 3 USDC →
+DONE, allowance 3 on chain; an approve to another spender → FAILED, not counted;
+revoke → DONE, allowance 0. `method: "permit"` answers `method_unavailable`
+until step 3.
+
 Each step with unit tests and a mainnet check recorded in
 [trezor-allowance-checks.md](trezor-allowance-checks.md), as T4–T8 were.
 

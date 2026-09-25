@@ -95,6 +95,7 @@ class WebApi:
         self.now = now
         self.auth_by_ip = RateLimit(30, 600)
         self.setup_by_account = RateLimit(5, 3600)
+        self.prepare_by_account = RateLimit(20, 3600)
 
     def handle(self, method: str, path: str, *, token: str, csrf: str | None, body: dict[str, Any],
                client: str) -> tuple[int, dict[str, Any], dict[str, str]]:
@@ -123,6 +124,21 @@ class WebApi:
             return 200, self._status(account, owner), {}
         if method == "POST" and path == "/allowance/setup":
             return 200, self._setup(account, owner, body), {}
+        if method == "POST" and path in ("/allowance/grant/prepare", "/allowance/revoke/prepare"):
+            self.prepare_by_account.hit(account)
+            if str(body.get("method") or "approve") != "approve":
+                raise WebError(400, "method_unavailable", "Only an approve from your wallet is available for now.")
+            kind = "GRANT" if path.startswith("/allowance/grant") else "REVOKE"
+            return 200, self.allowance.prepare_wallet(
+                account, kind, amount=body.get("amount"), limiter=body.get("limiter")), {}
+        if method == "POST" and path in ("/allowance/grant/submit", "/allowance/revoke/submit"):
+            op = self.allowance.store.op(account, str(body.get("operation") or ""))
+            kind = "GRANT" if path.startswith("/allowance/grant") else "REVOKE"
+            if op is None or op["kind"] != kind:
+                raise WebError(404, "no_such_operation", "No such request.")
+            return 200, self.allowance.submit_wallet(account, op["op_id"], body.get("txHash")), {}
+        if method == "GET" and path.startswith("/allowance/operations/"):
+            return 200, self.allowance.operation(account, path.rsplit("/", 1)[1]), {}
         raise WebError(404, "not_found", "No such endpoint.")
 
     # -- allowance --

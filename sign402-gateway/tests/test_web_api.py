@@ -259,3 +259,245 @@ class WebHttpTests(unittest.TestCase):
         got, _, _ = self.request("GET", "/health")
         self.assertEqual(got, 404)
 
+
+
+from tests.test_agent_allowance import DeviceLaneEvm  # noqa: E402
+
+
+class WalletChain(DeviceLaneEvm):
+    """DeviceLaneEvm plus what the wallet path reads: transactions by hash and block times."""
+
+    def __init__(self, artifact, owner):
+        super().__init__(artifact, owner)
+        self.txs = {}
+        self.receipts = {}
+        self.block_time = NOW
+
+    def call(self, method, params):
+        if method == "eth_getTransactionByHash":
+            return self.txs.get(params[0])
+        if method == "eth_getTransactionReceipt":
+            return self.receipts.get(params[0])
+        if method == "eth_getBlockByNumber":
+            return {"timestamp": hex(self.block_time)}
+        return super().call(method, params)
+
+    def put(self, tx_hash, sender, data, to=aa.USDC, chain_id="0x2105"):
+        self.txs[tx_hash] = {"hash": tx_hash, "from": sender.lower(), "to": to.lower(), "input": data,
+                             "value": "0x0", "chainId": chain_id}
+
+    def mine(self, n, spender, allowance):
+        self.receipts[tx_hash(n)] = {"status": "0x1", "blockNumber": "0x10"}
+        self.allowances[spender] = allowance
+
+
+def tx_hash(n):
+    return "0x" + format(n, "064x")
+
+
+class WalletLaneTests(unittest.TestCase):
+    """Grant and revoke from the owner's wallet: the page sends, the chain decides."""
+
+    USER = "wallet:owner"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.owner = Account.create()
+        self.clock = [NOW]
+        self.evm = WalletChain(aa.Artifact.load(), self.owner.address)
+        self.service = aa.AllowanceService(
+            store=aa.AllowanceStore(Path(self.tmp.name) / "allowance.db"), evm=self.evm,
+            fernet=Fernet(Fernet.generate_key()), owners={self.USER: self.owner.address},
+            guardian_key=lambda: Account.create().key.to_0x_hex(), gas_funder_key=funded(self.evm),
+            artifact=self.evm.artifact, max_daily=100_000_000, max_per_purchase=25_000_000, max_days=90,
+            max_grant=300_000_000, now=lambda: self.clock[0],
+        )
+        self.limiter = self.service.setup(self.USER, "10", "2", "30")["limiter"]
+
+    def approve(self, spender, amount):
+        return aa.encode_call("approve(address,uint256)", spender, amount)
+
+    def grant(self, amount="5", n=1, data=None, sender=None):
+        prepared = self.service.prepare_wallet(self.USER, "GRANT", amount=amount)
+        self.evm.put(tx_hash(n), sender or self.owner.address, data or prepared["tx"]["data"])
+        self.service.submit_wallet(self.USER, prepared["operation"], tx_hash(n))
+        return prepared
+
+    def test_the_page_gets_exactly_the_approve_to_send(self):
+        prepared = self.service.prepare_wallet(self.USER, "GRANT", amount="5")
+        self.assertEqual(prepared["tx"], {"from": self.owner.address, "to": aa.USDC,
+                                          "data": self.approve(self.limiter, 5_000_000),
+                                          "value": "0x0", "chainId": "0x2105"})
+        self.assertEqual(prepared["walletShows"],
+                         f"Your wallet will ask you to approve up to 5 USDC for {self.limiter[:6]}…{self.limiter[-4:]}.")
+        self.assertEqual(prepared["expiresAt"], NOW + aa.WALLET_PREPARE_SECONDS)
+
+    def test_a_grant_goes_from_submitted_to_done_by_reading_the_chain(self):
+        prepared = self.service.prepare_wallet(self.USER, "GRANT", amount="5")
+        op = self.service.submit_wallet(self.USER, prepared["operation"], tx_hash(1))
+        self.assertEqual(op["state"], "SUBMITTED")  # Base has not seen it yet
+
+        self.evm.put(tx_hash(1), self.owner.address, prepared["tx"]["data"])
+        self.assertEqual(self.service.operation(self.USER, prepared["operation"])["state"], "BROADCAST")
+
+        self.evm.mine(1, self.limiter, 5_000_000)
+        op = self.service.operation(self.USER, prepared["operation"])
+        self.assertEqual((op["state"], op["detail"]), ("DONE", "Allowance now 5 USDC."))
+        self.assertEqual(self.service.status(self.USER)["state"], "granted")
+        self.assertEqual(self.evm.broadcasts, [])  # the wallet sent it; the server never does
+
+    def test_an_amount_the_user_lowered_in_the_wallet_is_what_counts(self):
+        prepared = self.grant("5", data=self.approve(self.limiter, 2_000_000))
+        self.evm.mine(1, self.limiter, 2_000_000)
+        op = self.service.operation(self.USER, prepared["operation"])
+        self.assertEqual((op["state"], op["amountAtomic"]), ("DONE", "2000000"))
+
+    def test_a_transaction_that_is_not_the_prepared_approve_is_never_counted(self):
+        stranger = Account.create().address
+        cases = {
+            "from another wallet": dict(sender=stranger),
+            "to another spender": dict(data=self.approve(stranger, 5_000_000)),
+            "above the ceiling": dict(data=self.approve(self.limiter, 300_000_001)),
+            "not an approve": dict(data=aa.encode_call("transfer(address,uint256)", self.limiter, 5_000_000)),
+        }
+        for n, (name, spoil) in enumerate(cases.items(), start=10):
+            with self.subTest(name):
+                prepared = self.grant(n=n, **spoil)
+                op = self.service.operation(self.USER, prepared["operation"])
+                self.assertEqual(op["state"], "FAILED")
+                self.assertIn("Nothing counted", op["detail"])
+
+    def test_another_token_or_chain_is_refused(self):
+        prepared = self.service.prepare_wallet(self.USER, "GRANT", amount="5")
+        self.evm.put(tx_hash(1), self.owner.address, prepared["tx"]["data"], chain_id="0x1")
+        self.service.submit_wallet(self.USER, prepared["operation"], tx_hash(1))
+        self.assertIn("not on Base", self.service.operation(self.USER, prepared["operation"])["detail"])
+
+    def test_an_older_transaction_with_the_same_calldata_is_not_this_request(self):
+        prepared = self.grant("5")
+        self.evm.block_time = NOW - 3600
+        self.evm.mine(1, self.limiter, 5_000_000)
+        op = self.service.operation(self.USER, prepared["operation"])
+        self.assertEqual(op["state"], "FAILED")
+        self.assertIn("older than this request", op["detail"])
+
+    def test_one_transaction_counts_for_one_request(self):
+        self.grant("5", n=1)
+        self.evm.mine(1, self.limiter, 5_000_000)
+        self.service.status(self.USER)
+        again = self.service.prepare_wallet(self.USER, "GRANT", amount="5")
+        with self.assertRaises(aa.AllowanceError):
+            self.service.submit_wallet(self.USER, again["operation"], tx_hash(1))
+
+    def test_what_is_refused_before_the_wallet_is_asked(self):
+        with self.assertRaises(aa.AllowanceError):
+            self.service.prepare_wallet(self.USER, "GRANT", amount="300.01")
+        self.evm.getter_override["paused()"] = 1
+        with self.assertRaises(aa.AllowanceError) as raised:
+            self.service.prepare_wallet(self.USER, "GRANT", amount="5")
+        self.assertIn("paused or expired", str(raised.exception))
+        self.evm.getter_override = {"owner()": int(Account.create().address, 16)}
+        with self.assertRaises(aa.AllowanceError) as raised:
+            self.service.prepare_wallet(self.USER, "GRANT", amount="5")
+        self.assertIn("failed its check", str(raised.exception))
+
+    def test_requests_expire_are_replaced_and_do_not_overlap(self):
+        first = self.service.prepare_wallet(self.USER, "GRANT", amount="5")
+        second = self.service.prepare_wallet(self.USER, "GRANT", amount="6")
+        self.assertEqual(self.service.operation(self.USER, first["operation"])["state"], "EXPIRED")
+        self.service.submit_wallet(self.USER, second["operation"], tx_hash(2))
+        with self.assertRaises(aa.AllowanceError):
+            self.service.prepare_wallet(self.USER, "GRANT", amount="7")
+        self.clock[0] += aa.WALLET_PREPARE_SECONDS + 1
+        op = self.service.operation(self.USER, second["operation"])
+        self.assertEqual(op["state"], "FAILED")
+        self.assertIn("never saw", op["detail"])
+        third = self.service.prepare_wallet(self.USER, "GRANT", amount="7")
+        self.clock[0] += aa.WALLET_PREPARE_SECONDS + 1
+        self.assertEqual(self.service.operation(self.USER, third["operation"])["state"], "EXPIRED")
+
+    def test_a_wallet_revoke_closes_the_lane_and_returns_the_float(self):
+        self.grant("5", n=1)
+        self.evm.mine(1, self.limiter, 5_000_000)
+        self.service.status(self.USER)
+        prepared = self.service.prepare_wallet(self.USER, "REVOKE")
+        self.assertEqual(prepared["tx"]["data"], self.approve(self.limiter, 0))
+        self.assertIn("0 USDC (a revoke)", prepared["walletShows"])
+        self.evm.put(tx_hash(2), self.owner.address, prepared["tx"]["data"])
+        self.service.submit_wallet(self.USER, prepared["operation"], tx_hash(2))
+        self.assertEqual(self.service.operation(self.USER, prepared["operation"])["state"], "BROADCAST")
+        self.evm.mine(2, self.limiter, 0)
+        op = self.service.operation(self.USER, prepared["operation"])
+        self.assertEqual(op["state"], "DONE")
+        self.assertIn("went back to your wallet", op["detail"])
+        agent = self.service.store.agent(self.USER)["agent_address"]
+        self.assertEqual(self.evm.sent[-1]["from"], agent)
+
+    def test_a_revoke_must_approve_zero(self):
+        prepared = self.service.prepare_wallet(self.USER, "REVOKE")
+        self.evm.put(tx_hash(3), self.owner.address, self.approve(self.limiter, 1))
+        self.service.submit_wallet(self.USER, prepared["operation"], tx_hash(3))
+        self.assertIn("must approve 0", self.service.operation(self.USER, prepared["operation"])["detail"])
+
+
+class WalletRoutesTests(WebApiTests):
+    def test_grant_through_the_routes_and_only_for_its_own_account(self):
+        token, csrf, body = self.sign_in()
+        self.call("POST", "/allowance/setup", {"dailyCap": "5", "perPurchaseCap": "1", "days": "30"},
+                  token=token, csrf=csrf)
+        with self.assertRaises(wa.WebError) as raised:
+            self.call("POST", "/allowance/grant/prepare", {"amount": "5", "method": "permit"}, token=token, csrf=csrf)
+        self.assertEqual(raised.exception.code, "method_unavailable")
+        with self.assertRaises(WebAuthError):
+            self.call("POST", "/allowance/grant/prepare", {"amount": "5"}, token=token)
+        _, prepared, _ = self.call("POST", "/allowance/grant/prepare", {"amount": "5"}, token=token, csrf=csrf)
+        self.assertEqual(prepared["tx"]["from"], self.user.address)
+
+        with self.assertRaises(wa.WebError):  # a grant id on the revoke route
+            self.call("POST", "/allowance/revoke/submit", {"operation": prepared["operation"], "txHash": tx_hash(1)},
+                      token=token, csrf=csrf)
+        self.evm.rpc = self.evm  # FakeEvm has no receipts: the submitted hash stays SUBMITTED
+        self.evm.call = lambda method, params: None
+        _, op, _ = self.call("POST", "/allowance/grant/submit", {"operation": prepared["operation"], "txHash": tx_hash(1)},
+                             token=token, csrf=csrf)
+        self.assertEqual(op["state"], "SUBMITTED")
+        _, op, _ = self.call("GET", f"/allowance/operations/{prepared['operation']}", token=token)
+        self.assertEqual(op["txHash"], tx_hash(1))
+
+        self.user = Account.create()
+        other_token, _, _ = self.sign_in()
+        with self.assertRaises(aa.AllowanceError):
+            self.call("GET", f"/allowance/operations/{prepared['operation']}", token=other_token)
+
+
+class OperationsMigrationTests(unittest.TestCase):
+    def test_a_v1_table_keeps_every_row_and_accepts_the_wallet_states(self):
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "allowance.db"
+            db = sqlite3.connect(path)
+            db.executescript("""
+                CREATE TABLE operations (
+                    op_id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('GRANT', 'REVOKE', 'PAUSE')),
+                    limiter_address TEXT NOT NULL, amount INTEGER NOT NULL, job_id TEXT, tx_hash TEXT,
+                    state TEXT NOT NULL CHECK(state IN ('WAITING_DEVICE', 'BROADCAST', 'DONE', 'FAILED')),
+                    detail TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+                CREATE INDEX operations_by_user ON operations(user_id, created_at);
+                INSERT INTO operations VALUES ('op_1', '1045618308', 'GRANT', '0xL', 1000000, 'job_1', '0xT',
+                                               'DONE', 'Allowance now 0.8 USDC.', 1, 2);""")
+            db.commit()
+            db.close()
+            store = aa.AllowanceStore(path)
+            row = store.op("1045618308", "op_1")
+            self.assertEqual((row["state"], row["method"], row["detail"]), ("DONE", "device", "Allowance now 0.8 USDC."))
+            store.insert_op({"op_id": "op_2", "user_id": "u", "kind": "GRANT", "limiter_address": "0xL", "amount": 1,
+                             "job_id": None, "tx_hash": None, "state": "PREPARED", "detail": "", "method": "approve",
+                             "created_at": 3, "updated_at": 3})
+            aa.AllowanceStore(path)  # a second start changes nothing
+            self.assertEqual(len(store.recent_ops("1045618308", 10)), 1)
+            indexes = sqlite3.connect(path).execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'operations'").fetchall()
+            self.assertIn(("operations_by_user",), indexes)

@@ -69,6 +69,7 @@ DEFAULT_MAX_DAYS = 90
 DEFAULT_MAX_GRANT = Decimal("300")
 DEFAULT_BROKER_URL = "http://127.0.0.1:8122"
 DEVICE_JOB_SECONDS = 600
+WALLET_PREPARE_SECONDS = 900  # a prepared wallet request is good for 15 minutes
 DEFAULT_FLOAT_TARGET = Decimal("0.20")
 DEFAULT_FLOAT_LOW = Decimal("0.05")
 DEFAULT_EXACT_ABOVE = Decimal("0.05")
@@ -330,6 +331,26 @@ class Artifact:
 
 # --- storage ---------------------------------------------------------------------------
 
+OPERATIONS_SQL = """
+CREATE TABLE {name} (
+    op_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('GRANT', 'REVOKE', 'PAUSE')),
+    limiter_address TEXT NOT NULL,
+    amount INTEGER NOT NULL,
+    job_id TEXT,
+    tx_hash TEXT,
+    state TEXT NOT NULL CHECK(state IN ('PREPARED', 'SUBMITTED', 'WAITING_DEVICE', 'BROADCAST',
+                                        'DONE', 'FAILED', 'EXPIRED')),
+    detail TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    method TEXT NOT NULL DEFAULT 'device' CHECK(method IN ('device', 'approve', 'permit'))
+);
+"""
+OPERATIONS_INDEX_SQL = "CREATE INDEX IF NOT EXISTS operations_by_user ON operations(user_id, created_at);"
+
+
 class AllowanceStore:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -358,20 +379,6 @@ class AllowanceStore:
                     created_at INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS limiters_by_user ON limiters(user_id, created_at);
-                CREATE TABLE IF NOT EXISTS operations (
-                    op_id TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    kind TEXT NOT NULL CHECK(kind IN ('GRANT', 'REVOKE', 'PAUSE')),
-                    limiter_address TEXT NOT NULL,
-                    amount INTEGER NOT NULL,
-                    job_id TEXT,
-                    tx_hash TEXT,
-                    state TEXT NOT NULL CHECK(state IN ('WAITING_DEVICE', 'BROADCAST', 'DONE', 'FAILED')),
-                    detail TEXT NOT NULL DEFAULT '',
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS operations_by_user ON operations(user_id, created_at);
                 CREATE TABLE IF NOT EXISTS settlements (
                     tx_hash TEXT NOT NULL,
                     log_index TEXT NOT NULL,
@@ -421,7 +428,32 @@ class AllowanceStore:
                 );
                 """
             )
+            self._migrate_operations(db)
         os.chmod(self.path, 0o600)
+
+    @staticmethod
+    def _migrate_operations(db: sqlite3.Connection) -> None:
+        """Create `operations`, or rebuild a v1 table whose CHECK lacks the wallet states.
+
+        SQLite cannot alter a CHECK constraint; the rows are copied as they are,
+        with method 'device' (every v1 operation went through the Trezor path).
+        """
+        row = db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'operations'").fetchone()
+        if row is not None and "'PREPARED'" in row[0]:
+            return
+        if row is None:
+            db.executescript(OPERATIONS_SQL.format(name="operations") + OPERATIONS_INDEX_SQL)
+            return
+        db.executescript(
+            "ALTER TABLE operations RENAME TO operations_v1;"
+            + OPERATIONS_SQL.format(name="operations")
+            + """INSERT INTO operations (op_id, user_id, kind, limiter_address, amount, job_id, tx_hash,
+                     state, detail, created_at, updated_at, method)
+                 SELECT op_id, user_id, kind, limiter_address, amount, job_id, tx_hash,
+                     state, detail, created_at, updated_at, 'device' FROM operations_v1;
+                 DROP TABLE operations_v1;"""
+            + OPERATIONS_INDEX_SQL
+        )
 
     @contextmanager
     def _db(self) -> Iterator[sqlite3.Connection]:
@@ -474,10 +506,10 @@ class AllowanceStore:
         with self._db() as db:
             db.execute(
                 """INSERT INTO operations (op_id, user_id, kind, limiter_address, amount, job_id, tx_hash,
-                   state, detail, created_at, updated_at)
+                   state, detail, created_at, updated_at, method)
                    VALUES (:op_id, :user_id, :kind, :limiter_address, :amount, :job_id, :tx_hash,
-                   :state, :detail, :created_at, :updated_at)""",
-                dict(row),
+                   :state, :detail, :created_at, :updated_at, :method)""",
+                {"method": "device", **dict(row)},
             )
 
     def update_op(self, op_id: str, now: int, **fields: Any) -> None:
@@ -491,9 +523,18 @@ class AllowanceStore:
     def open_ops(self, user_id: str) -> list[sqlite3.Row]:
         with self._db() as db:
             return db.execute(
-                "SELECT * FROM operations WHERE user_id = ? AND state IN ('WAITING_DEVICE', 'BROADCAST') ORDER BY created_at",
+                "SELECT * FROM operations WHERE user_id = ? AND state IN ('PREPARED', 'SUBMITTED', 'WAITING_DEVICE', 'BROADCAST')"
+                " ORDER BY created_at",
                 (user_id,),
             ).fetchall()
+
+    def op_by_tx(self, tx_hash: str) -> sqlite3.Row | None:
+        with self._db() as db:
+            return db.execute("SELECT * FROM operations WHERE lower(tx_hash) = lower(?)", (tx_hash,)).fetchone()
+
+    def op(self, user_id: str, op_id: str) -> sqlite3.Row | None:
+        with self._db() as db:
+            return db.execute("SELECT * FROM operations WHERE user_id = ? AND op_id = ?", (user_id, op_id)).fetchone()
 
     def recent_ops(self, user_id: str, limit: int = 3) -> list[sqlite3.Row]:
         with self._db() as db:
@@ -982,6 +1023,85 @@ class AllowanceService:
             ),
         }
 
+    # -- the owner's wallet: grant and revoke from the web page --
+
+    def prepare_wallet(self, user_id: str, kind: str, amount: Any = None, limiter: str | None = None) -> dict[str, Any]:
+        """The exact approve for the owner's wallet to send, after checking the limiter on chain."""
+        owner = self.owner_of(user_id)
+        self.advance(user_id)
+        if kind == "GRANT":
+            amount_atomic = _usdc_atomic(amount, "The allowance")
+            if amount_atomic > self.max_grant:
+                raise AllowanceError(f"Allowances are limited to {_usdc_text(self.max_grant)} for now.")
+            row = self.store.active_limiter(user_id)
+            if row is None:
+                raise AllowanceError("Create a limiter first.")
+            if row["expiry"] <= self.now() or self.evm.call_word(row["limiter_address"], selector("paused()")):
+                raise AllowanceError("This limiter is paused or expired. Create a new one.")
+            problem = self._verify_deployment(row)
+            if problem:
+                raise AllowanceError(f"Your limiter {row['limiter_address']} failed its check ({problem}). "
+                                     "Nothing to sign.")
+        elif kind == "REVOKE":
+            amount_atomic = 0
+            row = self.store.limiter(user_id, str(limiter).strip()) if limiter else self.store.active_limiter(user_id)
+            if row is None:
+                raise AllowanceError("That limiter is not one of yours." if limiter else "You have no limiter to revoke.")
+        else:
+            raise ValueError(kind)
+        spender = to_checksum_address(row["limiter_address"])
+        now = int(self.now())
+        with self._ops_lock:
+            for op in self.store.open_ops(user_id):
+                if op["state"] != "PREPARED":
+                    raise AllowanceError("A request is already on its way. Wait for it to finish.")
+                self.store.update_op(op["op_id"], now, state="EXPIRED", detail="Replaced by a newer request.")
+            op_id = "op_" + keccak(text=f"{user_id}:{kind}:{spender}:{amount_atomic}:{now}:{os.urandom(8).hex()}").hex()[:24]
+            self.store.insert_op({
+                "op_id": op_id, "user_id": user_id, "kind": kind, "limiter_address": spender, "amount": amount_atomic,
+                "job_id": None, "tx_hash": None, "state": "PREPARED", "detail": "", "method": "approve",
+                "created_at": now, "updated_at": now,
+            })
+        what = f"up to {_usdc_text(amount_atomic)}" if amount_atomic else "0 USDC (a revoke)"
+        return {
+            "operation": op_id, "kind": kind, "method": "approve", "state": "PREPARED",
+            "limiter": spender, "amountAtomic": str(amount_atomic), "expiresAt": now + WALLET_PREPARE_SECONDS,
+            "tx": {"from": owner, "to": USDC, "data": encode_call("approve(address,uint256)", spender, amount_atomic),
+                   "value": "0x0", "chainId": hex(BASE_CHAIN_ID)},
+            "walletShows": f"Your wallet will ask you to approve {what} for {spender[:6]}…{spender[-4:]}.",
+        }
+
+    def submit_wallet(self, user_id: str, op_id: str, tx_hash: Any) -> dict[str, Any]:
+        """Record the hash the wallet returned; the chain decides the rest."""
+        self.owner_of(user_id)
+        tx_hash = str(tx_hash or "").strip().lower()
+        if len(tx_hash) != 66 or not tx_hash.startswith("0x") or not all(c in "0123456789abcdef" for c in tx_hash[2:]):
+            raise AllowanceError("That is not a transaction hash.")
+        with self._ops_lock:
+            op = self.store.op(user_id, str(op_id))
+            if op is None:
+                raise AllowanceError("No such request.")
+            if op["state"] != "PREPARED":
+                if op["tx_hash"] == tx_hash:
+                    return self.operation(user_id, op_id)
+                raise AllowanceError("This request has already been submitted or has ended.")
+            if self.store.op_by_tx(tx_hash) is not None:
+                raise AllowanceError("That transaction is already counted for another request.")
+            self.store.update_op(op["op_id"], int(self.now()), state="SUBMITTED", tx_hash=tx_hash)
+        self.advance(user_id)
+        return self.operation(user_id, op_id)
+
+    def operation(self, user_id: str, op_id: str) -> dict[str, Any]:
+        self.advance(user_id)
+        op = self.store.op(user_id, str(op_id))
+        if op is None:
+            raise AllowanceError("No such request.")
+        return {
+            "operation": op["op_id"], "kind": op["kind"], "method": op["method"], "state": op["state"],
+            "limiter": op["limiter_address"], "amountAtomic": str(op["amount"]), "txHash": op["tx_hash"],
+            "detail": op["detail"], "createdAt": op["created_at"], "updatedAt": op["updated_at"],
+        }
+
     def advance(self, user_id: str) -> None:
         """Move this user's pending grants and revokes forward, once each."""
         with self._ops_lock:
@@ -1000,8 +1120,31 @@ class AllowanceService:
         BROADCAST -> a receipt: DONE once the allowance reads back, FAILED if it
         reverted. No receipt yet: the same signed bytes are offered again, which
         a node that already has them answers with "already known".
+
+        The wallet path (method 'approve') starts earlier:
+        PREPARED -> EXPIRED if nobody submits a transaction in time.
+        SUBMITTED -> the transaction as Base has it: exactly an approve of this
+        limiter, from this owner, with an allowed amount (a wallet may let the
+        user edit it; the amount actually signed is recorded) -> BROADCAST.
+        Anything else is FAILED and nothing is counted.
         """
         now = int(self.now())
+        if op["state"] == "PREPARED":
+            if now - op["created_at"] > WALLET_PREPARE_SECONDS:
+                self.store.update_op(op["op_id"], now, state="EXPIRED", detail="Not signed in time. Nothing changed.")
+            return
+        if op["state"] == "SUBMITTED":
+            try:
+                tx = self.evm.rpc.call("eth_getTransactionByHash", [op["tx_hash"]])
+            except Exception:
+                return
+            if not isinstance(tx, dict):
+                if now - op["updated_at"] > WALLET_PREPARE_SECONDS:
+                    raise AllowanceError(f"Base never saw the transaction {op['tx_hash']}. Nothing changed.")
+                return
+            amount = self._wallet_tx_amount(op, tx)
+            self.store.update_op(op["op_id"], now, state="BROADCAST", amount=amount)
+            return
         if op["state"] == "WAITING_DEVICE":
             try:
                 job = self.broker.job(op["job_id"])
@@ -1033,6 +1176,12 @@ class AllowanceService:
         if isinstance(receipt, dict):
             if int(receipt.get("status", "0x0"), 16) != 1:
                 raise AllowanceError(f"The approve {op['tx_hash']} reverted on Base.")
+            if op["method"] != "device":
+                # A wallet transaction is named by the page: it must be one made
+                # for this request, not an older approve with the same calldata.
+                block = self.evm.call("eth_getBlockByNumber", [receipt["blockNumber"], False]) or {}
+                if int(block.get("timestamp", "0x0"), 16) < op["created_at"] - 60:
+                    raise AllowanceError(f"The transaction {op['tx_hash']} is older than this request. Nothing counted.")
             owner = self._owner(op["user_id"]) or ""
             # Waits out a lagging node, but only while the approve is fresh:
             # afterwards purchases spend from it and it never reads back whole.
@@ -1048,11 +1197,35 @@ class AllowanceService:
             return
         if now - op["updated_at"] > DEVICE_JOB_SECONDS:
             raise AllowanceError(f"The approve {op['tx_hash']} was sent but not mined. Check it on BaseScan before retrying.")
+        if op["method"] != "device":
+            return  # the wallet broadcast it; there are no signed bytes here to offer again
         try:
             job = self.broker.job(op["job_id"])
         except AllowanceError:
             return
         self._broadcast(str((job.get("result") or {}).get("signedTransaction", "")))
+
+    def _wallet_tx_amount(self, op: sqlite3.Row, tx: Mapping[str, Any]) -> int:
+        """The amount of a submitted approve if it is exactly what this request allows; else raise."""
+        owner = self._owner(op["user_id"]) or ""
+        data = str(tx.get("input") or tx.get("data") or "").lower()
+        refused = f"The transaction {op['tx_hash']} is not the approve this request prepared"
+        if str(tx.get("from", "")).lower() != owner.lower():
+            raise AllowanceError(f"{refused}: it is not from your wallet {owner}. Nothing counted.")
+        if str(tx.get("to") or "").lower() != USDC.lower() or int(str(tx.get("value") or "0x0"), 16) != 0:
+            raise AllowanceError(f"{refused}: it is not a call to USDC. Nothing counted.")
+        if tx.get("chainId") is not None and int(str(tx["chainId"]), 16) != BASE_CHAIN_ID:
+            raise AllowanceError(f"{refused}: it is not on Base. Nothing counted.")
+        if len(data) != 138 or not data.startswith(selector("approve(address,uint256)")):
+            raise AllowanceError(f"{refused}: it is not an approve. Nothing counted.")
+        if "0x" + data[34:74] != op["limiter_address"].lower():
+            raise AllowanceError(f"{refused}: it approves another address. Nothing counted.")
+        amount = int(data[74:], 16)
+        if op["kind"] == "REVOKE" and amount != 0:
+            raise AllowanceError(f"{refused}: a revoke must approve 0. Nothing counted.")
+        if op["kind"] == "GRANT" and not 0 < amount <= self.max_grant:
+            raise AllowanceError(f"{refused}: the amount is outside 0 to {_usdc_text(self.max_grant)}. Nothing counted.")
+        return amount
 
     def _return_float_if_closed(self, user_id: str, owner: str) -> str:
         """Send the agent's USDC back to the owner once nothing is granted any more.
@@ -1081,7 +1254,7 @@ class AllowanceService:
             logger.warning("allowance: returning the float of %s failed: %s", user_id, exc)
             return f" Returning your agent's float failed ({exc}); it is still at {agent}."
         logger.info("allowance: returned %s of float from %s to %s in %s", amount, agent, owner, tx)
-        return f" Your agent's float of {_usdc_text(amount)} went back to your Trezor address: {tx}."
+        return f" Your agent's float of {_usdc_text(amount)} went back to your wallet: {tx}."
 
     def _broadcast(self, raw: str) -> None:
         try:
@@ -1101,8 +1274,9 @@ class AllowanceService:
     def _op_text(self, op: sqlite3.Row) -> str:
         when = time.strftime("%H:%M UTC", time.gmtime(op["created_at"]))
         what = {"GRANT": f"grant {_usdc_text(op['amount'])}", "REVOKE": "revoke", "PAUSE": "pause"}[op["kind"]]
-        state = {"WAITING_DEVICE": "waiting for your Trezor", "BROADCAST": f"sent, {op['tx_hash']}",
-                 "DONE": "done", "FAILED": "failed"}[op["state"]]
+        state = {"PREPARED": "waiting for your wallet", "SUBMITTED": f"submitted, {op['tx_hash']}",
+                 "WAITING_DEVICE": "waiting for your Trezor", "BROADCAST": f"sent, {op['tx_hash']}",
+                 "DONE": "done", "FAILED": "failed", "EXPIRED": "expired"}[op["state"]]
         detail = f" — {op['detail']}" if op["detail"] else ""
         return f"{when} {what}: {state}{detail}"
 
