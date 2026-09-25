@@ -571,6 +571,11 @@ class AllowanceStore:
             db.execute("INSERT INTO alerts (user_id, severity, text, created_at) VALUES (?, ?, ?, ?)",
                        (user_id, severity, text, now))
 
+    def limiters_since(self, user_id: str, since: int) -> int:
+        with self._db() as db:
+            return db.execute("SELECT COUNT(*) FROM limiters WHERE user_id = ? AND created_at >= ?",
+                              (user_id, since)).fetchone()[0]
+
     def recent_alerts(self, user_id: str, limit: int = 3) -> list[sqlite3.Row]:
         with self._db() as db:
             return db.execute("SELECT * FROM alerts WHERE user_id = ? ORDER BY alert_id DESC LIMIT ?",
@@ -738,12 +743,14 @@ class AllowanceService:
         float_target: int = int(DEFAULT_FLOAT_TARGET * 1_000_000),
         float_low: int = int(DEFAULT_FLOAT_LOW * 1_000_000),
         exact_above: int = int(DEFAULT_EXACT_ABOVE * 1_000_000),
+        owner_lookup: Callable[[str], str | None] | None = None,
         now: Callable[[], float] = time.time,
     ):
         self.store = store
         self.evm = evm
         self.fernet = fernet
         self.owners = dict(owners)
+        self.owner_lookup = owner_lookup
         self.guardian_key = guardian_key
         self.guardian = Account.from_key(guardian_key()).address
         self.gas_funder_key = gas_funder_key
@@ -764,8 +771,15 @@ class AllowanceService:
 
     # -- who --
 
-    def owner_of(self, user_id: str) -> str:
+    def _owner(self, user_id: str) -> str | None:
+        """The owner address on file: the env allowlist first, then web accounts."""
         owner = self.owners.get(str(user_id))
+        if not owner and self.owner_lookup is not None:
+            owner = self.owner_lookup(str(user_id))
+        return owner or None
+
+    def owner_of(self, user_id: str) -> str:
+        owner = self._owner(user_id)
         if not owner:
             raise AllowanceUnavailable("The Trezor allowance is not enabled for this account.")
         return owner
@@ -1006,7 +1020,7 @@ class AllowanceService:
                     code, f"It failed on your computer ({code}). Nothing changed."))
                 return
             raw = str((job.get("result") or {}).get("signedTransaction", ""))
-            tx_hash = verify_signed_approve(raw, self.owners.get(op["user_id"], ""), op["limiter_address"], op["amount"])
+            tx_hash = verify_signed_approve(raw, self._owner(op["user_id"]) or "", op["limiter_address"], op["amount"])
             self.store.update_op(op["op_id"], now, state="BROADCAST", tx_hash=tx_hash)
             self._broadcast(raw)
             return
@@ -1019,7 +1033,7 @@ class AllowanceService:
         if isinstance(receipt, dict):
             if int(receipt.get("status", "0x0"), 16) != 1:
                 raise AllowanceError(f"The approve {op['tx_hash']} reverted on Base.")
-            owner = self.owners.get(op["user_id"], "")
+            owner = self._owner(op["user_id"]) or ""
             # Waits out a lagging node, but only while the approve is fresh:
             # afterwards purchases spend from it and it never reads back whole.
             fresh = now - op["updated_at"] < 120
@@ -1101,7 +1115,7 @@ class AllowanceService:
         refusal, not a fallback: an owner who set up the Trezor lane must never be
         paid for from a custodial wallet without knowing it.
         """
-        if str(user_id) not in self.owners:
+        if self._owner(user_id) is None:
             return None
         active = self.store.active_limiter(str(user_id))
         if active is None:
@@ -1353,8 +1367,13 @@ def build_allowance_service_from_env(
         raise ValueError(f"{ENABLED_ENV}=1 needs the wallet master key to encrypt agent keys.")
     fernet = Fernet(master_key.encode("ascii"))
     owners = parse_owners(str(values.get(OWNERS_ENV, "")))
-    if not owners:
-        raise ValueError(f"{ENABLED_ENV}=1 needs {OWNERS_ENV}.")
+    owner_lookup = None
+    if str(values.get("SIGN402_WEB_ENABLED", "0")).strip() == "1":
+        from .web_accounts import DEFAULT_WEB_DB, WEB_DB_ENV, WebAccountStore
+
+        owner_lookup = WebAccountStore(Path(str(values.get(WEB_DB_ENV, "") or DEFAULT_WEB_DB)).expanduser()).owner_for
+    if not owners and owner_lookup is None:
+        raise ValueError(f"{ENABLED_ENV}=1 needs {OWNERS_ENV} or SIGN402_WEB_ENABLED=1.")
     guardian_blob = str(values.get(GUARDIAN_KEY_ENV, "")).strip()
     if not guardian_blob:
         raise ValueError(f"{ENABLED_ENV}=1 needs {GUARDIAN_KEY_ENV} (Fernet-encrypted with the master key).")
@@ -1393,6 +1412,7 @@ def build_allowance_service_from_env(
         float_target=_usdc_atomic(values.get(FLOAT_TARGET_ENV, DEFAULT_FLOAT_TARGET), FLOAT_TARGET_ENV),
         float_low=_usdc_atomic(values.get(FLOAT_LOW_ENV, DEFAULT_FLOAT_LOW), FLOAT_LOW_ENV),
         exact_above=_usdc_atomic(values.get(EXACT_ABOVE_ENV, DEFAULT_EXACT_ABOVE), EXACT_ABOVE_ENV),
+        owner_lookup=owner_lookup,
     )
 
 

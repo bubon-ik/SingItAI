@@ -68,6 +68,8 @@ class TelegramNotifier:
         self._token = bot_token
 
     def __call__(self, user_id: str, text: str) -> None:
+        if not str(user_id).isdigit():
+            return  # a web account without Telegram: the alert is stored and shown on the page
         body = json.dumps({"chat_id": user_id, "text": text, "disable_web_page_preview": True}).encode()
         request = urllib.request.Request(
             f"https://api.telegram.org/bot{self._token}/sendMessage", data=body, method="POST",

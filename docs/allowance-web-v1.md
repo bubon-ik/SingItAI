@@ -257,6 +257,19 @@ rollout and is removed at general availability.
 6. The page (owner's design), then a private beta, then general availability
    with the abuse limits on.
 
+**Step 1 is built** (`sign402_gateway/web_accounts.py`, `web_api.py`): SIWE
+nonce → verify → session cookie + CSRF token, logout, `GET /session`,
+`GET /allowance`, `POST /allowance/setup` with the USDC minimum, the 30-day
+limiter cap and rate limits. Web accounts are owners through
+`AllowanceService.owner_lookup`, so the watcher, `lane_for` and later purchases
+see them like the env allowlist. Rehearsed over HTTP on a Base mainnet fork: a
+fresh wallet signed in, created a limiter whose `owner`, `agent` and caps read
+back on chain, and the deployed code matched the tested artifact; setup without
+the CSRF header, a wallet outside the beta and a logged-out cookie were refused.
+Run it with `python -m sign402_gateway.web_api` behind a TLS reverse proxy that
+forwards `/web/v1` to `127.0.0.1:8130`. Messages from the lane still name the
+Trezor and bot commands; step 2 makes them neutral for the web.
+
 Each step with unit tests and a mainnet check recorded in
 [trezor-allowance-checks.md](trezor-allowance-checks.md), as T4–T8 were.
 

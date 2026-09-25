@@ -424,6 +424,20 @@ class WiringTests(unittest.TestCase):
             aa.build_allowance_service_from_env("", env=base)
         self.assertIsInstance(aa.build_allowance_service_from_env(key, env=base), aa.AllowanceService)
 
+    def test_web_accounts_are_owners_without_an_env_list(self):
+        from sign402_gateway.web_accounts import WebAccountStore, account_id_for
+
+        key = Fernet.generate_key().decode()
+        blob = Fernet(key.encode()).encrypt(Account.create().key.to_0x_hex().encode()).decode()
+        tmp = Path(tempfile.mkdtemp())
+        env = {aa.ENABLED_ENV: "1", aa.GUARDIAN_KEY_ENV: blob, aa.GAS_FUNDER_ENV: blob,
+               aa.DB_ENV: str(tmp / "a.db"), "SIGN402_WEB_ENABLED": "1", "SIGN402_WEB_DB": str(tmp / "web.db")}
+        service = aa.build_allowance_service_from_env(key, env=env)
+        WebAccountStore(tmp / "web.db").ensure_account(OWNER, NOW)
+        self.assertEqual(service.owner_of(account_id_for(OWNER)), to_checksum_address(OWNER))
+        with self.assertRaises(aa.AllowanceUnavailable):
+            service.owner_of(USER)
+
     def test_owners_parse_to_checksummed_addresses(self):
         self.assertEqual(aa.parse_owners(f" {USER} : {OWNER.lower()} , 7:{GUARDIAN}"),
                          {USER: to_checksum_address(OWNER), "7": to_checksum_address(GUARDIAN)})
