@@ -201,9 +201,20 @@ async function walletOperation(kind, body) {
     const wallet = await needWallet();
     const prepared = await api.prepare(kind, body);
     say(`${prepared.walletShows} Confirm it in your wallet.`);
-    const answer = prepared.method === "permit"
-      ? { operation: prepared.operation, signature: await wallet.signTypedData(prepared.typedData) }
-      : { operation: prepared.operation, txHash: await wallet.sendTransaction(prepared.tx) };
+    let answer;
+    try {
+      answer = prepared.method === "permit"
+        ? { operation: prepared.operation, signature: await wallet.signTypedData(prepared.typedData) }
+        : { operation: prepared.operation, txHash: await wallet.sendTransaction(prepared.tx) };
+    } catch (error) {
+      // Some wallets (smart accounts, no ETH) cannot send the transaction. The same
+      // approval also works as a signature we send; the next press uses that.
+      if (prepared.method === "approve" && error?.code !== 4001 && !/reject|denied|cancel/i.test(error?.message || "")) {
+        state.method = "permit";
+        throw new Error("Your wallet couldn't send the transaction. Press the button again — this time you only sign, and we pay the gas.");
+      }
+      throw error;
+    }
     say("Waiting for Base to confirm it…");
     let op = await api.submit(kind, answer);
     const deadline = Date.now() + 180000;
@@ -375,18 +386,13 @@ function renderSetup(heading) {
     </div></div>`;
 }
 
+// No choice for the user: a transaction when the wallet has ETH (wallets show it
+// most clearly), otherwise — or after a transaction the wallet could not send —
+// a gas-free signature we send. One sentence says which.
 function methodSwitch() {
-  const m = method();
-  return `
-    <div>
-      <div class="segmented" role="group" aria-label="How to approve">
-        <button class="${m === "approve" ? "on" : ""}" data-action="method" data-method="approve">Transaction</button>
-        <button class="${m === "permit" ? "on" : ""}" data-action="method" data-method="permit">Signature, no gas</button>
-      </div>
-      <p class="hint">${m === "permit"
-        ? "You sign a USDC permit; we send it to Base and pay the gas."
-        : "Your wallet sends an approve transaction; you pay a few cents of ETH gas."}${hasGas() ? "" : " Your wallet has no ETH on Base."}</p>
-    </div>`;
+  return `<p class="hint">${method() === "permit"
+    ? "Your wallet will ask you to sign; we send it to Base and pay the gas."
+    : "Your wallet will ask you to confirm a transaction; it costs a few cents of ETH."}</p>`;
 }
 
 function renderAllowance() {
