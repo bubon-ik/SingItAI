@@ -464,9 +464,10 @@ function renderAllowance() {
       <div class="grid-2">
         ${granted ? `
         <div class="bezel"><div class="core stack">
-          <div><h2>Revoke</h2><p>Sets the allowance to 0. Whatever your agent still holds comes back to your wallet.</p></div>
+          <div><h2>Revoke the current limiter</h2><p>Stops your agent: sets the allowance of <span class="mono">${esc(short(a.limiter))}</span>
+            to 0. Whatever your agent still holds comes back to your wallet.</p></div>
           ${methodSwitch()}
-          <button class="btn btn-ghost" data-action="revoke">Revoke the allowance</button>
+          <button class="btn btn-ghost" data-action="revoke">Revoke current limiter ${esc(short(a.limiter))}</button>
         </div></div>` : ""}
         ${blocked ? "" : `
         <div class="bezel danger"><div class="core stack">
@@ -484,7 +485,7 @@ function renderStale(a) {
     <div><h2>Revoke your old limiter${stale.length > 1 ? "s" : ""}</h2>
       <p>Your agent no longer uses ${stale.length > 1 ? "these" : "this one"}, but your wallet still allows ${stale.length > 1 ? "them" : "it"} to take USDC. Revoke to close it.</p></div>
     ${stale.map((x) => `<div class="spread"><span class="mono">${esc(short(x.limiter))} · ${usdc(x.allowanceAtomic)} allowed</span>
-      <button class="btn btn-danger btn-sm" data-action="revoke-old" data-limiter="${esc(x.limiter)}">Revoke</button></div>`).join("")}
+      <button class="btn btn-danger btn-sm" data-action="revoke-old" data-limiter="${esc(x.limiter)}">Revoke old limiter</button></div>`).join("")}
   </div></div>`;
 }
 
@@ -751,7 +752,7 @@ function renderCard(card, key) {
   if (card.type === "wallet") {
     const grant = card.kind === "grant";
     if (state.done[key]) return `<div class="card done"><h3>${grant ? `Approved ${esc(card.amount)} USDC` : "Revoked"} ✓</h3></div>`;
-    return `<div class="card accent"><h3>${grant ? `Approve ${esc(card.amount)} USDC for your agent` : "Revoke your agent's allowance"}</h3>
+    return `<div class="card accent"><h3>${grant ? `Approve ${esc(card.amount)} USDC for your agent` : `Revoke the current limiter ${esc(short(card.limiter || ""))}`}</h3>
       <p class="faint">${grant ? "Your wallet will show an approval for your limiter" : "Your wallet will show an approval of 0 for your limiter"}
         ${card.limiter ? ` <span class="mono">${esc(short(card.limiter))}</span>` : ""}. Nothing moves until a purchase needs it.</p>
       <div style="margin-top:10px">${methodSwitch()}</div>
