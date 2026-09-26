@@ -5,5 +5,5 @@ window.SINGIT_APP_CONFIG = {
   apiBase: "/web/v1",
   // A free project id from cloud.reown.com turns on WalletConnect (mobile
   // wallets by QR code). Empty: browser extensions only.
-  walletConnectProjectId: "",
+  walletConnectProjectId: "c90215a87a06ac5527798a37ba898382",
 };

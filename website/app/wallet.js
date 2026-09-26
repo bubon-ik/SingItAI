@@ -135,7 +135,10 @@ export async function watchAppKit(onWallet) {
   const k = await appKit();
   k.subscribeAccount((account) => {
     if (account?.isConnected && account.address) {
-      try { onWallet(kitWallet(k, account.address)); } catch { /* provider not ready yet; the next event has it */ }
+      try {
+        onWallet(kitWallet(k, account.address));
+        k.close?.();  // connected: the page takes over from the modal
+      } catch { /* provider not ready yet; the next event has it */ }
     } else if (account && account.status === "disconnected") {
       onWallet(null);
     }
