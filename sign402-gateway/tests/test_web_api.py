@@ -168,6 +168,7 @@ class WebApiTests(unittest.TestCase):
         _, allowance, _ = self.call("GET", "/allowance", token=token)
         self.assertEqual((allowance["limiter"], allowance["state"]), (created["limiter"], "waiting_for_grant"))
         self.assertEqual(allowance["alerts"], [])
+        self.assertEqual(allowance["staleLimiters"], [])
         self.assertIn("ownerEthWei", allowance)
         with self.assertRaises(aa.AllowanceError):  # on the lane, nothing granted yet: a refusal
             self.service.lane_for(body["account"])
@@ -439,6 +440,16 @@ class WalletLaneTests(unittest.TestCase):
         self.assertIn("went back to your wallet", op["detail"])
         agent = self.service.store.agent(self.USER)["agent_address"]
         self.assertEqual(self.evm.sent[-1]["from"], agent)
+
+    def test_old_limiters_the_owner_still_allows_are_listed_for_revoking(self):
+        old = self.limiter
+        new = self.service.setup(self.USER, "20", "5", "30")["limiter"]
+        self.evm.allowances[old] = 5_000_000
+        self.evm.allowances[new] = 1_000_000
+        self.assertEqual(self.service.stale_allowances(self.USER),
+                         [{"limiter": old, "allowanceAtomic": 5_000_000, "status": "SUPERSEDED"}])
+        self.evm.allowances[old] = 0
+        self.assertEqual(self.service.stale_allowances(self.USER), [])
 
     def test_a_revoke_must_approve_zero(self):
         prepared = self.service.prepare_wallet(self.USER, "REVOKE")

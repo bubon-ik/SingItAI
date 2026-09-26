@@ -41,6 +41,7 @@ class AgentTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.allowance = Mock()
         self.allowance.status.return_value = dict(GRANTED)
+        self.allowance.stale_allowances.return_value = []
         self.shop = FakeShop()
         self.intent = "chat"
         self.model_replies = []
@@ -64,6 +65,15 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(message["cards"], [{"type": "wallet", "kind": "grant", "amount": "20", "limiter": "0xNEW"}])
         self.assertIn("Готово", message["text"])
 
+    def test_a_new_limiter_offers_to_revoke_an_old_one_still_allowed(self):
+        self.allowance.stale_allowances.return_value = [{"limiter": "0xOLD", "allowanceAtomic": 5_000_000, "status": "SUPERSEDED"}]
+        message = self.send("$10 a day, $2 per transaction", "set_limits")
+        self.assertEqual([c["kind"] for c in message["cards"]], ["grant", "revoke"])
+        self.assertEqual(message["cards"][1], {"type": "wallet", "kind": "revoke", "limiter": "0xOLD", "old": True, "allowance": "5"})
+        self.assertIn("older limiter", message["text"])
+        status = self.send("what can my agent spend?", "status")
+        self.assertEqual(status["cards"][1]["limiter"], "0xOLD")
+
     def test_a_daily_limit_alone_is_proposed_not_created(self):
         message = self.send("Set a $20 daily limit", "set_limits")
         self.agent.setup.assert_not_called()
@@ -73,7 +83,9 @@ class AgentTests(unittest.TestCase):
     def test_limit_sentences(self):
         for text, expected in (("$20 a day, $5 per purchase", {"daily": "20", "per": "5"}),
                                ("20 usdc per day and 2.5 per order for 7 days", {"daily": "20", "per": "2.5", "days": "7"}),
-                               ("лимит 50 в день, 10 за покупку", {"daily": "50", "per": "10"})):
+                               ("лимит 50 в день, 10 за покупку", {"daily": "50", "per": "10"}),
+                               ("set up limits $10 per day and $2 per transaction", {"daily": "10", "per": "2"}),
+                               ("10 в день и 2 за транзакцию", {"daily": "10", "per": "2"})):
             with self.subTest(text=text):
                 self.assertEqual({k: v for k, v in wg.parse_limits(text).items() if k in expected}, expected)
 

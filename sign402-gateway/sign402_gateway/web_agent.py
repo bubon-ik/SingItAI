@@ -102,7 +102,7 @@ def parse_limits(text: str) -> dict[str, str]:
     found: dict[str, str] = {}
     patterns = {
         "days": r"(\d{1,3})\s*(?:days?|дн|дней|день\b(?!\s*лимит))",
-        "per": r"(\d{1,6}(?:[.,]\d{1,6})?)\s*\$?\s*(?:usdc|usd|\$|долл\w*)?\s*(?:per|a|за)\s*(?:purchase|buy|order|покупк\w*|заказ\w*)",
+        "per": r"(\d{1,6}(?:[.,]\d{1,6})?)\s*\$?\s*(?:usdc|usd|\$|долл\w*)?\s*(?:per|a|an|each|за|на)\s*(?:purchase|buy|order|transaction|txn|tx|payment|покупк\w*|заказ\w*|транзакци\w*|платеж\w*|платёж\w*)",
         "daily": r"(\d{1,6}(?:[.,]\d{1,6})?)\s*\$?\s*(?:usdc|usd|\$|долл\w*)?\s*(?:per|a|an|в|за)\s*(?:day|день|сутки)",
     }
     for name, pattern in patterns.items():
@@ -376,7 +376,8 @@ class WebAgent:
         if not state["configured"]:
             return say(lang, "You have no limits yet. Tell me, for example: \"Set a $20 daily limit, $5 per purchase\".",
                        "Лимитов пока нет. Напишите, например: «Поставь лимит 20 долларов в день и 5 за покупку»."), []
-        return say(lang, "Here is where your allowance stands:", "Вот что сейчас с вашим разрешением:"), [{"type": "allowance"}]
+        return (say(lang, "Here is where your allowance stands:", "Вот что сейчас с вашим разрешением:")
+                + self._stale_note(lang, account), [{"type": "allowance"}] + self._stale_cards(account))
 
     def _on_set_limits(self, account, lang, text, intent):
         found = parse_limits(text)
@@ -399,11 +400,23 @@ class WebAgent:
                          "Now approve it once from your wallet — nothing moves until a purchase needs it.",
                    f"Готово: лимитер разрешает {daily} USDC в день, не больше {per} за покупку, на {days} дней. "
                    "Теперь один раз подтвердите в кошельке — деньги не двигаются, пока не понадобятся для покупки.")
-        return head, [{"type": "wallet", "kind": "grant", "amount": daily, "limiter": result.get("limiter")}]
+        cards = [{"type": "wallet", "kind": "grant", "amount": daily, "limiter": result.get("limiter")}]
+        return head + self._stale_note(lang, account), cards + self._stale_cards(account)
 
     def allowance_setup(self, account, daily, per, days):
         """Setup through the web API's checks (USDC minimum, per-wallet and daily budgets)."""
         return self.setup(account, {"dailyCap": daily, "perPurchaseCap": per, "days": days})
+
+    def _stale_cards(self, account) -> list[dict[str, Any]]:
+        return [{"type": "wallet", "kind": "revoke", "limiter": s["limiter"], "old": True,
+                 "allowance": str(Decimal(s["allowanceAtomic"]) / Decimal(1_000_000))}
+                for s in self.allowance.stale_allowances(account)]
+
+    def _stale_note(self, lang, account) -> str:
+        if not self.allowance.stale_allowances(account):
+            return ""
+        return say(lang, "\n\nAn older limiter still has an allowance from your wallet. It isn't used any more — revoke it below.",
+                   "\n\nУ старого лимитера ещё осталось разрешение с вашего кошелька. Он больше не используется — отзовите его ниже.")
 
     def _on_grant(self, account, lang, text, intent):
         state = self._state(account)

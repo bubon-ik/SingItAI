@@ -443,6 +443,8 @@ function renderAllowance() {
         </div>
       </div></div>
 
+      ${renderStale(a)}
+
       ${blocked ? renderSetup("Create a new limiter") : `
       <div class="grid-2">
         <div class="bezel ${a.state === "granted" ? "" : "glow"}"><div class="core stack">
@@ -473,6 +475,17 @@ function renderAllowance() {
         </div></div>`}
       </div>
     </div>`;
+}
+
+function renderStale(a) {
+  const stale = a.staleLimiters || [];
+  if (!stale.length) return "";
+  return `<div class="bezel danger"><div class="core stack">
+    <div><h2>Revoke your old limiter${stale.length > 1 ? "s" : ""}</h2>
+      <p>Your agent no longer uses ${stale.length > 1 ? "these" : "this one"}, but your wallet still allows ${stale.length > 1 ? "them" : "it"} to take USDC. Revoke to close it.</p></div>
+    ${stale.map((x) => `<div class="spread"><span class="mono">${esc(short(x.limiter))} · ${usdc(x.allowanceAtomic)} allowed</span>
+      <button class="btn btn-danger btn-sm" data-action="revoke-old" data-limiter="${esc(x.limiter)}">Revoke</button></div>`).join("")}
+  </div></div>`;
 }
 
 function renderTelegram() {
@@ -648,7 +661,8 @@ function renderSidebar() {
   const a = state.allowance;
   const amountLine = a?.configured
     ? `<div class="label">Can spend today</div><div class="amt">${amount(spendableToday(a))}<small>USDC</small></div>
-       <div style="margin-top:8px">${statusPill(a.state)}</div>`
+       <div style="margin-top:8px">${statusPill(a.state)}</div>
+       ${(a.staleLimiters || []).length ? `<div class="faint" style="color:var(--danger);margin-top:8px">⚠ Old limiter to revoke</div>` : ""}`
     : `<div class="label">Allowance</div><div style="margin-top:4px;font-size:14px;color:var(--text-soft)">No limits yet</div>`;
   $("#side-nav").innerHTML = `
     <button class="side-allowance ${state.view === "allowance" ? "active" : ""}" data-action="go" data-view="allowance">${amountLine}</button>
@@ -725,6 +739,14 @@ function renderCard(card, key) {
         <div><span class="label">Per purchase</span><b>${usdc(a.perPurchaseCapAtomic)}</b></div>
         <div><span class="label">Held by agent</span><b>${usdc(a.floatAtomic)}</b></div></div>
       <div class="row"><button class="btn btn-ghost btn-sm" data-action="go" data-view="allowance">Open allowance</button></div></div>`;
+  }
+  if (card.type === "wallet" && card.old) {
+    if (state.done[key]) return `<div class="card done"><h3>Old limiter revoked ✓</h3></div>`;
+    return `<div class="card accent"><h3>Revoke the old limiter <span class="mono">${esc(short(card.limiter))}</span></h3>
+      <p class="faint">It still may take up to ${esc(card.allowance)} USDC from your wallet, though your agent no longer uses it.</p>
+      <div style="margin-top:10px">${methodSwitch()}</div>
+      <div class="row"><button class="btn btn-primary btn-sm has-orb" data-action="card-wallet" data-key="${esc(key)}"
+        data-kind="revoke" data-limiter="${esc(card.limiter)}">Revoke in wallet${orb}</button></div></div>`;
   }
   if (card.type === "wallet") {
     const grant = card.kind === "grant";
@@ -848,6 +870,7 @@ const actions = {
   },
   grant,
   revoke: () => walletOperation("revoke", { method: method() }),
+  "revoke-old": (el) => walletOperation("revoke", { method: method(), limiter: el.dataset.limiter }),
   "ask-pause": () => { state.modal = { type: "pause" }; render(); },
   pause,
   link: () => busy("Getting a code…", async () => { state.linkCode = await api.linkTelegram(); }),
@@ -879,7 +902,7 @@ const actions = {
     const key = el.dataset.key;
     const ok = el.dataset.kind === "grant"
       ? await walletOperation("grant", { amount: el.dataset.amount, method: method() })
-      : await walletOperation("revoke", { method: method() });
+      : await walletOperation("revoke", { method: method(), ...(el.dataset.limiter ? { limiter: el.dataset.limiter } : {}) });
     if (ok) { state.done[key] = true; render(); }
   },
   "card-limits": (el) => {

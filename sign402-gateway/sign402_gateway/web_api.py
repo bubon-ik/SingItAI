@@ -290,6 +290,7 @@ class WebApi:
             {"severity": a["severity"], "text": a["text"], "createdAt": a["created_at"]}
             for a in self.allowance.store.recent_alerts(account, 10)
         ]
+        status["staleLimiters"] = self.allowance.stale_allowances(account)
         return status
 
     def _setup(self, account: str, owner: str, body: Mapping[str, Any]) -> dict[str, Any]:

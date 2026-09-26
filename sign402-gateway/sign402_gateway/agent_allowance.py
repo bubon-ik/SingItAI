@@ -650,6 +650,12 @@ class AllowanceStore:
             db.execute("INSERT INTO alerts (user_id, severity, text, created_at) VALUES (?, ?, ?, ?)",
                        (user_id, severity, text, now))
 
+    def other_limiters(self, user_id: str) -> list[sqlite3.Row]:
+        """This user's limiters that are not the active one: superseded or rejected."""
+        with self._db() as db:
+            return db.execute("SELECT * FROM limiters WHERE user_id = ? AND status != 'ACTIVE' ORDER BY created_at DESC",
+                              (user_id,)).fetchall()
+
     def limiters_since(self, user_id: str | None, since: int) -> int:
         """Limiters created since `since` for this user, or for everyone with None."""
         with self._db() as db:
@@ -1567,6 +1573,22 @@ class AllowanceService:
         if operations:
             described["telegramText"] += "\n\nRecent requests:\n" + "\n".join(operations)
         return {**described, "configured": True, "operations": operations}
+
+    def stale_allowances(self, user_id: str) -> list[dict[str, Any]]:
+        """Old limiters (superseded or rejected) the owner still allows to spend: revoke them.
+
+        Replacing a limiter cannot touch the owner's approve of the old one; while
+        it stands, the agent key could still pull through it within its caps.
+        """
+        owner = self._owner(user_id)
+        if not owner:
+            return []
+        out = []
+        for row in self.store.other_limiters(user_id)[:10]:
+            left = self.evm.call_word(USDC, encode_call("allowance(address,address)", owner, row["limiter_address"]))
+            if left:
+                out.append({"limiter": row["limiter_address"], "allowanceAtomic": left, "status": row["status"]})
+        return out
 
     def _describe(self, row: Mapping[str, Any]) -> dict[str, Any]:
         limiter, owner, agent = row["limiter_address"], row["owner_address"], row["agent_address"]
