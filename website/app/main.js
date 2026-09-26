@@ -761,13 +761,14 @@ function renderCard(card, key) {
   }
   if (card.type === "limits_proposal") {
     if (state.done[key]) return `<div class="card done"><h3>Limiter created ✓</h3></div>`;
-    return `<div class="card accent"><h3>Your limits</h3>
+    return `<div class="card accent"><h3>${card.replaces ? `Replace your limiter ${esc(short(card.replaces))}` : "Your limits"}</h3>
+      ${card.replaces ? `<p class="faint">A new limiter needs a new approval from your wallet; then revoke the old one. At most 3 limiters a month.</p>` : ""}
       <div class="fields" style="margin-top:10px">
         <div class="field"><label>Daily, USDC</label><input class="input" data-field-of="${esc(key)}" data-name="daily" value="${esc(card.daily)}"></div>
         <div class="field"><label>Per purchase</label><input class="input" data-field-of="${esc(key)}" data-name="per" value="${esc(card.per)}"></div>
         <div class="field"><label>Days</label><input class="input" data-field-of="${esc(key)}" data-name="days" value="${esc(card.days || "30")}"></div>
       </div>
-      <div class="row"><button class="btn btn-primary btn-sm has-orb" data-action="card-limits" data-key="${esc(key)}" data-lang="${esc(card.lang || "en")}">Create my limiter${orb}</button></div></div>`;
+      <div class="row"><button class="btn btn-primary btn-sm has-orb" data-action="card-limits" data-key="${esc(key)}" data-lang="${esc(card.lang || "en")}">${card.replaces ? "Replace my limiter" : "Create my limiter"}${orb}</button></div></div>`;
   }
   if (card.type === "products") {
     return `<div class="card">${(card.items || []).map((p) => `

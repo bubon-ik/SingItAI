@@ -387,6 +387,19 @@ class WebAgent:
         daily = Decimal(found["daily"])
         per = Decimal(found["per"]) if "per" in found else None
         days = found.get("days", "30")
+        state = self._state(account)
+        if state["configured"] and state["state"] not in ("paused", "expired"):
+            # Limits live in the contract: new ones mean a new limiter, a new approval
+            # and revoking the old one. Never on one message; the card confirms it.
+            now_daily = Decimal(state["dailyCapAtomic"]) / Decimal(1_000_000)
+            now_per = Decimal(state["perPurchaseCapAtomic"]) / Decimal(1_000_000)
+            new_per = per if per is not None else min(daily, max(Decimal(1), (daily / 4).quantize(Decimal("1"))))
+            return say(lang, f"You already have a limiter: {now_daily} USDC a day, {now_per} a purchase. New limits mean a "
+                             "new limiter: you approve it again and revoke the old one. Replace it?",
+                       f"У вас уже есть лимитер: {now_daily} USDC в день, {now_per} за покупку. Новые лимиты — это новый "
+                       "лимитер: его нужно снова одобрить, а старый отозвать. Заменить?"), [
+                {"type": "limits_proposal", "daily": str(daily), "per": str(new_per), "days": days, "lang": lang,
+                 "replaces": state["limiter"]}]
         if per is None:
             proposal = min(daily, max(Decimal(1), (daily / 4).quantize(Decimal("1"))))
             return say(lang, f"A daily limit of {daily} USDC. How much per purchase? I'd suggest {proposal}.",

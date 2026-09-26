@@ -59,7 +59,15 @@ class AgentTests(unittest.TestCase):
         reply = self.agent.message(ACCOUNT, None, text)
         return reply["messages"][1]
 
+    def test_replacing_a_working_limiter_is_confirmed_on_a_card(self):
+        message = self.send("Set a $50 daily limit, $10 per purchase", "set_limits")
+        self.agent.setup.assert_not_called()
+        card = message["cards"][0]
+        self.assertEqual((card["type"], card["daily"], card["per"], card["replaces"]), ("limits_proposal", "50", "10", "0xLIM"))
+        self.assertIn("Replace it?", message["text"])
+
     def test_limits_from_one_sentence_create_the_limiter_and_ask_for_the_wallet(self):
+        self.allowance.status.return_value = {"configured": False}
         message = self.send("Поставь лимит 20 долларов в день и 5 за покупку на 14 дней", "set_limits")
         self.agent.setup.assert_called_once_with(ACCOUNT, {"dailyCap": "20", "perPurchaseCap": "5", "days": "14"})
         self.assertEqual(message["cards"], [{"type": "wallet", "kind": "grant", "amount": "20", "limiter": "0xNEW"}])
@@ -67,7 +75,9 @@ class AgentTests(unittest.TestCase):
 
     def test_a_new_limiter_offers_to_revoke_an_old_one_still_allowed(self):
         self.allowance.stale_allowances.return_value = [{"limiter": "0xOLD", "allowanceAtomic": 5_000_000, "status": "SUPERSEDED"}]
+        self.allowance.status.return_value = dict(GRANTED, state="paused")
         message = self.send("$10 a day, $2 per transaction", "set_limits")
+        self.allowance.status.return_value = dict(GRANTED)
         self.assertEqual([c["kind"] for c in message["cards"]], ["grant", "revoke"])
         self.assertEqual(message["cards"][1], {"type": "wallet", "kind": "revoke", "limiter": "0xOLD", "old": True, "allowance": "5"})
         self.assertIn("older limiter", message["text"])
@@ -143,6 +153,7 @@ class AgentTests(unittest.TestCase):
         message = self.send("buy crypto news", "buy_tool")
         self.assertEqual(message["text"], "Raise your spending limit to continue.")
         self.agent.setup.side_effect = type("WebError", (Exception,), {"message": "At most 3 limiters per wallet."})()
+        self.allowance.status.return_value = {"configured": False}
         self.assertEqual(self.send("$20 a day, $5 per purchase", "set_limits")["text"], "At most 3 limiters per wallet.")
 
     def test_chats_belong_to_their_account(self):
