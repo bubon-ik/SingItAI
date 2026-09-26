@@ -229,7 +229,9 @@ the conversation. It works the way the Telegram bot does
   validated). It has no tools, cannot trigger a payment, and never sees
   purchase results or codes.
 - Routes: `GET /chats`, `GET /chats/{id}`, `POST /chats/message {chatId?, text}`,
-  `POST /chats/action {chatId, action}` for card buttons, `POST /chats/delete`.
+  `POST /chats/action {chatId, action}` for card buttons, `POST /chats/update {chatId, title?, pinned?, archived?}`
+  (rename, pin, archive; a new message unarchives), `POST /chats/delete`. `GET /chats` lists pinned chats first
+  and flags archived ones.
   Sixty messages an hour per account. Chats are stored per account in `web.db`.
 
 ## What the server verifies

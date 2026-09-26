@@ -18,7 +18,7 @@ const state = {
   session: null,       // {account, address, telegramLinked}
   allowance: null,     // GET /allowance
   tab: "allowance",
-  modal: null,         // {type: "busy" | "wallets" | "quote" | "pause", …}
+  modal: null,         // {type: "busy" | "wallets" | "quote" | "pause" | "delete-chat", …}
   preset: 0,           // index into PRESETS
   method: null,        // "approve" | "permit"; null = pick from the wallet's ETH
   linkCode: null,
@@ -36,6 +36,9 @@ const state = {
   sending: false,
   done: {},            // wallet cards already carried out, by "messageId:index"
   menuOpen: false,
+  chatMenu: null,      // {id, top, left}: the ⋯ menu of one chat
+  renaming: null,      // the chat whose title is being edited in the sidebar
+  showArchived: false,
 };
 
 const PRESETS = [
@@ -165,7 +168,8 @@ async function signOut() {
   await disconnectAppKit().catch(() => {});
   Object.assign(state, { session: null, wallet: null, allowance: null, quote: null, result: null, purchases: null,
                          linkCode: null, revealed: {}, tab: "allowance", modal: null, view: "chat", chats: [],
-                         chatId: null, messages: [], done: {} });
+                         chatId: null, messages: [], done: {}, chatMenu: null, renaming: null, showArchived: false });
+  showChatInUrl();
   render();
 }
 
@@ -619,6 +623,18 @@ function renderModal() {
       <p class="hint">Price held until ${esc(new Date(q.expiresAt * 1000).toLocaleTimeString())}.</p>`);
     return;
   }
+  if (m.type === "delete-chat") {
+    const c = state.chats.find((x) => x.id === m.id);
+    modalEl.innerHTML = modal(`
+      <div class="approval-head"><div class="avatar">${mark()}</div>
+        <div><strong>Delete this chat?</strong><span>${esc(c?.title || "Chat")}</span></div></div>
+      <p>The conversation is removed for good. Your limits, allowance and purchases stay as they are.</p>
+      <div class="actions" style="margin-top:20px">
+        <button class="btn btn-danger" data-action="chat-delete-confirm" data-id="${esc(m.id)}">Delete</button>
+        <button class="btn btn-ghost" data-action="dismiss-button">Cancel</button>
+      </div>`);
+    return;
+  }
   if (m.type === "pause") {
     modalEl.innerHTML = modal(`
       <div class="approval-head"><div class="avatar">${mark()}</div>
@@ -654,11 +670,55 @@ const SUGGESTIONS = [
   ["What can my agent spend today?", "Limits, allowance and what it holds"],
 ];
 
+function chatRow(c) {
+  const active = c.id === state.chatId && state.view === "chat";
+  if (state.renaming === c.id) {
+    return `<div class="side-row active"><input class="side-rename" data-rename="${esc(c.id)}" value="${esc(c.title)}"
+      maxlength="80" aria-label="Chat name"></div>`;
+  }
+  return `<div class="side-row ${active ? "active" : ""} ${state.chatMenu?.id === c.id ? "menu-on" : ""}" data-chat-row="${esc(c.id)}">
+    <button class="side-item" data-action="open-chat" data-id="${esc(c.id)}">${c.pinned ? `<span class="pin" aria-label="Pinned">●</span>` : ""}<span class="t">${esc(c.title)}</span></button>
+    <button class="row-more" data-action="chat-menu" data-id="${esc(c.id)}" aria-label="Options for ${esc(c.title)}" aria-haspopup="menu">⋯</button>
+  </div>`;
+}
+
+function renderChatList() {
+  const live = state.chats.filter((c) => !c.archived);
+  const pinned = live.filter((c) => c.pinned);
+  const recent = live.filter((c) => !c.pinned);
+  const archived = state.chats.filter((c) => c.archived);
+  const group = (label, list) => (list.length ? `<div class="side-label">${label}</div>${list.map(chatRow).join("")}` : "");
+  return (live.length ? group("Pinned", pinned) + group("Recents", recent)
+    : `<div class="side-label">Recents</div><p class="faint" style="padding:6px 10px">Your chats appear here.</p>`)
+    + (archived.length ? `<button class="side-archived" data-action="toggle-archived" aria-expanded="${state.showArchived}">
+        <span>${state.showArchived ? "▾" : "▸"}</span>Archived · ${archived.length}</button>
+        ${state.showArchived ? archived.map(chatRow).join("") : ""}` : "");
+}
+
+function renderChatMenu() {
+  const el = $("#chat-menu");
+  const m = state.chatMenu;
+  const c = m && state.chats.find((x) => x.id === m.id);
+  if (!c) { el.hidden = true; el.innerHTML = ""; return; }
+  const item = (action, label, key, cls = "") =>
+    `<button class="menu-item ${cls}" role="menuitem" data-action="${action}" data-id="${esc(c.id)}"><span>${label}</span><kbd>${key}</kbd></button>`;
+  el.innerHTML = (c.archived ? "" : item("chat-pin", c.pinned ? "Unpin" : "Pin", "P"))
+    + item("chat-rename", "Rename", "R")
+    + item("chat-copy", "Copy link", "C")
+    + `<hr>`
+    + item("chat-archive", c.archived ? "Unarchive" : "Archive", "A")
+    + item("chat-delete", "Delete", "D", "danger");
+  el.hidden = false;
+  const height = el.offsetHeight;
+  el.style.top = `${Math.max(8, Math.min(m.top, window.innerHeight - height - 8))}px`;
+  el.style.left = `${Math.max(8, Math.min(m.left, window.innerWidth - el.offsetWidth - 8))}px`;
+}
+
 function renderSidebar() {
-  $("#side-chats").innerHTML = state.chats.length
-    ? state.chats.map((c) => `<button class="side-item ${c.id === state.chatId && state.view === "chat" ? "active" : ""}"
-        data-action="open-chat" data-id="${esc(c.id)}"><span class="ico">💬</span><span class="t">${esc(c.title)}</span></button>`).join("")
-    : `<p class="faint" style="padding:6px 10px">Your chats appear here.</p>`;
+  const scroll = $("#side-chats").scrollTop;
+  $("#side-chats").innerHTML = renderChatList();
+  $("#side-chats").scrollTop = scroll;
+  renderChatMenu();
   const a = state.allowance;
   const amountLine = a?.configured
     ? `<div class="label">Can spend today</div><div class="amt">${amount(spendableToday(a))}<small>USDC</small></div>
@@ -812,6 +872,7 @@ async function sendMessage(text) {
   try {
     const reply = await api.say(state.chatId, text);
     state.chatId = reply.chatId;
+    showChatInUrl();
     state.messages = state.messages.filter((m) => m.id !== "pending").concat(reply.messages);
     await Promise.all([loadChats(), loadAllowance().catch(() => {})]);
   } catch (error) {
@@ -840,6 +901,13 @@ async function cardAction(action) {
   }
 }
 
+const chatLink = (id) => `${location.origin}${location.pathname}#chat=${encodeURIComponent(id)}`;
+
+function showChatInUrl() {
+  const hash = state.chatId && state.view === "chat" ? `#chat=${encodeURIComponent(state.chatId)}` : "";
+  if (location.hash !== hash) history.replaceState(null, "", location.pathname + location.search + hash);
+}
+
 async function openChat(id) {
   state.menuOpen = false;
   await busy("Opening…", async () => {
@@ -848,6 +916,41 @@ async function openChat(id) {
     state.messages = chat.messages;
     state.view = "chat";
   });
+  showChatInUrl();
+}
+
+function openChatMenu(button) {
+  const rect = button.getBoundingClientRect();
+  state.chatMenu = { id: button.dataset.id, top: rect.bottom + 6, left: rect.left };
+  renderSidebar();
+  $("#chat-menu .menu-item")?.focus();
+}
+
+function closeChatMenu() {
+  if (!state.chatMenu) return;
+  state.chatMenu = null;
+  renderSidebar();
+}
+
+async function updateChat(id, changes) {
+  try {
+    state.chats = (await api.updateChat(id, changes)).chats || state.chats;
+  } catch (error) {
+    toast(explain(error), true);
+  }
+  render();
+}
+
+let renameDone = false;
+async function finishRename(input, save) {
+  if (renameDone || state.renaming !== input.dataset.rename) return;
+  renameDone = true;
+  const id = input.dataset.rename;
+  const title = input.value.trim();
+  const before = state.chats.find((c) => c.id === id)?.title;
+  state.renaming = null;
+  if (save && title && title !== before) await updateChat(id, { title });
+  else render();
 }
 
 // -- events --
@@ -888,8 +991,59 @@ const actions = {
   reveal: (el) => busy("Fetching the code…", async () => {
     state.revealed[el.dataset.id] = (await api.reveal(el.dataset.id)).text || "No code.";
   }),
-  "new-chat": () => { Object.assign(state, { chatId: null, messages: [], view: "chat", menuOpen: false }); render(); $("#composer")?.focus(); },
+  "new-chat": () => {
+    Object.assign(state, { chatId: null, messages: [], view: "chat", menuOpen: false });
+    showChatInUrl();
+    render();
+    $("#composer")?.focus();
+  },
   "open-chat": (el) => openChat(el.dataset.id),
+  "chat-menu": (el) => (state.chatMenu?.id === el.dataset.id ? closeChatMenu() : openChatMenu(el)),
+  "toggle-archived": () => { state.showArchived = !state.showArchived; render(); },
+  "chat-pin": (el) => {
+    const c = state.chats.find((x) => x.id === el.dataset.id);
+    state.chatMenu = null;
+    updateChat(el.dataset.id, { pinned: !c?.pinned });
+  },
+  "chat-archive": (el) => {
+    const c = state.chats.find((x) => x.id === el.dataset.id);
+    state.chatMenu = null;
+    updateChat(el.dataset.id, { archived: !c?.archived });
+  },
+  "chat-rename": (el) => {
+    state.chatMenu = null;
+    state.renaming = el.dataset.id;
+    renameDone = false;
+    render();
+    const input = $(".side-rename");
+    input?.focus();
+    input?.select();
+  },
+  "chat-copy": async (el) => {
+    state.chatMenu = null;
+    render();
+    try {
+      await navigator.clipboard.writeText(chatLink(el.dataset.id));
+      toast("Link copied. It opens only for your wallet.");
+    } catch {
+      toast("Could not copy the link.", true);
+    }
+  },
+  "chat-delete": (el) => { state.chatMenu = null; state.modal = { type: "delete-chat", id: el.dataset.id }; render(); },
+  "chat-delete-confirm": async (el) => {
+    const id = el.dataset.id;
+    state.modal = null;
+    try {
+      await api.deleteChat(id);
+      state.chats = state.chats.filter((c) => c.id !== id);
+      if (state.chatId === id) Object.assign(state, { chatId: null, messages: [], view: "chat" });
+      showChatInUrl();
+      toast("Chat deleted.");
+    } catch (error) {
+      toast(explain(error), true);
+    }
+    render();
+  },
   go: (el) => {
     state.view = el.dataset.view;
     state.menuOpen = false;
@@ -932,6 +1086,7 @@ document.addEventListener("click", (event) => {
     return;
   }
   const el = event.target.closest("[data-action]");
+  if (state.chatMenu && !event.target.closest("#chat-menu") && el?.dataset.action !== "chat-menu") closeChatMenu();
   if (!el) return;
   // A click inside a modal's card is not a click on its backdrop.
   if (el.dataset.action === "dismiss" && event.target !== el) return;
@@ -945,11 +1100,53 @@ document.addEventListener("submit", (event) => {
   sendMessage($("#composer").value);
 });
 
+document.addEventListener("focusout", (event) => {
+  if (event.target.classList?.contains("side-rename")) finishRename(event.target, true);
+});
+
+// A right click on a chat opens its menu, like a desktop app.
+document.addEventListener("contextmenu", (event) => {
+  const row = event.target.closest("[data-chat-row]");
+  if (!row) return;
+  event.preventDefault();
+  state.chatMenu = { id: row.dataset.chatRow, top: event.clientY, left: event.clientX };
+  renderSidebar();
+  $("#chat-menu .menu-item")?.focus();
+});
+
+window.addEventListener("resize", closeChatMenu);
+$("#side-chats").addEventListener("scroll", closeChatMenu);
+
+window.addEventListener("hashchange", () => {
+  const id = decodeURIComponent((location.hash.match(/^#chat=(.+)$/) || [])[1] || "");
+  if (state.session && id && id !== state.chatId) openChat(id);
+});
+
 document.addEventListener("input", (event) => {
   if (event.target.id === "composer") autosize(event.target);
 });
 
+const MENU_KEYS = { p: "chat-pin", r: "chat-rename", c: "chat-copy", a: "chat-archive", d: "chat-delete" };
+
 document.addEventListener("keydown", (event) => {
+  if (event.target.classList?.contains("side-rename")) {
+    if (event.key === "Enter") { event.preventDefault(); finishRename(event.target, true); }
+    if (event.key === "Escape") { event.preventDefault(); finishRename(event.target, false); }
+    return;
+  }
+  if (state.chatMenu) {
+    const items = [...document.querySelectorAll("#chat-menu .menu-item")];
+    const at = items.indexOf(document.activeElement);
+    const key = event.key.toLowerCase();
+    if (event.key === "Escape") { event.preventDefault(); closeChatMenu(); return; }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      items[(at + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus();
+      return;
+    }
+    const target = items.find((b) => b.dataset.action === MENU_KEYS[key]);
+    if (target && !event.metaKey && !event.ctrlKey && !event.altKey) { event.preventDefault(); actions[target.dataset.action](target); return; }
+  }
   if (event.target.id === "composer" && event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     sendMessage(event.target.value);
@@ -973,6 +1170,8 @@ async function start() {
     }
   }
   render();
+  const linked = decodeURIComponent((location.hash.match(/^#chat=(.+)$/) || [])[1] || "");
+  if (state.session && linked) openChat(linked);
 }
 
 start();

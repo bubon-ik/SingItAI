@@ -216,6 +216,10 @@ class ChatStore:
                     text TEXT NOT NULL, cards TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL);
                 CREATE INDEX IF NOT EXISTS messages_by_chat ON chat_messages(chat_id, message_id);
             """)
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(chats)")}
+            for name in ("pinned", "archived"):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE chats ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
 
     @contextmanager
     def _db(self) -> Iterator[sqlite3.Connection]:
@@ -230,18 +234,41 @@ class ChatStore:
     def new_chat(self, account: str, title: str, now: int) -> str:
         chat_id = "c_" + secrets.token_urlsafe(10)
         with self._db() as db:
-            db.execute("INSERT INTO chats VALUES (?, ?, ?, ?, ?)", (chat_id, account, title[:80], now, now))
+            db.execute("INSERT INTO chats(chat_id, account_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                       (chat_id, account, title[:80], now, now))
         return chat_id
 
     def chat(self, account: str, chat_id: str) -> sqlite3.Row | None:
         with self._db() as db:
             return db.execute("SELECT * FROM chats WHERE chat_id = ? AND account_id = ?", (chat_id, account)).fetchone()
 
-    def chats(self, account: str, limit: int = 50) -> list[dict[str, Any]]:
+    def chats(self, account: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Pinned first, then the most recent; archived ones are flagged, not hidden."""
         with self._db() as db:
-            rows = db.execute("SELECT * FROM chats WHERE account_id = ? ORDER BY updated_at DESC LIMIT ?",
+            rows = db.execute("SELECT * FROM chats WHERE account_id = ? ORDER BY pinned DESC, updated_at DESC LIMIT ?",
                               (account, limit)).fetchall()
-        return [{"id": r["chat_id"], "title": r["title"], "updatedAt": r["updated_at"]} for r in rows]
+        return [{"id": r["chat_id"], "title": r["title"], "updatedAt": r["updated_at"],
+                 "pinned": bool(r["pinned"]), "archived": bool(r["archived"])} for r in rows]
+
+    def update(self, account: str, chat_id: str, *, title: str | None = None, pinned: bool | None = None,
+               archived: bool | None = None) -> bool:
+        """Rename, pin or archive one of the account's chats. False when it is not theirs."""
+        changes: dict[str, Any] = {}
+        if title is not None:
+            changes["title"] = title[:80]
+        if pinned is not None:
+            changes["pinned"] = int(pinned)
+        if archived is not None:
+            changes["archived"] = int(archived)
+            if archived:
+                changes["pinned"] = 0  # an archived chat leaves the pinned list
+        with self._db() as db:
+            if not changes:
+                return db.execute("SELECT 1 FROM chats WHERE chat_id = ? AND account_id = ?",
+                                  (chat_id, account)).fetchone() is not None
+            sets = ", ".join(f"{name} = ?" for name in changes)
+            return bool(db.execute(f"UPDATE chats SET {sets} WHERE chat_id = ? AND account_id = ?",
+                                   (*changes.values(), chat_id, account)).rowcount)
 
     def delete(self, account: str, chat_id: str) -> None:
         with self._db() as db:
@@ -252,7 +279,7 @@ class ChatStore:
         with self._db() as db:
             cursor = db.execute("INSERT INTO chat_messages(chat_id, role, text, cards, created_at) VALUES (?, ?, ?, ?, ?)",
                                 (chat_id, role, text, json.dumps(cards), now))
-            db.execute("UPDATE chats SET updated_at = ? WHERE chat_id = ?", (now, chat_id))
+            db.execute("UPDATE chats SET updated_at = ?, archived = 0 WHERE chat_id = ?", (now, chat_id))  # talking unarchives
         return {"id": cursor.lastrowid, "role": role, "text": text, "cards": cards, "createdAt": now}
 
     def messages(self, chat_id: str, limit: int = 200) -> list[dict[str, Any]]:

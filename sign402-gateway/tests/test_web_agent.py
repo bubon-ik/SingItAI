@@ -163,6 +163,20 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(len(self.agent.store.messages(reply["chatId"])), 2)
         self.assertEqual(self.agent.store.chats(ACCOUNT)[0]["title"], "hello")
 
+    def test_chats_are_pinned_renamed_and_archived_by_their_owner(self):
+        first = self.agent.message(ACCOUNT, None, "first")["chatId"]
+        second = self.agent.message(ACCOUNT, None, "second")["chatId"]
+        store = self.agent.store
+        self.assertTrue(store.update(ACCOUNT, first, pinned=True, title="Steam cards"))
+        self.assertEqual([(c["id"], c["title"], c["pinned"]) for c in store.chats(ACCOUNT)],
+                         [(first, "Steam cards", True), (second, "second", False)])
+        self.assertFalse(store.update("wallet:0x2222222222222222222222222222222222222222", second, archived=True))
+        store.update(ACCOUNT, first, archived=True)
+        chat = store.chats(ACCOUNT)[0]
+        self.assertEqual((chat["pinned"], chat["archived"]), (False, True))
+        self.agent.message(ACCOUNT, first, "back again")
+        self.assertFalse(next(c for c in store.chats(ACCOUNT) if c["id"] == first)["archived"])
+
     def test_without_a_classifier_or_model_keywords_and_help_still_work(self):
         agent = wg.WebAgent(allowance=self.allowance, shop=self.shop, store=self.agent.store)
         reply = agent.message(ACCOUNT, None, "buy crypto news")["messages"][1]

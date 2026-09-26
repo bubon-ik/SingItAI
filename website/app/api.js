@@ -66,5 +66,6 @@ export const api = {
   chat: (id) => call("GET", `/chats/${encodeURIComponent(id)}`),
   say: (chatId, text) => call("POST", "/chats/message", { chatId, text }),
   act: (chatId, action) => call("POST", "/chats/action", { chatId, action }),
+  updateChat: (chatId, changes) => call("POST", "/chats/update", { chatId, ...changes }),
   deleteChat: (chatId) => call("POST", "/chats/delete", { chatId }),
 };

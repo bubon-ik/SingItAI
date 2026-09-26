@@ -263,6 +263,21 @@ class WebApi:
             if not isinstance(action, dict):
                 raise WebError(400, "bad_action", "Send an action object.")
             return 200, self.agent.action(account, str(body.get("chatId") or ""), action), {}
+        if method == "POST" and path == "/chats/update":
+            changes: dict[str, Any] = {}
+            if "title" in body:
+                title = " ".join(str(body.get("title") or "").split())
+                if not title:
+                    raise WebError(400, "bad_title", "Give the chat a name.")
+                changes["title"] = title
+            for name in ("pinned", "archived"):
+                if name in body:
+                    if not isinstance(body[name], bool):
+                        raise WebError(400, f"bad_{name}", f"'{name}' is true or false.")
+                    changes[name] = body[name]
+            if not store.update(account, str(body.get("chatId") or ""), **changes):
+                raise WebError(404, "no_such_chat", "No such chat.")
+            return 200, {"ok": True, "chats": store.chats(account)}, {}
         if method == "POST" and path == "/chats/delete":
             store.delete(account, str(body.get("chatId") or ""))
             return 200, {"ok": True}, {}
