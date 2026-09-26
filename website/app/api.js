@@ -62,4 +62,9 @@ export const api = {
   bitrefillBuy: (quoteId) => call("POST", "/shop/bitrefill/buy", { quoteId }),
   purchases: (offset = 0) => call("GET", `/purchases?offset=${offset}`),
   reveal: (purchaseId) => call("POST", "/purchases/reveal", { purchaseId }),
+  chats: () => call("GET", "/chats"),
+  chat: (id) => call("GET", `/chats/${encodeURIComponent(id)}`),
+  say: (chatId, text) => call("POST", "/chats/message", { chatId, text }),
+  act: (chatId, action) => call("POST", "/chats/action", { chatId, action }),
+  deleteChat: (chatId) => call("POST", "/chats/delete", { chatId }),
 };

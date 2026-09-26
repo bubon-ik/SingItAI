@@ -157,6 +157,8 @@ class WebApi:
         self.prepare_by_account = RateLimit(20, 3600)
         self.permit_by_account = RateLimit(6, 86400)
         self.shop_by_account = RateLimit(60, 3600)
+        self.chat_by_account = RateLimit(60, 3600)
+        self.agent = None  # web_agent.WebAgent, when the chat is on
         self.link_by_account = RateLimit(10, 3600)
 
     def handle(self, method: str, path: str, *, token: str, csrf: str | None, body: dict[str, Any],
@@ -193,6 +195,8 @@ class WebApi:
         if method == "POST" and path == "/link/telegram/remove":
             self.auth.store.unlink_telegram(account)
             return 200, {"telegramLinked": False}, {}
+        if path == "/chats" or path.startswith("/chats/"):
+            return self._chats(method, path, account, body)
         if (method, path) in SHOP_ROUTES:
             if self.shop is None:
                 raise WebError(503, "shop_unavailable", "The shop is not enabled on this server.")
@@ -236,6 +240,33 @@ class WebApi:
         if "state" in out:
             out["state"] = _state_code(described)
         return out
+
+    def _chats(self, method: str, path: str, account: str, body: Mapping[str, Any]) -> tuple[int, dict[str, Any], dict]:
+        """The chat: talk to the agent; it sets limits, finds and buys (web_agent.py)."""
+        if self.agent is None:
+            raise WebError(503, "chat_unavailable", "The chat is not enabled on this server.")
+        store = self.agent.store
+        if method == "GET" and path == "/chats":
+            return 200, {"chats": store.chats(account)}, {}
+        if method == "GET" and path.startswith("/chats/"):
+            chat_id = path.rsplit("/", 1)[1]
+            chat = store.chat(account, chat_id)
+            if chat is None:
+                raise WebError(404, "no_such_chat", "No such chat.")
+            return 200, {"chatId": chat_id, "title": chat["title"], "messages": store.messages(chat_id)}, {}
+        if method == "POST" and path == "/chats/message":
+            self.chat_by_account.hit(account)
+            return 200, self.agent.message(account, body.get("chatId") or None, str(body.get("text") or "")), {}
+        if method == "POST" and path == "/chats/action":
+            self.chat_by_account.hit(account)
+            action = body.get("action")
+            if not isinstance(action, dict):
+                raise WebError(400, "bad_action", "Send an action object.")
+            return 200, self.agent.action(account, str(body.get("chatId") or ""), action), {}
+        if method == "POST" and path == "/chats/delete":
+            store.delete(account, str(body.get("chatId") or ""))
+            return 200, {"ok": True}, {}
+        raise WebError(404, "not_found", "No such endpoint.")
 
     def _refuse_contract_wallets(self, address: Any) -> None:
         """Smart-contract wallets sign with ERC-1271, which v1 does not check; say so plainly.
@@ -443,6 +474,12 @@ def build_web_api_from_env(allowance: AllowanceService, env: Mapping[str, str] |
         max_deploys_per_day=int(values.get("SIGN402_WEB_MAX_DEPLOYS_PER_DAY", "50")),
         shop=shop,
     )
+    if str(values.get("SIGN402_WEB_CHAT_ENABLED", "1")) == "1":
+        from .web_agent import ChatStore, build_agent_from_env
+
+        agent = build_agent_from_env(allowance, shop, ChatStore(store.path), env=values)
+        agent.setup = lambda account, body: api._setup(account, store.owner_for(account), body)
+        api.agent = agent
     return api, str(values.get("SIGN402_WEB_CORS_ORIGIN", "") or uri).rstrip("/")
 
 

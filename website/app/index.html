@@ -60,6 +60,27 @@
   <div id="view" aria-live="polite"></div>
 </main>
 
+<div id="app" class="app" hidden>
+  <aside class="sidebar" aria-label="SingIt">
+    <div class="side-top">
+      <a class="brand" href="https://singitai.app/"><svg class="mark" aria-hidden="true"><use href="#singit-mark"/></svg><span>SingIt</span></a>
+    </div>
+    <button class="side-new" data-action="new-chat"><span class="plus">+</span>New chat</button>
+    <div class="side-label">Chats</div>
+    <nav id="side-chats" class="side-chats" aria-label="Chats"></nav>
+    <div id="side-nav" class="side-nav"></div>
+  </aside>
+  <div class="scrim" data-action="close-menu"></div>
+  <section class="main">
+    <header class="topbar">
+      <button class="icon-btn" data-action="open-menu" aria-label="Menu">☰</button>
+      <span id="top-title" class="faint"></span>
+      <button class="icon-btn" data-action="new-chat" aria-label="New chat">+</button>
+    </header>
+    <div id="main" class="pane-host" style="display:flex;flex-direction:column;flex:1;min-height:0"></div>
+  </section>
+</div>
+
 <div id="modal"></div>
 <div id="toast" class="toast" role="status" hidden></div>
 

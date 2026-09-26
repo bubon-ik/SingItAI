@@ -203,6 +203,35 @@ when the connection comes from this host. Optional settings:
 `SIGN402_WEB_MIN_OWNER_USDC` (1), `SIGN402_WEB_MAX_LIMITERS_PER_30_DAYS` (3),
 `SIGN402_WEB_MAX_DEPLOYS_PER_DAY` (50), `SIGN402_WEB_DB` (`~/.sign402/web.db`).
 
+## Chat
+
+The signed-in page is a chat, laid out like Claude: a sidebar (new chat, the
+history, what the agent can spend today, purchases, Telegram, the account) and
+the conversation. It works the way the Telegram bot does
+(`sign402_gateway/web_agent.py`):
+
+- **Jev** (TypeSafe, `jev-latest`, the bot's `TYPESAFE_API_KEY`) classifies each
+  message into a fixed set of intents: set limits, grant, revoke, status,
+  purchases, paid data, gift card, eSIM, top-up, link Telegram, conversation.
+  Without a key or when it does not answer, the same intents come from keywords.
+- **Code acts** on the intent. Limits named in the message ("$20 a day, $5 per
+  purchase") create the limiter at once; a daily limit alone is proposed on a
+  card to confirm. Grants and revokes are cards the page hands to the wallet.
+  Paid data (crypto news, market data, ENS…) is bought at once, and gift cards,
+  eSIMs and top-ups are searched and shown, then bought by the card's button or
+  at once when the message named the product, the amount and asked to buy —
+  inside the user's limits, without asking again: the user chose that. At most
+  one purchase follows a message, and every purchase goes through the shop,
+  spending memory and the limiter.
+- **The chat model** (OpenRouter, the bot's `OPENROUTER_API_KEY`, the same model
+  as Hermes, `SIGN402_WEB_AGENT_MODEL`) writes the conversational replies and
+  turns a shopping sentence into search words, a country and an amount (JSON,
+  validated). It has no tools, cannot trigger a payment, and never sees
+  purchase results or codes.
+- Routes: `GET /chats`, `GET /chats/{id}`, `POST /chats/message {chatId?, text}`,
+  `POST /chats/action {chatId, action}` for card buttons, `POST /chats/delete`.
+  Sixty messages an hour per account. Chats are stored per account in `web.db`.
+
 ## What the server verifies
 
 Before `prepare`:

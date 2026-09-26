@@ -47,6 +47,15 @@ set_env SIGN402_WEB_URI "$ORIGIN"
 set_env SIGN402_WEB_CORS_ORIGIN "$ORIGIN"
 set_env SIGN402_WEB_ALLOWED_ADDRESSES "$ALLOWED"
 set_env SIGN402_WEB_STATIC_DIR "$APP/website"
+# The chat agent uses the bot's own keys: Jev (TypeSafe) to understand requests,
+# the OpenRouter model to talk. Copied from Hermes' env, never printed.
+for name in TYPESAFE_API_KEY OPENROUTER_API_KEY; do
+  if ! sudo grep -q "^$name=." "$ENV_FILE"; then
+    value=$(grep -E "^$name=" "$HOME/.hermes/.env" | head -1 | cut -d= -f2- | sed -e 's/^["'\'']//' -e 's/["'\'']$//')
+    if [ -n "$value" ]; then set_env "$name" "$value"; else echo "note: no $name in ~/.hermes/.env; the chat falls back to keywords"; fi
+    unset value
+  fi
+done
 if ! sudo grep -q '^SIGN402_WEB_INTERNAL_TOKEN=.\{32,\}' "$ENV_FILE"; then
   set_env SIGN402_WEB_INTERNAL_TOKEN "$("$GW/.venv/bin/python" -c 'import secrets; print(secrets.token_urlsafe(32))')"
 fi

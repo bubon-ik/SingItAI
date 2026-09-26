@@ -29,6 +29,13 @@ const state = {
   search: null,
   purchases: null,
   revealed: {},
+  view: "chat",        // signed in: "chat" | "allowance" | "purchases" | "telegram"
+  chats: [],           // the sidebar's history
+  chatId: null,
+  messages: [],
+  sending: false,
+  done: {},            // wallet cards already carried out, by "messageId:index"
+  menuOpen: false,
 };
 
 const PRESETS = [
@@ -148,7 +155,7 @@ async function signIn() {
     const signed = await api.verify(message, signature);
     setCsrf(signed.csrfToken);
     state.session = signed;
-    await loadAllowance();
+    await Promise.all([loadAllowance(), loadChats()]);
   });
 }
 
@@ -157,7 +164,8 @@ async function signOut() {
   setCsrf(null);
   await disconnectAppKit().catch(() => {});
   Object.assign(state, { session: null, wallet: null, allowance: null, quote: null, result: null, purchases: null,
-                         linkCode: null, revealed: {}, tab: "allowance", modal: null });
+                         linkCode: null, revealed: {}, tab: "allowance", modal: null, view: "chat", chats: [],
+                         chatId: null, messages: [], done: {} });
   render();
 }
 
@@ -189,7 +197,7 @@ function method() {
 }
 
 async function walletOperation(kind, body) {
-  await busy("Preparing…", async () => {
+  return busy("Preparing…", async () => {
     const wallet = await needWallet();
     const prepared = await api.prepare(kind, body);
     say(`${prepared.walletShows} Confirm it in your wallet.`);
@@ -206,6 +214,7 @@ async function walletOperation(kind, body) {
     await loadAllowance();
     if (op.state === "DONE") toast(op.detail || "Done.");
     else toast(op.detail || `The request ended as ${op.state.toLowerCase()}.`, true);
+    return op.state === "DONE";
   });
 }
 
@@ -603,10 +612,212 @@ function renderModal() {
 }
 
 function render() {
-  renderNav();
-  if (!state.session) view.innerHTML = renderHero();
-  else view.innerHTML = { allowance: renderAllowance, shop: renderShop, purchases: renderPurchases }[state.tab]();
+  const signedIn = Boolean(state.session);
+  document.body.classList.toggle("in-app", signedIn);
+  $("#app").hidden = !signedIn;
+  if (!signedIn) {
+    renderNav();
+    view.innerHTML = renderHero();
+  } else {
+    renderSidebar();
+    renderMain();
+  }
   renderModal();
+}
+
+// -- the chat app --
+
+const SUGGESTIONS = [
+  ["Set a $20 daily limit, $5 per purchase", "Your agent spends only inside it"],
+  ["Buy crypto news", "0.001 USDC, paid from your allowance"],
+  ["Find a Steam gift card in Germany", "Bitrefill gift cards, eSIMs and top-ups"],
+  ["What can my agent spend today?", "Limits, allowance and what it holds"],
+];
+
+function renderSidebar() {
+  $("#side-chats").innerHTML = state.chats.length
+    ? state.chats.map((c) => `<button class="side-item ${c.id === state.chatId && state.view === "chat" ? "active" : ""}"
+        data-action="open-chat" data-id="${esc(c.id)}"><span class="ico">💬</span><span class="t">${esc(c.title)}</span></button>`).join("")
+    : `<p class="faint" style="padding:6px 10px">Your chats appear here.</p>`;
+  const a = state.allowance;
+  const amountLine = a?.configured
+    ? `<div class="label">Can spend today</div><div class="amt">${amount(spendableToday(a))}<small>USDC</small></div>
+       <div style="margin-top:8px">${statusPill(a.state)}</div>`
+    : `<div class="label">Allowance</div><div style="margin-top:4px;font-size:14px;color:var(--text-soft)">No limits yet</div>`;
+  $("#side-nav").innerHTML = `
+    <button class="side-allowance ${state.view === "allowance" ? "active" : ""}" data-action="go" data-view="allowance">${amountLine}</button>
+    <button class="side-item ${state.view === "purchases" ? "active" : ""}" data-action="go" data-view="purchases"><span class="ico">🧾</span>Purchases</button>
+    <button class="side-item ${state.view === "telegram" ? "active" : ""}" data-action="go" data-view="telegram"><span class="ico">✈️</span>Telegram</button>
+    <div class="side-account">
+      <span class="account-chip" style="cursor:default"><span class="dot"></span>${esc(short(state.session.address))}</span>
+      <button class="btn btn-ghost btn-sm" data-action="sign-out">Sign out</button>
+    </div>`;
+  $("#app").classList.toggle("menu-open", state.menuOpen);
+  $("#top-title").textContent = state.view === "chat"
+    ? (state.chats.find((c) => c.id === state.chatId)?.title || "New chat")
+    : { allowance: "Allowance", purchases: "Purchases", telegram: "Telegram" }[state.view];
+}
+
+function renderMain() {
+  const host = $("#main");
+  if (state.view !== "chat") {
+    const page = { allowance: renderAllowance, purchases: renderPurchases,
+                   telegram: () => `<div class="page-head"><span class="eyebrow">Telegram</span><h1>Your agent in <em>Telegram</em>.</h1></div>${renderTelegram()}` }[state.view];
+    host.innerHTML = `<div class="pane"><div class="pane-inner">${page()}</div></div>`;
+    return;
+  }
+  const draft = $("#composer")?.value ?? "";
+  const chat = state.messages.length || state.sending
+    ? state.messages.map(renderMessage).join("") + (state.sending ? `<div class="msg assistant"><div class="avatar">${mark()}</div>
+        <div class="body"><span class="typing"><i></i><i></i><i></i></span></div></div>` : "")
+    : `<div class="empty"><div class="avatar">${mark()}</div>
+        <h1>What should your agent <em>do</em>?</h1>
+        <p>Ask in your own words. It sets your limits, finds what you need and buys it inside your limits. Your wallet signs only the approvals.</p>
+        <div class="suggestions">${SUGGESTIONS.map(([t, sub]) => `<button class="suggestion" data-action="suggest" data-text="${esc(t)}">${esc(t)}<span>${esc(sub)}</span></button>`).join("")}</div>
+      </div>`;
+  host.innerHTML = `
+    <div class="chat" id="chat"><div class="chat-inner">${chat}</div></div>
+    <div class="composer-wrap">
+      <form class="composer" data-form="send">
+        <textarea id="composer" rows="1" placeholder="Message your agent…" aria-label="Message">${esc(draft)}</textarea>
+        <button class="send" type="submit" aria-label="Send" ${state.sending ? "disabled" : ""}>↑</button>
+      </form>
+      <p class="composer-hint">Inside your limits your agent buys without asking. Approvals and revokes always need your wallet.</p>
+    </div>`;
+  autosize($("#composer"));
+  const pane = $("#chat");
+  pane.scrollTop = pane.scrollHeight;
+}
+
+function autosize(el) {
+  if (!el) return;
+  if (!el.value) { el.style.height = ""; return; }  // one row
+  requestAnimationFrame(() => {                       // after layout, or scrollHeight is wrong
+    el.style.height = "auto";
+    el.style.height = Math.min(200, el.scrollHeight) + "px";
+  });
+}
+
+function formatText(text) {
+  return esc(text).replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+    .replace(/(https:\/\/[\w./?=&%#:-]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+}
+
+function renderMessage(m) {
+  if (m.role === "user") return `<div class="msg user"><div class="bubble">${esc(m.text)}</div></div>`;
+  const cards = (m.cards || []).map((card, i) => renderCard(card, `${m.id}:${i}`)).join("");
+  return `<div class="msg assistant"><div class="avatar">${mark()}</div><div class="body">
+    <div class="text">${formatText(m.text)}</div>${cards ? `<div class="cards">${cards}</div>` : ""}</div></div>`;
+}
+
+function renderCard(card, key) {
+  const a = state.allowance;
+  if (card.type === "allowance" && a?.configured) {
+    return `<div class="card"><div class="spread"><h3>Your allowance</h3>${statusPill(a.state)}</div>
+      <div class="kv"><div><span class="label">Can spend today</span><b>${usdc(spendableToday(a))}</b></div>
+        <div><span class="label">Daily limit</span><b>${usdc(a.dailyCapAtomic)}</b></div>
+        <div><span class="label">Per purchase</span><b>${usdc(a.perPurchaseCapAtomic)}</b></div>
+        <div><span class="label">Held by agent</span><b>${usdc(a.floatAtomic)}</b></div></div>
+      <div class="row"><button class="btn btn-ghost btn-sm" data-action="go" data-view="allowance">Open allowance</button></div></div>`;
+  }
+  if (card.type === "wallet") {
+    const grant = card.kind === "grant";
+    if (state.done[key]) return `<div class="card done"><h3>${grant ? `Approved ${esc(card.amount)} USDC` : "Revoked"} ✓</h3></div>`;
+    return `<div class="card accent"><h3>${grant ? `Approve ${esc(card.amount)} USDC for your agent` : "Revoke your agent's allowance"}</h3>
+      <p class="faint">${grant ? "Your wallet will show an approval for your limiter" : "Your wallet will show an approval of 0 for your limiter"}
+        ${card.limiter ? ` <span class="mono">${esc(short(card.limiter))}</span>` : ""}. Nothing moves until a purchase needs it.</p>
+      <div style="margin-top:10px">${methodSwitch()}</div>
+      <div class="row"><button class="btn btn-primary btn-sm has-orb" data-action="card-wallet" data-key="${esc(key)}"
+        data-kind="${esc(card.kind)}" data-amount="${esc(card.amount || "")}">${grant ? "Approve in wallet" : "Revoke in wallet"}${orb}</button></div></div>`;
+  }
+  if (card.type === "limits_proposal") {
+    if (state.done[key]) return `<div class="card done"><h3>Limiter created ✓</h3></div>`;
+    return `<div class="card accent"><h3>Your limits</h3>
+      <div class="fields" style="margin-top:10px">
+        <div class="field"><label>Daily, USDC</label><input class="input" data-field-of="${esc(key)}" data-name="daily" value="${esc(card.daily)}"></div>
+        <div class="field"><label>Per purchase</label><input class="input" data-field-of="${esc(key)}" data-name="per" value="${esc(card.per)}"></div>
+        <div class="field"><label>Days</label><input class="input" data-field-of="${esc(key)}" data-name="days" value="${esc(card.days || "30")}"></div>
+      </div>
+      <div class="row"><button class="btn btn-primary btn-sm has-orb" data-action="card-limits" data-key="${esc(key)}" data-lang="${esc(card.lang || "en")}">Create my limiter${orb}</button></div></div>`;
+  }
+  if (card.type === "products") {
+    return `<div class="card">${(card.items || []).map((p) => `
+      <div class="product"><div><h3>${esc(p.name)}</h3><p class="faint mono">${esc(p.slug)}</p></div>
+        <div class="row" style="margin:0"><input class="input" placeholder="amount" data-package="${esc(p.slug)}">
+        <button class="btn btn-primary btn-sm" data-action="card-buy" data-slug="${esc(p.slug)}" data-name="${esc(p.name)}" data-lang="${esc(card.lang || "en")}">Buy</button></div></div>`).join("")}
+      <p class="faint" style="margin-top:8px">Enter the card value (for example 10) and I'll buy it from your allowance.</p></div>`;
+  }
+  if (card.type === "receipt") {
+    return `<div class="card accent"><div class="spread"><h3>${esc(card.name)}</h3><span class="status ok">Paid ${esc(card.price)} USDC</span></div>
+      ${card.txId ? `<p class="faint"><a href="https://basescan.org/tx/${esc(card.txId)}" target="_blank" rel="noopener">Transaction ↗</a></p>` : ""}
+      ${card.result ? `<pre class="result">${esc(card.result)}</pre>` : ""}
+      ${card.giftcard ? `<div class="row"><button class="btn btn-ghost btn-sm" data-action="go" data-view="purchases">Show my code</button></div>` : ""}</div>`;
+  }
+  if (card.type === "purchases") {
+    return `<div class="card">${(card.items || []).map((p) => `<div class="product"><div><h3>${esc(p.name)}</h3>
+      <p class="faint">${esc([p.denomination, p.paid, p.status].filter(Boolean).join(" · "))}</p></div></div>`).join("")}
+      <div class="row"><button class="btn btn-ghost btn-sm" data-action="go" data-view="purchases">All purchases</button></div></div>`;
+  }
+  if (card.type === "link_telegram") {
+    return `<div class="card">${state.linkCode
+      ? `<p>Send <span class="mono">/link ${esc(state.linkCode.code)}</span> to the SingIt bot within 10 minutes.</p>`
+      : `<button class="btn btn-ghost btn-sm" data-action="link">Get a code</button>`}</div>`;
+  }
+  return "";
+}
+
+async function loadChats() {
+  try { state.chats = (await api.chats()).chats || []; } catch { state.chats = []; }
+}
+
+async function sendMessage(text) {
+  text = String(text || "").trim();
+  if (!text || state.sending) return;
+  state.view = "chat";
+  state.menuOpen = false;
+  state.messages.push({ id: "pending", role: "user", text, cards: [] });
+  state.sending = true;
+  if ($("#composer")) $("#composer").value = "";
+  render();
+  try {
+    const reply = await api.say(state.chatId, text);
+    state.chatId = reply.chatId;
+    state.messages = state.messages.filter((m) => m.id !== "pending").concat(reply.messages);
+    await Promise.all([loadChats(), loadAllowance().catch(() => {})]);
+  } catch (error) {
+    state.messages = state.messages.filter((m) => m.id !== "pending");
+    toast(explain(error), true);
+    if ($("#composer")) $("#composer").value = text;
+  } finally {
+    state.sending = false;
+    render();
+  }
+}
+
+async function cardAction(action) {
+  if (state.sending) return;
+  state.sending = true;
+  render();
+  try {
+    const reply = await api.act(state.chatId, action);
+    state.messages = state.messages.concat(reply.messages);
+    await loadAllowance().catch(() => {});
+  } catch (error) {
+    toast(explain(error), true);
+  } finally {
+    state.sending = false;
+    render();
+  }
+}
+
+async function openChat(id) {
+  state.menuOpen = false;
+  await busy("Opening…", async () => {
+    const chat = await api.chat(id);
+    state.chatId = chat.chatId;
+    state.messages = chat.messages;
+    state.view = "chat";
+  });
 }
 
 // -- events --
@@ -646,6 +857,36 @@ const actions = {
   reveal: (el) => busy("Fetching the code…", async () => {
     state.revealed[el.dataset.id] = (await api.reveal(el.dataset.id)).text || "No code.";
   }),
+  "new-chat": () => { Object.assign(state, { chatId: null, messages: [], view: "chat", menuOpen: false }); render(); $("#composer")?.focus(); },
+  "open-chat": (el) => openChat(el.dataset.id),
+  go: (el) => {
+    state.view = el.dataset.view;
+    state.menuOpen = false;
+    if (state.view === "purchases") state.purchases = null;
+    render();
+  },
+  "open-menu": () => { state.menuOpen = true; render(); },
+  "close-menu": () => { state.menuOpen = false; render(); },
+  "sign-out": signOut,
+  suggest: (el) => sendMessage(el.dataset.text),
+  "card-wallet": async (el) => {
+    const key = el.dataset.key;
+    const ok = el.dataset.kind === "grant"
+      ? await walletOperation("grant", { amount: el.dataset.amount, method: method() })
+      : await walletOperation("revoke", { method: method() });
+    if (ok) { state.done[key] = true; render(); }
+  },
+  "card-limits": (el) => {
+    const key = el.dataset.key;
+    const value = (name) => document.querySelector(`[data-field-of="${CSS.escape(key)}"][data-name="${name}"]`)?.value.trim();
+    state.done[key] = true;
+    cardAction({ type: "create_limiter", daily: value("daily"), per: value("per"), days: value("days"), lang: el.dataset.lang });
+  },
+  "card-buy": (el) => {
+    const pkg = document.querySelector(`[data-package="${CSS.escape(el.dataset.slug)}"]`)?.value.trim();
+    if (!pkg) { toast("Enter the card value first.", true); return; }
+    cardAction({ type: "buy_giftcard", slug: el.dataset.slug, package: pkg, name: el.dataset.name, lang: el.dataset.lang });
+  },
   dismiss: () => { state.modal = null; render(); },
   "dismiss-button": () => { state.modal = null; render(); },
 };
@@ -667,7 +908,22 @@ document.addEventListener("click", (event) => {
   actions[el.dataset.action]?.(el);
 });
 
+document.addEventListener("submit", (event) => {
+  if (event.target.dataset.form !== "send") return;
+  event.preventDefault();
+  sendMessage($("#composer").value);
+});
+
+document.addEventListener("input", (event) => {
+  if (event.target.id === "composer") autosize(event.target);
+});
+
 document.addEventListener("keydown", (event) => {
+  if (event.target.id === "composer" && event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    sendMessage(event.target.value);
+    return;
+  }
   if (event.key === "Escape" && state.modal && state.modal.type !== "busy") { state.modal = null; render(); }
   if (event.key === "Enter" && event.target.id === "bf-query") searchBitrefill();
 });
@@ -680,7 +936,7 @@ async function start() {
   if (csrf()) {
     try {
       state.session = await api.session();
-      await loadAllowance();
+      await Promise.all([loadAllowance(), loadChats()]);
     } catch {
       state.session = null;
     }

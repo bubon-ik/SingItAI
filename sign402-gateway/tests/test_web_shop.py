@@ -433,3 +433,48 @@ class EndToEndShopTests(unittest.TestCase):
         self.assertNotIn("telegramText", bought)
         self.assertEqual(base.service.pay_x402.call_args.args[0], signed["account"])
         self.assertEqual(gateway.user_event_store.write.call_args.args[0], signed["account"])
+
+
+class WebChatRoutesTests(unittest.TestCase):
+    def setUp(self):
+        from sign402_gateway.web_agent import ChatStore, WebAgent
+        from tests.test_web_api import WebApiTests
+
+        self.base = WebApiTests()
+        self.base.setUp()
+        self.addCleanup(self.base.tmp.cleanup)
+        agent = WebAgent(allowance=self.base.service, shop=None, store=ChatStore(self.base.store.path),
+                         classify=lambda text: "chat")
+        agent.setup = lambda account, body: self.base.api._setup(account, self.base.store.owner_for(account), body)
+        self.base.api.agent = agent
+        self.token, self.csrf, self.me = self.base.sign_in()
+
+    def call(self, method, path, body=None, csrf=True):
+        return self.base.call(method, path, body, token=self.token, csrf=self.csrf if csrf else None)
+
+    def test_talk_list_read_and_delete_a_chat(self):
+        _, reply, _ = self.call("POST", "/chats/message", {"text": "hi"})
+        chat = reply["chatId"]
+        self.assertEqual([m["role"] for m in reply["messages"]], ["user", "assistant"])
+        self.assertEqual(self.call("GET", "/chats")[1]["chats"][0]["id"], chat)
+        self.assertEqual(len(self.call("GET", f"/chats/{chat}")[1]["messages"]), 2)
+        self.call("POST", "/chats/delete", {"chatId": chat})
+        with self.assertRaises(wa.WebError):
+            self.call("GET", f"/chats/{chat}")
+
+    def test_a_chat_is_its_accounts_alone_and_posts_need_csrf(self):
+        _, reply, _ = self.call("POST", "/chats/message", {"text": "hi"})
+        with self.assertRaises(wa.WebAuthError):
+            self.call("POST", "/chats/message", {"text": "hi"}, csrf=False)
+        self.base.user = Account.create()
+        other, other_csrf, _ = self.base.sign_in()
+        with self.assertRaises(wa.WebError):
+            self.base.call("GET", f"/chats/{reply['chatId']}", token=other)
+        with self.assertRaises(ValueError):
+            self.base.call("POST", "/chats/message", {"chatId": reply["chatId"], "text": "x"}, token=other, csrf=other_csrf)
+
+    def test_off_when_not_built(self):
+        self.base.api.agent = None
+        with self.assertRaises(wa.WebError) as raised:
+            self.call("GET", "/chats")
+        self.assertEqual(raised.exception.status, 503)
