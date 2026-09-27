@@ -18,6 +18,11 @@ class FakeShop:
         self.calls = []
         self.refuse = None
         self.venice = {"ok": True, "text": "Venice: hello!", "costAtomic": 900, "creditAtomic": 4_999_100}
+        self.catalog = {"ok": True, "products": [
+            {"slug": "isimo-colombia", "name": "Isimo Colombia", "type": "gift_card", "country": "CO", "categories": ["retail"]},
+            {"slug": "steam-germany", "name": "Steam DE", "type": "gift_card", "country": "DE", "categories": ["games"]},
+            {"slug": "vodafone-germany", "name": "Vodafone DE", "type": "phone_refill", "country": "DE",
+             "categories": ["refill"], "needsRecipient": True}]}
 
     def __call__(self, action, account, body):
         self.calls.append((action, account, dict(body)))
@@ -25,6 +30,8 @@ class FakeShop:
             return 400, {"ok": False, "text": "Raise your spending limit to continue."}
         if action == "venice-chat":
             return (200 if self.venice.get("ok") else 400), dict(self.venice)
+        if action == "catalog-search":
+            return 200, json.loads(json.dumps(self.catalog))
         replies = {
             "tool-quote": {"ok": True, "quoteId": "tq_1", "tool": {"id": body.get("tool"), "name": "Crypto News"}, "priceUsd": "0.001"},
             "tool-buy": {"ok": True, "text": "MARKET BRIEF: calm.", "txId": "0x" + "ab" * 32},
@@ -52,9 +59,18 @@ class AgentTests(unittest.TestCase):
         self.intent = "chat"
         self.model_replies = []
         self.model_calls = []
+        self.hints = {}
+        self.fit = None  # Jev's ranking: slug -> probability
         self.agent = wg.WebAgent(allowance=self.allowance, shop=self.shop, store=wg.ChatStore(Path(self.tmp.name) / "web.db"),
-                                 classify=lambda text: self.intent, model=self.model)
+                                 classify=lambda text: {"intent": self.intent, **self.hints}, model=self.model,
+                                 rank=self.rank)
         self.agent.setup = Mock(return_value={"limiter": "0xNEW"})
+
+    def rank(self, text, options):
+        self.ranked = dict(options)
+        if self.fit is None:
+            raise wg.AgentUnavailable("classifier")
+        return self.fit
 
     def model(self, messages, json_mode=False, max_tokens=700):
         self.model_calls.append((messages, json_mode))
@@ -123,10 +139,12 @@ class AgentTests(unittest.TestCase):
     def test_gift_cards_are_found_then_bought_by_the_card_button(self):
         self.model_replies = [json.dumps({"query": "steam", "country": "DE", "amount": "", "buy": False})]
         message = self.send("find a steam gift card in germany", "gift_card")
-        self.assertEqual(self.shop.calls[0], ("bitrefill-search", ACCOUNT, {"query": "steam", "country": "DE", "kind": "gift-cards"}))
+        self.assertEqual(self.shop.calls[0], ("catalog-search", ACCOUNT,
+                                              {"query": "steam", "country": "DE", "category": "", "productType": "gift_card"}))
         card = message["cards"][0]
         self.assertEqual(card["type"], "products")
-        self.assertEqual(card["items"][0]["packages"][0], {"value": "10", "currency": "EUR", "priceUsd": "10.9"})
+        self.assertEqual(card["items"][1]["packages"][0], {"value": "10", "currency": "EUR", "priceUsd": "10.9"})
+        self.assertEqual(card["items"][2], {"name": "Vodafone DE", "slug": "vodafone-germany", "needsRecipient": True})
         chat = self.agent.store.chats(ACCOUNT)[0]["id"]
         reply = self.agent.action(ACCOUNT, chat, {"type": "buy_giftcard", "slug": "steam-germany", "package": "10"})
         self.assertEqual([c[0] for c in self.shop.calls][-2:], ["bitrefill-quote", "bitrefill-buy"])
@@ -135,10 +153,37 @@ class AgentTests(unittest.TestCase):
     def test_an_esim_is_searched_among_esims_by_the_place(self):
         self.model_replies = [json.dumps({"query": "eSIM", "country": "DE", "place": "Germany", "amount": "", "buy": False})]
         message = self.send("i wanna buy eSim for Germany", "esim")
-        self.assertEqual(self.shop.calls[0][2], {"query": "Germany", "country": "DE", "kind": "esims"})
+        self.assertEqual(self.shop.calls[0][2], {"query": "", "country": "DE", "category": "", "productType": "esim"})
         self.assertEqual(message["cards"][0]["kind"], "esim")
         self.assertIn("eSIMs", message["text"])
+        self.model_replies = [json.dumps({"query": "eSIM", "country": "", "place": "Europe", "amount": "", "buy": False})]
+        self.send("esim for europe", "esim")
+        searched = [body for action, _, body in self.shop.calls if action == "catalog-search"]
+        self.assertEqual(searched[-1]["query"], "Europe")  # a region is searched by name
         self.assertEqual(wg.ESIM_WORDS.sub("", "eSIM data plan Europe").strip(), "Europe")
+
+    def test_jev_keeps_what_fits_and_drops_what_does_not(self):
+        self.model_replies = [json.dumps({"query": "steam", "country": "", "amount": "", "buy": False})]
+        self.hints = {"country": "DE"}  # Jev read the country; the model missed it
+        self.fit = {"steam-germany": 0.9, "isimo-colombia": 0.001, "vodafone-germany": 0.02, "none": 0.08}
+        message = self.send("steam card for my nephew in berlin", "gift_card")
+        self.assertEqual(self.shop.calls[0][2]["country"], "DE")
+        self.assertIn("Isimo Colombia", self.ranked["isimo-colombia"])
+        self.assertEqual([i["slug"] for i in message["cards"][0]["items"]], ["steam-germany"])
+
+    def test_food_is_offered_as_gift_cards_for_food_in_that_country(self):
+        self.hints = {"country": "CZ"}
+        message = self.send("я хочу заказать еду в Чехии", "food")
+        self.assertEqual(self.shop.calls[0][2], {"query": "", "country": "CZ", "category": "food", "productType": "gift_card"})
+        self.assertIn("напрямую я не могу", message["text"])
+        self.hints = {}
+        self.assertIn("В какой стране", self.send("хочу заказать еду", "food")["text"])
+
+    def test_without_the_catalog_bitrefills_own_search_is_used(self):
+        self.shop.catalog = {"ok": False, "error": "catalog_off", "products": []}
+        self.model_replies = [json.dumps({"query": "steam", "country": "DE", "amount": "", "buy": False})]
+        self.send("find a steam gift card in germany", "gift_card")
+        self.assertEqual(self.shop.calls[1], ("bitrefill-search", ACCOUNT, {"query": "steam", "country": "DE", "kind": "gift-cards"}))
 
     def test_a_named_value_that_is_not_offered_is_shown_not_bought(self):
         self.model_replies = [json.dumps({"query": "steam", "country": "DE", "amount": "13", "buy": True})]
@@ -149,8 +194,12 @@ class AgentTests(unittest.TestCase):
     def test_an_explicit_buy_with_an_amount_buys_the_first_match(self):
         self.model_replies = [json.dumps({"query": "steam", "country": "DE", "amount": "10", "buy": True})]
         message = self.send("buy a 10 euro steam card in germany", "gift_card")
-        self.assertEqual([c[0] for c in self.shop.calls if c[0] != "bitrefill-packages"],
-                         ["bitrefill-search", "bitrefill-quote", "bitrefill-buy"])
+        self.assertNotIn("bitrefill-buy", [c[0] for c in self.shop.calls])  # unranked: shown, not bought
+        self.model_replies = [json.dumps({"query": "steam", "country": "DE", "amount": "10", "buy": True})]
+        self.fit = {"steam-germany": 0.93, "isimo-colombia": 0.01, "none": 0.06}
+        message = self.send("buy a 10 euro steam card in germany", "gift_card")
+        self.assertEqual([c[0] for c in self.shop.calls if c[0] != "bitrefill-packages"][-3:],
+                         ["catalog-search", "bitrefill-quote", "bitrefill-buy"])
         self.assertEqual(self.shop.calls[-2][2], {"productId": "steam-germany", "package": "10"})
         self.assertEqual(message["cards"][0]["type"], "receipt")
 
@@ -230,16 +279,28 @@ class JevTests(unittest.TestCase):
             self.sent = json.loads(request.data)
             if error:
                 raise error
-            return io.BytesIO(json.dumps({"answers": {"intent": answer}}).encode())
+            answers = answer if isinstance(answer, dict) and "intent" in answer else {"intent": answer}
+            return io.BytesIO(json.dumps({"answers": answers}).encode())
         return open_
 
     def test_a_confident_choice_is_the_intent_and_a_weak_one_asks(self):
         jev = wg.Jev("key", opener=self.opener({"type": "choice", "choice": "buy_tool", "confidence": 0.93}))
-        self.assertEqual(jev("gimme news"), "buy_tool")
+        self.assertEqual(jev("gimme news"), {"intent": "buy_tool", "country": "", "category": ""})
         self.assertEqual(self.sent["model"], "jev-latest")
         self.assertEqual(set(self.sent["questions"]["intent"]["criteria"]), set(wg.INTENTS))
+        self.assertLessEqual(len(self.sent["questions"]["country"]["criteria"]), 255)  # Jev's limit per choice
         jev = wg.Jev("key", opener=self.opener({"type": "choice", "choice": "buy_tool", "confidence": 0.4}))
-        self.assertEqual(jev("hmm"), "clarify")
+        self.assertEqual(jev("hmm")["intent"], "clarify")
+
+    def test_country_and_kind_of_shop_come_with_the_intent_and_products_are_ranked(self):
+        choice = lambda c, p: {"type": "choice", "choice": c, "confidence": p}
+        jev = wg.Jev("key", opener=self.opener({"intent": choice("esim", 0.95), "country": choice("DE", 0.9),
+                                                "category": choice("mobile", 0.5)}))
+        self.assertEqual(jev("internet in berlin"), {"intent": "esim", "country": "DE", "category": ""})
+        jev = wg.Jev("key", opener=self.opener({"intent": choice("esim", 0.95), "best": {
+            "type": "choice", "choice": "a", "confidence": 0.8, "probabilities": {"a": 0.8, "b": 0.05, "none": 0.15}}}))
+        self.assertEqual(jev.rank("x", {"a": "A", "b": "B"}), {"a": 0.8, "b": 0.05, "none": 0.15})
+        self.assertIn("none", self.sent["questions"]["best"]["criteria"])
 
     def test_failures_are_unavailable_and_the_agent_falls_back_to_keywords(self):
         jev = wg.Jev("key", opener=self.opener(error=OSError("down")))

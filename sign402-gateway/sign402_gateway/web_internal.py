@@ -153,6 +153,9 @@ def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict
             return 400, result
         return 200, {"ok": True, **result}
 
+    if action == "catalog-search":
+        return catalog_search(server, payload)
+
     if action == "purchases":
         summaries = server.user_event_store.summaries(account)
         offset = max(0, int(payload.get("offset") or 0))
@@ -230,3 +233,42 @@ def pay_from_allowance(server: Any, gw: Any, account: str, tool: dict[str, Any],
             gw._release_user_wallet_spend(server, reservation_id)
             if claim_id and server.spending_policy is not None:
                 server.spending_policy.memory.release_claim(claim_id)
+
+
+CATALOG_TYPES = {"gift_card", "esim", "phone_refill"}
+
+
+def catalog_search(server: Any, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """Candidates from Bitrefill's catalog (the bot's MCP client): by words, or a country's shops of a kind.
+
+    Read-only; nothing here signs in as the account or quotes a price. The page's agent
+    ranks these and asks the allowance lane for packages and prices of the few it shows.
+    """
+    from .bitrefill_runner import BITREFILL_BROWSE_CATEGORIES  # noqa: PLC0415
+
+    client = getattr(getattr(server, "bitrefill_search_service", None), "bitrefill_client", None)
+    if client is None or not hasattr(client, "search_products") or type(client).__name__.startswith("Test"):
+        return 200, {"ok": False, "error": "catalog_off", "products": []}
+    query = " ".join(str(payload.get("query") or "").split())[:60]
+    country = str(payload.get("country") or "").upper()
+    country = country if len(country) == 2 and country.isalpha() else ""
+    product_type = str(payload.get("productType") or "")
+    product_type = product_type if product_type in CATALOG_TYPES else ""
+    category = BITREFILL_BROWSE_CATEGORIES.get(str(payload.get("category") or "all"), "")
+    if query:
+        products = client.search_products(query=query, country=country, category=category,
+                                          product_type=product_type, include_test_products=False)
+        if not products and category:  # the words may name a shop filed under another kind
+            products = client.search_products(query=query, country=country, category="",
+                                              product_type=product_type, include_test_products=False)
+    elif country:
+        products = client.list_products(country=country, category=category, start=0, limit=100,
+                                        include_test_products=False)
+        products = [p for p in products if not product_type or p.get("productType") == product_type]
+    else:
+        products = []
+    return 200, {"ok": True, "products": [
+        {"slug": p.get("productId"), "name": p.get("name"), "country": p.get("country"), "type": p.get("productType"),
+         "categories": list(p.get("categories") or ([p["category"]] if p.get("category") else [])),
+         "needsRecipient": str(p.get("recipientType") or "none") != "none"}
+        for p in products if p.get("productId") and p.get("inStock", True) is not False][:80]}

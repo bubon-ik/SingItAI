@@ -210,10 +210,24 @@ history, what the agent can spend today, purchases, Telegram, the account) and
 the conversation. It works the way the Telegram bot does
 (`sign402_gateway/web_agent.py`):
 
-- **Jev** (TypeSafe, `jev-latest`, the bot's `TYPESAFE_API_KEY`) classifies each
-  message into a fixed set of intents: set limits, grant, revoke, status,
-  purchases, paid data, gift card, eSIM, top-up, link Telegram, conversation.
-  Without a key or when it does not answer, the same intents come from keywords.
+- **Jev** (TypeSafe, `jev-latest`, the bot's `TYPESAFE_API_KEY`) reads each
+  message in one call, as the bot's router does: the intent (set limits, grant,
+  revoke, status, purchases, paid data, gift card, eSIM, top-up, food, goods,
+  travel, link Telegram, conversation), the country (ISO code, only when named)
+  and the kind of shop. Without a key or when it does not answer, the intent
+  comes from keywords.
+- **Catalog research** (gateway action `catalog-search`, the bot's Bitrefill MCP
+  catalog): a brand is searched by name within its product type (gift card,
+  eSIM, phone top-up) and country; without a brand, the country's shops of that
+  kind are listed; an eSIM is looked for by its country or region, never the
+  word "eSIM". Food, goods and travel cannot be bought directly, so gift cards
+  that pay for them in that country are offered. Jev then ranks the candidates
+  against the user's words (a `choice` over the products) and drops what plainly
+  does not fit. Cards show each product's real options (values, eSIM plans) with
+  today's price from the allowance lane. A product is bought straight from the
+  message only when the message asked to buy a named value and Jev was sure of
+  the product (or it was the only one). When the catalog is off, Bitrefill's own
+  search by words is used.
 - **Code acts** on the intent. Limits named in the message ("$20 a day, $5 per
   purchase") create the limiter at once; a daily limit alone is proposed on a
   card to confirm. Grants and revokes are cards the page hands to the wallet.
