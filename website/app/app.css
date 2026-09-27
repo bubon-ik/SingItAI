@@ -510,3 +510,11 @@ body.in-app .nav-wrap, body.in-app .shell { display: none; }
 .setting h3 { font-size: 15px; }
 .setting p { margin-top: 2px; font-size: 13px; overflow-wrap: anywhere; }
 .select-inline { width: auto; min-width: 150px; font-family: var(--sans); }
+
+.account-menu { min-width: 0; padding: 5px; border-radius: 12px; }
+.account-menu .menu-item { padding: 7px 10px; font-size: 13.5px; border-radius: 8px; }
+.account-menu .menu-item kbd { font-size: 11px; }
+.account-menu .icon { width: 15px; height: 15px; }
+.account-menu .mi-label { gap: 10px; }
+.account-menu .menu-head { padding: 6px 10px 4px; font-size: 11px; }
+.account-menu hr { margin: 4px 6px; }

@@ -996,7 +996,7 @@ function renderAccountMenu() {
     ? `<button class="menu-item back" data-action="account-menu-main"><span class="mi-label">${icon("back")}Reply language</span></button><hr>`
       + LANGUAGES.map(([code, label, hint]) => item("set-reply-lang", state.replyLang === code ? "check" : "", label,
           hint ? `<kbd>${hint}</kbd>` : "", `data-lang="${code}"`)).join("")
-    : `<div class="menu-head mono">${esc(state.session.address)}</div>`
+    : `<div class="menu-head mono" title="${esc(state.session.address)}">${esc(short(state.session.address))}</div>`
       + item("go", "usage", "Usage", "", 'data-view="usage"')
       + item("go", "purchases", "Purchases", "", 'data-view="purchases"')
       + item("go", "settings", "Settings", "", 'data-view="settings"')
@@ -1008,7 +1008,7 @@ function renderAccountMenu() {
   const chip = $(".side-account-btn").getBoundingClientRect();
   el.style.left = `${Math.max(8, chip.left)}px`;
   el.style.top = `${Math.max(8, chip.top - el.offsetHeight - 8)}px`;
-  el.style.minWidth = `${Math.max(230, chip.width)}px`;
+  el.style.width = `${Math.round(chip.width)}px`;  // as wide as the chip it opens from
 }
 
 function closeAccountMenu() {
