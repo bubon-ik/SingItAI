@@ -183,6 +183,24 @@ class BitrefillX402:
         return [{"slug": p.get("slug"), "name": p.get("name"), "currency": p.get("currency"),
                  "countries": p.get("countries")} for p in body.get("products", [])]
 
+    def packages(self, user_id: str, slug: str) -> dict[str, Any]:
+        """What can be bought of one product (card values, eSIM plans) and what each costs now."""
+        status, body, _ = self.http("GET", f"{API}/products/detail?" + urllib.parse.urlencode({"slug": slug}),
+                                    token=self.token(user_id))
+        product = body.get("product", body) if isinstance(body, dict) else {}
+        if status != 200 or not product:
+            raise AllowanceError(f"Bitrefill has no product {slug!r}.")
+        offered = []
+        for p in product.get("packages") or []:
+            try:
+                price = str(Decimal(str(p["payment_price"])))
+            except (InvalidOperation, KeyError):
+                continue  # no price, nothing to consent to
+            offered.append({"value": str(p.get("package_value")), "currency": p.get("package_currency") or "",
+                            "priceUsd": price})
+        return {"slug": slug, "name": product.get("name") or slug, "packages": offered[:40],
+                "recipientRequired": bool(product.get("recipient_required"))}
+
     def quote(self, user_id: str, slug: str, package: str) -> dict[str, Any]:
         """Product, package and the price Bitrefill quotes now, in USDC."""
         status, body, _ = self.http("GET", f"{API}/products/detail?" + urllib.parse.urlencode({"slug": slug}),

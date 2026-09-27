@@ -8226,6 +8226,8 @@ def _allowance_bitrefill_action(
                                     country=str(payload.get("country") or ""))
         lines = [f"{p['name']} — {p['slug']}" for p in products[:10]] or ["Nothing found."]
         return {"products": products, "telegramText": "\n".join(lines)}
+    if action == "bitrefill-packages":
+        return bitrefill.packages(lane_user, str(payload.get("productId") or ""))
     if action == "bitrefill-quote":
         quote = bitrefill.quote(lane_user, str(payload.get("productId") or ""), str(payload.get("package") or ""))
         now = int(time.time())

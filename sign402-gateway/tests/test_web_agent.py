@@ -30,6 +30,9 @@ class FakeShop:
             "tool-buy": {"ok": True, "text": "MARKET BRIEF: calm.", "txId": "0x" + "ab" * 32},
             "bitrefill-search": {"ok": True, "products": [{"name": "Steam DE", "slug": "steam-germany"},
                                                           {"name": "Steam US", "slug": "steam-usa"}]},
+            "bitrefill-packages": {"ok": True, "slug": body.get("productId"), "recipientRequired": False,
+                                   "packages": [{"value": "10", "currency": "EUR", "priceUsd": "10.9"},
+                                                {"value": "25", "currency": "EUR", "priceUsd": "27.1"}]},
             "bitrefill-quote": {"ok": True, "quoteId": "aq_1", "name": "Steam DE", "package": body.get("package"),
                                 "packageCurrency": "EUR", "priceUsd": "10.9"},
             "bitrefill-buy": {"ok": True, "invoiceId": "inv-1", "delivered": True},
@@ -120,18 +123,35 @@ class AgentTests(unittest.TestCase):
     def test_gift_cards_are_found_then_bought_by_the_card_button(self):
         self.model_replies = [json.dumps({"query": "steam", "country": "DE", "amount": "", "buy": False})]
         message = self.send("find a steam gift card in germany", "gift_card")
-        self.assertEqual(self.shop.calls, [("bitrefill-search", ACCOUNT, {"query": "steam", "country": "DE"})])
-        self.assertEqual(message["cards"][0]["type"], "products")
+        self.assertEqual(self.shop.calls[0], ("bitrefill-search", ACCOUNT, {"query": "steam", "country": "DE", "kind": "gift-cards"}))
+        card = message["cards"][0]
+        self.assertEqual(card["type"], "products")
+        self.assertEqual(card["items"][0]["packages"][0], {"value": "10", "currency": "EUR", "priceUsd": "10.9"})
         chat = self.agent.store.chats(ACCOUNT)[0]["id"]
         reply = self.agent.action(ACCOUNT, chat, {"type": "buy_giftcard", "slug": "steam-germany", "package": "10"})
         self.assertEqual([c[0] for c in self.shop.calls][-2:], ["bitrefill-quote", "bitrefill-buy"])
         self.assertTrue(reply["messages"][0]["cards"][0]["giftcard"])
 
+    def test_an_esim_is_searched_among_esims_by_the_place(self):
+        self.model_replies = [json.dumps({"query": "eSIM", "country": "DE", "place": "Germany", "amount": "", "buy": False})]
+        message = self.send("i wanna buy eSim for Germany", "esim")
+        self.assertEqual(self.shop.calls[0][2], {"query": "Germany", "country": "DE", "kind": "esims"})
+        self.assertEqual(message["cards"][0]["kind"], "esim")
+        self.assertIn("eSIMs", message["text"])
+        self.assertEqual(wg.ESIM_WORDS.sub("", "eSIM data plan Europe").strip(), "Europe")
+
+    def test_a_named_value_that_is_not_offered_is_shown_not_bought(self):
+        self.model_replies = [json.dumps({"query": "steam", "country": "DE", "amount": "13", "buy": True})]
+        message = self.send("buy a 13 euro steam card in germany", "gift_card")
+        self.assertNotIn("bitrefill-buy", [c[0] for c in self.shop.calls])
+        self.assertEqual(message["cards"][0]["type"], "products")
+
     def test_an_explicit_buy_with_an_amount_buys_the_first_match(self):
         self.model_replies = [json.dumps({"query": "steam", "country": "DE", "amount": "10", "buy": True})]
         message = self.send("buy a 10 euro steam card in germany", "gift_card")
-        self.assertEqual([c[0] for c in self.shop.calls], ["bitrefill-search", "bitrefill-quote", "bitrefill-buy"])
-        self.assertEqual(self.shop.calls[1][2], {"productId": "steam-germany", "package": "10"})
+        self.assertEqual([c[0] for c in self.shop.calls if c[0] != "bitrefill-packages"],
+                         ["bitrefill-search", "bitrefill-quote", "bitrefill-buy"])
+        self.assertEqual(self.shop.calls[-2][2], {"productId": "steam-germany", "package": "10"})
         self.assertEqual(message["cards"][0]["type"], "receipt")
 
     def test_conversation_runs_on_venice_once_the_allowance_is_approved(self):

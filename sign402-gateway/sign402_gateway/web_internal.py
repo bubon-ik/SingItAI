@@ -145,7 +145,7 @@ def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict
             return web_venice.choose_model(server, account, payload.get("model"))
         return web_venice.chat(server, gw, account, payload.get("messages"))
 
-    if action in ("bitrefill-search", "bitrefill-quote", "bitrefill-buy"):
+    if action in ("bitrefill-search", "bitrefill-packages", "bitrefill-quote", "bitrefill-buy"):
         if action == "bitrefill-buy":
             _limits_from_limiter(server, gw, account)
         result = gw._allowance_bitrefill_action(server, account, action, payload, web_confirmed=True)

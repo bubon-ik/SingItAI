@@ -409,6 +409,15 @@ body.in-app .nav-wrap, body.in-app .shell { display: none; }
 .product { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0; border-top: 1px solid var(--hairline); }
 .product:first-of-type { border-top: none; }
 .product .input { width: 96px; }
+.product > div:first-child { min-width: 0; }
+.product .select { font-family: var(--sans); width: auto; max-width: 260px; padding-right: 30px; cursor: pointer; appearance: none; -webkit-appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-soft) 50%), linear-gradient(135deg, var(--text-soft) 50%, transparent 50%);
+  background-position: calc(100% - 16px) 52%, calc(100% - 11px) 52%; background-size: 5px 5px; background-repeat: no-repeat; }
+.product .select option { background: #111412; color: var(--text); }
+@media (max-width: 620px) {
+  .product { flex-direction: column; align-items: stretch; }
+  .product .select { max-width: none; flex: 1; }
+}
 
 .composer-wrap { padding: 10px 24px 18px; }
 .composer { max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 6px; padding: 12px 10px 10px 18px;

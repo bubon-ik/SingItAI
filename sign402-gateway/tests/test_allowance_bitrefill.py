@@ -123,6 +123,11 @@ class BitrefillX402Tests(unittest.TestCase):
         with self.assertRaises(AllowanceError):
             self.bitrefill.quote("u", "hediyen", "999")
 
+    def test_the_packages_on_offer_come_with_their_price_now(self):
+        offered = self.bitrefill.packages("u", "hediyen")
+        self.assertEqual(offered, {"slug": "hediyen", "name": "Hediyen Kart", "recipientRequired": False,
+                                   "packages": [{"value": "1", "currency": "TRY", "priceUsd": "0.02"}]})
+
     def test_a_confirmed_order_is_paid_from_the_agent_and_carries_no_code(self):
         result = self.bitrefill.buy("u", "hediyen", "1", 20_000)
         args, kwargs = self.allowance.pay_x402.call_args

@@ -910,11 +910,23 @@ function renderCard(card, key) {
       <div class="row"><button class="btn btn-primary btn-sm has-orb" data-action="card-limits" data-key="${esc(key)}" data-lang="${esc(card.lang || "en")}">${card.replaces ? "Replace my limiter" : "Create my limiter"}${orb}</button></div></div>`;
   }
   if (card.type === "products") {
+    const plan = card.kind === "esim" ? "Choose a plan" : "Choose a value";
+    const choice = (p) => {
+      if (p.needsRecipient) return `<span class="faint">Delivered to a phone number — not available here yet</span>`;
+      const control = p.packages?.length
+        ? `<select class="input select" data-package="${esc(p.slug)}" aria-label="${plan}">
+            ${p.packages.map((o) => `<option value="${esc(o.value)}">${esc(o.value)}${o.currency && !/[a-z]/i.test(o.value) ? ` ${esc(o.currency)}` : ""} — ${esc(o.priceUsd)} USDC</option>`).join("")}
+          </select>`
+        : `<input class="input" placeholder="value" data-package="${esc(p.slug)}" aria-label="Value">`;
+      return `<div class="row" style="margin:0">${control}
+        <button class="btn btn-primary btn-sm" data-action="card-buy" data-slug="${esc(p.slug)}" data-name="${esc(p.name)}"
+          data-lang="${esc(card.lang || "en")}">Buy</button></div>`;
+    };
     return `<div class="card">${(card.items || []).map((p) => `
-      <div class="product"><div><h3>${esc(p.name)}</h3><p class="faint mono">${esc(p.slug)}</p></div>
-        <div class="row" style="margin:0"><input class="input" placeholder="amount" data-package="${esc(p.slug)}">
-        <button class="btn btn-primary btn-sm" data-action="card-buy" data-slug="${esc(p.slug)}" data-name="${esc(p.name)}" data-lang="${esc(card.lang || "en")}">Buy</button></div></div>`).join("")}
-      <p class="faint" style="margin-top:8px">Enter the card value (for example 10) and I'll buy it from your allowance.</p></div>`;
+      <div class="product"><div><h3>${esc(p.name)}</h3>
+        <p class="faint">${p.packages?.length ? `${p.packages.length} ${card.kind === "esim" ? "plans" : "options"} · from ${esc(Math.min(...p.packages.map((o) => Number(o.priceUsd))))} USDC` : esc(p.slug)}</p></div>
+        ${choice(p)}</div>`).join("")}
+      <p class="faint" style="margin-top:8px">Paid from your allowance, inside your limits. The price is checked again before paying.</p></div>`;
   }
   if (card.type === "credit") {
     return `<div class="note-line">Private chat credit topped up: <b>${esc(card.price)} USDC</b> on Venice, paid from your allowance.
