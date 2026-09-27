@@ -480,3 +480,33 @@ body.in-app .nav-wrap, body.in-app .shell { display: none; }
   .pane-inner { padding: 24px 16px 48px; }
   .card .fields { grid-template-columns: 1fr 1fr 1fr; }
 }
+
+/* ---------- account menu, Usage, Settings ---------- */
+.side-account-btn { display: flex; align-items: center; gap: 9px; width: 100%; padding: 10px 12px; border-radius: 12px;
+  border: 1px solid var(--hairline); background: rgba(255, 255, 255, 0.03); color: var(--text); cursor: pointer;
+  font: 500 13px var(--sans); text-align: left; }
+.side-account-btn:hover, .side-account-btn.open { background: rgba(255, 255, 255, 0.07); }
+.side-account-btn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; }
+.side-account-btn .mono { flex: 1; }
+.side-account-btn .caret { color: var(--text-faint); font-size: 11px; }
+.account-menu .menu-head { padding: 8px 12px 6px; font-size: 11.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; }
+.menu-item .mi-label { display: inline-flex; align-items: center; gap: 11px; }
+.icon { width: 17px; height: 17px; flex: none; color: var(--text-soft); display: inline-block; }
+.menu-item.back { color: var(--text-soft); }
+.msg-meta { margin-top: 8px; font: 12px var(--mono); color: var(--text-faint); }
+.typing + .msg-meta { margin-top: 6px; }
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.metric { display: flex; flex-direction: column; gap: 4px; padding: 16px 18px; border: 1px solid var(--hairline);
+  border-radius: 16px; background: rgba(255, 255, 255, 0.025); }
+.metric b { font: 600 24px var(--display); }
+.metric .faint { font-size: 12.5px; }
+.usage-rows { display: flex; flex-direction: column; margin-top: 8px; }
+.usage-row { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--hairline); font-size: 14px; }
+.usage-row:first-child { border-top: none; }
+.usage-row a { color: var(--accent); }
+.settings { display: flex; flex-direction: column; }
+.setting { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 0; border-top: 1px solid var(--hairline); }
+.setting:first-child { border-top: none; padding-top: 4px; }
+.setting h3 { font-size: 15px; }
+.setting p { margin-top: 2px; font-size: 13px; overflow-wrap: anywhere; }
+.select-inline { width: auto; min-width: 150px; font-family: var(--sans); }

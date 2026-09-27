@@ -46,7 +46,8 @@ class FakeVenice:
                 "payTo": VENICE_PAY_TO, "maxTimeoutSeconds": 300, "extra": {"name": "USD Coin", "version": "2"}}]})
         if url.endswith("/chat/completions"):
             self.balance -= 1_000
-            return FakeResponse(200, {"choices": [{"message": {"content": "Hi! Venice here."}}]},
+            return FakeResponse(200, {"choices": [{"message": {"content": "Hi! Venice here."}}],
+                                      "usage": {"prompt_tokens": 120, "completion_tokens": 30}},
                                 {"X-Balance-Remaining": str(self.balance / 1e6)})
         raise AssertionError(url)
 
@@ -94,6 +95,14 @@ class WebVeniceTests(unittest.TestCase):
         self.assertEqual((requirements["amountAtomic"], requirements["receiver"]), ("5000000", VENICE_PAY_TO))
         self.assertEqual(self.pay.call_args.kwargs["request_body"], {})
         self.assertEqual(set(self.venice.signers), {AGENT.address})  # Venice meters the agent, never a custodial wallet
+        self.assertEqual((reply["modelLabel"], reply["promptTokens"], reply["completionTokens"]),
+                         ("Venice Uncensored 1.2", 120, 30))
+        self.server.user_event_store.summaries.return_value = [
+            {"name": "Venice AI credit", "paid": "5 USDC", "recordedAt": "2026-09-27T10:00:00Z", "transactionUrl": "u"},
+            {"name": "Crypto News", "paid": "0.001 USDC", "recordedAt": "x", "transactionUrl": ""}]
+        status, usage = web_venice.usage(self.server, ACCOUNT)
+        self.assertEqual(usage["topUps"], [{"at": "2026-09-27T10:00:00Z", "paid": "5 USDC", "transactionUrl": "u"}])
+        self.assertEqual(usage["modelLabel"], "Venice Uncensored 1.2")
 
     def test_the_conversation_goes_to_venice_whole_and_credit_is_reused(self):
         self.venice.balance = 3_000_000

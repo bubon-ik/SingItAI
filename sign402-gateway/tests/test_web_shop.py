@@ -254,6 +254,17 @@ class WebShopRoutesTests(unittest.TestCase):
         self.assertEqual(forwarded["purchases"], {"offset": "6"})  # GET /purchases forwards only the offset
         self.assertEqual(forwarded["venice-models"], {})
 
+    def test_usage_combines_todays_answers_with_the_venice_credit(self):
+        status, body, _ = self.call("GET", "/usage")
+        self.assertEqual(status, 200)
+        self.assertEqual(self.calls[-1][:2], ("venice-usage", self.me["account"]))
+        self.base.api.shop = lambda action, account, body: (503, {"ok": False, "error": "chat_off"})
+        self.assertIsNone(self.call("GET", "/usage")[1]["venice"])  # Venice off: the page says so
+        self.base.api.shop = lambda action, account, body: (200, {"ok": True, "creditAtomic": 4_870_000, "model": "m",
+                                                                   "modelLabel": "M", "topUps": [], "secret": "x"})
+        venice = self.call("GET", "/usage")[1]["venice"]
+        self.assertEqual(venice, {"creditAtomic": 4_870_000, "model": "m", "modelLabel": "M", "topUps": []})
+
     def test_the_shop_needs_a_session_its_csrf_token_and_a_gateway(self):
         with self.assertRaises(wa.WebAuthError):
             self.call("POST", "/shop/tools/buy", {"quoteId": "q"}, csrf=False)

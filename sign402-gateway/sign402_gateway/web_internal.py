@@ -137,8 +137,10 @@ def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict
     if action == "tool-buy":
         return _buy_tool(server, gw, account, str(payload.get("quoteId") or ""))
 
-    if action in ("venice-chat", "venice-models", "venice-model"):
+    if action in ("venice-chat", "venice-models", "venice-model", "venice-usage"):
         from . import web_venice  # noqa: PLC0415 - Venice only loads when the chat is used
+        if action == "venice-usage":
+            return web_venice.usage(server, account)
         if action == "venice-models":
             return web_venice.models(server, account)
         if action == "venice-model":

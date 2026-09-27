@@ -29,7 +29,7 @@ const state = {
   search: null,
   purchases: null,
   revealed: {},
-  view: "chat",        // signed in: "chat" | "allowance" | "purchases" | "telegram"
+  view: "chat",        // signed in: "chat" | "allowance" | "purchases" | "telegram" | "usage" | "settings"
   chats: [],           // the sidebar's history
   chatId: null,
   messages: [],
@@ -41,7 +41,19 @@ const state = {
   showArchived: false,
   models: null,        // GET /chat/models: Venice's list and the one this account talks to
   modelFilter: { query: "", category: "" },
+  accountMenu: null,   // null | "main" | "language": the menu over the wallet chip
+  usage: null,         // GET /usage, for the Usage page
+  replyLang: readPref("singit.replyLang"),  // "" follows each message; "en" | "ru"
+  thinkingSince: 0,
 };
+
+function readPref(key) {
+  try { return localStorage.getItem(key) || ""; } catch { return ""; }
+}
+
+function writePref(key, value) {
+  try { value ? localStorage.setItem(key, value) : localStorage.removeItem(key); } catch { /* private mode */ }
+}
 
 const PRESETS = [
   { daily: "5", per: "1", days: "30", name: "Starter" },
@@ -170,7 +182,7 @@ async function signOut() {
   await disconnectAppKit().catch(() => {});
   Object.assign(state, { session: null, wallet: null, allowance: null, quote: null, result: null, purchases: null,
                          linkCode: null, revealed: {}, tab: "allowance", modal: null, view: "chat", chats: [],
-                         chatId: null, messages: [], done: {}, chatMenu: null, renaming: null, showArchived: false, models: null,
+                         chatId: null, messages: [], done: {}, chatMenu: null, renaming: null, showArchived: false, models: null, accountMenu: null, usage: null,
                          modelFilter: { query: "", category: "" } });
   showChatInUrl();
   render();
@@ -674,6 +686,7 @@ function render() {
   document.body.classList.toggle("in-app", signedIn);
   $("#app").hidden = !signedIn;
   if (!signedIn) {
+    $("#account-menu").hidden = true;
     renderNav();
     view.innerHTML = renderHero();
   } else {
@@ -749,22 +762,20 @@ function renderSidebar() {
     : `<div class="label">Allowance</div><div style="margin-top:4px;font-size:14px;color:var(--text-soft)">No limits yet</div>`;
   $("#side-nav").innerHTML = `
     <button class="side-allowance ${state.view === "allowance" ? "active" : ""}" data-action="go" data-view="allowance">${amountLine}</button>
-    <button class="side-item ${state.view === "purchases" ? "active" : ""}" data-action="go" data-view="purchases"><span class="ico">🧾</span>Purchases</button>
-    <button class="side-item ${state.view === "telegram" ? "active" : ""}" data-action="go" data-view="telegram"><span class="ico">✈️</span>Telegram</button>
-    <div class="side-account">
-      <span class="account-chip" style="cursor:default"><span class="dot"></span>${esc(short(state.session.address))}</span>
-      <button class="btn btn-ghost btn-sm" data-action="sign-out">Sign out</button>
-    </div>`;
+    <button class="side-account-btn ${state.accountMenu ? "open" : ""}" data-action="account-menu" aria-haspopup="menu"
+      aria-expanded="${Boolean(state.accountMenu)}"><span class="dot"></span><span class="mono">${esc(short(state.session.address))}</span>
+      <span class="caret">⌃</span></button>`;
+  renderAccountMenu();
   $("#app").classList.toggle("menu-open", state.menuOpen);
   $("#top-title").textContent = state.view === "chat"
     ? (state.chats.find((c) => c.id === state.chatId)?.title || "New chat")
-    : { allowance: "Allowance", purchases: "Purchases", telegram: "Telegram" }[state.view];
+    : { allowance: "Allowance", purchases: "Purchases", telegram: "Telegram", usage: "Usage", settings: "Settings" }[state.view];
 }
 
 function renderMain() {
   const host = $("#main");
   if (state.view !== "chat") {
-    const page = { allowance: renderAllowance, purchases: renderPurchases,
+    const page = { allowance: renderAllowance, purchases: renderPurchases, usage: renderUsage, settings: renderSettings,
                    telegram: () => `<div class="page-head"><span class="eyebrow">Telegram</span><h1>Your agent in <em>Telegram</em>.</h1></div>${renderTelegram()}` }[state.view];
     host.innerHTML = `<div class="pane"><div class="pane-inner">${page()}</div></div>`;
     return;
@@ -772,7 +783,8 @@ function renderMain() {
   const draft = $("#composer")?.value ?? "";
   const chat = state.messages.length || state.sending
     ? state.messages.map(renderMessage).join("") + (state.sending ? `<div class="msg assistant"><div class="avatar">${mark()}</div>
-        <div class="body"><span class="typing"><i></i><i></i><i></i></span></div></div>` : "")
+        <div class="body"><span class="typing"><i></i><i></i><i></i></span>
+        <div class="msg-meta" id="thinking">${thinkingText()}</div></div></div>` : "")
     : `<div class="empty"><div class="avatar">${mark()}</div>
         <h1>What should your agent <em>do</em>?</h1>
         <p>Ask in your own words. It sets your limits, finds what you need and buys it inside your limits. Your wallet signs only the approvals.</p>
@@ -928,6 +940,9 @@ function renderCard(card, key) {
         ${choice(p)}</div>`).join("")}
       <p class="faint" style="margin-top:8px">Paid from your allowance, inside your limits. The price is checked again before paying.</p></div>`;
   }
+  if (card.type === "usage") {
+    return `<div class="msg-meta">${esc(card.model)} · ${Number(card.tokens || 0).toLocaleString("en-US")} tokens · $${esc(card.costUsd)}</div>`;
+  }
   if (card.type === "credit") {
     return `<div class="note-line">Private chat credit topped up: <b>${esc(card.price)} USDC</b> on Venice, paid from your allowance.
       <button class="linkish" data-action="go" data-view="purchases">Purchases</button></div>`;
@@ -949,6 +964,135 @@ function renderCard(card, key) {
       : `<button class="btn btn-ghost btn-sm" data-action="link">Get a code</button>`}</div>`;
   }
   return "";
+}
+
+// -- account menu, Usage and Settings --
+
+// Outline icons (Feather/Lucide shapes), drawn in the text colour.
+const ICONS = {
+  usage: '<path d="M21 12a9 9 0 1 1-9-9v9z"/><path d="M15 3.5A9 9 0 0 1 20.5 9H15z"/>',
+  purchases: '<path d="M6 2h12v20l-3-2-3 2-3-2-3 2z"/><path d="M9 7h6M9 11h6M9 15h4"/>',
+  settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+  language: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+  telegram: '<path d="M21 4 3 11l7 2 2 7 3-5 5 4z"/><path d="m10 13 5-4"/>',
+  help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6"/><path d="M12 17h.01"/>',
+  signout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5M21 12H9"/>',
+  back: '<path d="m15 18-6-6 6-6"/>',
+  check: '<path d="m5 12 5 5 9-10"/>',
+};
+const icon = (name) => name && ICONS[name]
+  ? `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`
+  : `<span class="icon"></span>`;
+
+const LANGUAGES = [["", "Auto", "Replies follow your message"], ["en", "English", ""], ["ru", "Русский", ""]];
+const HELP_URL = "https://t.me/SingItAgents";
+
+function renderAccountMenu() {
+  const el = $("#account-menu");
+  if (!state.accountMenu || !state.session) { el.hidden = true; el.innerHTML = ""; return; }
+  const item = (action, name, label, extra = "", attrs = "") =>
+    `<button class="menu-item" role="menuitem" data-action="${action}" ${attrs}><span class="mi-label">${icon(name)}${label}</span>${extra}</button>`;
+  el.innerHTML = state.accountMenu === "language"
+    ? `<button class="menu-item back" data-action="account-menu-main"><span class="mi-label">${icon("back")}Reply language</span></button><hr>`
+      + LANGUAGES.map(([code, label, hint]) => item("set-reply-lang", state.replyLang === code ? "check" : "", label,
+          hint ? `<kbd>${hint}</kbd>` : "", `data-lang="${code}"`)).join("")
+    : `<div class="menu-head mono">${esc(state.session.address)}</div>`
+      + item("go", "usage", "Usage", "", 'data-view="usage"')
+      + item("go", "purchases", "Purchases", "", 'data-view="purchases"')
+      + item("go", "settings", "Settings", "", 'data-view="settings"')
+      + item("account-menu-language", "language", "Language", `<kbd>${esc(LANGUAGES.find(([c]) => c === state.replyLang)?.[1] || "Auto")} ›</kbd>`)
+      + item("go", "telegram", "Telegram", "", 'data-view="telegram"')
+      + item("get-help", "help", "Get help", "<kbd>↗</kbd>")
+      + `<hr>` + item("sign-out", "signout", "Sign out");
+  el.hidden = false;
+  const chip = $(".side-account-btn").getBoundingClientRect();
+  el.style.left = `${Math.max(8, chip.left)}px`;
+  el.style.top = `${Math.max(8, chip.top - el.offsetHeight - 8)}px`;
+  el.style.minWidth = `${Math.max(230, chip.width)}px`;
+}
+
+function closeAccountMenu() {
+  if (!state.accountMenu) return;
+  state.accountMenu = null;
+  renderSidebar();
+}
+
+const usd = (atomic, digits = 2) => `$${(Number(atomic || 0) / 1e6).toFixed(digits)}`;
+
+function renderUsage() {
+  if (!state.usage) {
+    queueMicrotask(async () => {
+      try { state.usage = await api.usage(); } catch (error) { state.usage = { failed: explain(error) }; }
+      render();
+    });
+    return `<div class="page-head"><span class="eyebrow">Usage</span><h1>What your agent <em>spends</em>.</h1></div>
+      <p class="faint">Loading…</p>`;
+  }
+  const u = state.usage;
+  const a = state.allowance;
+  const spent = a?.configured ? BigInt(a.dailyCapAtomic) - BigInt(a.remainingTodayAtomic) : null;
+  const today = u.today || { messages: 0, tokens: 0, costAtomic: 0, models: [] };
+  const metric = (label, value, sub = "") =>
+    `<div class="metric"><span class="label">${label}</span><b>${value}</b>${sub ? `<span class="faint">${sub}</span>` : ""}</div>`;
+  const rows = (list, render, empty) => list.length ? list.map(render).join("") : `<p class="faint">${empty}</p>`;
+  return `
+    <div class="page-head"><span class="eyebrow">Usage</span><h1>What your agent <em>spends</em>.</h1>
+      <p>Today, in UTC — the day your limiter and Venice count in.</p></div>
+    ${u.failed ? `<p class="note warn">${esc(u.failed)}</p>` : ""}
+    <div class="metrics">
+      ${metric("Chat credit", u.venice ? usd(u.venice.creditAtomic) : "—", u.venice ? `on Venice · ${esc(u.venice.modelLabel)}` : "private chat is off")}
+      ${metric("Spent today", spent === null ? "—" : usd(spent), a?.configured ? `of ${usd(a.dailyCapAtomic, 0)} daily limit` : "no limits yet")}
+      ${metric("Messages today", String(today.messages), `${Number(today.tokens).toLocaleString("en-US")} tokens · ${usd(today.costAtomic, 4)}`)}
+    </div>
+    <div class="bezel" style="margin-top:18px"><div class="core">
+      <h3>Today by model</h3>
+      <div class="usage-rows">${rows(today.models, (x) => `<div class="usage-row"><span>${esc(x.label)} <span class="faint">· ${x.messages} ${x.messages === 1 ? "message" : "messages"} · ${Number(x.tokens).toLocaleString("en-US")} tokens</span></span><span class="mono">${usd(x.costAtomic, 4)}</span></div>`, "No private chat messages today.")}</div>
+      <h3 style="margin-top:22px">Chat credit top-ups</h3>
+      <div class="usage-rows">${rows(u.venice?.topUps || [], (t) => `<div class="usage-row"><span>${esc(t.at ? new Date(t.at).toLocaleString() : "Top-up")}</span>
+        <span class="mono">${esc(t.paid || "")} ${t.transactionUrl ? `<a href="${esc(t.transactionUrl)}" target="_blank" rel="noopener">↗</a>` : ""}</span></div>`,
+        "None yet. Your agent buys $5 of Venice credit from your allowance when the chat needs it.")}</div>
+    </div></div>`;
+}
+
+function renderSettings() {
+  const lang = LANGUAGES.find(([c]) => c === state.replyLang) || LANGUAGES[0];
+  return `
+    <div class="page-head"><span class="eyebrow">Settings</span><h1>Your <em>agent</em>.</h1></div>
+    <div class="bezel"><div class="core settings">
+      <div class="setting"><div><h3>Model</h3><p class="faint">The Venice model your private chat talks to.</p></div>
+        <button class="btn btn-ghost btn-sm" data-action="open-models">${esc(state.models?.chosenLabel || "Choose")}</button></div>
+      <div class="setting"><div><h3>Reply language</h3><p class="faint">${esc(lang[2] || `Your agent always answers in ${lang[1]}.`)}</p></div>
+        <select class="input select-inline" data-setting="reply-lang">${LANGUAGES.map(([c, l]) =>
+          `<option value="${c}" ${c === state.replyLang ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      <div class="setting"><div><h3>Allowance</h3><p class="faint">Your limits, approvals and emergency stop.</p></div>
+        <button class="btn btn-ghost btn-sm" data-action="go" data-view="allowance">Open</button></div>
+      <div class="setting"><div><h3>Telegram</h3><p class="faint">${state.session.telegramLinked ? "Linked to the SingIt bot." : "Use the same agent from the SingIt bot."}</p></div>
+        <button class="btn btn-ghost btn-sm" data-action="go" data-view="telegram">${state.session.telegramLinked ? "Manage" : "Link"}</button></div>
+      <div class="setting"><div><h3>Wallet</h3><p class="faint mono">${esc(state.session.address)}</p></div>
+        <button class="btn btn-ghost btn-sm" data-action="sign-out">Sign out</button></div>
+    </div></div>`;
+}
+
+function setReplyLang(code) {
+  state.replyLang = code;
+  writePref("singit.replyLang", code);
+}
+
+function thinkingText() {
+  const seconds = state.thinkingSince ? Math.max(0, Math.round((Date.now() - state.thinkingSince) / 1000)) : 0;
+  return `Thinking · ${seconds}s`;
+}
+
+let thinkingTimer = null;
+function startThinking() {
+  state.thinkingSince = Date.now();
+  clearInterval(thinkingTimer);
+  thinkingTimer = setInterval(() => { const el = $("#thinking"); if (el) el.textContent = thinkingText(); }, 1000);
+}
+
+function stopThinking() {
+  clearInterval(thinkingTimer);
+  state.thinkingSince = 0;
 }
 
 async function loadModels() {
@@ -993,10 +1137,11 @@ async function sendMessage(text) {
   state.menuOpen = false;
   state.messages.push({ id: "pending", role: "user", text, cards: [] });
   state.sending = true;
+  startThinking();
   if ($("#composer")) $("#composer").value = "";
   render();
   try {
-    const reply = await api.say(state.chatId, text);
+    const reply = await api.say(state.chatId, text, state.replyLang);
     state.chatId = reply.chatId;
     showChatInUrl();
     state.messages = state.messages.filter((m) => m.id !== "pending").concat(reply.messages);
@@ -1006,7 +1151,9 @@ async function sendMessage(text) {
     toast(explain(error), true);
     if ($("#composer")) $("#composer").value = text;
   } finally {
+    stopThinking();
     state.sending = false;
+    state.usage = null;  // the Usage page reloads with this answer in it
     render();
   }
 }
@@ -1014,6 +1161,7 @@ async function sendMessage(text) {
 async function cardAction(action) {
   if (state.sending) return;
   state.sending = true;
+  startThinking();
   render();
   try {
     const reply = await api.act(state.chatId, action);
@@ -1022,6 +1170,7 @@ async function cardAction(action) {
   } catch (error) {
     toast(explain(error), true);
   } finally {
+    stopThinking();
     state.sending = false;
     render();
   }
@@ -1125,6 +1274,17 @@ const actions = {
   },
   "open-chat": (el) => openChat(el.dataset.id),
   "chat-menu": (el) => (state.chatMenu?.id === el.dataset.id ? closeChatMenu() : openChatMenu(el)),
+  "account-menu": () => { state.accountMenu = state.accountMenu ? null : "main"; state.chatMenu = null; renderSidebar(); },
+  "account-menu-main": () => { state.accountMenu = "main"; renderSidebar(); },
+  "account-menu-language": () => { state.accountMenu = "language"; renderSidebar(); },
+  "set-reply-lang": (el) => {
+    setReplyLang(el.dataset.lang);
+    state.accountMenu = null;
+    render();
+    toast({ en: "Your agent now answers in English.", ru: "Теперь агент отвечает по-русски." }[el.dataset.lang]
+      || "Your agent answers in the language you write.");
+  },
+  "get-help": () => { state.accountMenu = null; render(); window.open(HELP_URL, "_blank", "noopener"); },
   "open-models": async () => {
     await loadModels();  // Venice adds models; the list is cached for hours on the server
     if (!state.models) { toast("Model choice is unavailable right now.", true); return; }
@@ -1186,6 +1346,8 @@ const actions = {
   go: (el) => {
     state.view = el.dataset.view;
     state.menuOpen = false;
+    state.accountMenu = null;
+    if (state.view === "usage") state.usage = null;
     if (state.view === "purchases") state.purchases = null;
     render();
   },
@@ -1226,6 +1388,7 @@ document.addEventListener("click", (event) => {
   }
   const el = event.target.closest("[data-action]");
   if (state.chatMenu && !event.target.closest("#chat-menu") && el?.dataset.action !== "chat-menu") closeChatMenu();
+  if (state.accountMenu && !event.target.closest("#account-menu") && el?.dataset.action !== "account-menu") closeAccountMenu();
   if (!el) return;
   // A click inside a modal's card is not a click on its backdrop.
   if (el.dataset.action === "dismiss" && event.target !== el) return;
@@ -1237,6 +1400,10 @@ document.addEventListener("submit", (event) => {
   if (event.target.dataset.form !== "send") return;
   event.preventDefault();
   sendMessage($("#composer").value);
+});
+
+document.addEventListener("change", (event) => {
+  if (event.target.dataset.setting === "reply-lang") { setReplyLang(event.target.value); render(); }
 });
 
 document.addEventListener("focusout", (event) => {
@@ -1253,7 +1420,7 @@ document.addEventListener("contextmenu", (event) => {
   $("#chat-menu .menu-item")?.focus();
 });
 
-window.addEventListener("resize", closeChatMenu);
+window.addEventListener("resize", () => { closeChatMenu(); closeAccountMenu(); });
 $("#side-chats").addEventListener("scroll", closeChatMenu);
 
 window.addEventListener("hashchange", () => {
@@ -1296,6 +1463,7 @@ document.addEventListener("keydown", (event) => {
     sendMessage(event.target.value);
     return;
   }
+  if (event.key === "Escape" && state.accountMenu) { closeAccountMenu(); return; }
   if (event.key === "Escape" && state.modal && state.modal.type !== "busy") { state.modal = null; render(); }
   if (event.key === "Enter" && event.target.id === "bf-query") searchBitrefill();
 });

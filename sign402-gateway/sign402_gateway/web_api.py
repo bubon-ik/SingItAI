@@ -201,6 +201,8 @@ class WebApi:
             return 200, {"telegramLinked": False}, {}
         if path == "/chats" or path.startswith("/chats/"):
             return self._chats(method, path, account, body)
+        if method == "GET" and path == "/usage":
+            return 200, self._usage(account), {}
         if (method, path) in SHOP_ROUTES:
             if self.shop is None:
                 raise WebError(503, "shop_unavailable", "The shop is not enabled on this server.")
@@ -247,6 +249,18 @@ class WebApi:
             out["state"] = _state_code(described)
         return out
 
+    def _usage(self, account: str) -> dict[str, Any]:
+        """The Usage page: today's Venice answers per model, and the chat credit and its top-ups."""
+        today = int(time.time()) // 86400 * 86400  # the limiter's and Venice's day: UTC
+        out: dict[str, Any] = {"since": today,
+                               "today": self.agent.store.usage(account, today) if self.agent is not None else None,
+                               "venice": None}
+        if self.shop is not None:
+            status, venice = self.shop("venice-usage", account, {})
+            if status < 400 and venice.get("ok"):
+                out["venice"] = {k: venice.get(k) for k in ("creditAtomic", "model", "modelLabel", "topUps")}
+        return out
+
     def _chats(self, method: str, path: str, account: str, body: Mapping[str, Any]) -> tuple[int, dict[str, Any], dict]:
         """The chat: talk to the agent; it sets limits, finds and buys (web_agent.py)."""
         if self.agent is None:
@@ -262,7 +276,8 @@ class WebApi:
             return 200, {"chatId": chat_id, "title": chat["title"], "messages": store.messages(chat_id)}, {}
         if method == "POST" and path == "/chats/message":
             self.chat_by_account.hit(account)
-            return 200, self.agent.message(account, body.get("chatId") or None, str(body.get("text") or "")), {}
+            return 200, self.agent.message(account, body.get("chatId") or None, str(body.get("text") or ""),
+                                           reply_language=str(body.get("lang") or "") or None), {}
         if method == "POST" and path == "/chats/action":
             self.chat_by_account.hit(account)
             action = body.get("action")

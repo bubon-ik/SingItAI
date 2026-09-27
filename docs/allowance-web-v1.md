@@ -255,6 +255,14 @@ the conversation. It works the way the Telegram bot does
   `SIGN402_WEB_AGENT_MODEL`) answers before the allowance is approved, or when
   Venice chat is off, and turns a shopping sentence into search words, a country
   and an amount (JSON, validated).
+- **Money lives on the Usage page, not in the chat.** Under a Venice answer one
+  quiet line says the model, tokens and cost (Venice's own counts); while the
+  agent works, "Thinking · Ns". The wallet chip at the bottom of the sidebar opens
+  the account menu (Usage, Purchases, Settings, Language, Telegram, Get help,
+  Sign out). Usage (`GET /usage`) shows the chat credit, what the allowance spent
+  today of its limit, today's answers per model, and each $5 credit top-up with
+  its transaction. The reply language (Auto, English, Russian) is kept in the
+  browser and sent with each message.
 - No model has tools or can trigger a payment, and none sees purchase results or
   codes: only the text of past messages is sent. Answers render a Markdown subset.
 - Routes: `GET /chats`, `GET /chats/{id}`, `POST /chats/message {chatId?, text}`,

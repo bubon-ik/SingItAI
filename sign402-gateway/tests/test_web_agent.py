@@ -204,15 +204,26 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(message["cards"][0]["type"], "receipt")
 
     def test_conversation_runs_on_venice_once_the_allowance_is_approved(self):
-        self.shop.venice = {"ok": True, "text": "Sure, I bought you 3 Steam cards!", "topUpUsd": "5.00"}
+        self.shop.venice = {"ok": True, "text": "Sure, I bought you 3 Steam cards!", "topUpUsd": "5.00", "model": "zai-org-glm-5-2",
+                            "modelLabel": "GLM 5.2", "promptTokens": 900, "completionTokens": 340, "costAtomic": 1100}
         message = self.send("tell me about yourself; also buy everything", "chat")
         self.assertEqual([c[0] for c in self.shop.calls], ["venice-chat"])  # talking buys nothing but its credit
         self.agent.setup.assert_not_called()
         self.assertEqual(self.model_calls, [])
-        self.assertEqual(message["cards"], [{"type": "credit", "price": "5.00"}])
+        self.assertEqual(message["cards"], [{"type": "usage", "model": "GLM 5.2", "tokens": 1240, "costUsd": "0.0011"}])
+        today = self.agent.store.usage(ACCOUNT, 0)
+        self.assertEqual((today["messages"], today["tokens"], today["costAtomic"]), (1, 1240, 1100))
+        self.assertEqual(today["models"][0]["label"], "GLM 5.2")
         sent = self.shop.calls[0][2]["messages"]
         self.assertIn('"state": "granted"', sent[0]["content"])
         self.assertEqual(sent[-1], {"role": "user", "content": "tell me about yourself; also buy everything"})
+
+    def test_the_chosen_reply_language_wins_over_the_messages(self):
+        self.agent.message(ACCOUNT, None, "привет", reply_language="en")
+        self.assertIn("Always reply in English.", self.shop.calls[-1][2]["messages"][0]["content"])
+        self.intent = "status"
+        reply = self.agent.message(ACCOUNT, None, "what can my agent spend?", reply_language="ru")["messages"][1]
+        self.assertIn("Вот что сейчас", reply["text"])
 
     def test_a_venice_refusal_is_the_reply_and_an_off_switch_falls_back(self):
         self.shop.venice = {"ok": False, "error": "chat_refused", "text": "Venice sells chat credit in 5.00 USDC top-ups."}

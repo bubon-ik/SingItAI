@@ -284,6 +284,11 @@ class ChatStore:
                     message_id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, role TEXT NOT NULL,
                     text TEXT NOT NULL, cards TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL);
                 CREATE INDEX IF NOT EXISTS messages_by_chat ON chat_messages(chat_id, message_id);
+                CREATE TABLE IF NOT EXISTS chat_usage (
+                    account_id TEXT NOT NULL, chat_id TEXT NOT NULL, model TEXT NOT NULL, model_label TEXT NOT NULL,
+                    prompt_tokens INTEGER NOT NULL, completion_tokens INTEGER NOT NULL, cost_atomic INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL);
+                CREATE INDEX IF NOT EXISTS usage_by_account ON chat_usage(account_id, created_at);
             """)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(chats)")}
             for name in ("pinned", "archived"):
@@ -351,6 +356,24 @@ class ChatStore:
             db.execute("UPDATE chats SET updated_at = ?, archived = 0 WHERE chat_id = ?", (now, chat_id))  # talking unarchives
         return {"id": cursor.lastrowid, "role": role, "text": text, "cards": cards, "createdAt": now}
 
+    def record_usage(self, account: str, chat_id: str, reply: Mapping[str, Any], now: int) -> None:
+        with self._db() as db:
+            db.execute("INSERT INTO chat_usage VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (
+                account, chat_id, str(reply.get("model") or "")[:80], str(reply.get("modelLabel") or "")[:80],
+                int(reply.get("promptTokens") or 0), int(reply.get("completionTokens") or 0),
+                max(0, int(reply.get("costAtomic") or 0)), now))
+
+    def usage(self, account: str, since: int) -> dict[str, Any]:
+        """Venice answers since `since`, per model: messages, tokens and cost."""
+        with self._db() as db:
+            rows = db.execute("""SELECT model, model_label, COUNT(*) AS n, SUM(prompt_tokens + completion_tokens) AS tokens,
+                                        SUM(cost_atomic) AS cost FROM chat_usage WHERE account_id = ? AND created_at >= ?
+                                 GROUP BY model ORDER BY cost DESC, n DESC""", (account, since)).fetchall()
+        models = [{"model": r["model"], "label": r["model_label"] or r["model"], "messages": r["n"],
+                   "tokens": r["tokens"] or 0, "costAtomic": r["cost"] or 0} for r in rows]
+        return {"messages": sum(m["messages"] for m in models), "tokens": sum(m["tokens"] for m in models),
+                "costAtomic": sum(m["costAtomic"] for m in models), "models": models}
+
     def messages(self, chat_id: str, limit: int = 200) -> list[dict[str, Any]]:
         with self._db() as db:
             rows = db.execute("SELECT * FROM chat_messages WHERE chat_id = ? ORDER BY message_id DESC LIMIT ?",
@@ -404,7 +427,9 @@ class WebAgent:
 
     # -- entry points --
 
-    def message(self, account: str, chat_id: str | None, text: str) -> dict[str, Any]:
+    def message(self, account: str, chat_id: str | None, text: str, reply_language: str | None = None) -> dict[str, Any]:
+        """`reply_language` ("en" or "ru") is the user's setting; without it, replies follow their message."""
+        self._request.language = reply_language if reply_language in ("en", "ru") else None
         text = str(text or "").strip()
         if not text:
             raise ValueError("Type a message.")
@@ -456,11 +481,15 @@ class WebAgent:
                 logger.warning("web agent: classifier unavailable; using keywords")
         return keyword_intent(text)
 
+    def _language_rule(self) -> str:
+        chosen = getattr(self._request, "language", None)
+        return {"en": "\nAlways reply in English.", "ru": "\nAlways reply in Russian."}.get(chosen or "", "")
+
     def _hints(self) -> dict[str, str]:
         return getattr(self._request, "hints", {}) or {}
 
     def _respond(self, account: str, chat_id: str, text: str) -> tuple[str, list[dict[str, Any]]]:
-        lang = language_of(text)
+        lang = getattr(self._request, "language", None) or language_of(text)
         intent = self._intent(text)
         handler = {
             "set_limits": self._on_set_limits, "grant": self._on_grant, "revoke": self._on_revoke,
@@ -786,11 +815,15 @@ class WebAgent:
         history = [{"role": m["role"], "content": m["text"]}
                    for m in self.store.messages(chat_id)[-HISTORY_FOR_MODEL:] if m["text"]]
         if self.shop is not None and state.get("state") == "granted":
-            system = {"role": "system", "content": VENICE_SYSTEM.format(state=json.dumps(state))}
+            system = {"role": "system", "content": VENICE_SYSTEM.format(state=json.dumps(state)) + self._language_rule()}
             _, reply = self.shop("venice-chat", account, {"messages": [system] + history})
             if reply.get("ok"):
-                cards = [{"type": "credit", "price": reply["topUpUsd"]}] if reply.get("topUpUsd") else []
-                return str(reply.get("text") or "…"), cards
+                self.store.record_usage(account, chat_id, reply, int(self.now()))
+                tokens = int(reply.get("promptTokens") or 0) + int(reply.get("completionTokens") or 0)
+                # What the answer used, shown quietly under it; money itself lives on the Usage page.
+                return str(reply.get("text") or "…"), [{
+                    "type": "usage", "model": reply.get("modelLabel") or reply.get("model") or "Venice",
+                    "tokens": tokens, "costUsd": f"{int(reply.get('costAtomic') or 0) / 1_000_000:.4f}"}]
             if reply.get("error") != "chat_off":
                 return str(reply.get("text") or say(lang, "The private chat did not answer. Nothing was paid.",
                                                     "Приватный чат не ответил. Ничего не оплачено.")), []
@@ -799,7 +832,8 @@ class WebAgent:
                              "Try: \"Set a $20 daily limit, $5 per purchase\".",
                        "Я умею ставить лимиты, покупать криптоновости и другие данные, находить подарочные карты, eSIM "
                        "и пополнения. Попробуйте: «Поставь лимит 20 долларов в день и 5 за покупку»."), []
-        system = SYSTEM.format(state=json.dumps(state)) + ("" if state.get("state") == "granted" else NOT_YET_PRIVATE)
+        system = (SYSTEM.format(state=json.dumps(state)) + ("" if state.get("state") == "granted" else NOT_YET_PRIVATE)
+                  + self._language_rule())
         return self.model([{"role": "system", "content": system}] + history) or say(lang, "…", "…"), []
 
     # -- wiring to the web API --

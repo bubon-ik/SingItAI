@@ -129,7 +129,20 @@ def chat(server: Any, gw: Any, account: str, raw_messages: Any) -> tuple[int, di
     from .web_internal import _limits_from_limiter, pay_from_allowance  # noqa: PLC0415 - avoids an import cycle
 
     _limits_from_limiter(server, gw, account)
-    client = VeniceChatClient(store=store, transport=transport, signer=sign, settle=settle, config=config,
+    used: dict[str, int] = {}
+
+    def watched(method: str, url: str, **kwargs: Any) -> Any:
+        """Venice's own token counts for the answer, read off the completion it returns."""
+        response = transport(method, url, **kwargs)
+        if url.endswith("/chat/completions") and response.status == 200:
+            usage = (response.json() or {}).get("usage") or {}
+            for key in ("prompt_tokens", "completion_tokens"):
+                if isinstance(usage.get(key), int):
+                    used[key] = usage[key]
+        return response
+
+    model = store.get_session(account).model or config.model
+    client = VeniceChatClient(store=store, transport=watched, signer=sign, settle=settle, config=config,
                               purchases_paused=getattr(base.client, "purchases_paused", None))
     try:
         result = client.send(account, messages, wallet_address=agent)
@@ -137,7 +150,9 @@ def chat(server: Any, gw: Any, account: str, raw_messages: Any) -> tuple[int, di
         text = refusal.get("text") if exc.__class__.__name__ == "PrefundFailed" and refusal else str(exc)
         return 400, {"ok": False, "error": "chat_refused", "text": text}
     reply: dict[str, Any] = {"ok": True, "text": result.text, "costAtomic": result.cost_atomic,
-                             "creditAtomic": result.outstanding_atomic}
+                             "creditAtomic": result.outstanding_atomic, "model": model, "modelLabel": _label(base, model),
+                             "promptTokens": used.get("prompt_tokens", 0),
+                             "completionTokens": used.get("completion_tokens", 0)}
     if result.prefunded and paid:
         reply["topUpUsd"] = _usd(paid["amount"])
     return 200, reply
@@ -172,3 +187,25 @@ def choose_model(server: Any, account: str, model_id: Any) -> tuple[int, dict[st
     if base is None:
         return 503, {"ok": False, "error": "chat_off", "text": "The private chat is off on this server."}
     return 200, base.set_model(account, str(model_id or ""))  # UnknownModel is a ValueError: refused with its reason
+
+
+def _label(base: Any, model: str) -> str:
+    try:
+        return base._catalogue().resolve(model).label
+    except Exception:
+        return model
+
+
+def usage(server: Any, account: str) -> tuple[int, dict[str, Any]]:
+    """The account's Venice credit, its model, and the top-ups bought for it (the Usage page)."""
+    base = getattr(server, "chat_service", None)
+    if base is None:
+        return 503, {"ok": False, "error": "chat_off", "text": "The private chat is off on this server."}
+    session = base.store.get_session(account)
+    model = session.model or base.default_model
+    events = getattr(server, "user_event_store", None)
+    top_ups = [{"at": p.get("recordedAt"), "paid": p.get("paid"), "transactionUrl": p.get("transactionUrl")}
+               for p in (events.summaries(account) if events is not None else [])
+               if p.get("name") == VENICE_CREDIT["name"]][:20]
+    return 200, {"ok": True, "creditAtomic": session.outstanding_atomic, "model": model,
+                 "modelLabel": _label(base, model), "topUps": top_ups}
