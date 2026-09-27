@@ -137,6 +137,10 @@ def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict
     if action == "tool-buy":
         return _buy_tool(server, gw, account, str(payload.get("quoteId") or ""))
 
+    if action == "venice-chat":
+        from .web_venice import chat  # noqa: PLC0415 - Venice only loads when the chat is used
+        return chat(server, gw, account, payload.get("messages"))
+
     if action in ("bitrefill-search", "bitrefill-quote", "bitrefill-buy"):
         if action == "bitrefill-buy":
             _limits_from_limiter(server, gw, account)
@@ -179,18 +183,30 @@ def _buy_tool(server: Any, gw: Any, account: str, quote_id: str) -> tuple[int, d
     if (gw._payment_amount_atomic(requirements) > quote["amount"]
             or _receiver(requirements).lower() != quote["payTo"].lower()):
         raise AllowanceError("The price or the recipient changed since your quote. Nothing was paid; get a new quote.")
+    enriched = pay_from_allowance(server, gw, account, tool, resource_url, requirements, request_body=request_body,
+                                  payment_context=gw._tool_payment_context(tool, quote["payload"]),
+                                  approval=web_confirmation(quote_id), claim_scope=quote_id)
+    return (200 if enriched["ok"] else 400), enriched
 
+
+def pay_from_allowance(server: Any, gw: Any, account: str, tool: dict[str, Any], resource_url: str,
+                       requirements: dict[str, Any], *, request_body: dict[str, Any] | None,
+                       payment_context: dict[str, str] | None, approval: dict[str, Any],
+                       claim_scope: str) -> dict[str, Any]:
+    """Pay one x402 resource from the account's limiter, held to the same caps, memory and history as the bot.
+
+    `approval` is what stands for the owner's yes when spending memory asks for one: a
+    clicked quote, or the standing consent of the limits they set for their agent.
+    """
+    service = server.allowance
     reservation_id, claim_id, settled = None, None, False
     try:
         reservation_id, decision, claim_id = gw._reserve_user_wallet_spend(
-            server, account, requirements, resource_url=resource_url, claim_scope=quote_id)
+            server, account, requirements, resource_url=resource_url, claim_scope=claim_scope)
         payment = gw._payment_from_requirements(requirements, owner=account, resource_url=resource_url)
-        if decision is None or decision.needs_human:
-            approval = web_confirmation(quote_id)
-        else:
+        if decision is not None and not decision.needs_human:
             approval = {"ok": True, "status": "approved", "source": "spending_memory",
                         "approvalId": f"sm-{decision.journal_id}", "reason": decision.reason, "rule": decision.rule}
-        payment_context = gw._tool_payment_context(tool, quote["payload"])
         paid = service.pay_x402(
             account, resource_url, requirements, server.user_x402_buyer.base_payment_client,
             method="POST" if request_body is not None else "GET", request_body=request_body)
@@ -204,7 +220,7 @@ def _buy_tool(server: Any, gw: Any, account: str, quote_id: str) -> tuple[int, d
                                          payment=payment, claim_id=claim_id)
             settled = True
             server.user_event_store.write(account, enriched)
-        return (200 if enriched["ok"] else 400), enriched
+        return enriched
     finally:
         if not settled:
             gw._release_user_wallet_spend(server, reservation_id)

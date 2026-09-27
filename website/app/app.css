@@ -371,7 +371,24 @@ body.in-app .nav-wrap, body.in-app .shell { display: none; }
 .msg.assistant .avatar { width: 32px; height: 32px; border-radius: 10px; flex: none; }
 .msg.assistant .avatar .mark { width: 20px; height: 20px; }
 .msg.assistant .body { flex: 1; min-width: 0; padding-top: 4px; }
-.msg.assistant .text { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+.msg.assistant .text { overflow-wrap: anywhere; color: var(--text); line-height: 1.65; }
+.msg.assistant .text > * + * { margin-top: 0.75em; }
+.msg.assistant .text p, .msg.assistant .text li { color: var(--text); }
+.msg.assistant .text ul, .msg.assistant .text ol { padding-left: 1.3em; display: flex; flex-direction: column; gap: 0.3em; }
+.msg.assistant .text .md-h { font: 600 1.05rem var(--sans); margin-top: 1.1em; }
+.msg.assistant .text code { font: 0.9em var(--mono); background: rgba(255, 255, 255, 0.07); padding: 1px 5px; border-radius: 5px; }
+.msg.assistant .text .md-code { background: rgba(0, 0, 0, 0.35); border: 1px solid var(--hairline); border-radius: 12px;
+  padding: 12px 14px; overflow-x: auto; }
+.msg.assistant .text .md-code code { background: none; padding: 0; white-space: pre; }
+.msg.assistant .text blockquote { border-left: 2px solid rgba(62, 207, 142, 0.5); padding-left: 12px; color: var(--text-soft); }
+.msg.assistant .text a { color: var(--accent); }
+.md-table { overflow-x: auto; }
+.md-table table { border-collapse: collapse; font-size: 14px; }
+.md-table th, .md-table td { border: 1px solid var(--hairline); padding: 6px 10px; text-align: left; }
+.md-table th { background: rgba(255, 255, 255, 0.04); font-weight: 600; }
+.note-line { font-size: 13px; color: var(--text-faint); }
+.note-line b { color: var(--text-soft); font-weight: 500; }
+.linkish { border: none; background: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; }
 .msg .cards { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
 .typing { display: inline-flex; gap: 5px; padding-top: 12px; }
 .typing i { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); animation: blink 1.2s infinite ease-in-out; }

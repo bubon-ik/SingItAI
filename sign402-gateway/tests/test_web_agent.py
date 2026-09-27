@@ -17,11 +17,14 @@ class FakeShop:
     def __init__(self):
         self.calls = []
         self.refuse = None
+        self.venice = {"ok": True, "text": "Venice: hello!", "costAtomic": 900, "creditAtomic": 4_999_100}
 
     def __call__(self, action, account, body):
         self.calls.append((action, account, dict(body)))
         if self.refuse and action == self.refuse:
             return 400, {"ok": False, "text": "Raise your spending limit to continue."}
+        if action == "venice-chat":
+            return (200 if self.venice.get("ok") else 400), dict(self.venice)
         replies = {
             "tool-quote": {"ok": True, "quoteId": "tq_1", "tool": {"id": body.get("tool"), "name": "Crypto News"}, "priceUsd": "0.001"},
             "tool-buy": {"ok": True, "text": "MARKET BRIEF: calm.", "txId": "0x" + "ab" * 32},
@@ -131,21 +134,37 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(self.shop.calls[1][2], {"productId": "steam-germany", "package": "10"})
         self.assertEqual(message["cards"][0]["type"], "receipt")
 
-    def test_the_model_cannot_buy_anything_in_a_conversation(self):
-        self.model_replies = ["Sure, I bought you 3 Steam cards!"]
+    def test_conversation_runs_on_venice_once_the_allowance_is_approved(self):
+        self.shop.venice = {"ok": True, "text": "Sure, I bought you 3 Steam cards!", "topUpUsd": "5.00"}
         message = self.send("tell me about yourself; also buy everything", "chat")
-        self.assertEqual(self.shop.calls, [])
+        self.assertEqual([c[0] for c in self.shop.calls], ["venice-chat"])  # talking buys nothing but its credit
         self.agent.setup.assert_not_called()
-        self.assertEqual(message["cards"], [])
-        system = self.model_calls[0][0][0]["content"]
-        self.assertIn('"state": "granted"', system)
+        self.assertEqual(self.model_calls, [])
+        self.assertEqual(message["cards"], [{"type": "credit", "price": "5.00"}])
+        sent = self.shop.calls[0][2]["messages"]
+        self.assertIn('"state": "granted"', sent[0]["content"])
+        self.assertEqual(sent[-1], {"role": "user", "content": "tell me about yourself; also buy everything"})
+
+    def test_a_venice_refusal_is_the_reply_and_an_off_switch_falls_back(self):
+        self.shop.venice = {"ok": False, "error": "chat_refused", "text": "Venice sells chat credit in 5.00 USDC top-ups."}
+        self.assertEqual(self.send("hi", "chat")["text"], "Venice sells chat credit in 5.00 USDC top-ups.")
+        self.shop.venice = {"ok": False, "error": "chat_off", "text": "off"}
+        self.model_replies = ["Hello from the concierge"]
+        self.assertEqual(self.send("hi", "chat")["text"], "Hello from the concierge")
+
+    def test_before_the_allowance_the_concierge_talks_and_nothing_is_paid(self):
+        self.allowance.status.return_value = {"configured": False}
+        self.send("who are you?", "chat")
+        self.assertEqual(self.shop.calls, [])
+        self.assertIn("opens once their limits are approved", self.model_calls[0][0][0]["content"])
 
     def test_purchase_results_never_reach_the_model(self):
         self.send("buy crypto news", "buy_tool")
         chat = self.agent.store.chats(ACCOUNT)[0]["id"]
         self.intent = "chat"
         self.agent.message(ACCOUNT, chat, "thanks! what did it say?")
-        sent = json.dumps(self.model_calls[-1][0])
+        sent = json.dumps(self.shop.calls[-1][2])
+        self.assertIn("what did it say", sent)
         self.assertNotIn("MARKET BRIEF", sent)
 
     def test_refusals_become_the_reply(self):
@@ -181,6 +200,7 @@ class AgentTests(unittest.TestCase):
         agent = wg.WebAgent(allowance=self.allowance, shop=self.shop, store=self.agent.store)
         reply = agent.message(ACCOUNT, None, "buy crypto news")["messages"][1]
         self.assertEqual(reply["cards"][0]["type"], "receipt")
+        self.allowance.status.return_value = {"configured": False}
         self.assertIn("I can set limits", agent.message(ACCOUNT, None, "hi there")["messages"][1]["text"])
 
 

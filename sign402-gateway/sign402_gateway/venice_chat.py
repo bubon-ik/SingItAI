@@ -1477,7 +1477,12 @@ class VeniceChatClient:
                 "model": (
                     self.store.get_session(user_id).model or self.config.model
                 ),
-                "messages": [{"role": "user", "content": prompt}],
+                # The web chat sends its conversation; the bot, one prompt.
+                "messages": (
+                    prompt
+                    if isinstance(prompt, list)
+                    else [{"role": "user", "content": prompt}]
+                ),
             },
         )
         if response.status != 200:

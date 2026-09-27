@@ -779,9 +779,62 @@ function autosize(el) {
   });
 }
 
+// A small Markdown subset for the assistant's answers. Everything is escaped first;
+// only https links become anchors.
+function inline(escaped) {
+  return escaped
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+    .replace(/(^|[^*\w])\*([^*\s][^*]*?)\*(?!\*)/g, "$1<i>$2</i>")
+    .replace(/\[([^\]]+)\]\((https:\/\/[^\s)"]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/(^|[\s(])(https:\/\/[\w./?=&;%#:~+-]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+}
+
+const MD = {
+  fence: /^\s*```/, heading: /^(#{1,4})\s+(.*)$/, bullet: /^\s*[-*•]\s+(.*)$/, numbered: /^\s*\d+[.)]\s+(.*)$/,
+  quote: /^>\s?(.*)$/, row: /^\s*\|.*\|\s*$/, rule: /^\s*\|?[\s:|-]*-{3,}[\s:|-]*\|?\s*$/,
+};
+const cells = (line) => line.trim().replace(/^\||\|$/g, "").split("|").map((c) => inline(esc(c.trim())));
+
 function formatText(text) {
-  return esc(text).replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
-    .replace(/(https:\/\/[\w./?=&%#:-]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+  const lines = String(text || "").replace(/\r/g, "").split("\n");
+  const out = [];
+  let i = 0;
+  const take = (re) => { const items = []; while (i < lines.length && re.test(lines[i])) items.push(lines[i++].match(re)[1]); return items; };
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+    if (MD.fence.test(line)) {
+      const body = [];
+      for (i++; i < lines.length && !MD.fence.test(lines[i]); i++) body.push(lines[i]);
+      i++;
+      out.push(`<pre class="md-code"><code>${esc(body.join("\n"))}</code></pre>`);
+    } else if (MD.heading.test(line)) {
+      out.push(`<h4 class="md-h">${inline(esc(line.match(MD.heading)[2]))}</h4>`);
+      i++;
+    } else if (MD.bullet.test(line)) {
+      out.push(`<ul>${take(MD.bullet).map((t) => `<li>${inline(esc(t))}</li>`).join("")}</ul>`);
+    } else if (MD.numbered.test(line)) {
+      out.push(`<ol>${take(MD.numbered).map((t) => `<li>${inline(esc(t))}</li>`).join("")}</ol>`);
+    } else if (MD.quote.test(line)) {
+      out.push(`<blockquote>${take(MD.quote).map((t) => inline(esc(t))).join("<br>")}</blockquote>`);
+    } else if (MD.row.test(line) && MD.rule.test(lines[i + 1] || "")) {
+      const head = cells(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && MD.row.test(lines[i])) rows.push(cells(lines[i++]));
+      out.push(`<div class="md-table"><table><thead><tr>${head.map((c) => `<th>${c}</th>`).join("")}</tr></thead>
+        <tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`);
+    } else {
+      const para = [];
+      while (i < lines.length && lines[i].trim() && !Object.entries(MD).some(([k, re]) => k !== "rule" && re.test(lines[i]))) {
+        para.push(inline(esc(lines[i++])));
+      }
+      if (!para.length) para.push(inline(esc(lines[i++])));
+      out.push(`<p>${para.join("<br>")}</p>`);
+    }
+  }
+  return out.join("");
 }
 
 function renderMessage(m) {
@@ -836,6 +889,10 @@ function renderCard(card, key) {
         <div class="row" style="margin:0"><input class="input" placeholder="amount" data-package="${esc(p.slug)}">
         <button class="btn btn-primary btn-sm" data-action="card-buy" data-slug="${esc(p.slug)}" data-name="${esc(p.name)}" data-lang="${esc(card.lang || "en")}">Buy</button></div></div>`).join("")}
       <p class="faint" style="margin-top:8px">Enter the card value (for example 10) and I'll buy it from your allowance.</p></div>`;
+  }
+  if (card.type === "credit") {
+    return `<div class="note-line">Private chat credit topped up: <b>${esc(card.price)} USDC</b> on Venice, paid from your allowance.
+      <button class="linkish" data-action="go" data-view="purchases">Purchases</button></div>`;
   }
   if (card.type === "receipt") {
     return `<div class="card accent"><div class="spread"><h3>${esc(card.name)}</h3><span class="status ok">Paid ${esc(card.price)} USDC</span></div>

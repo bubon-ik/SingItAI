@@ -223,11 +223,22 @@ the conversation. It works the way the Telegram bot does
   inside the user's limits, without asking again: the user chose that. At most
   one purchase follows a message, and every purchase goes through the shop,
   spending memory and the limiter.
-- **The chat model** (OpenRouter, the bot's `OPENROUTER_API_KEY`, the same model
-  as Hermes, `SIGN402_WEB_AGENT_MODEL`) writes the conversational replies and
-  turns a shopping sentence into search words, a country and an amount (JSON,
-  validated). It has no tools, cannot trigger a payment, and never sees
-  purchase results or codes.
+- **Conversation runs on Venice** once the allowance is approved, like the bot's
+  private chat (`sign402_gateway/web_venice.py`, gateway action `venice-chat`).
+  Venice meters a prepaid balance held by the limiter's agent address, which
+  signs Venice in (SIWX). When the balance runs out, the agent buys Venice credit
+  over x402 ($5, Venice's fixed top-up) from the limiter, through the same caps,
+  spending memory, rate limit and purchase history as any other purchase; the
+  reply shows "credit topped up", and Purchases lists it. A per-purchase limit
+  under the top-up refuses it with the reason, nothing paid. The chat's Venice
+  policy mirrors the limiter (daily cap, expiry). Needs `SIGN402_AI_CHAT_ENABLED`
+  on the gateway, as for the bot.
+- **The concierge model** (OpenRouter, the bot's `OPENROUTER_API_KEY`,
+  `SIGN402_WEB_AGENT_MODEL`) answers before the allowance is approved, or when
+  Venice chat is off, and turns a shopping sentence into search words, a country
+  and an amount (JSON, validated).
+- No model has tools or can trigger a payment, and none sees purchase results or
+  codes: only the text of past messages is sent. Answers render a Markdown subset.
 - Routes: `GET /chats`, `GET /chats/{id}`, `POST /chats/message {chatId?, text}`,
   `POST /chats/action {chatId, action}` for card buttons, `POST /chats/update {chatId, title?, pinned?, archived?}`
   (rename, pin, archive; a new message unarchives), `POST /chats/delete`. `GET /chats` lists pinned chats first

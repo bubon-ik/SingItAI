@@ -40,7 +40,7 @@ from .agent_allowance import AllowanceError
 logger = logging.getLogger(__name__)
 
 MAX_MESSAGE = 2000
-HISTORY_FOR_MODEL = 12
+HISTORY_FOR_MODEL = 20
 
 INTENTS = {
     "set_limits": "Create, set or change the agent's spending limits: a daily limit, a per-purchase limit or how "
@@ -302,6 +302,22 @@ user's language. When an action fits, tell them the short phrase to type, e.g. "
 purchase", "Buy crypto news", "Find a Steam gift card in Germany".
 Current state: {state}"""
 
+# Before the limits are approved there is no Venice credit to talk on: the concierge helps them start.
+NOT_YET_PRIVATE = """
+Their private chat runs on Venice AI and opens once their limits are approved (Venice credit is bought from the
+allowance, $5 at a time). Until then, help them get started; if they want a long conversation, tell them this."""
+
+VENICE_SYSTEM = """You are SingIt, the user's private AI assistant on app.singitai.app, running on Venice AI: their
+prompts are not stored by the provider or used for training. Talk about anything they want and answer fully and
+well; use Markdown when it helps (lists, tables, code). Reply in the user's language.
+You are also their buying agent. They set a daily and a per-purchase limit that a contract on Base enforces; inside
+it you buy for them without asking again: paid x402 data (crypto news, market data, funding rates, token prices,
+ENS, risk checks, weather), Bitrefill gift cards, eSIMs and phone top-ups, and the Venice credit this conversation
+runs on ($5 at a time). You never buy from inside this answer: when they want something bought or their limits
+changed, tell them the short phrase to type, e.g. "Buy crypto news", "Find a Steam gift card in Germany", "Set a
+$20 daily limit, $5 per purchase". Never invent prices, balances or purchases: the current state is below.
+Current state: {state}"""
+
 
 class WebAgent:
     """One user message in, one assistant message (text + cards) out."""
@@ -372,7 +388,7 @@ class WebAgent:
             "link_telegram": self._on_link,
         }.get(intent)
         return self._guarded(lang, lambda: handler(account, lang, text, intent) if handler is not None
-                             else (self._converse(account, chat_id, lang), []))
+                             else self._converse(account, chat_id, lang))
 
     def _guarded(self, lang: str, work: Callable[[], tuple[str, list]]) -> tuple[str, list]:
         """Run a handler; a refusal from the lane, the web API or the shop becomes the reply, in its own words."""
@@ -595,17 +611,30 @@ class WebAgent:
             {"type": "receipt", "name": title, "price": quote.get("priceUsd"), "invoiceId": bought.get("invoiceId"),
              "giftcard": True}]
 
-    def _converse(self, account: str, chat_id: str, lang: str) -> str:
+    def _converse(self, account: str, chat_id: str, lang: str) -> tuple[str, list[dict[str, Any]]]:
+        """Talk. On Venice, paid from the allowance, once it is approved; the concierge before that.
+
+        Only the text of past messages goes to a model: purchase results live on cards and never do.
+        """
+        state = self._state(account)
+        history = [{"role": m["role"], "content": m["text"]}
+                   for m in self.store.messages(chat_id)[-HISTORY_FOR_MODEL:] if m["text"]]
+        if self.shop is not None and state.get("state") == "granted":
+            system = {"role": "system", "content": VENICE_SYSTEM.format(state=json.dumps(state))}
+            _, reply = self.shop("venice-chat", account, {"messages": [system] + history})
+            if reply.get("ok"):
+                cards = [{"type": "credit", "price": reply["topUpUsd"]}] if reply.get("topUpUsd") else []
+                return str(reply.get("text") or "…"), cards
+            if reply.get("error") != "chat_off":
+                return str(reply.get("text") or say(lang, "The private chat did not answer. Nothing was paid.",
+                                                    "Приватный чат не ответил. Ничего не оплачено.")), []
         if self.model is None:
             return say(lang, "I can set limits, buy crypto news and other data, and find gift cards, eSIMs and top-ups. "
                              "Try: \"Set a $20 daily limit, $5 per purchase\".",
                        "Я умею ставить лимиты, покупать криптоновости и другие данные, находить подарочные карты, eSIM "
-                       "и пополнения. Попробуйте: «Поставь лимит 20 долларов в день и 5 за покупку».")
-        state = self._state(account)
-        history = [m for m in self.store.messages(chat_id)[-HISTORY_FOR_MODEL:]]
-        messages = [{"role": "system", "content": SYSTEM.format(state=json.dumps(state))}]
-        messages += [{"role": m["role"], "content": m["text"]} for m in history if m["text"]]
-        return self.model(messages) or say(lang, "…", "…")
+                       "и пополнения. Попробуйте: «Поставь лимит 20 долларов в день и 5 за покупку»."), []
+        system = SYSTEM.format(state=json.dumps(state)) + ("" if state.get("state") == "granted" else NOT_YET_PRIVATE)
+        return self.model([{"role": "system", "content": system}] + history) or say(lang, "…", "…"), []
 
     # -- wiring to the web API --
 
