@@ -255,6 +255,20 @@ class AgentTests(unittest.TestCase):
         self.allowance.status.return_value = {"configured": False}
         self.assertEqual(self.send("$20 a day, $5 per purchase", "set_limits")["text"], "At most 3 limiters per wallet.")
 
+    def test_a_solana_account_chats_and_looks_but_does_not_set_limits_or_buy(self):
+        solana = "solana:7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+        self.intent = "set_limits"
+        reply = self.agent.message(solana, None, "Set a $20 daily limit, $5 per purchase")["messages"][1]
+        self.assertIn("Solana", reply["text"])
+        self.agent.setup.assert_not_called()
+        self.allowance.status.assert_not_called()
+        self.intent = "gift_card"
+        self.model_replies = [json.dumps({"query": "steam", "country": "DE", "amount": "10", "buy": True})]
+        self.fit = {"steam-germany": 0.95}
+        reply = self.agent.message(solana, None, "buy a 10 euro steam card in germany")["messages"][1]
+        self.assertTrue(reply["cards"][0]["readOnly"])
+        self.assertNotIn("bitrefill-buy", [c[0] for c in self.shop.calls])
+
     def test_chats_belong_to_their_account(self):
         reply = self.agent.message(ACCOUNT, None, "hello")
         with self.assertRaises(ValueError):

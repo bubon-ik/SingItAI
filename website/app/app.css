@@ -518,3 +518,7 @@ body.in-app .nav-wrap, body.in-app .shell { display: none; }
 .account-menu .mi-label { gap: 10px; }
 .account-menu .menu-head { padding: 6px 10px 4px; font-size: 11px; }
 .account-menu hr { margin: 4px 6px; }
+
+.chain-tag { font: 500 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; padding: 1px 5px;
+  border-radius: 5px; border: 1px solid rgba(62, 207, 142, 0.35); color: var(--accent); }
+.btn .chain-tag { margin-left: 8px; }

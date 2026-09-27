@@ -451,3 +451,22 @@ Each step with unit tests and a mainnet check recorded in
 - Service fee on Bitrefill x402 orders, still not collected (open since v1).
 - Phantom's EVM support on Base is assumed; test it before promising it.
 - Solana users (Phantom's default chain) need a different lane; out of scope.
+
+## Solana wallets (step 1: sign-in)
+
+Any wallet signs in: an EVM wallet with Sign-In with Ethereum on Base, or a
+Solana wallet (Phantom, Solflare, Backpack, or any through Reown AppKit's Solana
+adapter) with Sign In With Solana (CAIP-122 text, `Chain ID: mainnet`), verified
+as an ed25519 signature over exactly the issued message. A Solana account is
+`solana:<base58 address>`; the beta allowlist compares Solana addresses
+case-sensitively. The session and `/session` carry `chain` (`base` | `solana`),
+and the page labels it.
+
+The allowance lane is a Base contract, so a Solana account has no limiter yet:
+`GET /allowance` answers `{configured: false, chain: "solana", supported: false}`,
+allowance writes are refused with the reason, and the agent chats (the free
+concierge), researches the catalog and shows products read-only, and says that
+buying needs a Base wallet for now. The gateway lets a Solana account only look
+(`tools`, `catalog-search`, `purchases`, Venice models and usage), never pay.
+Step 2 — limits and payments on Solana — needs its own spending mechanism.
+

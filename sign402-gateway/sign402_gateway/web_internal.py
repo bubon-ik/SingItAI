@@ -21,7 +21,7 @@ from decimal import Decimal
 from typing import Any
 
 from .agent_allowance import AllowanceError, AllowanceUnavailable
-from .web_accounts import ACCOUNT_PREFIX
+from .web_accounts import ACCOUNT_PREFIX, SOLANA_PREFIX
 
 QUOTE_SECONDS = 600
 PUBLIC_TOOL_FIELDS = ("id", "name", "description", "source", "resourceUrl", "inputSchema")
@@ -59,11 +59,19 @@ class ToolQuotes:
         return quote
 
 
-def _account(server: Any, payload: dict[str, Any]) -> str:
+# What a Solana account may do before the Solana allowance exists: look, never pay.
+SOLANA_READ_ONLY = {"tools", "catalog-search", "purchases", "venice-models", "venice-model", "venice-usage"}
+
+
+def _account(server: Any, payload: dict[str, Any], action: str = "") -> str:
     account = str(payload.get("account") or "")
     service = getattr(server, "allowance", None)
     if service is None:
         raise AllowanceUnavailable("The allowance lane is off on this server.")
+    if account.startswith(SOLANA_PREFIX) and action in SOLANA_READ_ONLY:
+        accounts = getattr(server, "web_accounts", None)
+        if accounts is not None and accounts.account(account) is not None:
+            return account
     if not account.startswith(ACCOUNT_PREFIX) or service.owner_lookup is None or not service.owner_lookup(account):
         raise AllowanceUnavailable("Unknown web account.")
     return account
@@ -107,7 +115,7 @@ def _usd(atomic: int) -> str:
 def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     from . import server as gw  # the gateway's purchase helpers; imported here to avoid a cycle
 
-    account = _account(server, payload)
+    account = _account(server, payload, action)
     service = server.allowance
     if action == "tools":
         return 200, {"ok": True, "tools": [

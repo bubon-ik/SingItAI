@@ -1,9 +1,11 @@
-// The user's wallet, through EIP-1193.
+// The user's wallet: an EVM one through EIP-1193, or a Solana one (Phantom,
+// Solflare, Backpack…) through its signMessage.
 //
 // With a WalletConnect project id (config.js) the connection goes through
-// Reown AppKit — the standard wallet modal: browser extensions, WalletConnect
-// QR for mobile wallets, and a session that survives a reload. Without one,
-// the page lists the extensions that announce themselves by EIP-6963.
+// Reown AppKit — the standard wallet modal, for EVM and Solana: browser
+// extensions, WalletConnect QR for mobile wallets, and a session that survives
+// a reload. Without one, the page lists the EVM extensions that announce
+// themselves by EIP-6963 and the Solana extensions it finds on the page.
 // Everything that gets signed is prepared by the server; the page only hands
 // it to the wallet.
 
@@ -28,12 +30,71 @@ export function discover(onChange) {
   window.dispatchEvent(new Event("eip6963:requestProvider"));
 }
 
+// Solana extensions that put a provider on the page.
+const SOLANA_INJECTED = [
+  ["sol-phantom", "Phantom (Solana)", () => window.phantom?.solana],
+  ["sol-solflare", "Solflare", () => window.solflare],
+  ["sol-backpack", "Backpack (Solana)", () => window.backpack?.solana || window.backpack],
+];
+
 export function wallets() {
   const list = [...found.values()];
   if (!list.length && window.ethereum) {
     list.push({ info: { uuid: "injected", name: "Browser wallet", icon: "" }, provider: window.ethereum });
   }
+  for (const [uuid, name, get] of SOLANA_INJECTED) {
+    const provider = get();
+    if (provider?.connect && provider?.signMessage) list.push({ info: { uuid, name, icon: "" }, provider, chain: "solana" });
+  }
   return list;
+}
+
+const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+function base58(bytes) {
+  let n = 0n;
+  for (const b of bytes) n = n * 256n + BigInt(b);
+  let out = "";
+  while (n > 0n) { out = B58[Number(n % 58n)] + out; n /= 58n; }
+  for (const b of bytes) { if (b !== 0) break; out = "1" + out; }
+  return out;
+}
+
+// A Solana wallet signs in (Sign In With Solana). Spending on Solana is not built yet.
+export class SolanaWallet {
+  constructor(provider, name, address) {
+    this.provider = provider;
+    this.name = name;
+    this.address = address || null;
+    this.chain = "solana";
+  }
+
+  static async fromInjected(choice) {
+    const connected = await choice.provider.connect();
+    const key = connected?.publicKey || choice.provider.publicKey;
+    if (!key) throw new Error("The wallet shared no account.");
+    return new SolanaWallet(choice.provider, choice.info.name, key.toString());
+  }
+
+  on(event, handler) {
+    // Solana wallets say "accountChanged" with the new public key (or null).
+    if (event === "accountsChanged") this.provider.on?.("accountChanged", (key) => handler(key ? [key.toString()] : []));
+  }
+
+  async signMessage(message) {
+    const signed = await this.provider.signMessage(new TextEncoder().encode(message), "utf8");
+    const bytes = signed?.signature || signed;
+    if (!(bytes instanceof Uint8Array) || bytes.length !== 64) throw new Error("The wallet returned no signature.");
+    return base58(bytes);
+  }
+
+  unsupported() {
+    throw new Error("Spending from a Solana wallet is coming. For now, connect a Base wallet to let your agent buy.");
+  }
+
+  async sendTransaction() { this.unsupported(); }
+  async signTypedData() { this.unsupported(); }
+  async ensureBase() { this.unsupported(); }
 }
 
 export class Wallet {
@@ -41,9 +102,11 @@ export class Wallet {
     this.provider = provider;
     this.name = name;
     this.address = address || null;
+    this.chain = "base";
   }
 
   static async fromInjected(choice) {
+    if (choice.chain === "solana") return SolanaWallet.fromInjected(choice);
     const wallet = new Wallet(choice.provider, choice.info.name);
     const accounts = await wallet.provider.request({ method: "eth_requestAccounts" });
     if (!accounts?.length) throw new Error("The wallet shared no account.");
@@ -96,12 +159,12 @@ export function appKitConfigured() {
 
 async function appKit() {
   if (kit) return kit;
-  const { createAppKit, WagmiAdapter, networks } = await import(APPKIT);
+  const { createAppKit, WagmiAdapter, SolanaAdapter, networks } = await import(APPKIT);
   const projectId = window.SINGIT_APP_CONFIG.walletConnectProjectId;
   const adapter = new WagmiAdapter({ projectId, networks: [networks.base] });
   kit = createAppKit({
-    adapters: [adapter],
-    networks: [networks.base],
+    adapters: [adapter, new SolanaAdapter()],  // any wallet: EVM on Base, or Solana
+    networks: [networks.base, networks.solana],
     defaultNetwork: networks.base,
     projectId,
     metadata: {
@@ -124,10 +187,13 @@ async function appKit() {
   return kit;
 }
 
-function kitWallet(k, address) {
-  const provider = k.getWalletProvider?.() || k.getProvider?.("eip155");
+function kitWallet(k, account) {
+  const solana = String(account.caipAddress || "").startsWith("solana:");
+  const provider = solana
+    ? k.getProvider?.("solana") || k.getWalletProvider?.()
+    : k.getProvider?.("eip155") || k.getWalletProvider?.();
   if (!provider) throw new Error("The wallet connected but gave no provider. Try again.");
-  return new Wallet(provider, "WalletConnect", address);
+  return solana ? new SolanaWallet(provider, "WalletConnect", account.address) : new Wallet(provider, "WalletConnect", account.address);
 }
 
 // Watch AppKit: a restored session, a new connection, a switch or a disconnect.
@@ -136,7 +202,7 @@ export async function watchAppKit(onWallet) {
   k.subscribeAccount((account) => {
     if (account?.isConnected && account.address) {
       try {
-        onWallet(kitWallet(k, account.address));
+        onWallet(kitWallet(k, account));
         k.close?.();  // connected: the page takes over from the modal
       } catch { /* provider not ready yet; the next event has it */ }
     } else if (account && account.status === "disconnected") {

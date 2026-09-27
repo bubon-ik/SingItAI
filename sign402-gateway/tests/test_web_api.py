@@ -109,6 +109,51 @@ class WebAuthTests(unittest.TestCase):
         self.assertNotIn(signed["csrfToken"].encode(), raw)
 
 
+class SolanaSignInTests(unittest.TestCase):
+    """Phantom, Solflare or Backpack on Solana: Sign In With Solana, an ed25519 signature."""
+
+    def setUp(self):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from sign402_gateway.solana_keys import b58encode
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.key = Ed25519PrivateKey.generate()
+        self.b58 = b58encode
+        self.address = b58encode(self.key.public_key().public_bytes_raw())
+        self.evm = Account.create()
+        self.store = WebAccountStore(Path(self.tmp.name) / "web.db")
+        self.auth = WebAuth(self.store, domain=DOMAIN, uri=URI, allowed=[self.address, self.evm.address],
+                            now=lambda: NOW)
+
+    def signed(self, message, key=None):
+        return self.b58((key or self.key).sign(message.encode()))
+
+    def test_a_solana_wallet_signs_in_to_its_own_account(self):
+        issued = self.auth.nonce(self.address)
+        self.assertEqual(issued["chain"], "solana")
+        lines = issued["message"].splitlines()
+        self.assertEqual(lines[:2], [f"{DOMAIN} wants you to sign in with your Solana account:", self.address])
+        self.assertIn("Chain ID: mainnet", lines)
+        signed = self.auth.verify(issued["message"], self.signed(issued["message"]))
+        self.assertEqual((signed["account"], signed["chain"], signed["address"]),
+                         (f"solana:{self.address}", "solana", self.address))
+        self.assertIsNone(self.store.owner_for(signed["account"]))  # not a Base allowance owner
+        self.assertEqual(self.auth.nonce(self.evm.address)["chain"], "base")
+
+    def test_what_must_not_sign_in_with_solana(self):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        issued = self.auth.nonce(self.address)
+        with self.assertRaises(WebAuthError):
+            self.auth.verify(issued["message"], self.signed(issued["message"], Ed25519PrivateKey.generate()))
+        issued = self.auth.nonce(self.address)
+        with self.assertRaises(WebAuthError):
+            self.auth.verify(issued["message"], "not-a-signature")
+        with self.assertRaises(WebAuthError):  # base58 is case-sensitive: another key, not on the list
+            self.auth.nonce(self.address.swapcase())
+        with self.assertRaises(WebAuthError):
+            self.auth.nonce("hello")
+
+
 class WebApiTests(unittest.TestCase):
     """The routes, with the real allowance service on a fake chain."""
 

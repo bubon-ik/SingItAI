@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 MAX_MESSAGE = 2000
 HISTORY_FOR_MODEL = 20
+SOLANA_ACCOUNT = "solana:"  # web_accounts.SOLANA_PREFIX
 CATALOG_KINDS = {"gift_card": "gift-cards", "esim": "esims", "topup": "topups"}  # Bitrefill's catalogs
 ESIM_WORDS = re.compile(r"(?i)\b(e-?sims?|sim\s*cards?|sims?|data|plans?|mobile|internet|travel)\b")
 
@@ -491,6 +492,8 @@ class WebAgent:
     def _respond(self, account: str, chat_id: str, text: str) -> tuple[str, list[dict[str, Any]]]:
         lang = getattr(self._request, "language", None) or language_of(text)
         intent = self._intent(text)
+        if account.startswith(SOLANA_ACCOUNT) and intent in ("set_limits", "grant", "revoke", "status", "buy_tool"):
+            return self._solana_not_yet(lang)
         handler = {
             "set_limits": self._on_set_limits, "grant": self._on_grant, "revoke": self._on_revoke,
             "status": self._on_status, "purchases": self._on_purchases, "buy_tool": self._on_buy_tool,
@@ -516,6 +519,8 @@ class WebAgent:
                        "Что-то пошло не так на нашей стороне. Ничего не оплачено."), []
 
     def _state(self, account: str) -> dict[str, Any]:
+        if account.startswith(SOLANA_ACCOUNT):
+            return {"configured": False, "chain": "solana"}  # the allowance lane is Base-only for now
         status = self.allowance.status(account)
         if not status.get("configured"):
             return {"configured": False}
@@ -614,6 +619,8 @@ class WebAgent:
                    "Привяжите Telegram в меню слева: Telegram → Link, и отправьте код боту."), [{"type": "link_telegram"}]
 
     def _ready(self, account, lang) -> tuple[str, list] | None:
+        if account.startswith(SOLANA_ACCOUNT):
+            return self._solana_not_yet(lang)
         state = self._state(account)
         if not state["configured"]:
             return self._no_limiter(lang)
@@ -623,6 +630,12 @@ class WebAgent:
                 {"type": "wallet", "kind": "grant", "amount": str(Decimal(state["dailyCapAtomic"]) / Decimal(1_000_000)),
                  "limiter": state["limiter"]}]
         return None
+
+    def _solana_not_yet(self, lang):
+        return say(lang, "You signed in with a Solana wallet. Spending limits on Solana are coming; until then I can "
+                         "chat and look things up. To let me buy now, connect a Base wallet (Phantom works on Base too).",
+                   "Вы вошли с Solana-кошельком. Лимиты на Solana скоро будут; пока я могу общаться и искать. "
+                   "Чтобы я мог покупать уже сейчас, подключите кошелёк на Base (Phantom тоже работает на Base)."), []
 
     def _no_limiter(self, lang):
         return say(lang, "First set your limits, for example: \"Set a $20 daily limit, $5 per purchase\".",
@@ -659,7 +672,8 @@ class WebAgent:
 
     def _on_catalog(self, account, lang, text, intent):
         """Research Bitrefill's catalog for the request, keep what fits, show it with its real options."""
-        blocked = self._ready(account, lang)
+        solana = account.startswith(SOLANA_ACCOUNT)  # may look, may not buy yet
+        blocked = None if solana else self._ready(account, lang)
         if blocked:
             return blocked
         hints = self._hints()
@@ -690,7 +704,7 @@ class WebAgent:
         items = [self._offer(account, p) for p in found[:4]]
         amount = wanted.get("amount")
         # Bought at once only when the message said so and the product is certain: Jev chose it, or it is the only one.
-        if amount and wanted.get("buy") and sure and not items[0].get("needsRecipient"):
+        if amount and wanted.get("buy") and sure and not solana and not items[0].get("needsRecipient"):
             first = items[0]
             if not first.get("packages") or any(o["value"] == amount for o in first["packages"]):
                 return self._buy_giftcard(account, lang, first["slug"], amount, first.get("name", ""))
@@ -706,7 +720,11 @@ class WebAgent:
         else:
             text_en = "Here is what fits best. Pick a value and I'll buy it from your allowance."
             text_ru = "Вот что подходит лучше всего. Выберите номинал — куплю из вашего лимита."
-        return say(lang, text_en, text_ru), [{"type": "products", "kind": intent, "items": items, "lang": lang}]
+        if solana:
+            text_en += " Buying needs a Base wallet for now; Solana spending limits are coming."
+            text_ru += " Покупка пока только с кошельком на Base; лимиты на Solana скоро будут."
+        return say(lang, text_en, text_ru), [{"type": "products", "kind": intent, "items": items, "lang": lang,
+                                               **({"readOnly": True} if solana else {})}]
 
     def _research(self, account: str, text: str, intent: str, query: str, country: str, category: str,
                   place: str) -> tuple[list[dict[str, Any]], bool]:

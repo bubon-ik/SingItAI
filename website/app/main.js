@@ -349,7 +349,8 @@ function renderNav() {
 
 function renderHero() {
   const cta = state.wallet
-    ? `<button class="btn btn-primary btn-lg has-orb" data-action="sign-in">Sign in as ${esc(short(state.wallet.address))}${orb}</button>
+    ? `<button class="btn btn-primary btn-lg has-orb" data-action="sign-in">Sign in as ${esc(short(state.wallet.address))}
+         <span class="chain-tag">${state.wallet.chain === "solana" ? "Solana" : "Base"}</span>${orb}</button>
        <button class="btn btn-ghost btn-lg" data-action="connect">Use another wallet</button>`
     : `<button class="btn btn-primary btn-lg has-orb" data-action="connect">Connect wallet${orb}</button>
        <a class="btn btn-ghost btn-lg" href="https://singitai.app/#how">How it works</a>`;
@@ -362,7 +363,7 @@ function renderHero() {
       <div class="row" style="justify-content:center">${cta}</div>
       <div class="steps">
         <div class="step"><span class="n">01</span><h3>Connect and sign in</h3>
-          <p>Rabby, MetaMask, Phantom or any WalletConnect wallet. Signing in moves nothing.</p></div>
+          <p>Any wallet: Rabby, MetaMask, Phantom, Solflare, Backpack or WalletConnect — on Base or Solana. Signing in moves nothing.</p></div>
         <div class="step"><span class="n">02</span><h3>Set your limits</h3>
           <p>We deploy a small contract that enforces them on Base. You pay no gas for it.</p></div>
         <div class="step"><span class="n">03</span><h3>Allow once</h3>
@@ -417,6 +418,14 @@ function methodSwitch() {
 function renderAllowance() {
   const a = state.allowance;
   if (!a) return `<p class="faint">Loading…</p>`;
+  if (a.chain === "solana") {
+    return `<div class="page-head"><span class="eyebrow">Solana</span><h1>Limits on Solana are <em>coming</em>.</h1>
+      <p>${esc(a.text || "")}</p></div>
+      <div class="bezel"><div class="core"><p>Signed in as <span class="mono">${esc(state.session.address)}</span> on Solana.
+        Your agent can chat and look things up. To let it buy now, sign out and connect a Base wallet —
+        Phantom works on Base too.</p>
+        <div class="row"><button class="btn btn-ghost btn-sm" data-action="sign-out">Use a Base wallet</button></div></div></div>`;
+  }
   if (!a.configured) {
     return `<div class="page-head"><span class="eyebrow">Step 2 of 3</span>
       <h1>Set your agent's <em>limits</em>.</h1>
@@ -759,12 +768,13 @@ function renderSidebar() {
     ? `<div class="label">Can spend today</div><div class="amt">${amount(spendableToday(a))}<small>USDC</small></div>
        <div style="margin-top:8px">${statusPill(a.state)}</div>
        ${(a.staleLimiters || []).length ? `<div class="faint" style="color:var(--danger);margin-top:8px">⚠ Old limiter to revoke</div>` : ""}`
-    : `<div class="label">Allowance</div><div style="margin-top:4px;font-size:14px;color:var(--text-soft)">No limits yet</div>`;
+    : `<div class="label">Allowance</div><div style="margin-top:4px;font-size:14px;color:var(--text-soft)">${
+        a?.chain === "solana" ? "Solana · limits coming" : "No limits yet"}</div>`;
   $("#side-nav").innerHTML = `
     <button class="side-allowance ${state.view === "allowance" ? "active" : ""}" data-action="go" data-view="allowance">${amountLine}</button>
     <button class="side-account-btn ${state.accountMenu ? "open" : ""}" data-action="account-menu" aria-haspopup="menu"
       aria-expanded="${Boolean(state.accountMenu)}"><span class="dot"></span><span class="mono">${esc(short(state.session.address))}</span>
-      <span class="caret">⌃</span></button>`;
+      <span class="chain-tag">${state.session.chain === "solana" ? "SOL" : "Base"}</span><span class="caret">⌃</span></button>`;
   renderAccountMenu();
   $("#app").classList.toggle("menu-open", state.menuOpen);
   $("#top-title").textContent = state.view === "chat"

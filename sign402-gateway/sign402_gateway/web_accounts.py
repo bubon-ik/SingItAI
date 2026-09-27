@@ -1,13 +1,15 @@
-"""Web accounts: Sign-In with Ethereum, sessions, and the owner behind each account.
+"""Web accounts: Sign-In with Ethereum or Solana, sessions, and the owner behind each account.
 
 Design: docs/allowance-web-v1.md, "Accounts and identity". The server writes the
-exact EIP-4361 message when it hands out a nonce and keeps it; signing in means
-returning that same text with a signature that recovers to the address it
-names. Nothing in the submitted message is parsed for trust — it is compared
-byte for byte with what was issued.
+exact sign-in message when it hands out a nonce and keeps it; signing in means
+returning that same text with a signature from the address it names (EIP-4361
+recovered for an EVM wallet, an ed25519 signature for a Solana one). Nothing in
+the submitted message is parsed for trust — it is compared byte for byte with
+what was issued.
 
-An account is `wallet:<checksummed address>`. Its owner address is that address;
-the allowance lane reads it through `WebAccountStore.owner_for`.
+An account is `wallet:<checksummed address>` for an EVM wallet and
+`solana:<base58 address>` for a Solana one. Its owner address is that address;
+the Base allowance lane reads EVM owners through `WebAccountStore.owner_for`.
 
 Session and CSRF tokens are random, shown once, and stored only as hashes.
 """
@@ -29,6 +31,7 @@ from eth_account.messages import encode_defunct
 from eth_utils import is_address, to_checksum_address
 
 from .allowance_bitrefill import siwe_message
+from .solana_keys import b58decode, b58encode
 
 WEB_DB_ENV = "SIGN402_WEB_DB"
 DEFAULT_WEB_DB = "~/.sign402/web.db"
@@ -37,15 +40,75 @@ NONCE_SECONDS = 300
 LINK_CODE_SECONDS = 600
 SESSION_SECONDS = 12 * 3600
 STATEMENT = "Sign in to SingIt. This signature does not move funds or approve any spending."
-ACCOUNT_PREFIX = "wallet:"
+ACCOUNT_PREFIX = "wallet:"         # an EVM wallet (Base)
+SOLANA_PREFIX = "solana:"          # a Solana wallet
 
 
 class WebAuthError(Exception):
     """A sign-in or session refused; the message is safe to show."""
 
 
+def solana_address(value: str) -> str | None:
+    """The canonical base58 form of a Solana public key, or None."""
+    try:
+        raw = b58decode(value)
+    except ValueError:
+        return None
+    return b58encode(raw) if len(raw) == 32 and b58encode(raw) == value else None
+
+
+def chain_of(address: Any) -> str:
+    """ "base" for an EVM address, "solana" for a Solana one."""
+    text = str(address or "").strip()
+    if is_address(text):
+        return "base"
+    if solana_address(text):
+        return "solana"
+    raise WebAuthError("That is not an Ethereum or Solana address.")
+
+
+def normalized(address: str) -> str:
+    return to_checksum_address(address) if chain_of(address) == "base" else address
+
+
 def account_id_for(address: str) -> str:
+    if chain_of(address) == "solana":
+        return SOLANA_PREFIX + address
     return ACCOUNT_PREFIX + to_checksum_address(address)
+
+
+def chain_of_account(account_id: str) -> str:
+    return "solana" if str(account_id).startswith(SOLANA_PREFIX) else "base"
+
+
+def _allow_key(address: str) -> str:
+    """EVM addresses compare case-insensitively; Solana's base58 is case-sensitive."""
+    return address.lower() if address.startswith("0x") else address
+
+
+def siws_message(domain: str, uri: str, address: str, nonce: str, issued: str, expires: str) -> str:
+    """Sign In With Solana (CAIP-122), the text Phantom, Solflare and Backpack show and sign."""
+    return (f"{domain} wants you to sign in with your Solana account:\n{address}\n\n{STATEMENT}\n\n"
+            f"URI: {uri}\nVersion: 1\nChain ID: mainnet\nNonce: {nonce}\nIssued At: {issued}\n"
+            f"Expiration Time: {expires}")
+
+
+def _ed25519_signature(signature: str) -> bytes:
+    """A Solana wallet's 64-byte signature, as base58 (the norm), 0x-hex or base64."""
+    import base64
+    text = signature.strip()
+    candidates = []
+    if text.startswith("0x"):
+        candidates.append(lambda: bytes.fromhex(text[2:]))
+    candidates += [lambda: b58decode(text), lambda: base64.b64decode(text, validate=True)]
+    for decode in candidates:
+        try:
+            raw = decode()
+        except Exception:
+            continue
+        if len(raw) == 64:
+            return raw
+    raise WebAuthError("The signature could not be read.")
 
 
 def _hash(token: str) -> str:
@@ -132,7 +195,7 @@ class WebAccountStore:
         account_id = account_id_for(address)
         with self._db() as db:
             db.execute("INSERT OR IGNORE INTO accounts(account_id, owner_address, created_at) VALUES (?, ?, ?)",
-                       (account_id, to_checksum_address(address), now))
+                       (account_id, normalized(address), now))
         return account_id
 
     def account(self, account_id: str) -> sqlite3.Row | None:
@@ -227,27 +290,45 @@ class WebAuth:
         self.domain = domain
         self.uri = uri
         # None: everyone (general availability). Otherwise the beta allowlist.
-        self.allowed = None if allowed is None else {a.lower() for a in allowed}
+        self.allowed = None if allowed is None else {_allow_key(a.strip()) for a in allowed}
         self.now = now
 
     def _check_allowed(self, address: str) -> None:
-        if self.allowed is not None and address.lower() not in self.allowed:
+        if self.allowed is not None and _allow_key(address) not in self.allowed:
             raise WebAuthError("This address is not in the beta yet.")
 
     def nonce(self, address: Any) -> dict[str, Any]:
         address = str(address or "").strip()
-        if not is_address(address):
-            raise WebAuthError("That is not an Ethereum address.")
-        address = to_checksum_address(address)
+        chain = chain_of(address)
+        address = normalized(address)
         self._check_allowed(address)
         now = self.now()
         nonce = secrets.token_hex(16)
-        message = siwe_message({
-            "domain": self.domain, "uri": self.uri, "version": "1", "statement": STATEMENT,
-            "nonce": nonce, "issuedAt": _iso(now), "expirationTime": _iso(now + NONCE_SECONDS),
-        }, address, CHAIN_ID)
+        if chain == "solana":
+            message = siws_message(self.domain, self.uri, address, nonce, _iso(now), _iso(now + NONCE_SECONDS))
+        else:
+            message = siwe_message({
+                "domain": self.domain, "uri": self.uri, "version": "1", "statement": STATEMENT,
+                "nonce": nonce, "issuedAt": _iso(now), "expirationTime": _iso(now + NONCE_SECONDS),
+            }, address, CHAIN_ID)
         self.store.add_nonce(nonce, address, message, int(now) + NONCE_SECONDS, int(now))
-        return {"nonce": nonce, "message": message, "expiresAt": int(now) + NONCE_SECONDS}
+        return {"nonce": nonce, "message": message, "chain": chain, "expiresAt": int(now) + NONCE_SECONDS}
+
+    def _signed_by(self, address: str, message: str, signature: str) -> bool:
+        if chain_of(address) == "solana":
+            from cryptography.exceptions import InvalidSignature
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+            try:
+                Ed25519PublicKey.from_public_bytes(b58decode(address)).verify(
+                    _ed25519_signature(signature), message.encode())
+                return True
+            except InvalidSignature:
+                return False
+        try:
+            signer = Account.recover_message(encode_defunct(text=message), signature=signature)
+        except Exception:
+            raise WebAuthError("The signature could not be read.") from None
+        return signer.lower() == address.lower()
 
     def verify(self, message: Any, signature: Any) -> dict[str, Any]:
         message, signature = str(message or ""), str(signature or "")
@@ -256,18 +337,14 @@ class WebAuth:
         issued = self.store.take_nonce(nonce, now) if nonce else None
         if issued is None or issued["message"] != message:
             raise WebAuthError("This sign-in request is unknown, used or expired. Start again.")
-        try:
-            signer = Account.recover_message(encode_defunct(text=message), signature=signature)
-        except Exception:
-            raise WebAuthError("The signature could not be read.") from None
-        if signer.lower() != issued["address"].lower():
+        if not self._signed_by(issued["address"], message, signature):
             raise WebAuthError("The signature is not from the address that asked to sign in.")
         self._check_allowed(issued["address"])
         account_id = self.store.ensure_account(issued["address"], now)
         token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
         self.store.add_session(_hash(token), _hash(csrf), account_id, issued["address"], now, now + SESSION_SECONDS)
         return {"token": token, "csrfToken": csrf, "account": account_id, "address": issued["address"],
-                "expiresAt": now + SESSION_SECONDS}
+                "chain": chain_of_account(account_id), "expiresAt": now + SESSION_SECONDS}
 
     def session(self, token: str, csrf: str | None = None) -> sqlite3.Row:
         """The live session for this cookie; with `csrf`, also the matching CSRF token."""

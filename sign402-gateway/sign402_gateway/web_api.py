@@ -44,7 +44,7 @@ from urllib.parse import parse_qsl
 
 from .agent_allowance import AllowanceError, AllowanceService, AllowanceUnavailable, _usdc_atomic
 from .web_accounts import (
-    DEFAULT_WEB_DB, SESSION_SECONDS, WEB_DB_ENV, WebAccountStore, WebAuth, WebAuthError,
+    DEFAULT_WEB_DB, SESSION_SECONDS, WEB_DB_ENV, WebAccountStore, WebAuth, WebAuthError, chain_of_account,
 )
 
 logger = logging.getLogger(__name__)
@@ -116,6 +116,9 @@ def _public_text(body: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+SOLANA_NOT_YET = ("Spending limits on Solana are coming. Your Solana wallet can sign in, chat and look things up; "
+                  "to let your agent buy now, connect a Base wallet (the same Phantom works on Base).")
+
 SHOP_ROUTES = {
     ("GET", "/shop/tools"): "tools",
     ("POST", "/shop/tools/quote"): "tool-quote",
@@ -177,7 +180,7 @@ class WebApi:
             signed = self.auth.verify(body.get("message"), body.get("signature"))
             cookie = (f"{COOKIE}={signed['token']}; Path={PREFIX}; Max-Age={SESSION_SECONDS}; "
                       "HttpOnly; Secure; SameSite=Strict")
-            out = {"account": signed["account"], "address": signed["address"],
+            out = {"account": signed["account"], "address": signed["address"], "chain": signed["chain"],
                    "csrfToken": signed["csrfToken"], "expiresAt": signed["expiresAt"],
                    "telegramLinked": bool(self.auth.store.telegram_for(signed["account"]))}
             return 200, out, {"Set-Cookie": cookie}
@@ -188,9 +191,16 @@ class WebApi:
 
         session = self.auth.session(token, None if method == "GET" else (csrf or ""))
         account, owner = session["account_id"], session["address"]
+        chain = chain_of_account(account)
         if method == "GET" and path == "/session":
-            return 200, {"account": account, "address": owner,
+            return 200, {"account": account, "address": owner, "chain": chain,
                          "telegramLinked": bool(self.auth.store.telegram_for(account))}, {}
+        if chain == "solana" and path.startswith("/allowance"):
+            # The allowance lane is a Base contract; a Solana wallet signs in, chats and browses for now.
+            if method == "GET" and path == "/allowance":
+                return 200, {"configured": False, "chain": "solana", "supported": False,
+                             "text": SOLANA_NOT_YET}, {}
+            raise WebError(400, "solana_not_yet", SOLANA_NOT_YET)
         if method == "POST" and path == "/link/telegram":
             self.link_by_account.hit(account)
             code = self.auth.store.new_link_code(account, int(self.now()))
@@ -309,6 +319,8 @@ class WebApi:
 
         An EIP-7702 account (code 0xef0100…) still signs with its own key and is fine.
         """
+        if not str(address or "").startswith("0x"):
+            return  # a Solana wallet: no contract code to look at
         try:
             code = self.allowance.evm.code(str(address or ""))
         except Exception:
