@@ -233,6 +233,10 @@ the conversation. It works the way the Telegram bot does
   under the top-up refuses it with the reason, nothing paid. The chat's Venice
   policy mirrors the limiter (daily cap, expiry). Needs `SIGN402_AI_CHAT_ENABLED`
   on the gateway, as for the bot.
+- **The model is theirs to choose** from Venice's own list (every chat model with
+  a published price, cheapest first, filtered by Venice's capability tags): the
+  chip under the message box, `GET /chat/models` and `POST /chat/model {model}`.
+  Choosing moves no money; the next message uses it.
 - **The concierge model** (OpenRouter, the bot's `OPENROUTER_API_KEY`,
   `SIGN402_WEB_AGENT_MODEL`) answers before the allowance is approved, or when
   Venice chat is off, and turns a shopping sentence into search words, a country
@@ -243,6 +247,8 @@ the conversation. It works the way the Telegram bot does
   `POST /chats/action {chatId, action}` for card buttons, `POST /chats/update {chatId, title?, pinned?, archived?}`
   (rename, pin, archive; a new message unarchives), `POST /chats/delete`. `GET /chats` lists pinned chats first
   and flags archived ones.
+  The page's own scripts and styles are served with `?v=<hash of the page>`, so a
+  cache in front of it (Cloudflare's browser TTL) never mixes an old file with a new one.
   Sixty messages an hour per account. Chats are stored per account in `web.db`.
 
 ## What the server verifies

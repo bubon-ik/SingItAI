@@ -137,9 +137,13 @@ def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict
     if action == "tool-buy":
         return _buy_tool(server, gw, account, str(payload.get("quoteId") or ""))
 
-    if action == "venice-chat":
-        from .web_venice import chat  # noqa: PLC0415 - Venice only loads when the chat is used
-        return chat(server, gw, account, payload.get("messages"))
+    if action in ("venice-chat", "venice-models", "venice-model"):
+        from . import web_venice  # noqa: PLC0415 - Venice only loads when the chat is used
+        if action == "venice-models":
+            return web_venice.models(server, account)
+        if action == "venice-model":
+            return web_venice.choose_model(server, account, payload.get("model"))
+        return web_venice.chat(server, gw, account, payload.get("messages"))
 
     if action in ("bitrefill-search", "bitrefill-quote", "bitrefill-buy"):
         if action == "bitrefill-buy":

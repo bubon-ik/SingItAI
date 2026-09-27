@@ -250,7 +250,9 @@ class WebShopRoutesTests(unittest.TestCase):
                 status, body, _ = self.call(method, path, {"quoteId": "q", "offset": "6"})
                 self.assertEqual((status, body), (200, {"ok": True, "text": "done"}))
                 self.assertEqual(self.calls[-1][:2], (action, self.me["account"]))
-        self.assertEqual(self.calls[-2][2], {"offset": "6"})  # GET /purchases forwards only the offset
+        forwarded = {action: body for action, _, body in self.calls}
+        self.assertEqual(forwarded["purchases"], {"offset": "6"})  # GET /purchases forwards only the offset
+        self.assertEqual(forwarded["venice-models"], {})
 
     def test_the_shop_needs_a_session_its_csrf_token_and_a_gateway(self):
         with self.assertRaises(wa.WebAuthError):

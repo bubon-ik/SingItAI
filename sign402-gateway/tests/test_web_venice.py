@@ -10,7 +10,7 @@ from eth_account.messages import encode_defunct
 from sign402_gateway import goplausible, web_internal, web_venice
 from sign402_gateway.chat_store import ChatStore
 from sign402_gateway.server import _validate_base_usdc_x402_requirement
-from sign402_gateway.venice_chat import VeniceConfig
+from sign402_gateway.venice_chat import ChatService, UnknownModel, VeniceConfig, VeniceModelCatalogue
 
 ACCOUNT = "wallet:0x1111111111111111111111111111111111111111"
 VENICE_PAY_TO = "0x2670B922ef37C7Df47158725C0CC407b5382293F"
@@ -62,7 +62,9 @@ class WebVeniceTests(unittest.TestCase):
         self.allowance.agent_key.return_value = (AGENT.address, AGENT.key.to_0x_hex())
         self.server = SimpleNamespace(
             allowance=self.allowance, user_event_store=Mock(),
-            chat_service=SimpleNamespace(store=store, client=SimpleNamespace(config=config, purchases_paused=lambda: False)))
+            chat_service=ChatService(
+                store=store, client=SimpleNamespace(config=config, purchases_paused=lambda: False), wallet_service=None,
+                daily_cap_atomic=5_000_000, catalogue=VeniceModelCatalogue(fetch=Mock(side_effect=OSError("offline")))))
         self.gw = SimpleNamespace(normalize_x402_payment_required=goplausible.normalize_x402_payment_required,
                                   _validate_base_usdc_x402_requirement=_validate_base_usdc_x402_requirement,
                                   _enforce_user_purchase_rate=Mock())
@@ -115,6 +117,21 @@ class WebVeniceTests(unittest.TestCase):
             self.chat("hello")
         self.server.chat_service = None
         self.assertEqual(self.chat("hello")[1]["error"], "chat_off")
+
+    def test_the_account_picks_its_model_from_venices_list(self):
+        status, listing = web_venice.models(self.server, ACCOUNT)
+        self.assertEqual((status, listing["chosen"], listing["chosenLabel"]),
+                         (200, "venice-uncensored-1-2", "Venice Uncensored 1.2"))
+        prices = [m["outputUsdPerMTok"] for m in listing["models"]]
+        self.assertEqual(prices, sorted(prices))  # cheapest first
+        web_venice.choose_model(self.server, ACCOUNT, "grok-4-6")
+        self.assertEqual(web_venice.models(self.server, ACCOUNT)[1]["chosenLabel"], "Grok 4.6")
+        with self.assertRaises(UnknownModel):
+            web_venice.choose_model(self.server, ACCOUNT, "gpt-9-imaginary")
+        self.venice.balance = 3_000_000
+        self.chat("hi")
+        sent = next(body for method, url, body in self.venice.requests if url.endswith("/chat/completions"))
+        self.assertEqual(sent["model"], "grok-4-6")
 
     def test_only_a_conversation_ending_with_the_user_is_sent(self):
         with self.assertRaises(ValueError):

@@ -141,3 +141,34 @@ def chat(server: Any, gw: Any, account: str, raw_messages: Any) -> tuple[int, di
     if result.prefunded and paid:
         reply["topUpUsd"] = _usd(paid["amount"])
     return 200, reply
+
+
+def models(server: Any, account: str) -> tuple[int, dict[str, Any]]:
+    """Every Venice chat model, cheapest first, with the one this account talks to.
+
+    The page filters by category and name itself: one request, however much they browse.
+    """
+    base = getattr(server, "chat_service", None)
+    if base is None:
+        return 503, {"ok": False, "error": "chat_off", "text": "The private chat is off on this server."}
+    catalogue = base._catalogue()
+    chosen = base.store.get_session(account).model or base.default_model
+    listed = catalogue.models()
+    categories = [c for c in catalogue.categories() if c.key != "all"]
+    return 200, {
+        "ok": True, "chosen": chosen,
+        "chosenLabel": next((m.label for m in listed if m.model_id == chosen), chosen),
+        "categories": [{"key": c.key, "label": c.label} for c in categories],
+        "models": [{"id": m.model_id, "label": m.label, "blurb": m.blurb,
+                    "inputUsdPerMTok": m.input_usd_per_mtok, "outputUsdPerMTok": m.output_usd_per_mtok,
+                    "tags": [c.key for c in categories if catalogue._matches(m.model_id, c.key)]}
+                   for m in listed[:300]],
+    }
+
+
+def choose_model(server: Any, account: str, model_id: Any) -> tuple[int, dict[str, Any]]:
+    """Talk to another model from the next message on. Moves no money."""
+    base = getattr(server, "chat_service", None)
+    if base is None:
+        return 503, {"ok": False, "error": "chat_off", "text": "The private chat is off on this server."}
+    return 200, base.set_model(account, str(model_id or ""))  # UnknownModel is a ValueError: refused with its reason

@@ -18,7 +18,7 @@ const state = {
   session: null,       // {account, address, telegramLinked}
   allowance: null,     // GET /allowance
   tab: "allowance",
-  modal: null,         // {type: "busy" | "wallets" | "quote" | "pause" | "delete-chat", …}
+  modal: null,         // {type: "busy" | "wallets" | "quote" | "pause" | "delete-chat" | "models", …}
   preset: 0,           // index into PRESETS
   method: null,        // "approve" | "permit"; null = pick from the wallet's ETH
   linkCode: null,
@@ -39,6 +39,8 @@ const state = {
   chatMenu: null,      // {id, top, left}: the ⋯ menu of one chat
   renaming: null,      // the chat whose title is being edited in the sidebar
   showArchived: false,
+  models: null,        // GET /chat/models: Venice's list and the one this account talks to
+  modelFilter: { query: "", category: "" },
 };
 
 const PRESETS = [
@@ -158,7 +160,7 @@ async function signIn() {
     const signed = await api.verify(message, signature);
     setCsrf(signed.csrfToken);
     state.session = signed;
-    await Promise.all([loadAllowance(), loadChats()]);
+    await Promise.all([loadAllowance(), loadChats(), loadModels()]);
   });
 }
 
@@ -168,7 +170,8 @@ async function signOut() {
   await disconnectAppKit().catch(() => {});
   Object.assign(state, { session: null, wallet: null, allowance: null, quote: null, result: null, purchases: null,
                          linkCode: null, revealed: {}, tab: "allowance", modal: null, view: "chat", chats: [],
-                         chatId: null, messages: [], done: {}, chatMenu: null, renaming: null, showArchived: false });
+                         chatId: null, messages: [], done: {}, chatMenu: null, renaming: null, showArchived: false, models: null,
+                         modelFilter: { query: "", category: "" } });
   showChatInUrl();
   render();
 }
@@ -623,6 +626,25 @@ function renderModal() {
       <p class="hint">Price held until ${esc(new Date(q.expiresAt * 1000).toLocaleTimeString())}.</p>`);
     return;
   }
+  if (m.type === "models") {
+    const { query, category } = state.modelFilter;
+    const granted = state.allowance?.state === "granted";
+    modalEl.innerHTML = `<div class="overlay" data-action="dismiss"><div class="modal modal-wide bezel" role="dialog" aria-modal="true"
+      aria-label="Choose a model"><div class="core">
+      <div class="approval-head"><div class="avatar">${mark()}</div>
+        <div><strong>Choose a model</strong><span>Private on Venice · prices per 1M tokens, paid from your chat credit</span></div></div>
+      ${granted ? "" : `<p class="note">Your private chat starts once your limits are approved. Your choice is kept until then.</p>`}
+      <input id="model-search" class="input" type="search" placeholder="Search ${state.models.models.length} models…"
+        value="${esc(query)}" autocomplete="off" aria-label="Search models">
+      <div class="model-cats">
+        <button class="chip ${category ? "" : "on"}" data-action="model-category" data-key="">All</button>
+        ${state.models.categories.map((c) => `<button class="chip ${category === c.key ? "on" : ""}" data-action="model-category"
+          data-key="${esc(c.key)}">${esc(c.label)}</button>`).join("")}
+      </div>
+      <div id="model-list" class="model-list" role="listbox">${renderModelList()}</div>
+    </div></div></div>`;
+    return;
+  }
   if (m.type === "delete-chat") {
     const c = state.chats.find((x) => x.id === m.id);
     modalEl.innerHTML = modal(`
@@ -761,7 +783,11 @@ function renderMain() {
     <div class="composer-wrap">
       <form class="composer" data-form="send">
         <textarea id="composer" rows="1" placeholder="Message your agent…" aria-label="Message">${esc(draft)}</textarea>
-        <button class="send" type="submit" aria-label="Send" ${state.sending ? "disabled" : ""}>↑</button>
+        <div class="composer-bar">
+          ${state.models ? `<button type="button" class="model-chip" data-action="open-models" aria-haspopup="dialog">
+            <span class="venice">Venice</span>${esc(state.models.chosenLabel)}<span class="caret">▾</span></button>` : "<span></span>"}
+          <button class="send" type="submit" aria-label="Send" ${state.sending ? "disabled" : ""}>↑</button>
+        </div>
       </form>
       <p class="composer-hint">Inside your limits your agent buys without asking. Approvals and revokes always need your wallet.</p>
     </div>`;
@@ -913,6 +939,37 @@ function renderCard(card, key) {
   return "";
 }
 
+async function loadModels() {
+  try { state.models = await api.models(); } catch { state.models = null; }  // no Venice: no picker
+}
+
+const perMillion = (usd) => `$${Number(usd) < 1 ? Number(usd).toFixed(2) : Number(usd).toFixed(2).replace(/\.00$/, "")}`;
+
+function renderModelList() {
+  const { query, category } = state.modelFilter;
+  const needle = query.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const list = state.models.models.filter((mdl) => (!category || mdl.tags.includes(category))
+    && (!needle || (mdl.label + mdl.id).toLowerCase().replace(/[^a-z0-9]/g, "").includes(needle)));
+  if (!list.length) return `<p class="faint" style="padding:14px 4px">No model matches.</p>`;
+  return list.map((mdl) => `<button class="model-row ${mdl.id === state.models.chosen ? "chosen" : ""}" data-action="choose-model"
+      data-id="${esc(mdl.id)}" role="option" aria-selected="${mdl.id === state.models.chosen}">
+      <span class="model-main"><b>${esc(mdl.label)}</b>${mdl.blurb ? `<span>${esc(mdl.blurb)}</span>` : ""}</span>
+      <span class="model-price">${perMillion(mdl.inputUsdPerMTok)} in · ${perMillion(mdl.outputUsdPerMTok)} out</span>
+      <span class="model-check">${mdl.id === state.models.chosen ? "✓" : ""}</span></button>`).join("");
+}
+
+async function chooseModel(id) {
+  try {
+    const chosen = await api.chooseModel(id);
+    state.models = { ...state.models, chosen: chosen.chosen, chosenLabel: chosen.label };
+    state.modal = null;
+    render();
+    toast(`${chosen.label} answers from your next message.`);
+  } catch (error) {
+    toast(explain(error), true);
+  }
+}
+
 async function loadChats() {
   try { state.chats = (await api.chats()).chats || []; } catch { state.chats = []; }
 }
@@ -1056,6 +1113,19 @@ const actions = {
   },
   "open-chat": (el) => openChat(el.dataset.id),
   "chat-menu": (el) => (state.chatMenu?.id === el.dataset.id ? closeChatMenu() : openChatMenu(el)),
+  "open-models": async () => {
+    await loadModels();  // Venice adds models; the list is cached for hours on the server
+    if (!state.models) { toast("Model choice is unavailable right now.", true); return; }
+    state.modal = { type: "models" };
+    render();
+    $("#model-search")?.focus();
+  },
+  "model-category": (el) => {
+    state.modelFilter.category = el.dataset.key;
+    for (const b of document.querySelectorAll("[data-action='model-category']")) b.classList.toggle("on", b === el);
+    $("#model-list").innerHTML = renderModelList();
+  },
+  "choose-model": (el) => chooseModel(el.dataset.id),
   "toggle-archived": () => { state.showArchived = !state.showArchived; render(); },
   "chat-pin": (el) => {
     const c = state.chats.find((x) => x.id === el.dataset.id);
@@ -1180,6 +1250,11 @@ window.addEventListener("hashchange", () => {
 });
 
 document.addEventListener("input", (event) => {
+  if (event.target.id === "model-search") {
+    state.modelFilter.query = event.target.value;
+    $("#model-list").innerHTML = renderModelList();
+    return;
+  }
   if (event.target.id === "composer") autosize(event.target);
 });
 
@@ -1221,7 +1296,7 @@ async function start() {
   if (csrf()) {
     try {
       state.session = await api.session();
-      await Promise.all([loadAllowance(), loadChats()]);
+      await Promise.all([loadAllowance(), loadChats(), loadModels()]);
     } catch {
       state.session = null;
     }

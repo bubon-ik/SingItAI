@@ -25,9 +25,11 @@ plus everything SIGN402_ALLOWANCE_* the lane itself needs.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -123,6 +125,8 @@ SHOP_ROUTES = {
     ("POST", "/shop/bitrefill/buy"): "bitrefill-buy",
     ("GET", "/purchases"): "purchases",
     ("POST", "/purchases/reveal"): "purchase-reveal",
+    ("GET", "/chat/models"): "venice-models",
+    ("POST", "/chat/model"): "venice-model",
 }
 
 
@@ -204,6 +208,8 @@ class WebApi:
             forwarded = dict(body)
             if method == "GET" and path == "/purchases":
                 forwarded = {"offset": body.get("offset", 0)}
+            elif method == "GET":
+                forwarded = {}
             status, reply = self.shop(SHOP_ROUTES[(method, path)], account, forwarded)
             return status, _public_text(reply), {}
         if method == "GET" and path == "/allowance":
@@ -327,6 +333,28 @@ class WebApi:
         return self._public(result)
 
 
+# The page's own scripts and styles, as the page references them: `app.css`, `main.js`, `from "./api.js"`.
+PAGE_ASSET = re.compile(r'((?:src|href)="|from\s+")(\.?/?[\w-]+\.(?:js|css))"')
+
+
+def page_version(app_dir: Path) -> str:
+    """A short hash of the page's files, so a new deploy is a new URL for every one of them.
+
+    Caches in front of the page (Cloudflare sets its own browser TTL) may keep a file for
+    hours; versioned references keep a browser from mixing an old script with a new one.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(app_dir.glob("*")):
+        if path.is_file():
+            stat = path.stat()
+            digest.update(f"{path.name}:{stat.st_size}:{stat.st_mtime_ns};".encode())
+    return digest.hexdigest()[:12]
+
+
+def versioned(text: str, version: str) -> str:
+    return PAGE_ASSET.sub(lambda m: f'{m.group(1)}{m.group(2)}?v={version}"', text)
+
+
 class WebHandler(BaseHTTPRequestHandler):
     server_version = "SingItWeb/1"
 
@@ -402,6 +430,9 @@ class WebHandler(BaseHTTPRequestHandler):
             self._send(404, {"ok": False, "error": "not_found", "message": "No such page."})
             return
         data = target.read_bytes()
+        app_dir = (root / "app").resolve()
+        if target.parent == app_dir and target.suffix in (".html", ".js"):
+            data = versioned(data.decode("utf-8"), page_version(app_dir)).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", STATIC_TYPES.get(target.suffix, "application/octet-stream"))
         self.send_header("Cache-Control", "no-cache")

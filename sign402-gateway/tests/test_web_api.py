@@ -666,3 +666,21 @@ class StaticPageTests(unittest.TestCase):
         self.assertEqual(self.api.handle.call_args.kwargs["client"], "203.0.113.7")
         self.get("/web/v1/session", {"X-Forwarded-For": "1.1.1.1, 198.51.100.2"})
         self.assertEqual(self.api.handle.call_args.kwargs["client"], "198.51.100.2")
+
+
+class PageVersionTests(unittest.TestCase):
+    def test_the_pages_own_scripts_and_styles_carry_one_version(self):
+        from sign402_gateway.web_api import page_version, versioned
+        html = ('<link rel="stylesheet" href="app.css"><link rel="icon" href="../assets/favicon.svg">'
+                '<link href="https://fonts.googleapis.com/css2?family=Geist" rel="stylesheet">'
+                '<script src="config.js"></script><script type="module" src="main.js"></script>')
+        self.assertEqual(versioned(html, "abc"), html.replace('app.css"', 'app.css?v=abc"')
+                         .replace('config.js"', 'config.js?v=abc"').replace('main.js"', 'main.js?v=abc"'))
+        js = 'import { api } from "./api.js";\n} from "./wallet.js";\nconst x = "https://cdn.jsdelivr.net/npm/a.js";'
+        self.assertEqual(versioned(js, "abc"), js.replace('api.js"', 'api.js?v=abc"').replace('wallet.js"', 'wallet.js?v=abc"'))
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "main.js"
+            page.write_text("a")
+            before = page_version(Path(tmp))
+            page.write_text("ab")
+            self.assertNotEqual(page_version(Path(tmp)), before)
