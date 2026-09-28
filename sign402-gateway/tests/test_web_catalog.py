@@ -58,3 +58,9 @@ class CatalogSearchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PriceTextTests(unittest.TestCase):
+    def test_whole_prices_keep_their_zeros(self):
+        self.assertEqual([web_internal._usd(a) for a in (20_000_000, 10_000_000, 1_000, 5_500_000, 0)],
+                         ["20", "10", "0.001", "5.5", "0"])

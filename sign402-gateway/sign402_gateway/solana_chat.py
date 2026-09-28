@@ -56,11 +56,20 @@ class SolanaBridge:
         self.rpc = rpc or os.environ.get('SOLANA_RPC_URL') or 'https://api.mainnet-beta.solana.com'
 
     def __call__(self, user_id, payer, operation, **payload):
+        key = self.wallets.decrypt_private_key_for_future_signing(str(user_id), chain='solana')
+        try:
+            return self.run(user_id, payer, key, operation, **payload)
+        finally:
+            key = None
+
+    def run(self, user_id, payer, key, operation, fee_payer_key=None, **payload):
+        """Run one bridge operation for `payer` with its key (and our fee payer's, when it pays fees)."""
         # Isolate each authenticated identity and wallet, even if a caller
         # supplies someone else's quote id. Secrets travel only on stdin.
         directory = self.directory / hashlib.sha256(f'{user_id}:{payer}'.encode()).hexdigest()
-        key = self.wallets.decrypt_private_key_for_future_signing(str(user_id), chain='solana')
         request = dict(payload, operation=operation, payer=payer, privateKey=key)
+        if fee_payer_key:
+            request['feePayerKey'] = fee_payer_key
         env = {k: v for k, v in os.environ.items() if k in ('PATH', 'HOME', 'LANG', 'SSL_CERT_FILE', 'SSL_CERT_DIR')}
         env.update(SINGIT_STATE_DIR=str(directory), SOLANA_RPC_URL=self.rpc, NODE_NO_WARNINGS='1')
         try:
@@ -69,10 +78,11 @@ class SolanaBridge:
                 timeout=240, check=False)
             response = json.loads(process.stdout)
         except Exception:
-            raise SolanaChatError('BRIDGE_UNAVAILABLE', 'Could not complete the Exa request. Check search payment status before trying again.' if operation.startswith('exa-') else 'Could not complete the Venice request. Check payment status before trying another top-up.') from None
+            raise SolanaChatError('BRIDGE_UNAVAILABLE', 'Could not complete the Exa request. Check search payment status before trying again.' if operation.startswith('exa-') else 'Could not reach Solana. Nothing was sent; try again shortly.' if operation.startswith('allowance-') else 'Could not complete the Venice request. Check payment status before trying another top-up.') from None
         finally:
             request.pop('privateKey', None)
-            key = None
+            request.pop('feePayerKey', None)
+            key = fee_payer_key = None
         if not isinstance(response, dict) or not response.get('ok'):
             code = response.get('code', 'BRIDGE_FAILED') if isinstance(response, dict) else 'BRIDGE_FAILED'
             messages = {
@@ -83,6 +93,15 @@ class SolanaBridge:
                 'PAYMENT_UNCERTAIN': 'The payment result is uncertain. Check payment status; do not pay again.',
                 'TRANSACTION_REQUIRED': 'No transaction receipt is available yet. Contact support with the quote ID; do not pay again.',
             }
+            if operation.startswith('allowance-'):
+                messages.update(
+                    NO_USDC_ACCOUNT='This wallet has no USDC on Solana yet. Add some USDC first.',
+                    TRANSACTION_MISMATCH='Your wallet signed something other than what was prepared. Nothing was sent.',
+                    SIGNATURE_REQUIRED='Your wallet did not sign the transaction. Nothing was sent.',
+                    RPC_UNAVAILABLE='Could not reach Solana. Nothing was sent; try again shortly.',
+                    FEE_PAYER_REQUIRED='Solana payments are not set up on this server yet.',
+                    INVALID_TOKEN_ACCOUNT='Your Solana USDC account looks unusual; it was not touched.',
+                    INVALID_AMOUNT='That amount is out of range.')
             if operation.startswith('exa-'):
                 messages.update(EXA_RATE_LIMIT='Exa is rate limited. Try again later; no search was submitted.',
                     EXA_PAYMENT_UNCERTAIN='Search payment is uncertain. Check search payment status; do not pay again.',

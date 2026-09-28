@@ -109,7 +109,7 @@ def _limits_from_limiter(server: Any, gw: Any, account: str) -> None:
 
 
 def _usd(atomic: int) -> str:
-    return f"{Decimal(atomic) / Decimal(1_000_000):f}".rstrip("0").rstrip(".") or "0"
+    return f"{Decimal(atomic) / Decimal(1_000_000):.6f}".rstrip("0").rstrip(".")  # .6f: never strip a whole number
 
 
 def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
