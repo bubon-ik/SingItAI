@@ -134,6 +134,15 @@ class BitrefillX402Tests(unittest.TestCase):
         for secret in ("QUO-8812-7731-0042", "abc123secret"):
             self.assertNotIn(secret, dumped)
 
+    def test_every_kind_of_code_becomes_a_labelled_field(self):
+        self.assertEqual(ab.redemption_fields({"code": "WOLT-AB12-CD34", "pin": "4471", "instructions": "Add it in the app."}),
+                         [{"label": "Code", "value": "WOLT-AB12-CD34", "kind": "code"}, {"label": "PIN", "value": "4471", "kind": "code"}])
+        self.assertEqual(ab.redemption_fields([{"link": "https://br.quocardpay.jp/card/x", "expirationTime": "2027-03-27T00:00:00.000Z"}]),
+                         [{"label": "Link", "value": "https://br.quocardpay.jp/card/x", "kind": "link"},
+                          {"label": "Expires", "value": "2027-03-27T00:00:00.000Z", "kind": "date"}])
+        self.assertEqual(ab.redemption_fields({"esim_install_link": "https://esim.example/lpa"})[0]["label"], "Install link")
+        self.assertEqual(ab.redemption_fields("ALZA-VOUCHER-1"), [{"label": "Code", "value": "ALZA-VOUCHER-1", "kind": "code"}])
+
     def test_usage_instructions_never_pass_a_bare_code_or_code_like_token(self):
         self.assertEqual(ab.usage_instructions("ABCD-1234-EFGH"), "")
         self.assertEqual(ab.usage_instructions([{"pin": "9921", "other": "Enter PIN 9921 at checkout. Serial X9Y8Z7W6V5U4."}]),

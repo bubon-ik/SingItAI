@@ -870,11 +870,11 @@ class WebAgent:
         title = f"{bought.get('name') or name} {bought.get('package')} {bought.get('packageCurrency') or ''}".strip()
         delivered = bought.get("delivered", True)
         return say(lang, f"Bought {title} for {bought.get('priceUsd')} USDC on Solana. "
-                         + ("Your code is ready in Purchases — shown once." if delivered else "Bitrefill is still delivering it."),
+                         + ("Press Show code below — it is shown once." if delivered else "Bitrefill is still delivering it."),
                    f"Купил {title} за {bought.get('priceUsd')} USDC на Solana. "
-                   + ("Код в разделе «Покупки» — показывается один раз." if delivered else "Bitrefill ещё доставляет.")), [
+                   + ("Нажмите «Show code» ниже — код показывается один раз." if delivered else "Bitrefill ещё доставляет.")), [
             {"type": "receipt", "name": title, "price": bought.get("priceUsd"), "invoiceId": bought.get("invoiceId"),
-             "giftcard": True, **({"howToUse": bought["howToUse"]} if bought.get("howToUse") else {})}]
+             "giftcard": True, "purchaseId": bought.get("purchaseId"), **({"howToUse": bought["howToUse"]} if bought.get("howToUse") else {})}]
 
     def _buy_giftcard(self, account, lang, slug, package, name):
         blocked = self._ready(account, lang)
@@ -887,11 +887,11 @@ class WebAgent:
         title = f"{quote.get('name') or name} {quote.get('package')} {quote.get('packageCurrency') or ''}".strip()
         delivered = bought.get("delivered", True)
         return say(lang, f"Bought {title} for {quote.get('priceUsd')} USDC. "
-                         + ("Your code is ready in Purchases — shown once." if delivered else "Bitrefill is still delivering it."),
+                         + ("Press Show code below — it is shown once." if delivered else "Bitrefill is still delivering it."),
                    f"Купил {title} за {quote.get('priceUsd')} USDC. "
-                   + ("Код в разделе «Покупки» — показывается один раз." if delivered else "Bitrefill ещё доставляет.")), [
+                   + ("Нажмите «Show code» ниже — код показывается один раз." if delivered else "Bitrefill ещё доставляет.")), [
             {"type": "receipt", "name": title, "price": quote.get("priceUsd"), "invoiceId": bought.get("invoiceId"),
-             "giftcard": True, **({"howToUse": bought["howToUse"]} if bought.get("howToUse") else {})}]
+             "giftcard": True, "purchaseId": bought.get("purchaseId"), **({"howToUse": bought["howToUse"]} if bought.get("howToUse") else {})}]
 
     def _venice_topup(self, account: str, chat_id: str, lang: str, action: Mapping[str, Any]) -> tuple[str, list]:
         """The top-up the user confirmed on the card, then the answer they were waiting for."""

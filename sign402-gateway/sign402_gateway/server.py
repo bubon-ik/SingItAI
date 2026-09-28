@@ -8293,7 +8293,8 @@ def _allowance_bitrefill_buy(server: Any, user_id: str, quote_id: str, *, web_co
         )
         settled = True
         server.user_event_store.write(user_id, result)
-        return result
+        from .purchase_history import purchase_id as _purchase_id
+        return {**result, "purchaseId": _purchase_id(result)}  # the chat's receipt opens its code by this
     finally:
         if not settled:
             _release_user_wallet_spend(server, reservation_id)
@@ -8327,7 +8328,11 @@ def _allowance_bitrefill_reveal(server: Any, event: dict[str, Any], user_id: str
             lines.extend(f"{key}: {value}" for key, value in item.items() if value not in (None, "", {}))
         else:
             lines.append(str(item))
-    return {"ok": True, "telegramText": "\n".join(lines), "invoiceId": invoice_id}
+    from .allowance_bitrefill import redemption_fields
+    first = next((i for i in (codes if isinstance(codes, list) else [codes]) if isinstance(i, dict)), {})
+    return {"ok": True, "telegramText": "\n".join(lines), "invoiceId": invoice_id, "fields": redemption_fields(codes),
+            "howToUse": " ".join(str(first[k]) for k in ("instructions", "redemption_instructions", "how_to_redeem")
+                                 if isinstance(first.get(k), str))}
 
 
 def _last_bitrefill_purchase_response(

@@ -161,6 +161,34 @@ def usage_instructions(redemption: Any) -> str:
     return text[:397] + "…" if len(text) > 400 else text
 
 
+FIELD_LABELS = {"code": "Code", "pin": "PIN", "link": "Link", "url": "Link", "voucher": "Voucher", "barcode": "Barcode",
+                "serial": "Serial", "serial_number": "Serial", "password": "Password", "claim_code": "Code",
+                "activation_code": "Activation code", "esim_install_link": "Install link", "lpa": "LPA",
+                "expirationtime": "Expires", "expiration_date": "Expires", "expires_at": "Expires", "expiry": "Expires"}
+
+
+def redemption_fields(codes: Any) -> list[dict[str, str]]:
+    """What redeems a delivered product, labelled for the page: codes to copy, links to open.
+
+    Bitrefill sends different shapes per product (a Wolt code, an Alza voucher, a QUO Card Pay link,
+    an eSIM install link…); every non-empty field is kept, in Bitrefill's order. Only for showing
+    once to the owner: never stored, never logged, never given to a model.
+    """
+    fields: list[dict[str, str]] = []
+    for item in codes if isinstance(codes, list) else [codes]:
+        if isinstance(item, dict):
+            for key, value in item.items():
+                if value in (None, "", {}, []) or str(key).lower() in INSTRUCTION_KEYS:
+                    continue
+                text = str(value)
+                label = FIELD_LABELS.get(str(key).lower(), str(key).replace("_", " ").capitalize())
+                kind = "link" if text.startswith(("https://", "http://")) else "date" if label == "Expires" else "code"
+                fields.append({"label": label, "value": text, "kind": kind})
+        elif item not in (None, ""):
+            fields.append({"label": "Code", "value": str(item), "kind": "link" if str(item).startswith("http") else "code"})
+    return fields
+
+
 def _find(obj: Any, name: str) -> Any:
     if isinstance(obj, dict):
         if obj.get(name) not in (None, ""):

@@ -630,6 +630,24 @@ function renderShop() {
     </div>`;
 }
 
+// A code as Bitrefill delivers it: a code or PIN to copy, a link to open, when it expires.
+function renderCode(shown) {
+  if (typeof shown === "string") shown = { text: shown, fields: [] };
+  if (!shown.fields?.length) return `<pre class="result">${esc(shown.text)}</pre>`;
+  const row = (f) => f.kind === "link"
+    ? `<div class="code-row"><span class="label">${esc(f.label)}</span>
+        <div class="code-actions"><a class="btn btn-primary btn-sm" href="${esc(f.value)}" target="_blank" rel="noopener noreferrer">Open</a>
+        <button class="btn btn-ghost btn-sm" data-action="copy-text" data-text="${esc(f.value)}">Copy link</button></div></div>`
+    : f.kind === "date"
+      ? `<div class="code-row"><span class="label">${esc(f.label)}</span><span class="faint">${esc(new Date(f.value).toString() === "Invalid Date" ? f.value : new Date(f.value).toLocaleDateString())}</span></div>`
+      : `<div class="code-row"><span class="label">${esc(f.label)}</span>
+          <div class="code-actions"><span class="code-value mono">${esc(f.value)}</span>
+          <button class="btn btn-ghost btn-sm" data-action="copy-text" data-text="${esc(f.value)}">Copy</button></div></div>`;
+  return `<div class="code-box">${shown.fields.map(row).join("")}
+    ${shown.howToUse ? `<div class="how-to-use"><span class="label">How to use</span><p>${esc(shown.howToUse)}</p></div>` : ""}
+    <p class="hint">Shown once. Save it now; it is also in the email Bitrefill sent you.</p></div>`;
+}
+
 function renderPurchases() {
   if (!state.purchases && !state.modal) queueMicrotask(loadPurchases);
   const items = state.purchases || [];
@@ -643,7 +661,7 @@ function renderPurchases() {
             <h3>${esc(p.name)}</h3>
             <p>${esc([p.denomination, p.paid, p.network, p.status].filter(Boolean).join(" · "))}
               ${p.transactionUrl ? ` · <a href="${esc(p.transactionUrl)}" target="_blank" rel="noopener">transaction ↗</a>` : ""}</p>
-            ${state.revealed[p.id] ? `<pre class="result">${esc(state.revealed[p.id])}</pre>` : ""}
+            ${state.revealed[p.id] ? renderCode(state.revealed[p.id]) : ""}
           </div>
           ${p.canReveal && !state.revealed[p.id] ? `<button class="btn btn-ghost btn-sm" data-action="reveal" data-id="${esc(p.id)}">Show code once</button>` : ""}
         </li>`).join("")}</ul>` : `<p>${state.purchases ? "Nothing yet." : "Loading…"}</p>`}
@@ -1057,7 +1075,9 @@ function renderCard(card, key) {
       ${card.txId ? `<p class="faint"><a href="https://basescan.org/tx/${esc(card.txId)}" target="_blank" rel="noopener">Transaction ↗</a></p>` : ""}
       ${card.result ? `<pre class="result">${esc(card.result)}</pre>` : ""}
       ${card.howToUse ? `<div class="how-to-use"><span class="label">How to use</span><p>${esc(card.howToUse)}</p></div>` : ""}
-      ${card.giftcard ? `<div class="row"><button class="btn btn-ghost btn-sm" data-action="go" data-view="purchases">Show my code</button></div>` : ""}</div>`;
+      ${card.giftcard && state.revealed[card.purchaseId] ? renderCode(state.revealed[card.purchaseId])
+        : card.giftcard && card.purchaseId ? `<div class="row"><button class="btn btn-ghost btn-sm" data-action="reveal" data-id="${esc(card.purchaseId)}">Show code</button></div>`
+        : card.giftcard ? `<div class="row"><button class="btn btn-ghost btn-sm" data-action="go" data-view="purchases">Show my code</button></div>` : ""}</div>`;
   }
   if (card.type === "purchases") {
     return `<div class="card">${(card.items || []).map((p) => `<div class="product"><div><h3>${esc(p.name)}</h3>
@@ -1391,9 +1411,15 @@ const actions = {
   "search-bitrefill": searchBitrefill,
   "quote-bitrefill": (el) => quoteBitrefill(el.dataset.slug),
   buy,
+  // Shown once, kept only in this page's memory: never in the chat history or the browser's storage.
   reveal: (el) => busy("Fetching the code…", async () => {
-    state.revealed[el.dataset.id] = (await api.reveal(el.dataset.id)).text || "No code.";
+    const shown = await api.reveal(el.dataset.id);
+    state.revealed[el.dataset.id] = { text: shown.text || "No code.", fields: shown.fields || [], howToUse: shown.howToUse || "" };
   }),
+  "copy-text": async (el) => {
+    try { await navigator.clipboard.writeText(el.dataset.text); toast("Copied."); }
+    catch { toast("Could not copy; select it instead.", true); }
+  },
   "new-chat": () => {
     Object.assign(state, { chatId: null, messages: [], view: "chat", menuOpen: false });
     showChatInUrl();

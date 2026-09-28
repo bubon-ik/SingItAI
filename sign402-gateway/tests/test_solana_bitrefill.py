@@ -97,6 +97,7 @@ class SolanaBitrefillTests(unittest.TestCase):
         pay = [c for c in self.bridge.calls if c[0] == "bitrefill-invoice-pay"][0][4]
         self.assertEqual(pay, {"url": sb.PAY_URL, "invoiceId": INVOICE, "maxAmount": "9440000", "owner": OWNER})
         self.assertEqual((bought["priceUsd"], bought["delivered"]), ("9.44", True))
+        self.assertEqual(len(bought["purchaseId"]), 24)  # the chat's receipt opens its code by this
         self.assertEqual(bought["howToUse"], "Enter the code … at checkout on alza.cz.")
         recorded = self.events.write.call_args.args[1]
         self.assertEqual((recorded["mode"], recorded["fulfillmentToken"]), ("bitrefill_mcp_solana", "tok-secret"))
@@ -118,6 +119,8 @@ class SolanaBitrefillTests(unittest.TestCase):
                  "quoteId": INVOICE, "bitrefill": {}}
         shown = sb.reveal(self.server, event, ACCOUNT)
         self.assertIn("ALZA-9999-8888", shown["telegramText"])
+        self.assertEqual(shown["fields"], [{"label": "Code", "value": "ALZA-9999-8888", "kind": "code"}])
+        self.assertIn("alza.cz", shown["howToUse"])
         self.events.clear_fulfillment_token.assert_called_once()
         self.assertIn("already shown once", sb.reveal(self.server, {**event, "fulfillmentToken": ""}, ACCOUNT)["telegramText"])
 

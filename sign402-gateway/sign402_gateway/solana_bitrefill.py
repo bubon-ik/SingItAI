@@ -143,7 +143,9 @@ def buy(server: Any, account: str, slug: Any, package: Any, *, sleep: Any = time
         server.user_event_store.write(account, event)
     else:
         server.user_event_store.write(account, {k: v for k, v in event.items() if k != "fulfillmentToken"})
-    return {"ok": True, "invoiceId": invoice_id, "delivered": delivered, "name": name, "package": quote["packageValue"],
+    from .purchase_history import purchase_id
+    return {"ok": True, "invoiceId": invoice_id, "purchaseId": purchase_id(event), "delivered": delivered, "name": name,
+            "package": quote["packageValue"],
             "packageCurrency": quote.get("currency") or "", "priceUsd": f"{Decimal(amount) / 1_000_000:f}".rstrip("0").rstrip("."),
             "txId": paid.get("transaction"), **({"howToUse": how_to_use} if how_to_use else {})}
 
@@ -166,6 +168,10 @@ def reveal(server: Any, event: dict[str, Any], account: str) -> dict[str, Any]:
             lines.extend(f"{key}: {value}" for key, value in item.items() if value not in (None, "", {}))
         else:
             lines.append(str(item))
+    from .allowance_bitrefill import redemption_fields
     from .purchase_history import purchase_id
     server.user_event_store.clear_fulfillment_token(account, purchase_id(event))
-    return {"ok": True, "telegramText": "\n".join(lines)}
+    first = next((i for i in (codes if isinstance(codes, list) else [codes]) if isinstance(i, dict)), {})
+    return {"ok": True, "telegramText": "\n".join(lines), "fields": redemption_fields(codes),
+            "howToUse": " ".join(str(first[k]) for k in ("instructions", "redemption_instructions", "how_to_redeem")
+                                 if isinstance(first.get(k), str))}
