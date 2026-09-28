@@ -432,6 +432,9 @@ function renderSetup(heading) {
 // most clearly), otherwise — or after a transaction the wallet could not send —
 // a gas-free signature we send. One sentence says which.
 function methodSwitch() {
+  if (state.session?.chain === "solana") {
+    return `<p class="hint">Your wallet will ask you to approve once; its Solana network fee is about 0.000005 SOL.</p>`;
+  }
   return `<p class="hint">${method() === "permit"
     ? "Your wallet will ask you to sign; we send it to Base and pay the gas."
     : "Your wallet will ask you to confirm a transaction; it costs a few cents of ETH."}</p>`;
@@ -987,8 +990,11 @@ function renderCard(card, key) {
     const grant = card.kind === "grant";
     if (state.done[key]) return `<div class="card done"><h3>${grant ? `Approved ${esc(card.amount)} USDC` : "Revoked"} ✓</h3></div>`;
     return `<div class="card accent"><h3>${grant ? `Approve ${esc(card.amount)} USDC for your agent` : `Revoke the current limiter ${esc(short(card.limiter || ""))}`}</h3>
-      <p class="faint">${grant ? "Your wallet will show an approval for your limiter" : "Your wallet will show an approval of 0 for your limiter"}
-        ${card.limiter ? ` <span class="mono">${esc(short(card.limiter))}</span>` : ""}. Nothing moves until a purchase needs it.</p>
+      <p class="faint">${state.session?.chain === "solana"
+        ? (grant ? "Your wallet will let your agent" : "Your wallet will take back the permission of your agent")
+        : (grant ? "Your wallet will show an approval for your limiter" : "Your wallet will show an approval of 0 for your limiter")}
+        ${card.limiter ? ` <span class="mono">${esc(short(card.limiter))}</span>` : ""}${state.session?.chain === "solana" && grant
+          ? ` spend up to ${esc(card.amount)} USDC from your account` : ""}. Nothing moves until a purchase needs it.</p>
       <div style="margin-top:10px">${methodSwitch()}</div>
       <div class="row"><button class="btn btn-primary btn-sm has-orb" data-action="card-wallet" data-key="${esc(key)}"
         data-kind="${esc(card.kind)}" data-amount="${esc(card.amount || "")}">${grant ? "Approve in wallet" : "Revoke in wallet"}${orb}</button></div></div>`;
@@ -1601,7 +1607,25 @@ document.addEventListener("keydown", (event) => {
 
 // -- start --
 
+// Caches in front of the page (Cloudflare's browser TTL) can keep an old copy of it for hours.
+// The running scripts carry the page's version (?v=…); if the page now names another, reload once.
+async function reloadIfStale() {
+  const running = new URL(import.meta.url).searchParams.get("v");
+  if (!running) return false;
+  try {
+    const html = await (await fetch(location.pathname, { cache: "no-store" })).text();
+    const published = (html.match(/main\.js\?v=([a-f0-9]+)/) || [])[1];
+    if (published && published !== running && sessionStorage.getItem("singit.reloadedFor") !== published) {
+      sessionStorage.setItem("singit.reloadedFor", published);
+      location.replace(`${location.pathname}?v=${published}${location.hash}`);  // a URL no cache holds
+      return true;
+    }
+  } catch { /* offline or blocked: keep the page as it is */ }
+  return false;
+}
+
 async function start() {
+  if (await reloadIfStale()) return;
   discover(() => { if (state.modal?.type === "wallets") renderModal(); });
   if (appKitConfigured()) watchAppKit(setWallet).catch((error) => toast(explain(error), true));
   if (csrf()) {
