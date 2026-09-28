@@ -151,3 +151,17 @@ class SolanaBitrefillTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SolanaInternalRoutesTests(SolanaBitrefillTests):
+    def test_the_gateway_routes_a_solana_accounts_bitrefill_calls_to_solana(self):
+        from sign402_gateway import web_internal
+        self.server.allowance = Mock()
+        self.server.web_accounts = SimpleNamespace(account=lambda account: {"account_id": account})
+        status, offered = web_internal.handle(self.server, "bitrefill-packages", {"account": ACCOUNT, "productId": "alza-czech-republic"})
+        self.assertEqual((status, offered["packages"][0]["priceUsd"]), (200, "9.44"))
+        status, reply = web_internal.handle(self.server, "bitrefill-solana-buy", {"account": ACCOUNT, "productId": "x", "package": "200"})
+        self.assertEqual((status, reply["error"]), (409, "email_needed"))
+        web_internal.handle(self.server, "buyer-email-set", {"account": ACCOUNT, "email": "me@example.com"})
+        self.assertTrue(web_internal.handle(self.server, "buyer-email", {"account": ACCOUNT})[1]["hasEmail"])
+        self.server.allowance.lane_for.assert_not_called()  # the Base lane is never asked

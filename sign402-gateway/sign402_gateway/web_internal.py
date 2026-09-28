@@ -163,17 +163,6 @@ def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict
             return web_venice.choose_model(server, account, payload.get("model"))
         return web_venice.chat(server, gw, account, payload.get("messages"))
 
-    if action in ("bitrefill-search", "bitrefill-packages", "bitrefill-quote", "bitrefill-buy"):
-        if action == "bitrefill-buy":
-            _limits_from_limiter(server, gw, account)
-        result = gw._allowance_bitrefill_action(server, account, action, payload, web_confirmed=True)
-        if result.get("ok", True) is False:
-            return 400, result
-        return 200, {"ok": True, **result}
-
-    if action == "catalog-search":
-        return catalog_search(server, payload)
-
     if account.startswith(SOLANA_PREFIX) and action in ("bitrefill-packages", "bitrefill-solana-buy", "buyer-email",
                                                         "buyer-email-set"):
         from . import solana_bitrefill  # noqa: PLC0415
@@ -188,6 +177,17 @@ def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict
             return 200, solana_bitrefill.buy(server, account, payload.get("productId"), payload.get("package"))
         except solana_bitrefill.NeedsEmail as exc:
             return 409, {"ok": False, "error": "email_needed", "text": str(exc)}
+
+    if action in ("bitrefill-search", "bitrefill-packages", "bitrefill-quote", "bitrefill-buy"):
+        if action == "bitrefill-buy":
+            _limits_from_limiter(server, gw, account)
+        result = gw._allowance_bitrefill_action(server, account, action, payload, web_confirmed=True)
+        if result.get("ok", True) is False:
+            return 400, result
+        return 200, {"ok": True, **result}
+
+    if action == "catalog-search":
+        return catalog_search(server, payload)
 
     if action == "purchases":
         summaries = server.user_event_store.summaries(account)
