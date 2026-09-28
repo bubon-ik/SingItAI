@@ -268,8 +268,9 @@ def topup_solana(server: Any, account: str, quote_id: Any, approval_hash: Any) -
     if status.get("attempted"):
         return 409, {"ok": False, "error": "already_attempted", "text": "This top-up was already sent. Nothing more was paid."}
     amount = _atomic(quote["amountUsdc"])
-    lane.fund(account, amount, "Venice AI credit")
-    paid = lane._call(account, "pay", quoteId=quote["quoteId"], approvalHash=approval_hash)
+    owner = lane.owner(account)
+    paid = lane.spend(account, amount, "Venice AI credit", lambda: lane._call(
+        account, "pay", quoteId=quote["quoteId"], approvalHash=approval_hash, owner=owner))
     ok = paid.get("state") == "confirmed"
     events = getattr(server, "user_event_store", None)
     if ok and events is not None:

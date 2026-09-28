@@ -709,7 +709,7 @@ function renderModal() {
         </div>
       </div>
       <p class="note warn">Send only <b>USDC</b> on the <b>${solana ? "Solana" : "Base"}</b> network. Other tokens or networks can be lost.</p>
-      ${solana ? `<p class="hint">No SOL needed: SingIt pays the network fees for your agent's allowance.</p>` : ""}
+      ${solana ? `<p class="hint">Keep a little SOL (about 0.00002) for your one approval. Purchases need no SOL: sellers pay that fee.</p>` : ""}
       <div class="actions" style="margin-top:16px">
         ${byCard ? `<button class="btn btn-primary" data-action="buy-with-card">Buy USDC with a card</button>` : ""}
         <button class="btn btn-ghost" data-action="dismiss-button">Done</button>

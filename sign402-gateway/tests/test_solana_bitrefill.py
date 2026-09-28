@@ -12,7 +12,7 @@ from sign402_gateway import solana_bitrefill as sb
 from sign402_gateway import web_agent as wg
 from sign402_gateway.agent_allowance import AllowanceError
 from sign402_gateway.solana_allowance import SolanaAllowanceService, SolanaAllowanceStore
-from tests.test_solana_allowance import ACCOUNT, FakeBridge
+from tests.test_solana_allowance import ACCOUNT, OWNER, FakeBridge
 
 INVOICE = "c2b27180-610e-4132-af77-ad42fc0ac444"
 
@@ -21,7 +21,7 @@ class Bridge(FakeBridge):
     def run(self, user_id, payer, key, operation, fee_payer_key=None, **payload):
         if operation == "bitrefill-invoice-pay":
             self.calls.append((operation, payer, True, None, payload))
-            self.agent_usdc -= int(payload["maxAmount"])
+            self.charge(int(payload["maxAmount"]))
             return {"invoiceId": payload["invoiceId"], "state": "accepted", "transaction": "4" * 88}
         return super().run(user_id, payer, key, operation, fee_payer_key, **payload)
 
@@ -95,8 +95,7 @@ class SolanaBitrefillTests(unittest.TestCase):
         self.assertEqual(order[0], "buy-products")
         self.assertEqual((order[1]["payment_method"], order[1]["email"]), ("usdc_solana", "me@example.com"))
         pay = [c for c in self.bridge.calls if c[0] == "bitrefill-invoice-pay"][0][4]
-        self.assertEqual(pay, {"url": sb.PAY_URL, "invoiceId": INVOICE, "maxAmount": "9440000"})
-        self.assertEqual([c[0] for c in self.bridge.calls if c[0] == "allowance-pull"], ["allowance-pull"])
+        self.assertEqual(pay, {"url": sb.PAY_URL, "invoiceId": INVOICE, "maxAmount": "9440000", "owner": OWNER})
         self.assertEqual((bought["priceUsd"], bought["delivered"]), ("9.44", True))
         self.assertEqual(bought["howToUse"], "Enter the code … at checkout on alza.cz.")
         recorded = self.events.write.call_args.args[1]
@@ -112,7 +111,7 @@ class SolanaBitrefillTests(unittest.TestCase):
         self.lane.setup(ACCOUNT, "20", "5", "30")
         with self.assertRaisesRegex(AllowanceError, "does not fit your limits"):
             self.buy()
-        self.assertEqual([c for c in self.bridge.calls if c[0] in ("allowance-pull", "bitrefill-invoice-pay")], [])
+        self.assertEqual([c for c in self.bridge.calls if c[0] == "bitrefill-invoice-pay"], [])
 
     def test_the_code_is_shown_once_from_the_encrypted_token(self):
         event = {"mode": "bitrefill_mcp_solana", "invoiceId": INVOICE, "productName": "Alza CZ", "fulfillmentToken": "tok-secret",

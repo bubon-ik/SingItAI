@@ -18,11 +18,18 @@ class FakeBridge:
 
     def __init__(self):
         self.calls, self.owner_usdc, self.delegated, self.agent_usdc, self.submit_state = [], 20_000_000, 0, 0, "confirmed"
+        self.owner_sol = 7_000_000  # the owner's own SOL pays their approve's fee
+
+    def charge(self, amount):
+        """A purchase paid from the owner's account by the agent as delegate."""
+        self.owner_usdc -= amount
+        self.delegated -= amount
 
     def run(self, user_id, payer, key, operation, fee_payer_key=None, **payload):
         self.calls.append((operation, payer, bool(key), fee_payer_key, payload))
         if operation == "allowance-state":
-            return {"owner": {"amount": str(self.owner_usdc), "delegatedToAgent": str(self.delegated)},
+            return {"owner": {"amount": str(self.owner_usdc), "delegatedToAgent": str(self.delegated),
+                              "solLamports": str(self.owner_sol)},
                     "agent": {"usdcAtomic": str(self.agent_usdc)}}
         if operation == "allowance-prepare":
             return {"transaction": "BASE64TX", "messageHash": "hash-" + payload["kind"] + payload["amount"]}
@@ -65,49 +72,64 @@ class SolanaAllowanceTests(unittest.TestCase):
         self.assertEqual((prepared["chain"], prepared["transaction"]), ("solana", "BASE64TX"))
         self.assertIn("spend up to 20 USDC", prepared["walletShows"])
         prepare_call = self.bridge.calls[-1]
-        self.assertEqual(prepare_call[4], {"owner": OWNER, "kind": "approve", "amount": "20000000"})
-        self.assertEqual(prepare_call[3], "FEE-PAYER-KEY")  # our fee payer pays the network fee
+        self.assertEqual(prepare_call[4], {"owner": OWNER, "kind": "approve", "amount": "20000000", "ownerPaysFee": True})
+        self.assertIsNone(prepare_call[3])  # the owner pays this fee from their SOL; ours is not used
         done = self.service.submit_wallet(ACCOUNT, prepared["operation"], "SIGNED")
         self.assertEqual((done["state"], done["detail"]), ("DONE", "Allowance now 20 USDC."))
         self.assertEqual(self.bridge.calls[-1][4]["messageHash"], "hash-approve20000000")  # checked against the prepared one
         status = self.service.status(ACCOUNT)
         self.assertEqual((status["state"], status["allowanceAtomic"], status["remainingTodayAtomic"]), ("granted", 20_000_000, 20_000_000))
 
-    def test_a_purchase_pulls_only_what_it_needs_within_the_limits(self):
-        self.grant()
-        funded = self.service.fund(ACCOUNT, 5_000_000, "Venice credit")
-        self.assertEqual((funded["pulled"], funded["pullTx"]), (5_000_000, "PullTx"))
-        self.bridge.agent_usdc -= 5_000_000  # the merchant was paid from it
-        self.bridge.agent_usdc += 1_000_000  # a leftover from an earlier purchase is used first
-        self.assertEqual(self.service.fund(ACCOUNT, 3_000_000, "x")["pulled"], 2_000_000)
-        self.assertEqual(self.service.status(ACCOUNT)["remainingTodayAtomic"], 12_000_000)
+    def paid(self, amount, state="accepted"):
+        def pay():
+            self.bridge.charge(amount)
+            return {"state": state, "transaction": "Tx"}
+        return pay
 
-    def test_what_is_refused_before_anything_moves(self):
+    def test_a_purchase_is_paid_from_the_owners_account_and_counted(self):
+        self.grant()
+        result = self.service.spend(ACCOUNT, 5_000_000, "Venice credit", self.paid(5_000_000))
+        self.assertEqual(result["state"], "accepted")
+        status = self.service.status(ACCOUNT)
+        self.assertEqual((status["remainingTodayAtomic"], status["allowanceAtomic"]), (15_000_000, 15_000_000))
+        self.assertNotIn("allowance-pull", [c[0] for c in self.bridge.calls])  # no transfer to the agent, no fee for us
+
+    def test_what_is_refused_before_anything_is_paid(self):
+        pay = self.paid(1)
         with self.assertRaises(AllowanceUnavailable):
-            self.service.fund(ACCOUNT, 1, "x")
+            self.service.spend(ACCOUNT, 1, "x", pay)
         self.grant("6")
-        pulls = lambda: [c for c in self.bridge.calls if c[0] == "allowance-pull"]
-        for amount, reason in ((6_000_000, "per-purchase"), (5_000_000, None), (5_000_000, "approval is used up")):
-            with self.subTest(amount=amount):
-                if reason is None:
-                    self.service.fund(ACCOUNT, amount, "ok")
-                    self.bridge.agent_usdc = 0
-                else:
-                    with self.assertRaisesRegex(AllowanceError, reason):
-                        self.service.fund(ACCOUNT, amount, "x")
-        self.assertEqual(len(pulls()), 1)
+        with self.assertRaisesRegex(AllowanceError, "per-purchase"):
+            self.service.spend(ACCOUNT, 6_000_000, "x", pay)
+        self.service.spend(ACCOUNT, 5_000_000, "ok", self.paid(5_000_000))
+        with self.assertRaisesRegex(AllowanceError, "approval is used up"):
+            self.service.spend(ACCOUNT, 5_000_000, "x", pay)
+        self.bridge.delegated, self.bridge.owner_usdc = 5_000_000, 1_000_000
+        with self.assertRaisesRegex(AllowanceError, "holds 1 USDC"):
+            self.service.spend(ACCOUNT, 5_000_000, "x", pay)
         self.clock[0] += 31 * 86400
         with self.assertRaisesRegex(AllowanceError, "expired"):
-            self.service.fund(ACCOUNT, 1, "x")
+            self.service.spend(ACCOUNT, 1, "x", pay)
 
-    def test_the_daily_limit_counts_every_purchase_of_the_day(self):
+    def test_the_daily_limit_counts_every_purchase_of_the_day_but_not_a_refused_one(self):
         self.grant("100")
         self.service.setup(ACCOUNT, "8", "5", "30")
-        self.service.fund(ACCOUNT, 5_000_000, "a")
+        self.service.spend(ACCOUNT, 5_000_000, "a", self.paid(5_000_000))
+        self.service.spend(ACCOUNT, 1_000_000, "refused", self.paid(0, state="uncertain"))
+        self.assertEqual(self.service.status(ACCOUNT)["remainingTodayAtomic"], 3_000_000)
         with self.assertRaisesRegex(AllowanceError, "today's 8 USDC limit"):
-            self.service.fund(ACCOUNT, 4_000_000, "b")
+            self.service.spend(ACCOUNT, 4_000_000, "b", self.paid(4_000_000))
         self.clock[0] += 86400
-        self.service.fund(ACCOUNT, 4_000_000, "b")
+        self.service.spend(ACCOUNT, 4_000_000, "b", self.paid(4_000_000))
+
+    def test_a_wallet_without_sol_uses_our_fee_payer_only_if_there_is_one(self):
+        self.bridge.owner_sol = 0
+        self.service.setup(ACCOUNT, "20", "5", "30")
+        self.service.prepare_wallet(ACCOUNT, "GRANT", amount="20")
+        self.assertEqual(self.bridge.calls[-1][3], "FEE-PAYER-KEY")
+        self.service.fee_payer_key = None
+        with self.assertRaisesRegex(AllowanceError, "needs a little SOL"):
+            self.service.prepare_wallet(ACCOUNT, "GRANT", amount="20")
 
     def test_a_late_or_foreign_submission_is_not_sent(self):
         self.service.setup(ACCOUNT, "20", "5", "30")

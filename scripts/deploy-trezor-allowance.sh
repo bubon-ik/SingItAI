@@ -237,8 +237,9 @@ cat <<TEXT
 
 Send 0.003 ETH on Base to the gas_funder address above; it pays every deployment
 and tops up the guardian and your agent. Then, in Telegram: /allowance.
-Send 0.02 SOL to the solana_fee_payer address above (if listed); it pays the network
-fee of every Solana approve, revoke and purchase pull, and each agent's USDC account.
+The solana_fee_payer above (if listed) is optional: Solana users pay their own approve's
+tiny fee and sellers pay for purchases. Fund it with a little SOL only to serve wallets
+that hold no SOL at all.
 
 Rolled back by: git -C $APP checkout $PREV, reinstall, restore
 $BACKUP/sign402-gateway.env to $ENV_FILE, restart sign402-gateway and hermes-gateway,

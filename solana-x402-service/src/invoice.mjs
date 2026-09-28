@@ -7,6 +7,7 @@
 // before the only submission; an uncertain result is never retried here.
 import { ClientError, NETWORK, USDC } from './config.mjs';
 import { isTransactionId } from './chain.mjs';
+import { assertDelegated } from './allowance.mjs';
 
 export const BITREFILL_PAY_URL = 'https://api.bitrefill.com/x402/invoice/pay';
 
@@ -44,7 +45,7 @@ export class InvoicePayments {
     } catch { throw new ClientError('NETWORK_ERROR', 'Bitrefill did not answer. Nothing was retried.'); }
   }
 
-  async pay({ url, invoiceId, maxAmount }) {
+  async pay({ url, invoiceId, maxAmount, owner = null }) {
     if (url !== BITREFILL_PAY_URL) throw new ClientError('UNSUPPORTED_MERCHANT', 'Only Bitrefill invoices are paid here.');
     if (typeof invoiceId !== 'string' || !/^[0-9a-f-]{8,64}$/i.test(invoiceId)) throw new ClientError('INVALID_INVOICE', 'Invalid invoice.');
     if (!/^[1-9][0-9]*$/.test(String(maxAmount))) throw new ClientError('INVALID_AMOUNT', 'Invalid maximum amount.');
@@ -56,10 +57,16 @@ export class InvoicePayments {
     if (!header) throw new ClientError('INVALID_CHALLENGE', 'Bitrefill sent no payment request.');
     const offer = decode(header);
     const requirement = selectInvoiceRequirement(offer, maxAmount, this.wallet.address);
-    const funds = await this.chain.balances(this.wallet.address);
-    if (BigInt(funds.usdcAtomic) < BigInt(requirement.amount)) throw new ClientError('INSUFFICIENT_USDC', 'The agent does not hold this invoice amount yet.');
     const resource = offer.resource || { url, description: 'Bitrefill invoice', mimeType: 'application/json' };
-    const built = await this.chain.build(requirement, resource, this.wallet);
+    let built;
+    if (owner) {  // straight from the owner's account, the agent as their approved delegate
+      await assertDelegated(this.chain, owner, this.wallet.address, requirement.amount);
+      built = await this.chain.buildDelegated(requirement, resource, this.wallet, owner);
+    } else {
+      const funds = await this.chain.balances(this.wallet.address);
+      if (BigInt(funds.usdcAtomic) < BigInt(requirement.amount)) throw new ClientError('INSUFFICIENT_USDC', 'The agent does not hold this invoice amount yet.');
+      built = await this.chain.build(requirement, resource, this.wallet);
+    }
     this.store.claimInvoice(invoiceId, this.wallet.address, built.messageHash, requirement.amount);
     let response;
     try { response = await this.post(url, { 'PAYMENT-SIGNATURE': Buffer.from(JSON.stringify(built.payload)).toString('base64') }); }

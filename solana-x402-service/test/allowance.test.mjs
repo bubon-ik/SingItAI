@@ -103,3 +103,17 @@ test('the bridge runs allowance operations only for the agent it was given', asy
   await assert.rejects(dispatch({ operation: 'allowance-state', payer: owner.address, owner: owner.address }, { wallet: agent, chain }), /mismatch/);
   await assert.rejects(dispatch({ operation: 'allowance-pull', payer: agent.address, owner: owner.address, amount: '1' }, { wallet: agent, chain, allowance: lane(rpc) }), /fee payer/);
 });
+
+test('the owner may pay their own approve’s fee: then theirs is the only signature', async () => {
+  const [owner, agent] = [await testWallet(), await testWallet()];
+  const rpc = fakeRpc({ account: tokenAccount(owner.address) });
+  const prepared = await lane(rpc).prepare({ kind: 'approve', owner: owner.address, delegate: agent.address, amount: '20000000', feePayer: owner.address });
+  const { tx, message } = instructionsOf(prepared.transaction);
+  assert.deepEqual(Object.keys(tx.signatures), [owner.address]);
+  assert.equal(message.staticAccounts[0], owner.address);
+  const signed = await partiallySignTransaction([owner.signer.keyPair], tx);
+  const wire = (await import('@solana/kit')).getBase64EncodedWireTransaction(signed);
+  const result = await lane(rpc).submit({ transaction: wire, expectedHash: prepared.messageHash, owner: owner.address, feePayer: null });
+  assert.equal(result.state, 'confirmed');
+  assert.equal(rpc.sent.length, 1);
+});

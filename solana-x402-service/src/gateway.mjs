@@ -15,7 +15,7 @@ import { InvoicePayments } from './invoice.mjs';
 export async function dispatch(input, { wallet, venice, chain, store, exa, feePayer = null, allowance = null }) {
   if (wallet.address !== input.payer) throw new ClientError('WRONG_WALLET', 'Wallet mismatch.');
   if (input.operation === 'bitrefill-invoice-pay') {
-    return new InvoicePayments({ wallet, chain, store }).pay({ url: input.url, invoiceId: input.invoiceId, maxAmount: input.maxAmount });
+    return new InvoicePayments({ wallet, chain, store }).pay({ url: input.url, invoiceId: input.invoiceId, maxAmount: input.maxAmount, owner: input.owner || null });
   }
   if (input.operation === 'bitrefill-invoice-attempt') return store.invoiceAttempt(input.invoiceId);
   if (typeof input.operation === 'string' && input.operation.startsWith('allowance-')) {
@@ -23,14 +23,16 @@ export async function dispatch(input, { wallet, venice, chain, store, exa, feePa
     const lane = allowance || new TokenAllowance({ chain });
     const needFeePayer = () => { if (!feePayer) throw new ClientError('FEE_PAYER_REQUIRED', 'No fee payer is configured.'); return feePayer; };
     if (input.operation === 'allowance-state') {
-      const [owner, agent] = await Promise.all([lane.state(input.owner, wallet.address), chain.balances(wallet.address)]);
-      return { owner, agent: { usdcAtomic: agent.usdcAtomic, solLamports: agent.solLamports }, feePayer: feePayer?.address || null };
+      const [owner, agent, ownerSol] = await Promise.all([lane.state(input.owner, wallet.address), chain.balances(wallet.address), chain.balances(input.owner)]);
+      return { owner: { ...owner, solLamports: ownerSol.solLamports }, agent: { usdcAtomic: agent.usdcAtomic, solLamports: agent.solLamports }, feePayer: feePayer?.address || null };
     }
     if (input.operation === 'allowance-prepare') {
-      return lane.prepare({ kind: input.kind, owner: input.owner, delegate: wallet.address, amount: input.amount || '0', feePayer: needFeePayer().address });
+      // The owner pays this one small fee from their own SOL, unless our fee payer is asked to.
+      const payer = input.ownerPaysFee ? input.owner : needFeePayer().address;
+      return lane.prepare({ kind: input.kind, owner: input.owner, delegate: wallet.address, amount: input.amount || '0', feePayer: payer });
     }
     if (input.operation === 'allowance-submit') {
-      return lane.submit({ transaction: input.transaction, expectedHash: input.messageHash, owner: input.owner, feePayer: needFeePayer() });
+      return lane.submit({ transaction: input.transaction, expectedHash: input.messageHash, owner: input.owner, feePayer: input.ownerPaysFee ? null : needFeePayer() });
     }
     if (input.operation === 'allowance-pull') {
       return lane.pull({ owner: input.owner, amount: input.amount, agent: wallet, feePayer: needFeePayer() });
@@ -53,7 +55,7 @@ export async function dispatch(input, { wallet, venice, chain, store, exa, feePa
   if (!['pay', 'status', 'reconcile'].includes(input.operation)) throw new ClientError('INVALID_OPERATION', 'Unsupported operation.');
   const quote = store.quote(input.quoteId);
   if (quote.payer !== wallet.address) throw new ClientError('WRONG_WALLET', 'Quote belongs to another wallet.');
-  if (input.operation === 'pay') return payments.pay(input.quoteId, input.approvalHash);
+  if (input.operation === 'pay') return payments.pay(input.quoteId, input.approvalHash, input.owner || null);
   if (input.operation === 'status') {
     const attempt = store.attempt(input.quoteId);
     return { quote: quoteSummary(quote), attempted: !!attempt, state: attempt?.state || 'quoted', transaction: attempt?.transaction_id || null };

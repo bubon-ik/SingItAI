@@ -34,7 +34,7 @@ class VeniceBridge(FakeBridge):
             return {"quote": self.quotes[payload["quoteId"]], "attempted": bool(self.paid), "state": "quoted"}
         if operation == "pay":
             self.paid.append(payload)
-            self.agent_usdc -= 5_000_000
+            self.charge(5_000_000)
             self.credit = "5"
             return {"state": "confirmed", "transaction": "5" * 88}
         if operation == "chat":
@@ -75,8 +75,7 @@ class SolanaVeniceTests(unittest.TestCase):
         self.grant()
         status, paid = web_venice.topup_solana(self.server, ACCOUNT, "q1", "h" * 64)
         self.assertEqual((status, paid["ok"], paid["text"]), (200, True, "Added 5 USDC of Venice credit."))
-        self.assertEqual([c[0] for c in self.bridge.calls if c[0] == "allowance-pull"], ["allowance-pull"])
-        self.assertEqual(self.bridge.paid, [{"quoteId": "q1", "approvalHash": "h" * 64}])
+        self.assertEqual(self.bridge.paid, [{"quoteId": "q1", "approvalHash": "h" * 64, "owner": OWNER}])  # from the owner's account
         recorded = self.events.write.call_args.args[1]
         self.assertEqual((recorded["toolName"], recorded["receipt"]["network"]), ("Venice AI credit", "Solana"))
         self.assertEqual(self.lane.status(ACCOUNT)["remainingTodayAtomic"], 15_000_000)

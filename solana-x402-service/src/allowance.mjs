@@ -98,6 +98,14 @@ export function parseTokenAccount(data, owner) {
   };
 }
 
+// Before paying from the owner's account: it holds the amount and the agent is approved for it.
+export async function assertDelegated(chain, owner, agent, amount) {
+  const state = await new TokenAllowance({ chain }).state(owner, agent);
+  if (BigInt(state.delegatedToAgent) < BigInt(amount)) throw new ClientError('ALLOWANCE_TOO_LOW', 'The approval in your wallet does not cover this payment. Nothing was paid.');
+  if (BigInt(state.amount) < BigInt(amount)) throw new ClientError('INSUFFICIENT_USDC', 'Your wallet does not hold enough USDC for this payment. Nothing was paid.');
+  return state;
+}
+
 export class TokenAllowance {
   constructor({ chain, sleep = ms => new Promise(r => setTimeout(r, ms)), confirmTimeoutMs = 60000 }) {
     Object.assign(this, { chain, rpc: chain.rpc, sleep, confirmTimeoutMs });
@@ -152,7 +160,8 @@ export class TokenAllowance {
     if (!signature || !(await verifySignature(await getPublicKeyFromAddress(owner), signature, tx.messageBytes))) {
       throw new ClientError('SIGNATURE_REQUIRED', 'The wallet did not sign the transaction.');
     }
-    const signed = await partiallySignTransaction([feePayer.signer.keyPair], tx);
+    // The owner may be their own fee payer; then theirs is the only signature.
+    const signed = feePayer ? await partiallySignTransaction([feePayer.signer.keyPair], tx) : tx;
     return this.send(signed);
   }
 

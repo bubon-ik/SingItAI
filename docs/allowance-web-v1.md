@@ -471,13 +471,16 @@ A Solana account has the same lane as a Base one, through the same routes
   USDC account, the account's agent key as delegate, for a total. The chain
   enforces that total; one `Revoke` ends it at once. The server prepares the
   transaction, the wallet signs it (`@solana/web3.js` on the page), and the
-  server sends it only if it is exactly the prepared message, adding our fee
-  payer's signature: the owner needs no SOL.
-- **A purchase** pulls just what the agent still needs from the owner's account
-  (the agent as delegate) into the agent's own, within the per-purchase and daily
-  limits and the expiry (checked here) and the approved total (checked by the
-  chain), and counts it against the day. x402 then pays from the agent's
-  account, the merchant paying that fee.
+  server sends it only if it is exactly the prepared message. The owner pays its
+  tiny fee from their own SOL; a wallet with no SOL at all falls back to our fee
+  payer, when one is configured.
+- **A purchase** is paid over x402 straight from the owner's account, the agent
+  signing as the approved delegate, within the per-purchase and daily limits and
+  the expiry (checked here) and the approved total (checked by the chain); it is
+  counted against the day once the merchant accepts it. The merchant's facilitator
+  pays that network fee. x402's own facilitator accepts such a payment: it checks
+  the signer, mint, recipient and amount, not whose account it is
+  (`solana-x402-service/test/delegated.test.mjs`). Nothing costs us gas.
 - **Venice** runs on it: the agent's Solana address signs Venice in; without
   credit, the reply is a card with Venice's exact quote, and confirming it pulls,
   pays and answers (the Solana x402 service never pays a quote nobody approved).
@@ -487,8 +490,8 @@ A Solana account has the same lane as a Base one, through the same routes
   September 18 (docs/bitrefill-solana-checks.md): an MCP guest invoice with
   `payment_method: usdc_solana`, paid over Bitrefill's x402 route
   (`/x402/invoice/pay`, the Solana USDC option, sponsored by Bitrefill's fee
-  payer) from the agent's account after the pull (`solana_bitrefill.py`,
-  `solana-x402-service/src/invoice.mjs`). The invoice may not exceed the quote by
+  payer) straight from the owner's account, the agent as delegate
+  (`solana_bitrefill.py`, `solana-x402-service/src/invoice.mjs`). The invoice may not exceed the quote by
   more than 2%; one payment attempt per invoice. Guest invoices need the buyer's
   email: the agent asks for it once in the chat, stores it encrypted
   (`BuyerEmailStore`), and finishes the purchase. The code is shown once, on
@@ -496,10 +499,9 @@ A Solana account has the same lane as a Base one, through the same routes
 - Paid x402 data (crypto news, market data, ENS…) is sold on Base only; from
   Solana the agent says so.
 
-Turned on with `SIGN402_SOLANA_ALLOWANCE_ENABLED=1` and
-`SIGN402_SOLANA_FEE_PAYER_KEY` (Fernet-encrypted, made by
-`python -m sign402_gateway.solana_allowance new-fee-payer`; the deploy script does
-it when the web page is on). Fund that fee payer with a little SOL.
+Turned on with `SIGN402_SOLANA_ALLOWANCE_ENABLED=1`. `SIGN402_SOLANA_FEE_PAYER_KEY`
+(Fernet-encrypted, made by `python -m sign402_gateway.solana_allowance new-fee-payer`;
+the deploy script makes one) is optional: fund it only to serve wallets with no SOL.
 
 ## Sign in with email or a social account
 

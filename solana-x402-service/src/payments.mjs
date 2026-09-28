@@ -37,7 +37,7 @@ export class Payments {
     if (this.now() >= quote.expiresAt) throw new ClientError('QUOTE_EXPIRED', 'The quote expired. Prepare and review a new quote.');
     if (quote.requirement.network !== NETWORK || quote.requirement.asset !== USDC || quote.resource.url !== TOP_UP_URL) throw new ClientError('UNSUPPORTED_PAYMENT', 'Only Venice USDC top-ups on Solana mainnet are supported.');
   }
-  async pay(id, approval) {
+  async pay(id, approval, owner = null) {
     const quote = this.store.quote(id);
     this.validateQuote(quote, approval);
     if (this.store.attempt(id)) throw new ClientError('ALREADY_ATTEMPTED', 'A payment was already attempted for this quote. Use reconcile.');
@@ -45,9 +45,17 @@ export class Payments {
     const fresh = await this.venice.challenge();
     if (canonical(fresh.requirement) !== canonical(quote.requirement) || canonical(fresh.resource) !== canonical(quote.resource)) throw new ClientError('TERMS_CHANGED', 'Venice changed the payment terms. Prepare and approve a new quote.');
     this.validateQuote(quote, approval);
-    const funds = await this.chain.balances(this.wallet.address);
-    if (BigInt(funds.usdcAtomic) < BigInt(quote.requirement.amount)) throw new ClientError('INSUFFICIENT_USDC', `Fund the displayed Solana wallet first; payment needs ${formatUsdc(quote.requirement.amount)} USDC.`);
-    const built = await this.chain.build(quote.requirement, quote.resource, this.wallet);
+    let built;
+    if (owner) {
+      // From the owner's own account, the wallet here being their approved delegate (allowance.mjs).
+      const { assertDelegated } = await import('./allowance.mjs');
+      await assertDelegated(this.chain, owner, this.wallet.address, quote.requirement.amount);
+      built = await this.chain.buildDelegated(quote.requirement, quote.resource, this.wallet, owner);
+    } else {
+      const funds = await this.chain.balances(this.wallet.address);
+      if (BigInt(funds.usdcAtomic) < BigInt(quote.requirement.amount)) throw new ClientError('INSUFFICIENT_USDC', `Fund the displayed Solana wallet first; payment needs ${formatUsdc(quote.requirement.amount)} USDC.`);
+      built = await this.chain.build(quote.requirement, quote.resource, this.wallet);
+    }
     this.validateQuote(quote, approval);
     // Persist BEFORE the only submission. Only public metadata and a message
     // hash are stored; keys, auth headers and signed payloads remain in memory.

@@ -8,11 +8,14 @@ contract here yet, so the pieces are split:
   never take more than what is left of it, and one Revoke ends it;
 - the daily and per-purchase limits and the expiry are enforced here, before every
   pull, and each purchase is recorded against the day;
-- the agent pulls exactly what a purchase still needs into its own USDC account and
-  pays the merchant from there (x402 wants the payer to own the account).
+- a purchase is paid over x402 straight from the owner's account, the agent signing as
+  the approved delegate; the merchant's facilitator pays that network fee (x402's own
+  facilitator checks the signer, mint, recipient and amount, not whose account it is:
+  solana-x402-service/test/delegated.test.mjs).
 
-Our fee payer signs every transaction as fee payer, so neither the owner nor the agent
-needs SOL. The chain work runs in the Node x402 service (solana-x402-service/src/allowance.mjs)
+Nothing here costs us gas. The owner pays the one small fee of their approve or revoke
+from their own SOL; only a wallet with no SOL at all falls back to our fee payer, when
+one is configured. The chain work runs in the Node x402 service (solana-x402-service/src/allowance.mjs)
 through the same bridge the bot's Solana chat uses.
 """
 
@@ -41,6 +44,7 @@ FEE_PAYER_ENV = "SIGN402_SOLANA_FEE_PAYER_KEY"   # Fernet-encrypted base58 keypa
 DEFAULT_DB = "~/.sign402/solana-allowance.db"
 PREPARE_SECONDS = 90   # a Solana blockhash lives about a minute
 DAY = 86400
+OWNER_FEE_LAMPORTS = 20_000  # enough SOL to pay one signature's fee (5,000) with room to spare
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -51,7 +55,7 @@ CREATE TABLE IF NOT EXISTS limits (
 CREATE TABLE IF NOT EXISTS ops (
     op_id TEXT PRIMARY KEY, account TEXT NOT NULL, kind TEXT NOT NULL, amount INTEGER NOT NULL,
     message_hash TEXT NOT NULL, state TEXT NOT NULL, tx TEXT, detail TEXT NOT NULL DEFAULT '',
-    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, owner_pays_fee INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS spends (
     id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT NOT NULL, amount INTEGER NOT NULL, purpose TEXT NOT NULL,
     pull_tx TEXT, created_at INTEGER NOT NULL);
@@ -80,6 +84,9 @@ class SolanaAllowanceStore:
         self._lock = threading.RLock()
         with self._db() as db:
             db.executescript(SCHEMA)
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(ops)")}
+            if "owner_pays_fee" not in columns:
+                db.execute("ALTER TABLE ops ADD COLUMN owner_pays_fee INTEGER NOT NULL DEFAULT 0")
 
     @contextmanager
     def _db(self) -> Iterator[sqlite3.Connection]:
@@ -112,8 +119,9 @@ class SolanaAllowanceStore:
 
     def add_op(self, op: Mapping[str, Any]) -> None:
         with self._db() as db:
-            db.execute("INSERT INTO ops VALUES (:op_id, :account, :kind, :amount, :message_hash, :state, NULL, '', :now, :now)",
-                       dict(op))
+            db.execute("""INSERT INTO ops(op_id, account, kind, amount, message_hash, state, tx, detail, created_at, updated_at,
+                          owner_pays_fee) VALUES (:op_id, :account, :kind, :amount, :message_hash, :state, NULL, '', :now, :now,
+                          :owner_pays_fee)""", {"owner_pays_fee": 1, **dict(op)})
 
     def op(self, account: str, op_id: str) -> sqlite3.Row | None:
         with self._db() as db:
@@ -139,7 +147,7 @@ class SolanaAllowanceStore:
 class SolanaAllowanceService:
     """Limits, the wallet's approval and revoke, and funding a purchase, for `solana:` accounts."""
 
-    def __init__(self, *, store: SolanaAllowanceStore, bridge: Any, fernet: Any, fee_payer_key: Callable[[], str],
+    def __init__(self, *, store: SolanaAllowanceStore, bridge: Any, fernet: Any, fee_payer_key: Callable[[], str] | None,
                  max_daily: int, max_per_purchase: int, max_days: int, max_grant: int,
                  now: Callable[[], float] = time.time):
         self.store, self.bridge, self.fernet, self.fee_payer_key = store, bridge, fernet, fee_payer_key
@@ -168,7 +176,7 @@ class SolanaAllowanceService:
         agent, key = self.agent_key(account)
         try:
             return self.bridge.run(account, agent, key, operation,
-                                   fee_payer_key=self.fee_payer_key() if fee_payer else None, **payload)
+                                   fee_payer_key=self.fee_payer_key() if fee_payer and self.fee_payer_key else None, **payload)
         finally:
             key = None
 
@@ -229,11 +237,14 @@ class SolanaAllowanceService:
             atomic = 0
         else:
             raise AllowanceError("Grant or revoke only.")
-        prepared = self._call(account, "allowance-prepare", fee_payer=True, owner=owner,
+        owner_pays = int(self.chain_state(account)["owner"].get("solLamports") or 0) >= OWNER_FEE_LAMPORTS
+        if not owner_pays and self.fee_payer_key is None:
+            raise AllowanceError("Your wallet needs a little SOL (about 0.00002) to pay this one signature's network fee.")
+        prepared = self._call(account, "allowance-prepare", fee_payer=not owner_pays, owner=owner, ownerPaysFee=owner_pays,
                               kind="approve" if kind == "GRANT" else "revoke", amount=str(atomic))
         op_id = "sop_" + secrets.token_urlsafe(12)
         now = int(self.now())
-        self.store.add_op({"op_id": op_id, "account": account, "kind": kind, "amount": atomic,
+        self.store.add_op({"op_id": op_id, "account": account, "kind": kind, "amount": atomic, "owner_pays_fee": int(owner_pays),
                            "message_hash": prepared["messageHash"], "state": "PREPARED", "now": now})
         agent = self.agent_key(account)[0]
         shows = (f"Your wallet will ask you to let {agent[:4]}…{agent[-4:]} spend up to {_text(atomic)} of your USDC."
@@ -251,8 +262,9 @@ class SolanaAllowanceService:
         if op["created_at"] + PREPARE_SECONDS < now:
             self.store.update_op(op_id, "EXPIRED", now, detail="Too late for this transaction; prepare it again.")
             return self.operation(account, op_id)
-        result = self._call(account, "allowance-submit", fee_payer=True, owner=self.owner(account),
-                            transaction=str(transaction or ""), messageHash=op["message_hash"])
+        owner_pays = bool(op["owner_pays_fee"])
+        result = self._call(account, "allowance-submit", fee_payer=not owner_pays, owner=self.owner(account),
+                            ownerPaysFee=owner_pays, transaction=str(transaction or ""), messageHash=op["message_hash"])
         state = {"confirmed": "DONE", "failed": "FAILED", "rejected": "FAILED"}.get(result.get("state"), "UNCERTAIN")
         detail = {
             "DONE": (f"Allowance now {_text(op['amount'])}." if op["kind"] == "GRANT" else "Revoked: your agent can no longer spend."),
@@ -275,38 +287,37 @@ class SolanaAllowanceService:
 
     # -- paying --
 
-    def fund(self, account: str, amount: int, purpose: str) -> dict[str, Any]:
-        """Make the agent hold `amount` for one purchase, within the limits; count it against today."""
+    def spend(self, account: str, amount: int, purpose: str, pay: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        """Pay `amount` from the owner's account within the limits, and count it against today.
+
+        `pay` makes the x402 payment (the agent as delegate, the merchant paying the fee). The
+        limits are checked first and the purchase counted only once `pay` says it was accepted;
+        one purchase at a time, so two cannot both fit the same room.
+        """
         amount = int(amount)
         limits = self.store.limits(account)
         if limits is None:
             raise AllowanceUnavailable("Set your limits and approve them first.")
-        now = int(self.now())
-        if limits["expiry"] <= now:
-            raise AllowanceError("Your Solana allowance has expired. Set new limits to continue.")
-        if amount > limits["per_purchase_cap"]:
-            raise AllowanceError(f"{_text(amount)} is above your {_text(limits['per_purchase_cap'])} per-purchase limit. Nothing was paid.")
         with self._spend_lock:
+            now = int(self.now())
+            if limits["expiry"] <= now:
+                raise AllowanceError("Your Solana allowance has expired. Set new limits to continue.")
+            if amount > limits["per_purchase_cap"]:
+                raise AllowanceError(f"{_text(amount)} is above your {_text(limits['per_purchase_cap'])} per-purchase limit. Nothing was paid.")
             spent = self.store.spent_since(account, now // DAY * DAY)
             if spent + amount > limits["daily_cap"]:
                 raise AllowanceError(f"That would pass today's {_text(limits['daily_cap'])} limit "
                                      f"({_text(max(0, limits['daily_cap'] - spent))} left). Nothing was paid.")
-            chain = self.chain_state(account)
-            held = int(chain["agent"]["usdcAtomic"])
-            need = max(0, amount - held)
-            pull_tx = None
-            if need:
-                if need > int(chain["owner"]["delegatedToAgent"]):
-                    raise AllowanceError("Your wallet's approval is used up or revoked. Approve a new allowance to continue. Nothing was paid.")
-                if need > int(chain["owner"]["amount"]):
-                    raise AllowanceError(f"Your Solana wallet holds {_text(int(chain['owner']['amount']))}; this needs {_text(need)} more. Nothing was paid.")
-                pulled = self._call(account, "allowance-pull", fee_payer=True, owner=self.owner(account), amount=str(need))
-                if pulled.get("state") != "confirmed":
-                    raise AllowanceError("Moving the USDC for this purchase was not confirmed. Nothing was paid; try again shortly.")
-                pull_tx = pulled.get("transaction")
-            self.store.add_spend(account, amount, purpose, pull_tx, int(self.now()))
-        logger.info("solana allowance: %s funded %s for %s", account, amount, purpose[:60])
-        return {"funded": amount, "pulled": need, "pullTx": pull_tx}
+            owner = self.chain_state(account)["owner"]
+            if amount > int(owner["delegatedToAgent"]):
+                raise AllowanceError("Your wallet's approval is used up or revoked. Approve a new allowance to continue. Nothing was paid.")
+            if amount > int(owner["amount"]):
+                raise AllowanceError(f"Your Solana wallet holds {_text(int(owner['amount']))}; this costs {_text(amount)}. Nothing was paid.")
+            result = pay()
+            if result.get("state") in ("accepted", "confirmed"):
+                self.store.add_spend(account, amount, purpose, result.get("transaction"), int(self.now()))
+        logger.info("solana allowance: %s paid %s for %s (%s)", account, amount, purpose[:60], result.get("state"))
+        return result
 
 
 def build_solana_allowance_from_env(master_key: str, bridge: Any = None,
@@ -320,16 +331,15 @@ def build_solana_allowance_from_env(master_key: str, bridge: Any = None,
                                   MAX_DAILY_ENV, MAX_DAYS_ENV, MAX_GRANT_ENV, MAX_PER_PURCHASE_ENV, _usdc_atomic)
 
     fernet = Fernet(master_key.encode("ascii"))
-    blob = str(values.get(FEE_PAYER_ENV, "")).strip()
-    if not blob:
-        raise ValueError(f"{ENABLED_ENV}=1 needs {FEE_PAYER_ENV} (Fernet-encrypted with the master key).")
+    blob = str(values.get(FEE_PAYER_ENV, "")).strip()  # optional: only for owners without any SOL
     if bridge is None:
         from .solana_chat import SolanaBridge
         bridge = SolanaBridge(None, Path(str(values.get("SIGN402_SOLANA_CHAT_STATE_DIR", "") or
                                              Path.home() / ".sign402" / "solana-chat")) / "web-operations")
     return SolanaAllowanceService(
         store=SolanaAllowanceStore(Path(str(values.get(DB_ENV, "") or DEFAULT_DB)).expanduser()),
-        bridge=bridge, fernet=fernet, fee_payer_key=lambda: fernet.decrypt(blob.encode("ascii")).decode(),
+        bridge=bridge, fernet=fernet,
+        fee_payer_key=(lambda: fernet.decrypt(blob.encode("ascii")).decode()) if blob else None,
         max_daily=_usdc_atomic(values.get(MAX_DAILY_ENV, DEFAULT_MAX_DAILY), MAX_DAILY_ENV),
         max_per_purchase=_usdc_atomic(values.get(MAX_PER_PURCHASE_ENV, DEFAULT_MAX_PER_PURCHASE), MAX_PER_PURCHASE_ENV),
         max_days=int(values.get(MAX_DAYS_ENV, DEFAULT_MAX_DAYS)),

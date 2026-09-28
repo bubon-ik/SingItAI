@@ -7,9 +7,9 @@ on Solana through Bitrefill's x402 route.
   1. `buy-products` with `payment_method: usdc_solana` and the buyer's email (Bitrefill
      requires it on guest invoices; it is where codes also land) returns the invoice, its
      access token and `x402_payment_url`;
-  2. the agent pulls the invoice amount from the owner's wallet, within their limits
-     (solana_allowance.py), and pays the x402 route from its own account
-     (solana-x402-service/src/invoice.mjs);
+  2. the agent pays the x402 route straight from the owner's account as their approved
+     delegate, within their limits (solana_allowance.py, solana-x402-service/src/invoice.mjs);
+     Bitrefill's fee payer pays the network fee;
   3. `get-invoice-by-id` with the access token reports delivery; the code is shown once,
      on request, from the purchase record's encrypted access token.
 
@@ -111,8 +111,9 @@ def buy(server: Any, account: str, slug: Any, package: Any, *, sleep: Any = time
     if amount > math.ceil(price * PRICE_SLACK):
         raise AllowanceError("Bitrefill's invoice is above the price you were shown. Nothing was paid.")
 
-    lane.fund(account, amount, f"Bitrefill {quote['name']} {quote['packageValue']}")
-    paid = lane._call(account, "bitrefill-invoice-pay", url=PAY_URL, invoiceId=invoice_id, maxAmount=str(amount))
+    owner = lane.owner(account)
+    paid = lane.spend(account, amount, f"Bitrefill {quote['name']} {quote['packageValue']}", lambda: lane._call(
+        account, "bitrefill-invoice-pay", url=PAY_URL, invoiceId=invoice_id, maxAmount=str(amount), owner=owner))
 
     delivered, order = False, {}
     deadline = now() + DELIVERY_WAIT_SECONDS
