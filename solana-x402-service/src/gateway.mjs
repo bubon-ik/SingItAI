@@ -9,9 +9,29 @@ import { Store } from './store.mjs';
 import { VeniceClient } from './venice.mjs';
 import { SolanaChain } from './chain.mjs';
 import { Payments, quoteSummary } from './payments.mjs';
+import { TokenAllowance } from './allowance.mjs';
 
-export async function dispatch(input, { wallet, venice, chain, store, exa }) {
+export async function dispatch(input, { wallet, venice, chain, store, exa, feePayer = null, allowance = null }) {
   if (wallet.address !== input.payer) throw new ClientError('WRONG_WALLET', 'Wallet mismatch.');
+  if (typeof input.operation === 'string' && input.operation.startsWith('allowance-')) {
+    // `wallet` is the agent: the owner's delegate and the payer of every purchase.
+    const lane = allowance || new TokenAllowance({ chain });
+    const needFeePayer = () => { if (!feePayer) throw new ClientError('FEE_PAYER_REQUIRED', 'No fee payer is configured.'); return feePayer; };
+    if (input.operation === 'allowance-state') {
+      const [owner, agent] = await Promise.all([lane.state(input.owner, wallet.address), chain.balances(wallet.address)]);
+      return { owner, agent: { usdcAtomic: agent.usdcAtomic, solLamports: agent.solLamports }, feePayer: feePayer?.address || null };
+    }
+    if (input.operation === 'allowance-prepare') {
+      return lane.prepare({ kind: input.kind, owner: input.owner, delegate: wallet.address, amount: input.amount || '0', feePayer: needFeePayer().address });
+    }
+    if (input.operation === 'allowance-submit') {
+      return lane.submit({ transaction: input.transaction, expectedHash: input.messageHash, owner: input.owner, feePayer: needFeePayer() });
+    }
+    if (input.operation === 'allowance-pull') {
+      return lane.pull({ owner: input.owner, amount: input.amount, agent: wallet, feePayer: needFeePayer() });
+    }
+    throw new ClientError('INVALID_OPERATION', 'Unsupported allowance operation.');
+  }
   if (typeof input.operation === 'string' && input.operation.startsWith('exa-')) {
     const payments = new ExaPayments({ wallet, exa, chain, store });
     if (input.operation === 'exa-terms') return payments.terms();
@@ -24,7 +44,7 @@ export async function dispatch(input, { wallet, venice, chain, store, exa }) {
   const payments = new Payments({ wallet, venice, chain, store });
   if (input.operation === 'balance') return venice.balance();
   if (input.operation === 'quote') return payments.prepare();
-  if (input.operation === 'chat') return venice.chat({ model: input.model, message: input.message, maxTokens: 1024, sources: input.sources, offerSearch: input.offerSearch === true });
+  if (input.operation === 'chat') return venice.chat({ model: input.model, message: input.message, conversation: input.conversation, maxTokens: 1024, sources: input.sources, offerSearch: input.offerSearch === true });
   if (!['pay', 'status', 'reconcile'].includes(input.operation)) throw new ClientError('INVALID_OPERATION', 'Unsupported operation.');
   const quote = store.quote(input.quoteId);
   if (quote.payer !== wallet.address) throw new ClientError('WRONG_WALLET', 'Quote belongs to another wallet.');
@@ -47,10 +67,17 @@ async function main() {
   const wallet = await walletFromBytes(bytes);
   bytes.fill(0);
   delete input.privateKey;
+  let feePayer = null;
+  if (input.feePayerKey) {
+    const payerBytes = getBase58Encoder().encode(input.feePayerKey);
+    feePayer = await walletFromBytes(payerBytes);
+    payerBytes.fill(0);
+  }
+  delete input.feePayerKey;
   const config = configuration();
   const store = new Store(input.operation?.startsWith('exa-') ? path.join(config.stateDir, 'exa') : config.stateDir);
   try {
-    const result = await dispatch(input, { wallet, store, venice: new VeniceClient({ wallet }), exa: new ExaClient(), chain: new SolanaChain(config.rpcUrl) });
+    const result = await dispatch(input, { wallet, store, feePayer, venice: new VeniceClient({ wallet }), exa: new ExaClient(), chain: new SolanaChain(config.rpcUrl) });
     process.stdout.write(JSON.stringify({ ok: true, result }));
   } finally { store.close(); }
 }

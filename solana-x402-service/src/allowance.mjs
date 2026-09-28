@@ -1,0 +1,192 @@
+// An SPL Token allowance on the owner's own USDC account: the Solana side of SingIt's
+// agent allowance. The owner approves the agent as delegate once, for a total, from
+// their wallet. The agent then pulls exactly what a purchase needs into its own USDC
+// account and pays the merchant from there (x402 needs the payer to own the account).
+// Our fee payer covers network fees, so neither the owner nor the agent needs SOL.
+import {
+  AccountRole, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage,
+  getBase58Decoder, getBase58Encoder, getBase64EncodedWireTransaction, getProgramDerivedAddress,
+  getTransactionDecoder, getSignatureFromTransaction, getPublicKeyFromAddress, isAddress,
+  partiallySignTransaction, pipe, setTransactionMessageFeePayer, setTransactionMessageLifetimeUsingBlockhash,
+  verifySignature,
+} from '@solana/kit';
+import { ClientError, USDC, TOKEN_PROGRAM, ATA_PROGRAM } from './config.mjs';
+import { messageHash } from './chain.mjs';
+
+const SYSTEM_PROGRAM = '11111111111111111111111111111111';
+const DECIMALS = 6;
+const MAX_ALLOWANCE = 10_000_000_000n; // 10,000 USDC: a sanity ceiling, not a policy
+
+function u64(value) {
+  const amount = BigInt(value);
+  if (amount < 0n || amount > MAX_ALLOWANCE) throw new ClientError('INVALID_AMOUNT', 'Amount out of range.');
+  const bytes = Buffer.alloc(8);
+  bytes.writeBigUInt64LE(amount);
+  return [...bytes];
+}
+
+function address(value, what) {
+  if (typeof value !== 'string' || !isAddress(value)) throw new ClientError('INVALID_ADDRESS', `Invalid ${what} address.`);
+  return value;
+}
+
+export async function usdcAccount(owner) {
+  const enc = getBase58Encoder();
+  const [ata] = await getProgramDerivedAddress({
+    programAddress: ATA_PROGRAM, seeds: [enc.encode(owner), enc.encode(TOKEN_PROGRAM), enc.encode(USDC)],
+  });
+  return ata;
+}
+
+// SPL Token instructions, encoded by hand: ApproveChecked (13), Revoke (5), TransferChecked (12).
+export function approveInstruction({ source, owner, delegate, amount }) {
+  return {
+    programAddress: TOKEN_PROGRAM,
+    accounts: [
+      { address: source, role: AccountRole.WRITABLE }, { address: USDC, role: AccountRole.READONLY },
+      { address: delegate, role: AccountRole.READONLY }, { address: owner, role: AccountRole.READONLY_SIGNER },
+    ],
+    data: new Uint8Array([13, ...u64(amount), DECIMALS]),
+  };
+}
+
+export function revokeInstruction({ source, owner }) {
+  return {
+    programAddress: TOKEN_PROGRAM,
+    accounts: [{ address: source, role: AccountRole.WRITABLE }, { address: owner, role: AccountRole.READONLY_SIGNER }],
+    data: new Uint8Array([5]),
+  };
+}
+
+export function transferInstruction({ source, destination, authority, amount }) {
+  return {
+    programAddress: TOKEN_PROGRAM,
+    accounts: [
+      { address: source, role: AccountRole.WRITABLE }, { address: USDC, role: AccountRole.READONLY },
+      { address: destination, role: AccountRole.WRITABLE }, { address: authority, role: AccountRole.READONLY_SIGNER },
+    ],
+    data: new Uint8Array([12, ...u64(amount), DECIMALS]),
+  };
+}
+
+// Associated Token Account program, CreateIdempotent (1): the agent's USDC account, paid by the fee payer.
+export function createAccountInstruction({ payer, account, owner }) {
+  return {
+    programAddress: ATA_PROGRAM,
+    accounts: [
+      { address: payer, role: AccountRole.WRITABLE_SIGNER }, { address: account, role: AccountRole.WRITABLE },
+      { address: owner, role: AccountRole.READONLY }, { address: USDC, role: AccountRole.READONLY },
+      { address: SYSTEM_PROGRAM, role: AccountRole.READONLY }, { address: TOKEN_PROGRAM, role: AccountRole.READONLY },
+    ],
+    data: new Uint8Array([1]),
+  };
+}
+
+// The SPL token account layout: mint 0..32, owner 32..64, amount 64..72, delegate COption 72..108,
+// state 108, is_native COption 109..121, delegated_amount 121..129.
+export function parseTokenAccount(data, owner) {
+  const b58 = getBase58Decoder();
+  if (data.length < 165 || b58.decode(data.subarray(0, 32)) !== USDC || b58.decode(data.subarray(32, 64)) !== owner) {
+    throw new ClientError('INVALID_TOKEN_ACCOUNT', 'The USDC token account did not match the expected mint and owner.');
+  }
+  const hasDelegate = data.readUInt32LE(72) === 1;
+  return {
+    amount: data.readBigUInt64LE(64).toString(),
+    delegate: hasDelegate ? b58.decode(data.subarray(76, 108)) : null,
+    delegatedAmount: hasDelegate ? data.readBigUInt64LE(121).toString() : '0',
+    frozen: data[108] === 2,
+  };
+}
+
+export class TokenAllowance {
+  constructor({ chain, sleep = ms => new Promise(r => setTimeout(r, ms)), confirmTimeoutMs = 60000 }) {
+    Object.assign(this, { chain, rpc: chain.rpc, sleep, confirmTimeoutMs });
+  }
+
+  async state(owner, delegate) {
+    address(owner, 'owner');
+    const account = await usdcAccount(owner);
+    let info;
+    try { info = await this.rpc.getAccountInfo(account, { encoding: 'base64', commitment: 'confirmed' }).send({ abortSignal: AbortSignal.timeout(20000) }); }
+    catch { throw new ClientError('RPC_UNAVAILABLE', 'Could not read the Solana USDC account.'); }
+    if (!info.value) return { account, exists: false, amount: '0', delegate: null, delegatedAmount: '0', delegatedToAgent: '0' };
+    if (info.value.owner !== TOKEN_PROGRAM) throw new ClientError('INVALID_TOKEN_ACCOUNT', 'The USDC account is not a token account.');
+    const parsed = parseTokenAccount(Buffer.from(info.value.data[0], 'base64'), owner);
+    return { account, exists: true, ...parsed, delegatedToAgent: parsed.delegate === delegate ? parsed.delegatedAmount : '0' };
+  }
+
+  async compile(feePayer, instructions) {
+    let latest;
+    try { latest = (await this.rpc.getLatestBlockhash({ commitment: 'confirmed' }).send({ abortSignal: AbortSignal.timeout(20000) })).value; }
+    catch { throw new ClientError('RPC_UNAVAILABLE', 'Could not reach Solana to prepare the transaction.'); }
+    const message = pipe(
+      createTransactionMessage({ version: 0 }),
+      m => setTransactionMessageFeePayer(feePayer, m),
+      m => setTransactionMessageLifetimeUsingBlockhash(latest, m),
+      m => appendTransactionMessageInstructions(instructions, m),
+    );
+    return compileTransaction(message);
+  }
+
+  // What the owner's wallet signs: approve the agent for a total, or revoke it. Our fee payer
+  // signs after the owner, once the signed transaction is checked against this exact message.
+  async prepare({ kind, owner, delegate, amount, feePayer }) {
+    address(owner, 'owner'); address(feePayer, 'fee payer');
+    const source = await usdcAccount(owner);
+    const state = await this.state(owner, delegate);
+    if (!state.exists) throw new ClientError('NO_USDC_ACCOUNT', 'This wallet has no USDC account on Solana yet. Add some USDC first.');
+    const instruction = kind === 'approve'
+      ? approveInstruction({ source, owner, delegate: address(delegate, 'agent'), amount })
+      : kind === 'revoke' ? revokeInstruction({ source, owner }) : null;
+    if (!instruction) throw new ClientError('INVALID_OPERATION', 'Approve or revoke only.');
+    const tx = await this.compile(feePayer, [instruction]);
+    return { transaction: getBase64EncodedWireTransaction(tx), messageHash: messageHash(tx.messageBytes) };
+  }
+
+  async submit({ transaction, expectedHash, owner, feePayer }) {
+    let tx;
+    try { tx = getTransactionDecoder().decode(Buffer.from(String(transaction), 'base64')); }
+    catch { throw new ClientError('INVALID_TRANSACTION', 'The signed transaction could not be read.'); }
+    if (messageHash(tx.messageBytes) !== expectedHash) throw new ClientError('TRANSACTION_MISMATCH', 'The wallet signed something other than what was prepared. Nothing was sent.');
+    const signature = tx.signatures[owner];
+    if (!signature || !(await verifySignature(await getPublicKeyFromAddress(owner), signature, tx.messageBytes))) {
+      throw new ClientError('SIGNATURE_REQUIRED', 'The wallet did not sign the transaction.');
+    }
+    const signed = await partiallySignTransaction([feePayer.signer.keyPair], tx);
+    return this.send(signed);
+  }
+
+  // The agent takes `amount` from the owner's account (as delegate) into its own, creating it if needed.
+  async pull({ owner, amount, agent, feePayer }) {
+    address(owner, 'owner');
+    const agentAccount = await usdcAccount(agent.address);
+    const tx = await this.compile(feePayer.address, [
+      createAccountInstruction({ payer: feePayer.address, account: agentAccount, owner: agent.address }),
+      transferInstruction({ source: await usdcAccount(owner), destination: agentAccount, authority: agent.address, amount }),
+    ]);
+    const signed = await partiallySignTransaction([agent.signer.keyPair, feePayer.signer.keyPair], tx);
+    return this.send(signed);
+  }
+
+  async send(signed) {
+    const id = getSignatureFromTransaction(signed);
+    let refused = false;
+    try {
+      await this.rpc.sendTransaction(getBase64EncodedWireTransaction(signed), { encoding: 'base64', preflightCommitment: 'confirmed' })
+        .send({ abortSignal: AbortSignal.timeout(20000) });
+    } catch {
+      // Refused in preflight (nothing sent), or the answer was lost: the status below decides.
+      refused = true;
+    }
+    const deadline = Date.now() + (refused ? 15000 : this.confirmTimeoutMs);
+    while (Date.now() < deadline) {
+      let status;
+      try { status = (await this.rpc.getSignatureStatuses([id]).send({ abortSignal: AbortSignal.timeout(20000) })).value[0]; }
+      catch { status = undefined; }
+      if (status?.err) return { transaction: id, state: 'failed' };
+      if (status && ['confirmed', 'finalized'].includes(status.confirmationStatus)) return { transaction: id, state: 'confirmed' };
+      await this.sleep(1500);
+    }
+    return { transaction: id, state: refused ? 'rejected' : 'uncertain' };
+  }
+}

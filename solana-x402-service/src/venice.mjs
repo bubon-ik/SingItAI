@@ -64,11 +64,14 @@ export class VeniceClient {
     if (!r.ok || !Array.isArray(r.data.data)) throw new ClientError('MODELS_FAILED', 'Could not read Venice models.');
     return r.data.data.map(m => ({ id: m.id, type: m.type }));
   }
-  async chat({ model, message, maxTokens = 256, sources, offerSearch = false }) {
-    if (!model || !message || !Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 2048) throw new ClientError('INVALID_CHAT', 'Specify model, message and max-tokens between 1 and 2048.');
+  async chat({ model, message, conversation, maxTokens = 256, sources, offerSearch = false }) {
+    const turns = Array.isArray(conversation) ? conversation : null;
+    if (turns && (!turns.length || turns.length > 40 || turns.some(t => !['system', 'user', 'assistant'].includes(t?.role) || typeof t.content !== 'string'))) throw new ClientError('INVALID_CHAT', 'Invalid conversation.');
+    if (!model || (!message && !turns) || !Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 2048) throw new ClientError('INVALID_CHAT', 'Specify model, message and max-tokens between 1 and 2048.');
     const balance = await this.balance();
     if (!balance.canConsume) throw new ClientError('TOP_UP_REQUIRED', 'Venice credit is insufficient. Prepare and approve a top-up first.');
-    const messages = [{ role: 'user', content: message }];
+    // The web chat sends its conversation; the bot, one message.
+    const messages = turns ? turns.map(t => ({ role: t.role, content: t.content.slice(0, 20000) })) : [{ role: 'user', content: message }];
     if (offerSearch === true && !Array.isArray(sources)) {
       messages.unshift({ role: 'system', content: 'You can request one web search to answer this question. Decide from its meaning whether external evidence or current facts are needed; do not rely on keywords alone. Answer directly for conversation, writing, translation, reasoning and stable knowledge when you have enough information. Respect a request not to browse. If current or uncertain external facts, a particular page, or explicit research are necessary, reply ONLY with NEED_WEB: followed by one concise, self-contained search query on the same line (at most 2000 characters), with no explanation, markdown or answer. Do not invent current facts. A request is not permission to spend: the gateway checks the user’s separate approval and limits before any search. Otherwise answer the user normally in their language. When explaining or quoting the NEED_WEB syntax, put it in prose or a code block so it cannot be mistaken for a control reply. Never claim you searched before receiving results.' });
     }
