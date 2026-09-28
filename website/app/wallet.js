@@ -111,6 +111,9 @@ export class SolanaWallet {
 
   // The approve or revoke the server prepared: the wallet signs it, the server checks it and sends it.
   async signTransaction(base64) {
+    // Through AppKit the Solana provider signs only while Solana is the active network
+    // (otherwise "Invalid chain id"); the page starts on Base.
+    if (this.name === "WalletConnect" && kit && kitNetworks?.solana) await kit.switchNetwork(kitNetworks.solana);
     const { VersionedTransaction } = await solanaWeb3();
     const signed = await this.provider.signTransaction(VersionedTransaction.deserialize(fromBase64(base64)));
     const bytes = signed?.serialize ? signed.serialize() : signed?.signedTransaction?.serialize?.();
@@ -150,6 +153,9 @@ export class Wallet {
   }
 
   async ensureBase() {
+    if (this.name === "WalletConnect" && kit && kitNetworks?.base && kit.getCaipNetwork?.()?.id !== kitNetworks.base.id) {
+      await kit.switchNetwork(kitNetworks.base);
+    }
     const chainId = await this.provider.request({ method: "eth_chainId" });
     if (String(chainId).toLowerCase() === BASE.chainId) return;
     try {
@@ -182,6 +188,7 @@ export class Wallet {
 // -- Reown AppKit (WalletConnect) --
 
 let kit = null;
+let kitNetworks = null;
 
 // WalletConnect explorer ids (explorer-api.walletconnect.com).
 const POPULAR_WALLETS = {
@@ -206,6 +213,7 @@ export function appKitConfigured() {
 async function appKit() {
   if (kit) return kit;
   const { createAppKit, WagmiAdapter, SolanaAdapter, networks } = await import(APPKIT);
+  kitNetworks = networks;
   const projectId = window.SINGIT_APP_CONFIG.walletConnectProjectId;
   const adapter = new WagmiAdapter({ projectId, networks: [networks.base] });
   kit = createAppKit({
