@@ -126,10 +126,16 @@ function say(text) {
 
 // -- wallet and session --
 
+let signInAfterConnect = false;  // the user pressed "Continue": sign in as soon as the wallet is there
+
 function setWallet(wallet) {
   const changed = (wallet?.address || "").toLowerCase() !== (state.wallet?.address || "").toLowerCase();
   state.wallet = wallet;
   if (changed) render();
+  if (wallet?.address && signInAfterConnect && !state.session) {
+    signInAfterConnect = false;
+    signIn();
+  }
 }
 
 async function needWallet() {
@@ -144,6 +150,7 @@ async function needWallet() {
 }
 
 function connectWallet() {
+  signInAfterConnect = !state.session;
   if (appKitConfigured()) {
     openAppKit().catch((error) => toast(explain(error), true));
   } else {
@@ -343,7 +350,7 @@ function renderNav() {
     accountEl.innerHTML = `<button class="account-chip" data-action="account"><span class="dot"></span>
       <span class="addr">${esc(short(state.wallet.address))}</span></button>`;
   } else {
-    accountEl.innerHTML = `<button class="btn btn-primary btn-sm" data-action="connect">Connect wallet</button>`;
+    accountEl.innerHTML = `<button class="btn btn-primary btn-sm" data-action="connect">${appKitConfigured() ? "Sign in" : "Connect wallet"}</button>`;
   }
 }
 
@@ -352,7 +359,7 @@ function renderHero() {
     ? `<button class="btn btn-primary btn-lg has-orb" data-action="sign-in">Sign in as ${esc(short(state.wallet.address))}
          <span class="chain-tag">${state.wallet.chain === "solana" ? "Solana" : "Base"}</span>${orb}</button>
        <button class="btn btn-ghost btn-lg" data-action="connect">Use another wallet</button>`
-    : `<button class="btn btn-primary btn-lg has-orb" data-action="connect">Connect wallet${orb}</button>
+    : `<button class="btn btn-primary btn-lg has-orb" data-action="connect">${appKitConfigured() ? "Continue with email or wallet" : "Connect wallet"}${orb}</button>
        <a class="btn btn-ghost btn-lg" href="https://singitai.app/#how">How it works</a>`;
   return `
     <section class="hero">
@@ -362,8 +369,8 @@ function renderHero() {
         and one signature takes it all back.</p>
       <div class="row" style="justify-content:center">${cta}</div>
       <div class="steps">
-        <div class="step"><span class="n">01</span><h3>Connect and sign in</h3>
-          <p>Any wallet: Rabby, MetaMask, Phantom, Solflare, Backpack or WalletConnect — on Base or Solana. Signing in moves nothing.</p></div>
+        <div class="step"><span class="n">01</span><h3>Sign in</h3>
+          <p>With your email, Google or Apple — we make a wallet for you — or any wallet you have: Rabby, MetaMask, Phantom, Solflare. Signing in moves nothing.</p></div>
         <div class="step"><span class="n">02</span><h3>Set your limits</h3>
           <p>We deploy a small contract that enforces them on Base. You pay no gas for it.</p></div>
         <div class="step"><span class="n">03</span><h3>Allow once</h3>

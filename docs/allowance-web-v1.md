@@ -470,3 +470,14 @@ buying needs a Base wallet for now. The gateway lets a Solana account only look
 (`tools`, `catalog-search`, `purchases`, Venice models and usage), never pay.
 Step 2 — limits and payments on Solana — needs its own spending mechanism.
 
+## Sign in with email or a social account
+
+No wallet is needed to start: the AppKit modal offers email, Google, Apple, X
+and Discord, which create a Reown embedded wallet for the user (a plain account,
+`defaultAccountTypes: {eip155: "eoa"}`; a smart account would sign through its
+contract, which v1 refuses). From there it is the same flow as any wallet: Sign-In
+with Ethereum, limits, one approval. A new embedded wallet has no ETH, so the page
+approves the allowance with an EIP-2612 permit signature (no gas) instead of an
+`approve` transaction. Signing in follows the connection the user asked for
+without a second click. Funding it with USDC on Base is still the user's step.
+

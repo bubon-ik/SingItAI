@@ -1,5 +1,6 @@
 // The user's wallet: an EVM one through EIP-1193, or a Solana one (Phantom,
-// Solflare, Backpack…) through its signMessage.
+// Solflare, Backpack…) through its signMessage — or, with no wallet at all, the
+// Reown embedded wallet created by signing in with email, Google, Apple, X or Discord.
 //
 // With a WalletConnect project id (config.js) the connection goes through
 // Reown AppKit — the standard wallet modal, for EVM and Solana: browser
@@ -181,7 +182,14 @@ async function appKit() {
       "--w3m-font-family": "Geist, 'Helvetica Neue', sans-serif",
       "--w3m-border-radius-master": "3px",
     },
-    features: { analytics: false, email: false, socials: false, swaps: false, onramp: false, send: false, history: false },
+    // Email and social sign-in create a Reown embedded wallet: no extension, no seed phrase.
+    // It must be a plain account (EOA): the limiter's owner signs Sign-In with Ethereum and
+    // the allowance, and a smart account would sign through its contract, which v1 refuses.
+    defaultAccountTypes: { eip155: "eoa" },
+    features: {
+      analytics: false, email: true, socials: ["google", "apple", "x", "discord"], emailShowWallets: true,
+      swaps: false, onramp: false, send: false, history: false,
+    },
     allowUnsupportedChain: false,
   });
   return kit;
