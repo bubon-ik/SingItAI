@@ -538,3 +538,6 @@ body.in-app .nav-wrap, body.in-app .shell { display: none; }
   background: rgba(240, 192, 96, 0.05); color: var(--text-soft); font: 400 12.5px var(--sans); text-align: left; cursor: pointer; }
 .side-funds b { color: var(--text); font-weight: 600; }
 @media (max-width: 520px) { .funds { grid-template-columns: 1fr; justify-items: center; } .funds-side { align-items: center; text-align: center; } }
+
+.topup-options { flex-wrap: wrap; }
+.topup-options .btn[disabled] { opacity: 0.4; cursor: not-allowed; }

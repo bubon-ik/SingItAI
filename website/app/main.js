@@ -1031,10 +1031,15 @@ function renderCard(card, key) {
   }
   if (card.type === "venice_topup") {
     if (state.done[key]) return `<div class="card done"><h3>Venice credit topped up ✓</h3></div>`;
-    return `<div class="card accent"><div class="spread"><h3>Private chat credit</h3><span class="status">${esc(card.amount)} USDC</span></div>
-      <p class="faint">Venice's exact price for ${esc(card.amount)} USDC of credit, paid from your Solana allowance. Asked once per top-up.</p>
-      <div class="row"><button class="btn btn-primary btn-sm has-orb" data-action="card-topup" data-key="${esc(key)}"
-        data-quote="${esc(card.quoteId)}" data-hash="${esc(card.approvalHash)}">Top up ${esc(card.amount)} USDC${orb}</button></div></div>`;
+    const options = card.options?.length ? card.options : [{ amount: card.amount, ok: true }];
+    const why = options.filter((o) => !o.ok).map((o) => `${o.amount} USDC: ${o.why}`).join(" · ");
+    return `<div class="card accent"><div class="spread"><h3>Private chat credit</h3><span class="status">from ${esc(card.amount)} USDC</span></div>
+      <p class="faint">Credit on Venice for your private chat, paid from your Solana allowance. Each message spends a fraction of a cent.
+        Pick how much; the button you press is your approval.</p>
+      <div class="row topup-options">${options.map((o, i) => `<button class="btn ${i === 0 ? "btn-primary has-orb" : "btn-ghost"} btn-sm"
+        data-action="card-topup" data-key="${esc(key)}" data-quote="${esc(card.quoteId)}" data-hash="${esc(card.approvalHash)}"
+        data-amount="${esc(o.atomic || "")}" ${o.ok ? "" : `disabled title="${esc(o.why || "")}"`}>Top up ${esc(o.amount)} USDC${i === 0 ? orb : ""}</button>`).join("")}</div>
+      ${why ? `<p class="hint">${esc(why)}</p>` : ""}</div>`;
   }
   if (card.type === "add_funds") {
     return `<div class="card"><p>Your wallet needs more USDC on Base for this.</p>
@@ -1497,7 +1502,8 @@ const actions = {
   },
   "card-topup": (el) => {
     state.done[el.dataset.key] = true;
-    cardAction({ type: "venice_topup", quoteId: el.dataset.quote, approvalHash: el.dataset.hash });
+    cardAction({ type: "venice_topup", quoteId: el.dataset.quote, approvalHash: el.dataset.hash,
+                 ...(el.dataset.amount ? { amount: el.dataset.amount } : {}) });
   },
   "card-limits": (el) => {
     const key = el.dataset.key;

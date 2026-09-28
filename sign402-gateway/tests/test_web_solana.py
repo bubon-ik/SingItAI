@@ -29,13 +29,19 @@ class VeniceBridge(FakeBridge):
             return {"canConsume": float(self.credit) > 0, "balanceUsd": self.credit}
         if operation == "quote":
             self.calls.append((operation, payer, True, None, payload))
+            if payload.get("amount"):
+                usdc = int(payload["amount"]) / 1_000_000
+                self.quotes["q-more"] = {"quoteId": "q-more", "amountUsdc": f"{usdc:.6f}", "approvalHash": "m" * 64,
+                                         "expiresAt": "2027-01-01T00:00:00Z", "recipient": "Venice"}
+                return self.quotes["q-more"]
             return self.quotes["q1"]
         if operation == "status":
             return {"quote": self.quotes[payload["quoteId"]], "attempted": bool(self.paid), "state": "quoted"}
         if operation == "pay":
             self.paid.append(payload)
-            self.charge(5_000_000)
-            self.credit = "5"
+            amount = int(float(self.quotes[payload["quoteId"]]["amountUsdc"]) * 1_000_000)
+            self.charge(amount)
+            self.credit = str(amount / 1_000_000)
             return {"state": "confirmed", "transaction": "5" * 88}
         if operation == "chat":
             self.calls.append((operation, payer, True, None, payload))
@@ -82,6 +88,19 @@ class SolanaVeniceTests(unittest.TestCase):
         status, reply = web_venice.chat_solana(self.server, ACCOUNT, self.messages)
         self.assertEqual((reply["text"], reply["promptTokens"], reply["costAtomic"]), ("Hi from Venice on Solana", 50, 1100))
         self.assertEqual(self.bridge.calls[-2][4]["conversation"], self.messages)
+
+    def test_the_card_offers_amounts_that_fit_and_says_why_others_do_not(self):
+        self.grant(daily="20", per="12")
+        status, reply = web_venice.chat_solana(self.server, ACCOUNT, self.messages)
+        self.assertEqual([(o["amount"], o["ok"]) for o in reply["options"]], [("5", True), ("10", True), ("20", False)])
+        self.assertEqual(reply["options"][2]["why"], "above your per-purchase limit")
+
+    def test_a_larger_amount_pressed_is_quoted_and_paid_at_that_amount(self):
+        self.grant(daily="20", per="12")
+        status, paid = web_venice.topup_solana(self.server, ACCOUNT, "q1", "h" * 64, amount="10000000")
+        self.assertEqual((status, paid["text"]), (200, "Added 10 USDC of Venice credit."))
+        self.assertEqual(self.bridge.paid[-1], {"quoteId": "q-more", "approvalHash": "m" * 64, "owner": OWNER})
+        self.assertEqual(self.lane.status(ACCOUNT)["remainingTodayAtomic"], 10_000_000)
 
     def test_a_top_up_not_shown_or_over_the_limits_is_not_paid(self):
         self.grant(per="4")

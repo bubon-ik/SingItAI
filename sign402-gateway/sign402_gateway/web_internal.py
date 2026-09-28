@@ -152,7 +152,8 @@ def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict
         from . import web_venice  # noqa: PLC0415 - Venice only loads when the chat is used
         solana = account.startswith(SOLANA_PREFIX)
         if action == "venice-solana-topup":
-            return web_venice.topup_solana(server, account, payload.get("quoteId"), payload.get("approvalHash"))
+            return web_venice.topup_solana(server, account, payload.get("quoteId"), payload.get("approvalHash"),
+                                           payload.get("amount"))
         if action == "venice-usage":
             return web_venice.usage_solana(server, account) if solana else web_venice.usage(server, account)
         if action == "venice-chat" and solana:

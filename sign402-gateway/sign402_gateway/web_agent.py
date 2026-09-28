@@ -896,7 +896,8 @@ class WebAgent:
     def _venice_topup(self, account: str, chat_id: str, lang: str, action: Mapping[str, Any]) -> tuple[str, list]:
         """The top-up the user confirmed on the card, then the answer they were waiting for."""
         _, paid = self._shop("venice-solana-topup", account,
-                             {"quoteId": str(action.get("quoteId") or ""), "approvalHash": str(action.get("approvalHash") or "")})
+                             {"quoteId": str(action.get("quoteId") or ""), "approvalHash": str(action.get("approvalHash") or ""),
+                              **({"amount": str(action["amount"])} if str(action.get("amount") or "").isdigit() else {})})
         text, cards = self._converse(account, chat_id, lang)
         return f"{paid.get('text') or ''}\n\n{text}".strip(), cards
 
@@ -924,7 +925,8 @@ class WebAgent:
                 quote = reply.get("quote") or {}
                 return str(reply.get("text") or ""), [{
                     "type": "venice_topup", "amount": str(quote.get("amountUsdc") or "").rstrip("0").rstrip("."),
-                    "quoteId": quote.get("quoteId"), "approvalHash": quote.get("approvalHash"), "lang": lang}]
+                    "quoteId": quote.get("quoteId"), "approvalHash": quote.get("approvalHash"),
+                    "options": reply.get("options") or [], "lang": lang}]
             if reply.get("error") != "chat_off":
                 return str(reply.get("text") or say(lang, "The private chat did not answer. Nothing was paid.",
                                                     "Приватный чат не ответил. Ничего не оплачено.")), []

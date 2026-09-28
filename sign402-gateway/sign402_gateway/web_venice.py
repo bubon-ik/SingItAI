@@ -240,10 +240,12 @@ def chat_solana(server: Any, account: str, raw_messages: Any) -> tuple[int, dict
     before = lane._call(account, "balance")
     if not before.get("canConsume"):
         quote = lane._call(account, "quote")
+        minimum = _atomic(quote["amountUsdc"])
         return 402, {"ok": False, "error": "topup_needed",
-                     "text": f"Your private chat needs Venice credit: {quote['amountUsdc'].rstrip('0').rstrip('.')} USDC "
-                             "from your Solana allowance. Confirm to top up; I'll answer right after.",
-                     "quote": {k: quote[k] for k in ("quoteId", "amountUsdc", "approvalHash", "expiresAt", "recipient")}}
+                     "text": f"Your private chat needs Venice credit: at least {minimum / 1_000_000:g} USDC from your "
+                             "Solana allowance. Pick an amount; I'll answer right after.",
+                     "quote": {k: quote[k] for k in ("quoteId", "amountUsdc", "approvalHash", "expiresAt", "recipient")},
+                     "options": _topup_options(lane, account, minimum)}
     answer = lane._call(account, "chat", model=model, conversation=messages)
     usage = answer.get("usage") or {}
     try:
@@ -258,8 +260,26 @@ def chat_solana(server: Any, account: str, raw_messages: Any) -> tuple[int, dict
                  "completionTokens": int(usage.get("completion_tokens") or 0)}
 
 
-def topup_solana(server: Any, account: str, quote_id: Any, approval_hash: Any) -> tuple[int, dict[str, Any]]:
-    """The top-up the user confirmed on the card: exactly that quote, funded within the limits."""
+TOPUP_CHOICES = (5_000_000, 10_000_000, 20_000_000)  # Venice's minimum is $5; its own suggestion is $10
+
+
+def _topup_options(lane: Any, account: str, minimum: int) -> list[dict[str, Any]]:
+    """The amounts offered on the card, each with whether it fits the account's limits right now."""
+    status = lane.status(account)
+    room = [(int(status.get("perPurchaseCapAtomic") or 0), "above your per-purchase limit"),
+            (int(status.get("remainingTodayAtomic") or 0), "more than is left today"),
+            (int(status.get("allowanceAtomic") or 0), "more than your wallet approved"),
+            (int(status.get("ownerUsdcAtomic") or 0), "more than your wallet holds")]
+    options = []
+    for amount in sorted({minimum, *(c for c in TOPUP_CHOICES if c > minimum)}):
+        why = next((reason for cap, reason in room if amount > cap), "")
+        options.append({"amount": f"{amount / 1_000_000:g}", "atomic": str(amount), "ok": not why, **({"why": why} if why else {})})
+    return options
+
+
+def topup_solana(server: Any, account: str, quote_id: Any, approval_hash: Any,
+                 amount: Any = None) -> tuple[int, dict[str, Any]]:
+    """The top-up the user confirmed on the card: the amount they pressed, to the Venice they were shown."""
     lane = _solana_lane(server)
     status = lane._call(account, "status", quoteId=str(quote_id or ""))
     quote = status["quote"]
@@ -267,6 +287,12 @@ def topup_solana(server: Any, account: str, quote_id: Any, approval_hash: Any) -
         raise AllowanceError("That is not the top-up you were shown. Nothing was paid.")
     if status.get("attempted"):
         return 409, {"ok": False, "error": "already_attempted", "text": "This top-up was already sent. Nothing more was paid."}
+    if amount not in (None, "") and int(amount) != _atomic(quote["amountUsdc"]):
+        # A larger amount they pressed: the same Venice terms at that amount, bound to its own hash.
+        chosen = lane._call(account, "quote", amount=str(int(amount)))
+        if chosen.get("recipient") != quote.get("recipient"):
+            raise AllowanceError("Venice's payment address changed. Nothing was paid.")
+        quote, approval_hash = chosen, chosen["approvalHash"]
     amount = _atomic(quote["amountUsdc"])
     owner = lane.owner(account)
     paid = lane.spend(account, amount, "Venice AI credit", lambda: lane._call(

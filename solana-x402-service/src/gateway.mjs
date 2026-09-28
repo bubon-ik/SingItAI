@@ -51,7 +51,7 @@ export async function dispatch(input, { wallet, venice, chain, store, exa, feePa
   }
   const payments = new Payments({ wallet, venice, chain, store });
   if (input.operation === 'balance') return venice.balance();
-  if (input.operation === 'quote') return payments.prepare();
+  if (input.operation === 'quote') return payments.prepare(input.amount ?? null);
   if (input.operation === 'chat') return venice.chat({ model: input.model, message: input.message, conversation: input.conversation, maxTokens: 1024, sources: input.sources, offerSearch: input.offerSearch === true });
   if (!['pay', 'status', 'reconcile'].includes(input.operation)) throw new ClientError('INVALID_OPERATION', 'Unsupported operation.');
   const quote = store.quote(input.quoteId);

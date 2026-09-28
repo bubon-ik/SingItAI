@@ -95,3 +95,14 @@ test('reconciliation preserves uncertainty if chain proof does not match', async
   assert.equal(f.store.attempt(f.quote.quoteId).state, 'sending');
   assert.equal(f.calls.submit, 0);
 });
+test('a top-up above Venice’s minimum is quoted, approved and paid at that amount', async t => {
+  const f = await setup(t);
+  const ten = await f.payments.prepare('10000000');
+  assert.equal(ten.amountUsdc, '10.000000');
+  let built;
+  f.chain.build = async requirement => { built = requirement; f.calls.build++; return { payload: { test: true }, messageHash: 'b'.repeat(64) }; };
+  await f.payments.pay(ten.quoteId, ten.approvalHash);
+  assert.equal(built.amount, '10000000');
+  await assert.rejects(f.payments.prepare('3000000'), { code: 'BELOW_MINIMUM' });
+  await assert.rejects(f.payments.prepare('60000000'), { code: 'INVALID_AMOUNT' });
+});

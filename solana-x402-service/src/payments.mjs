@@ -24,8 +24,16 @@ function transactionFrom(response) {
 
 export class Payments {
   constructor({ wallet, venice, chain, store, now = Date.now }) { Object.assign(this, { wallet, venice, chain, store, now }); }
-  async prepare() {
+  // Venice's 402 names its minimum top-up; a larger amount is paid the way Venice's own client
+  // pays it (veniceai/x402-client, topUp(amountUsd)): the same terms with the chosen amount.
+  async prepare(amount = null) {
     const { requirement, resource } = await this.venice.challenge();
+    if (amount !== null && amount !== undefined) {
+      const chosen = BigInt(String(amount));
+      if (chosen < BigInt(requirement.amount)) throw new ClientError('BELOW_MINIMUM', `Venice's minimum top-up is ${formatUsdc(requirement.amount)} USDC.`);
+      if (chosen > 50000000n) throw new ClientError('INVALID_AMOUNT', 'Top up at most 50 USDC at a time.');
+      requirement.amount = chosen.toString();
+    }
     const quote = { id: randomUUID(), payer: this.wallet.address, createdAt: this.now(), expiresAt: this.now() + 300000, requirement, resource };
     quote.approvalHash = quoteHash(quote);
     this.store.saveQuote(quote);
@@ -43,7 +51,9 @@ export class Payments {
     if (this.store.attempt(id)) throw new ClientError('ALREADY_ATTEMPTED', 'A payment was already attempted for this quote. Use reconcile.');
     if (this.store.unresolved(this.wallet.address)) throw new ClientError('UNRESOLVED_PAYMENT', 'Resolve the previous payment before starting another top-up.');
     const fresh = await this.venice.challenge();
-    if (canonical(fresh.requirement) !== canonical(quote.requirement) || canonical(fresh.resource) !== canonical(quote.resource)) throw new ClientError('TERMS_CHANGED', 'Venice changed the payment terms. Prepare and approve a new quote.');
+    // Same terms as quoted, except the amount, which may be above Venice's minimum but never below it.
+    const sameTerms = canonical({ ...fresh.requirement, amount: quote.requirement.amount }) === canonical(quote.requirement);
+    if (!sameTerms || BigInt(quote.requirement.amount) < BigInt(fresh.requirement.amount) || canonical(fresh.resource) !== canonical(quote.resource)) throw new ClientError('TERMS_CHANGED', 'Venice changed the payment terms. Prepare and approve a new quote.');
     this.validateQuote(quote, approval);
     let built;
     if (owner) {
