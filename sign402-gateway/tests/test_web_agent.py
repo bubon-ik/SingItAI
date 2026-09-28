@@ -27,7 +27,7 @@ class FakeShop:
     def __call__(self, action, account, body):
         self.calls.append((action, account, dict(body)))
         if self.refuse and action == self.refuse:
-            return 400, {"ok": False, "text": "Raise your spending limit to continue."}
+            return 400, {"ok": False, "text": getattr(self, "refusal", "Raise your spending limit to continue.")}
         if action == "venice-chat":
             return (200 if self.venice.get("ok") else 400), dict(self.venice)
         if action == "catalog-search":
@@ -270,6 +270,18 @@ class AgentTests(unittest.TestCase):
         reply = self.agent.message(solana, None, "buy a 10 euro steam card in germany")["messages"][1]
         self.assertTrue(reply["cards"][0]["readOnly"])
         self.assertNotIn("bitrefill-buy", [c[0] for c in self.shop.calls])
+
+    def test_short_of_usdc_the_reply_offers_to_add_funds(self):
+        self.allowance.status.return_value = {"configured": False}
+        self.agent.setup.side_effect = type("WebError", (Exception,), {
+            "message": "Your wallet needs at least 1 USDC on Base before we create a limiter for it.",
+            "code": "owner_needs_usdc"})()
+        reply = self.send("$20 a day, $5 per purchase", "set_limits")
+        self.assertEqual(reply["cards"], [{"type": "add_funds"}])
+        self.allowance.status.return_value = dict(GRANTED)
+        self.shop.refuse = "tool-buy"
+        self.shop.refusal = "Your limiter cannot fund 0.001 USDC now: it allows 0 USDC. Nothing was paid."
+        self.assertEqual(self.send("buy crypto news", "buy_tool")["cards"], [{"type": "add_funds"}])
 
     def test_chats_belong_to_their_account(self):
         reply = self.agent.message(ACCOUNT, None, "hello")

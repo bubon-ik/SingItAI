@@ -513,7 +513,10 @@ class WebAgent:
         except Exception as exc:
             public = getattr(exc, "message", None)  # WebError: already a sentence for the user
             if public or isinstance(exc, (ValueError, LookupError, AllowanceError)):
-                return str(public or exc), []
+                text = str(public or exc)
+                # Short of USDC in the wallet: the reply comes with the way to add some.
+                short = getattr(exc, "code", "") == "owner_needs_usdc" or "cannot fund" in text
+                return text, [{"type": "add_funds"}] if short else []
             logger.exception("web agent: a handler failed")
             return say(lang, "Something went wrong on our side. Nothing was paid.",
                        "Что-то пошло не так на нашей стороне. Ничего не оплачено."), []

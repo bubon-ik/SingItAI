@@ -479,5 +479,10 @@ contract, which v1 refuses). From there it is the same flow as any wallet: Sign-
 with Ethereum, limits, one approval. A new embedded wallet has no ETH, so the page
 approves the allowance with an EIP-2612 permit signature (no gas) instead of an
 `approve` transaction. Signing in follows the connection the user asked for
-without a second click. Funding it with USDC on Base is still the user's step.
+without a second click. Funding it is the "Add funds" window (account menu; the sidebar when the wallet
+holds under 1 USDC; a card on the agent's reply when a purchase or a new limiter
+is short of USDC): the address with a QR code and a copy button, the balance, a
+warning to send only USDC on Base, and, for a wallet connected through AppKit,
+"Buy USDC with a card" (Reown's onramp partners; they may ask for ID and charge a
+fee). The money lands in the user's own wallet, never with us.
 

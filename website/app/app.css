@@ -526,3 +526,15 @@ body.in-app .nav-wrap, body.in-app .shell { display: none; }
 .how-to-use { margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--hairline); }
 .how-to-use p { margin-top: 4px; font-size: 13.5px; color: var(--text-soft); line-height: 1.55; }
+
+.funds { display: grid; grid-template-columns: 148px minmax(0, 1fr); gap: 18px; align-items: center; margin: 16px 0 14px; }
+.qr { width: 148px; height: 148px; border-radius: 14px; background: #fff; padding: 6px; display: grid; place-items: center;
+  color: #111; font-size: 12px; text-align: center; }
+.qr svg { width: 100%; height: 100%; }
+.funds-side { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; min-width: 0; }
+.funds-address { font-size: 12.5px; overflow-wrap: anywhere; line-height: 1.5; }
+.funds-balance { font-size: 12.5px; }
+.side-funds { width: 100%; padding: 8px 12px; border-radius: 11px; border: 1px dashed rgba(240, 192, 96, 0.45);
+  background: rgba(240, 192, 96, 0.05); color: var(--text-soft); font: 400 12.5px var(--sans); text-align: left; cursor: pointer; }
+.side-funds b { color: var(--text); font-weight: 600; }
+@media (max-width: 520px) { .funds { grid-template-columns: 1fr; justify-items: center; } .funds-side { align-items: center; text-align: center; } }

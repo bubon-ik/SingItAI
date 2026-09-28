@@ -188,7 +188,7 @@ async function appKit() {
     defaultAccountTypes: { eip155: "eoa" },
     features: {
       analytics: false, email: true, socials: ["google", "apple", "x", "discord"], emailShowWallets: true,
-      swaps: false, onramp: false, send: false, history: false,
+      swaps: false, onramp: true, send: false, history: false,  // onramp: buy USDC with a card
     },
     allowUnsupportedChain: false,
   });
@@ -222,6 +222,12 @@ export async function watchAppKit(onWallet) {
 export async function openAppKit() {
   const k = await appKit();
   await k.open({ view: "Connect" });
+}
+
+// Buy crypto with a card (Reown's onramp providers), for a wallet connected through AppKit.
+export async function openOnRamp() {
+  const k = await appKit();
+  await k.open({ view: "OnRampProviders" });
 }
 
 export async function disconnectAppKit() {

@@ -1438,7 +1438,7 @@ class AllowanceService:
         if size > room:
             raise AllowanceError(
                 f"Your limiter cannot fund {_usdc_text(size)} now: it allows {_usdc_text(room)} "
-                "(per purchase, left today, the allowance and your Trezor balance). Nothing was paid."
+                "(per purchase, left today, the allowance and your wallet's balance). Nothing was paid."
             )
         data = encode_call("spend(address,uint256,bytes32)", agent, size, keccak(text=ref_text).hex())
         self.ensure_gas(agent, self.evm.quote(agent, to=limiter, data=data)["maxCostWei"])

@@ -4,7 +4,7 @@
 
 import { api, ApiError, csrf, setCsrf } from "./api.js";
 import {
-  appKitConfigured, disconnectAppKit, discover, openAppKit, Wallet, wallets, walletError, watchAppKit,
+  appKitConfigured, disconnectAppKit, discover, openAppKit, openOnRamp, Wallet, wallets, walletError, watchAppKit,
 } from "./wallet.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -654,6 +654,34 @@ function renderModal() {
       <p class="hint">Price held until ${esc(new Date(q.expiresAt * 1000).toLocaleTimeString())}.</p>`);
     return;
   }
+  if (m.type === "funds") {
+    const solana = state.session?.chain === "solana";
+    const address = state.session?.address || state.wallet?.address || "";
+    const a = state.allowance;
+    const byCard = appKitConfigured() && state.wallet?.name === "WalletConnect" && !solana;
+    modalEl.innerHTML = modal(`
+      <div class="approval-head"><div class="avatar">${mark()}</div>
+        <div><strong>Add funds</strong><span>USDC on ${solana ? "Solana" : "Base"}, to your own wallet</span></div></div>
+      <div class="funds">
+        <div class="qr" id="funds-qr" aria-label="QR code of your address"></div>
+        <div class="funds-side">
+          <span class="label">Your address</span>
+          <p class="mono funds-address">${esc(address)}</p>
+          <button class="btn btn-ghost btn-sm" data-action="copy-address">Copy address</button>
+          ${!solana && a?.ownerUsdcAtomic !== undefined ? `<p class="faint funds-balance">Now: ${usdc(a.ownerUsdcAtomic)}${
+            a.ownerEthWei !== undefined ? ` · ${(Number(a.ownerEthWei) / 1e18).toFixed(5)} ETH` : ""}</p>` : ""}
+        </div>
+      </div>
+      <p class="note warn">Send only <b>USDC</b> on the <b>${solana ? "Solana" : "Base"}</b> network. Other tokens or networks can be lost.</p>
+      ${solana ? `<p class="hint">Spending from Solana is coming; for now your agent buys from a Base wallet.</p>` : ""}
+      <div class="actions" style="margin-top:16px">
+        ${byCard ? `<button class="btn btn-primary" data-action="buy-with-card">Buy USDC with a card</button>` : ""}
+        <button class="btn btn-ghost" data-action="dismiss-button">Done</button>
+      </div>
+      ${byCard ? `<p class="hint">Card purchases are run by Reown's partners; they may ask for ID and charge a fee.</p>` : ""}`);
+    drawQr(address);
+    return;
+  }
   if (m.type === "models") {
     const { query, category } = state.modelFilter;
     const granted = state.allowance?.state === "granted";
@@ -777,8 +805,10 @@ function renderSidebar() {
        ${(a.staleLimiters || []).length ? `<div class="faint" style="color:var(--danger);margin-top:8px">⚠ Old limiter to revoke</div>` : ""}`
     : `<div class="label">Allowance</div><div style="margin-top:4px;font-size:14px;color:var(--text-soft)">${
         a?.chain === "solana" ? "Solana · limits coming" : "No limits yet"}</div>`;
+  const low = a && a.chain !== "solana" && a.ownerUsdcAtomic !== undefined && BigInt(a.ownerUsdcAtomic) < 1000000n;
   $("#side-nav").innerHTML = `
     <button class="side-allowance ${state.view === "allowance" ? "active" : ""}" data-action="go" data-view="allowance">${amountLine}</button>
+    ${low ? `<button class="side-funds" data-action="add-funds">Wallet has ${usdc(a.ownerUsdcAtomic)} · <b>Add funds</b></button>` : ""}
     <button class="side-account-btn ${state.accountMenu ? "open" : ""}" data-action="account-menu" aria-haspopup="menu"
       aria-expanded="${Boolean(state.accountMenu)}"><span class="dot"></span><span class="mono">${esc(short(state.session.address))}</span>
       <span class="chain-tag">${state.session.chain === "solana" ? "SOL" : "Base"}</span><span class="caret">⌃</span></button>`;
@@ -957,6 +987,10 @@ function renderCard(card, key) {
         ${choice(p)}</div>`).join("")}
       <p class="faint" style="margin-top:8px">Paid from your allowance, inside your limits. The price is checked again before paying.</p></div>`;
   }
+  if (card.type === "add_funds") {
+    return `<div class="card"><p>Your wallet needs more USDC on Base for this.</p>
+      <div class="row"><button class="btn btn-primary btn-sm" data-action="add-funds">Add funds</button></div></div>`;
+  }
   if (card.type === "usage") {
     return `<div class="msg-meta">${esc(card.model)} · ${Number(card.tokens || 0).toLocaleString("en-US")} tokens · $${esc(card.costUsd)}</div>`;
   }
@@ -996,6 +1030,7 @@ const ICONS = {
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6"/><path d="M12 17h.01"/>',
   signout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5M21 12H9"/>',
   back: '<path d="m15 18-6-6 6-6"/>',
+  funds: '<path d="M20 12V8H6a2 2 0 0 1 0-4h12v4"/><path d="M4 6v12a2 2 0 0 0 2 2h14v-4"/><path d="M18 12a2 2 0 0 0 0 4h4v-4z"/>',
   check: '<path d="m5 12 5 5 9-10"/>',
 };
 const icon = (name) => name && ICONS[name]
@@ -1015,6 +1050,7 @@ function renderAccountMenu() {
       + LANGUAGES.map(([code, label, hint]) => item("set-reply-lang", state.replyLang === code ? "check" : "", label,
           hint ? `<kbd>${hint}</kbd>` : "", `data-lang="${code}"`)).join("")
     : `<div class="menu-head mono" title="${esc(state.session.address)}">${esc(short(state.session.address))}</div>`
+      + item("add-funds", "funds", "Add funds")
       + item("go", "usage", "Usage", "", 'data-view="usage"')
       + item("go", "purchases", "Purchases", "", 'data-view="purchases"')
       + item("go", "settings", "Settings", "", 'data-view="settings"')
@@ -1111,6 +1147,26 @@ function startThinking() {
 function stopThinking() {
   clearInterval(thinkingTimer);
   state.thinkingSince = 0;
+}
+
+// A QR code of the address, drawn with qrcode-generator (loaded once, only when needed).
+let qrLibrary = null;
+function drawQr(text) {
+  qrLibrary ||= new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js";
+    script.onload = () => resolve(window.qrcode);
+    script.onerror = () => { qrLibrary = null; reject(new Error("QR unavailable")); };
+    document.head.append(script);
+  });
+  qrLibrary.then((qrcode) => {
+    const el = $("#funds-qr");
+    if (!el || !text) return;
+    const qr = qrcode(0, "M");
+    qr.addData(text);
+    qr.make();
+    el.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+  }).catch(() => { const el = $("#funds-qr"); if (el) el.textContent = "QR unavailable — copy the address."; });
 }
 
 async function loadModels() {
@@ -1292,6 +1348,16 @@ const actions = {
   },
   "open-chat": (el) => openChat(el.dataset.id),
   "chat-menu": (el) => (state.chatMenu?.id === el.dataset.id ? closeChatMenu() : openChatMenu(el)),
+  "add-funds": () => { state.accountMenu = null; state.chatMenu = null; state.modal = { type: "funds" }; render(); },
+  "copy-address": async () => {
+    try {
+      await navigator.clipboard.writeText(state.session?.address || state.wallet?.address || "");
+      toast("Address copied.");
+    } catch {
+      toast("Could not copy; select the address instead.", true);
+    }
+  },
+  "buy-with-card": () => { state.modal = null; render(); openOnRamp().catch((error) => toast(explain(error), true)); },
   "account-menu": () => { state.accountMenu = state.accountMenu ? null : "main"; state.chatMenu = null; renderSidebar(); },
   "account-menu-main": () => { state.accountMenu = "main"; renderSidebar(); },
   "account-menu-language": () => { state.accountMenu = "language"; renderSidebar(); },
