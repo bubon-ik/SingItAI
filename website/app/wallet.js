@@ -74,7 +74,14 @@ function base58(bytes) {
   return out;
 }
 
-// A Solana wallet signs in (Sign In With Solana). Spending on Solana is not built yet.
+// @solana/web3.js, only to hand a prepared transaction to the wallet in the shape it expects.
+const SOLANA_WEB3 = "https://cdn.jsdelivr.net/npm/@solana/web3.js@1.99.0/+esm";
+let web3 = null;
+const solanaWeb3 = () => (web3 ||= import(SOLANA_WEB3));
+const fromBase64 = (text) => Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
+const toBase64 = (bytes) => btoa(Array.from(bytes, (b) => String.fromCharCode(b)).join(""));
+
+// A Solana wallet: signs in (Sign In With Solana) and signs the allowance the server prepares.
 export class SolanaWallet {
   constructor(provider, name, address) {
     this.provider = provider;
@@ -102,8 +109,17 @@ export class SolanaWallet {
     return base58(bytes);
   }
 
+  // The approve or revoke the server prepared: the wallet signs it, the server checks it and sends it.
+  async signTransaction(base64) {
+    const { VersionedTransaction } = await solanaWeb3();
+    const signed = await this.provider.signTransaction(VersionedTransaction.deserialize(fromBase64(base64)));
+    const bytes = signed?.serialize ? signed.serialize() : signed?.signedTransaction?.serialize?.();
+    if (!bytes) throw new Error("The wallet returned no signed transaction.");
+    return toBase64(bytes);
+  }
+
   unsupported() {
-    throw new Error("Spending from a Solana wallet is coming. For now, connect a Base wallet to let your agent buy.");
+    throw new Error("This is a Base step; your Solana wallet signs its own version of it.");
   }
 
   async sendTransaction() { this.unsupported(); }

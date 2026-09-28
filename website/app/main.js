@@ -228,6 +228,21 @@ async function walletOperation(kind, body) {
     const prepared = await api.prepare(kind, body);
     say(`${prepared.walletShows} Confirm it in your wallet.`);
     let answer;
+    if (prepared.chain === "solana") {
+      // Solana: the wallet signs the prepared approve or revoke; the server checks it and sends it.
+      answer = { operation: prepared.operation, transaction: await wallet.signTransaction(prepared.transaction) };
+      say("Sending it to Solana…");
+      let op = await api.submit(kind, answer);
+      const until = Date.now() + 90000;
+      while (!["DONE", "FAILED", "EXPIRED"].includes(op.state) && Date.now() < until) {
+        await sleep(2000);
+        op = await api.operation(prepared.operation);
+      }
+      await loadAllowance();
+      if (op.state === "DONE") toast(op.detail || "Done.");
+      else toast(op.detail || `The request ended as ${op.state.toLowerCase()}.`, true);
+      return op.state === "DONE";
+    }
     try {
       answer = prepared.method === "permit"
         ? { operation: prepared.operation, signature: await wallet.signTypedData(prepared.typedData) }
@@ -422,17 +437,38 @@ function methodSwitch() {
     : "Your wallet will ask you to confirm a transaction; it costs a few cents of ETH."}</p>`;
 }
 
+// Solana: the owner's wallet approved the agent for a total; the day and per-purchase limits are ours.
+function renderSolanaAllowance(a) {
+  const granted = a.state === "granted";
+  return `
+    <div class="page-head"><span class="eyebrow">Agent allowance · Solana</span>
+      <h1>${granted ? "Your agent can <em>spend</em>." : "Approve it <em>once</em>."}</h1>
+      <p>Your USDC stays in your wallet. Your agent takes only what a purchase needs, inside these limits.</p></div>
+    <div class="metrics">
+      <div class="metric"><span class="label">Can spend today</span><b>${usdc(spendableToday(a))}</b></div>
+      <div class="metric"><span class="label">Daily limit</span><b>${usdc(a.dailyCapAtomic)}</b><span class="faint">per purchase ${usdc(a.perPurchaseCapAtomic)}</span></div>
+      <div class="metric"><span class="label">Approved in your wallet</span><b>${usdc(a.allowanceAtomic)}</b><span class="faint">wallet holds ${usdc(a.ownerUsdcAtomic)}</span></div>
+    </div>
+    <div class="bezel" style="margin-top:18px"><div class="core">
+      <p class="faint">Your wallet approved <span class="mono">${esc(short(a.limiter))}</span>, your agent, to take up to the approved total.
+        The chain enforces that total; SingIt enforces the daily and per-purchase limits. Revoking takes effect at once.</p>
+      <div class="row">
+        ${granted ? "" : `<input id="grant-amount" class="input" style="width:120px" value="${esc(amount(a.dailyCapAtomic))}" aria-label="Amount to approve">
+          <button class="btn btn-primary btn-sm has-orb" data-action="grant">Approve in wallet${orb}</button>`}
+        ${granted ? `<button class="btn btn-ghost btn-sm" data-action="add-funds">Add funds</button>` : ""}
+        ${a.allowanceAtomic > 0 ? `<button class="btn btn-danger btn-sm" data-action="revoke">Revoke</button>` : ""}
+      </div>
+    </div></div>`;
+}
+
 function renderAllowance() {
   const a = state.allowance;
   if (!a) return `<p class="faint">Loading…</p>`;
-  if (a.chain === "solana") {
+  if (a.chain === "solana" && a.supported === false) {
     return `<div class="page-head"><span class="eyebrow">Solana</span><h1>Limits on Solana are <em>coming</em>.</h1>
-      <p>${esc(a.text || "")}</p></div>
-      <div class="bezel"><div class="core"><p>Signed in as <span class="mono">${esc(state.session.address)}</span> on Solana.
-        Your agent can chat and look things up. To let it buy now, sign out and connect a Base wallet —
-        Phantom works on Base too.</p>
-        <div class="row"><button class="btn btn-ghost btn-sm" data-action="sign-out">Use a Base wallet</button></div></div></div>`;
+      <p>${esc(a.text || "")}</p></div>`;
   }
+  if (a.chain === "solana" && a.configured) return renderSolanaAllowance(a);
   if (!a.configured) {
     return `<div class="page-head"><span class="eyebrow">Step 2 of 3</span>
       <h1>Set your agent's <em>limits</em>.</h1>
@@ -668,12 +704,12 @@ function renderModal() {
           <span class="label">Your address</span>
           <p class="mono funds-address">${esc(address)}</p>
           <button class="btn btn-ghost btn-sm" data-action="copy-address">Copy address</button>
-          ${!solana && a?.ownerUsdcAtomic !== undefined ? `<p class="faint funds-balance">Now: ${usdc(a.ownerUsdcAtomic)}${
-            a.ownerEthWei !== undefined ? ` · ${(Number(a.ownerEthWei) / 1e18).toFixed(5)} ETH` : ""}</p>` : ""}
+          ${a?.ownerUsdcAtomic !== undefined ? `<p class="faint funds-balance">Now: ${usdc(a.ownerUsdcAtomic)}${
+            !solana && a.ownerEthWei !== undefined ? ` · ${(Number(a.ownerEthWei) / 1e18).toFixed(5)} ETH` : ""}</p>` : ""}
         </div>
       </div>
       <p class="note warn">Send only <b>USDC</b> on the <b>${solana ? "Solana" : "Base"}</b> network. Other tokens or networks can be lost.</p>
-      ${solana ? `<p class="hint">Spending from Solana is coming; for now your agent buys from a Base wallet.</p>` : ""}
+      ${solana ? `<p class="hint">No SOL needed: SingIt pays the network fees for your agent's allowance.</p>` : ""}
       <div class="actions" style="margin-top:16px">
         ${byCard ? `<button class="btn btn-primary" data-action="buy-with-card">Buy USDC with a card</button>` : ""}
         <button class="btn btn-ghost" data-action="dismiss-button">Done</button>
@@ -804,8 +840,8 @@ function renderSidebar() {
        <div style="margin-top:8px">${statusPill(a.state)}</div>
        ${(a.staleLimiters || []).length ? `<div class="faint" style="color:var(--danger);margin-top:8px">⚠ Old limiter to revoke</div>` : ""}`
     : `<div class="label">Allowance</div><div style="margin-top:4px;font-size:14px;color:var(--text-soft)">${
-        a?.chain === "solana" ? "Solana · limits coming" : "No limits yet"}</div>`;
-  const low = a && a.chain !== "solana" && a.ownerUsdcAtomic !== undefined && BigInt(a.ownerUsdcAtomic) < 1000000n;
+        a?.supported === false ? "Solana · limits coming" : "No limits yet"}</div>`;
+  const low = a && a.ownerUsdcAtomic !== undefined && BigInt(a.ownerUsdcAtomic) < 1000000n;
   $("#side-nav").innerHTML = `
     <button class="side-allowance ${state.view === "allowance" ? "active" : ""}" data-action="go" data-view="allowance">${amountLine}</button>
     ${low ? `<button class="side-funds" data-action="add-funds">Wallet has ${usdc(a.ownerUsdcAtomic)} · <b>Add funds</b></button>` : ""}
@@ -986,6 +1022,13 @@ function renderCard(card, key) {
         <p class="faint">${p.packages?.length ? `${p.packages.length} ${card.kind === "esim" ? "plans" : "options"} · from ${esc(Math.min(...p.packages.map((o) => Number(o.priceUsd))))} USDC` : esc(p.slug)}</p></div>
         ${choice(p)}</div>`).join("")}
       <p class="faint" style="margin-top:8px">Paid from your allowance, inside your limits. The price is checked again before paying.</p></div>`;
+  }
+  if (card.type === "venice_topup") {
+    if (state.done[key]) return `<div class="card done"><h3>Venice credit topped up ✓</h3></div>`;
+    return `<div class="card accent"><div class="spread"><h3>Private chat credit</h3><span class="status">${esc(card.amount)} USDC</span></div>
+      <p class="faint">Venice's exact price for ${esc(card.amount)} USDC of credit, paid from your Solana allowance. Asked once per top-up.</p>
+      <div class="row"><button class="btn btn-primary btn-sm has-orb" data-action="card-topup" data-key="${esc(key)}"
+        data-quote="${esc(card.quoteId)}" data-hash="${esc(card.approvalHash)}">Top up ${esc(card.amount)} USDC${orb}</button></div></div>`;
   }
   if (card.type === "add_funds") {
     return `<div class="card"><p>Your wallet needs more USDC on Base for this.</p>
@@ -1445,6 +1488,10 @@ const actions = {
       ? await walletOperation("grant", { amount: el.dataset.amount, method: method() })
       : await walletOperation("revoke", { method: method(), ...(el.dataset.limiter ? { limiter: el.dataset.limiter } : {}) });
     if (ok) { state.done[key] = true; render(); }
+  },
+  "card-topup": (el) => {
+    state.done[el.dataset.key] = true;
+    cardAction({ type: "venice_topup", quoteId: el.dataset.quote, approvalHash: el.dataset.hash });
   },
   "card-limits": (el) => {
     const key = el.dataset.key;
