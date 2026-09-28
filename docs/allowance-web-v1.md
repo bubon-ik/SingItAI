@@ -452,23 +452,43 @@ Each step with unit tests and a mainnet check recorded in
 - Phantom's EVM support on Base is assumed; test it before promising it.
 - Solana users (Phantom's default chain) need a different lane; out of scope.
 
-## Solana wallets (step 1: sign-in)
+## Solana wallets
 
 Any wallet signs in: an EVM wallet with Sign-In with Ethereum on Base, or a
 Solana wallet (Phantom, Solflare, Backpack, or any through Reown AppKit's Solana
-adapter) with Sign In With Solana (CAIP-122 text, `Chain ID: mainnet`), verified
-as an ed25519 signature over exactly the issued message. A Solana account is
-`solana:<base58 address>`; the beta allowlist compares Solana addresses
-case-sensitively. The session and `/session` carry `chain` (`base` | `solana`),
-and the page labels it.
+adapter, including email wallets) with Sign In With Solana (CAIP-122 text,
+`Chain ID: mainnet`), verified as an ed25519 signature over exactly the issued
+message. A Solana account is `solana:<base58 address>`; the beta allowlist
+compares Solana addresses case-sensitively. The session carries `chain`.
 
-The allowance lane is a Base contract, so a Solana account has no limiter yet:
-`GET /allowance` answers `{configured: false, chain: "solana", supported: false}`,
-allowance writes are refused with the reason, and the agent chats (the free
-concierge), researches the catalog and shows products read-only, and says that
-buying needs a Base wallet for now. The gateway lets a Solana account only look
-(`tools`, `catalog-search`, `purchases`, Venice models and usage), never pay.
-Step 2 — limits and payments on Solana — needs its own spending mechanism.
+A Solana account has the same lane as a Base one, through the same routes
+(`sign402_gateway/solana_allowance.py`, the Node side in
+`solana-x402-service/src/allowance.mjs`):
+
+- **Limits** (daily, per purchase, days) are set the same way and kept by the
+  server; there is no contract to deploy.
+- **One approval from the wallet**: an SPL `ApproveChecked` on the owner's own
+  USDC account, the account's agent key as delegate, for a total. The chain
+  enforces that total; one `Revoke` ends it at once. The server prepares the
+  transaction, the wallet signs it (`@solana/web3.js` on the page), and the
+  server sends it only if it is exactly the prepared message, adding our fee
+  payer's signature: the owner needs no SOL.
+- **A purchase** pulls just what the agent still needs from the owner's account
+  (the agent as delegate) into the agent's own, within the per-purchase and daily
+  limits and the expiry (checked here) and the approved total (checked by the
+  chain), and counts it against the day. x402 then pays from the agent's
+  account, the merchant paying that fee.
+- **Venice** runs on it: the agent's Solana address signs Venice in; without
+  credit, the reply is a card with Venice's exact quote, and confirming it pulls,
+  pays and answers (the Solana x402 service never pays a quote nobody approved).
+  Usage shows the credit and each top-up.
+- Paid data and Bitrefill are sold on Base, so from Solana the agent says so;
+  the catalog is read-only there.
+
+Turned on with `SIGN402_SOLANA_ALLOWANCE_ENABLED=1` and
+`SIGN402_SOLANA_FEE_PAYER_KEY` (Fernet-encrypted, made by
+`python -m sign402_gateway.solana_allowance new-fee-payer`; the deploy script does
+it when the web page is on). Fund that fee payer with a little SOL.
 
 ## Sign in with email or a social account
 

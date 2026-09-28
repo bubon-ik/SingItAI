@@ -604,7 +604,11 @@ def main() -> int:
 
     master = load_master_key()
     allowance = build_allowance_service_from_env(master)
-    solana = build_solana_allowance_from_env(master)
+    try:
+        solana = build_solana_allowance_from_env(master)
+    except (ValueError, OSError) as exc:  # a misconfigured Solana lane stays off; Base keeps working
+        logger.error("web api: solana allowance lane disabled: %s", exc)
+        solana = None
     if allowance is None:
         logger.error("web api: the allowance lane is off (SIGN402_ALLOWANCE_ENABLED != 1)")
         return 1

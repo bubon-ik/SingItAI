@@ -335,3 +335,24 @@ def build_solana_allowance_from_env(master_key: str, bridge: Any = None,
         max_days=int(values.get(MAX_DAYS_ENV, DEFAULT_MAX_DAYS)),
         max_grant=_usdc_atomic(values.get(MAX_GRANT_ENV, DEFAULT_MAX_GRANT), MAX_GRANT_ENV),
     )
+
+
+def encrypt_fee_payer_key(master_key: str) -> tuple[str, str]:
+    """A new Solana keypair for our fee payer: its address, and the keypair encrypted with the master key."""
+    from cryptography.fernet import Fernet
+
+    address, secret = generate_keypair()
+    return address, Fernet(master_key.encode("ascii")).encrypt(secret.encode()).decode()
+
+
+if __name__ == "__main__":
+    import sys
+
+    from .keyring import load_master_key
+
+    if sys.argv[1:] != ["new-fee-payer"]:
+        print("usage: python -m sign402_gateway.solana_allowance new-fee-payer", file=sys.stderr)
+        sys.exit(2)
+    fee_address, fee_blob = encrypt_fee_payer_key(load_master_key())
+    print(f"address {fee_address}")
+    print(f"encrypted {fee_blob}")

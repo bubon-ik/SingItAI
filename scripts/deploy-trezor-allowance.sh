@@ -132,6 +132,23 @@ else
   printf 'gas_funder %s\nguardian %s\n' "$(field address "$funder")" "$(field address "$guardian")" > "$CONF/allowance-operators"
   unset funder guardian broker_token
 fi
+# The Solana lane for web accounts signed in with a Solana wallet (docs/allowance-web-v1.md,
+# "Solana"): our fee payer signs every approve, revoke and pull as fee payer.
+if sudo grep -q '^SIGN402_WEB_ENABLED=1' "$ENV_FILE" && ! sudo grep -q '^SIGN402_SOLANA_FEE_PAYER_KEY=' "$ENV_FILE"; then
+  sol=$(sudo systemd-run --quiet --uid=hermes --pipe --wait --collect \
+    -p EnvironmentFile="$ENV_FILE" -p WorkingDirectory="$GW" \
+    "$GW/.venv/bin/python" -m sign402_gateway.solana_allowance new-fee-payer)
+  sol_field() { awk -v k="$1" '$1==k {print $2}' <<<"$sol"; }
+  [ -n "$(sol_field encrypted)" ] || fail "the Solana fee payer key was not created"
+  {
+    printf '\n# Solana allowance lane for web accounts, %s\n' "$(date -u +%FT%TZ)"
+    printf 'SIGN402_SOLANA_ALLOWANCE_ENABLED=1\n'
+    printf 'SIGN402_SOLANA_FEE_PAYER_KEY=%s\n' "$(sol_field encrypted)"
+  } | sudo tee -a "$ENV_FILE" >/dev/null
+  printf 'solana_fee_payer %s\n' "$(sol_field address)" >> "$CONF/allowance-operators"
+  unset sol
+  echo "Solana lane on; its fee payer is in $CONF/allowance-operators"
+fi
 
 step "5. Watcher unit (sudo)"
 sudo tee "$WATCHER_UNIT" >/dev/null <<UNIT
@@ -220,6 +237,8 @@ cat <<TEXT
 
 Send 0.003 ETH on Base to the gas_funder address above; it pays every deployment
 and tops up the guardian and your agent. Then, in Telegram: /allowance.
+Send 0.02 SOL to the solana_fee_payer address above (if listed); it pays the network
+fee of every Solana approve, revoke and purchase pull, and each agent's USDC account.
 
 Rolled back by: git -C $APP checkout $PREV, reinstall, restore
 $BACKUP/sign402-gateway.env to $ENV_FILE, restart sign402-gateway and hermes-gateway,

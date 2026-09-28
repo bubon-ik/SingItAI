@@ -128,5 +128,14 @@ class SolanaAllowanceTests(unittest.TestCase):
             self.service.owner("wallet:0x1111111111111111111111111111111111111111")
 
 
+class FeePayerKeyTests(unittest.TestCase):
+    def test_a_new_fee_payer_is_encrypted_with_the_master_key(self):
+        from sign402_gateway.solana_allowance import encrypt_fee_payer_key
+        from sign402_gateway.solana_keys import keypair_address
+        master = Fernet.generate_key().decode()
+        address, blob = encrypt_fee_payer_key(master)
+        self.assertEqual(keypair_address(Fernet(master.encode()).decrypt(blob.encode()).decode()), address)
+
+
 if __name__ == "__main__":
     unittest.main()
