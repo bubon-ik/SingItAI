@@ -19,6 +19,19 @@ const BASE = {
   blockExplorerUrls: ["https://basescan.org"],
 };
 
+// Installed extensions the wallet list shows: the ones most people have. Others (Keplr,
+// Rainbow, Ambire…) are left out of the list; WalletConnect's QR still connects them.
+// Filtering the EIP-6963 announcement itself is the only way that also covers
+// extensions WalletConnect's directory does not know.
+const SHOWN_EXTENSIONS = new Set([
+  "io.metamask", "app.phantom", "io.rabby", "com.coinbase.wallet", "com.trustwallet.app",
+  "com.okex.wallet", "com.binance.wallet", "app.backpack", "com.brave.wallet",
+]);
+window.addEventListener("eip6963:announceProvider", (event) => {
+  const rdns = event.detail?.info?.rdns;
+  if (rdns && !SHOWN_EXTENSIONS.has(rdns)) event.stopImmediatePropagation();
+}, { capture: true });
+
 const found = new Map(); // uuid -> { info, provider }
 
 export function discover(onChange) {
@@ -154,6 +167,22 @@ export class Wallet {
 
 let kit = null;
 
+// WalletConnect explorer ids (explorer-api.walletconnect.com).
+const POPULAR_WALLETS = {
+  metamask: "c57ca95b47569778a828d19178114f4db188b89b763c899ba0be274e97267d96",
+  phantom: "a797aa35c0fadbfc1a53e7f675162ed5226968b44a19ee3d24385c64d1d3c393",
+  rabby: "18388be9ac2d02726dbac9777c96efaac06d744b2f6d580fccdd4127a6d01fd1",
+  coinbase: "fd20dc426fb37566d803205b19bbc1d4096b248ac04548e3cfb6b3a38bd033aa",
+  trust: "4622a2b2d6af1c9844944291e5e7351a6aa24cd7b23099efac1b2fd875da31a0",
+  okx: "971e689d0a5be527bac79629b4ee9b925e82208e5168b733496a09c0faed0709",
+  solflare: "1ca0bdd4747578705b1939af023d120677c64fe6ca76add81fda36e350605e79",
+  backpack: "2bd8c14e035c2d48f184aaa168559e86b0e3433228d3c4075900a221785019b0",
+};
+const HIDDEN_WALLETS = {
+  keplr: "6adb6082c909901b9e7189af3a4a0223102cd6f8d5c39e39f3d49acb92b578bb",
+  rainbow: "1ae92b26df02f0abca6304df07debccd18262fdf5fe82daa81593582dac9a369",
+};
+
 export function appKitConfigured() {
   return Boolean(window.SINGIT_APP_CONFIG?.walletConnectProjectId);
 }
@@ -186,7 +215,11 @@ async function appKit() {
     // It must be a plain account (EOA): the limiter's owner signs Sign-In with Ethereum and
     // the allowance, and a smart account would sign through its contract, which v1 refuses.
     defaultAccountTypes: { eip155: "eoa" },
+    // The wallets most people have, first; niche ones stay out of the list (Search still finds any).
+    featuredWalletIds: Object.values(POPULAR_WALLETS),
+    excludeWalletIds: Object.values(HIDDEN_WALLETS),
     features: {
+      connectMethodsOrder: ["email", "social", "wallet"],  // new users first: email or Google, then "or a wallet"
       analytics: false, email: true, socials: ["google", "apple", "x", "discord"], emailShowWallets: true,
       swaps: false, onramp: true, send: false, history: false,  // onramp: buy USDC with a card
     },
