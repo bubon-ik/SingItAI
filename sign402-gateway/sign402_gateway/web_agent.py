@@ -822,7 +822,7 @@ class WebAgent:
                    f"Купил {title} за {quote.get('priceUsd')} USDC. "
                    + ("Код в разделе «Покупки» — показывается один раз." if delivered else "Bitrefill ещё доставляет.")), [
             {"type": "receipt", "name": title, "price": quote.get("priceUsd"), "invoiceId": bought.get("invoiceId"),
-             "giftcard": True}]
+             "giftcard": True, **({"howToUse": bought["howToUse"]} if bought.get("howToUse") else {})}]
 
     def _converse(self, account: str, chat_id: str, lang: str) -> tuple[str, list[dict[str, Any]]]:
         """Talk. On Venice, paid from the allowance, once it is approved; the concierge before that.

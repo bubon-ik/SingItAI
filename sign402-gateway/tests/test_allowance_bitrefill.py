@@ -92,7 +92,7 @@ class FakeBitrefill:
             if token:
                 body = {"delivery_status": "all_delivered" if self.delivered else "pending"}
                 if self.codes_in_status:
-                    body["orders"] = [{"redemption_info": {"code": "SECRET-CODE"}}]
+                    body["orders"] = [{"redemption_info": getattr(self, "redemption", {"code": "SECRET-CODE"})}]
                 return 200, body, {}
             return 402, CHALLENGE, {}
         raise AssertionError(path)
@@ -122,6 +122,23 @@ class BitrefillX402Tests(unittest.TestCase):
         self.assertEqual((quote["priceUsd"], quote["priceAtomic"]), ("0.02", 20_000))
         with self.assertRaises(AllowanceError):
             self.bitrefill.quote("u", "hediyen", "999")
+
+    def test_how_to_use_comes_from_bitrefill_without_anything_that_redeems(self):
+        self.http.codes_in_status = True
+        self.http.redemption = {"code": "QUO-8812-7731-0042", "link": "https://br.quocardpay.jp/card/abc123secret",
+                                "instructions": "Open https://br.quocardpay.jp/card/abc123secret and show the barcode "
+                                                "QUO-8812-7731-0042 to the cashier. <b>Registers only</b>, not self-checkout."}
+        result = self.bitrefill.buy("u", "hediyen", "1", 20_000)
+        self.assertEqual(result["howToUse"], "Open … and show the barcode … to the cashier. Registers only, not self-checkout.")
+        dumped = json.dumps(result)
+        for secret in ("QUO-8812-7731-0042", "abc123secret"):
+            self.assertNotIn(secret, dumped)
+
+    def test_usage_instructions_never_pass_a_bare_code_or_code_like_token(self):
+        self.assertEqual(ab.usage_instructions("ABCD-1234-EFGH"), "")
+        self.assertEqual(ab.usage_instructions([{"pin": "9921", "other": "Enter PIN 9921 at checkout. Serial X9Y8Z7W6V5U4."}]),
+                         "Enter PIN … at checkout. Serial ….")
+        self.assertEqual(ab.usage_instructions({"code": "C0DE"}), "")
 
     def test_the_packages_on_offer_come_with_their_price_now(self):
         offered = self.bitrefill.packages("u", "hediyen")

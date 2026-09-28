@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import math
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -32,6 +34,8 @@ from eth_account.messages import encode_defunct
 from eth_utils import to_checksum_address
 
 from .agent_allowance import USDC, USER_AGENT, AllowanceError, AllowanceService
+
+logger = logging.getLogger(__name__)
 
 API = "https://api.bitrefill.com/x402"
 # Published in the Bitrefill agent skill (references/touchpoints/x402.md). A pay
@@ -111,6 +115,50 @@ def _json(raw: bytes) -> Any:
         return json.loads(raw or b"{}")
     except ValueError:
         return {}
+
+
+# Where Bitrefill says how to use what was bought, and where it puts what redeems it.
+INSTRUCTION_KEYS = ("instructions", "redemption_instructions", "redeem_instructions", "how_to_redeem",
+                    "how_to_use", "usage", "description", "other", "terms")
+BEARER_KEYS = {"code", "pin", "link", "url", "voucher", "barcode", "serial", "serial_number", "password",
+               "claim_code", "activation_code", "qr", "qr_code", "esim_install_link", "lpa", "smdp", "token"}
+CODE_LIKE = re.compile(r"\b(?=[A-Za-z0-9-]*\d)[A-Za-z0-9][A-Za-z0-9-]{9,}\b")
+
+
+def _bearer_values(obj: Any) -> list[str]:
+    out: list[str] = []
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if str(key).lower() in BEARER_KEYS and isinstance(value, (str, int)):
+                out.append(str(value))
+            else:
+                out += _bearer_values(value)
+    elif isinstance(obj, list):
+        for value in obj:
+            out += _bearer_values(value)
+    return out
+
+
+def usage_instructions(redemption: Any) -> str:
+    """How to use a delivered product, in Bitrefill's words, with anything that redeems it removed.
+
+    The result may be shown in the chat and kept in the purchase record, so it must never carry
+    the code: bearer fields are cut out wherever they recur, links (a link can be the voucher)
+    and code-like tokens are dropped, and a bare string is ignored, since it may be the code.
+    """
+    items = redemption if isinstance(redemption, list) else [redemption]
+    found = next((i for i in items if isinstance(i, dict)), None)
+    if found is None:
+        return ""
+    text = " ".join(str(found[k]) for k in INSTRUCTION_KEYS if isinstance(found.get(k), str) and found[k].strip())
+    text = re.sub(r"<[^>]+>", " ", text)
+    for secret in sorted(set(_bearer_values(found)), key=len, reverse=True):
+        if len(secret.strip()) >= 4:
+            text = text.replace(secret.strip(), "…")
+    text = re.sub(r"(?:https?://|www\.)\S+", "", text)
+    text = CODE_LIKE.sub("…", text)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", " ".join(text.split()))
+    return text[:397] + "…" if len(text) > 400 else text
 
 
 def _find(obj: Any, name: str) -> Any:
@@ -272,6 +320,7 @@ class BitrefillX402:
             raise AllowanceError(f"Order {invoice_id} was not paid (HTTP {paid['status']}). Nothing was charged.")
 
         delivered = self._wait_delivery(token, invoice_id)
+        how_to_use = self._how_to_use(user_id, invoice_id, slug) if delivered else ""
         name = f"{quoted['name']} {quoted['package']} {quoted.get('packageCurrency') or ''}".strip()
         text = (
             f"Bought {name} for {Decimal(amount) / 1_000_000} USDC from your Trezor allowance ({paid['funding']}).\n"
@@ -284,8 +333,20 @@ class BitrefillX402:
             "package": str(package), "productName": quoted["name"], "priceUsd": str(Decimal(amount) / 1_000_000),
             "amountAtomic": amount, "txId": paid["settlementTx"], "funding": paid["funding"],
             "fundingTx": paid["fundingTx"], "payer": paid["payer"], "limiter": paid["limiter"],
-            "delivered": delivered, "telegramText": text,
+            "delivered": delivered, "telegramText": text, **({"howToUse": how_to_use} if how_to_use else {}),
         }
+
+    def _how_to_use(self, user_id: str, invoice_id: str, slug: str) -> str:
+        """Bitrefill's usage instructions for a delivered order; the code itself is read and dropped here."""
+        try:
+            info = self.redemption(user_id, invoice_id)
+        except Exception:
+            return ""
+        first = next((i for i in (info if isinstance(info, list) else [info]) if isinstance(i, dict)), None)
+        # Field names only, never values: what Bitrefill sends, so the instructions can be found.
+        logger.info("bitrefill: redemption fields for %s: %s", slug,
+                    sorted(first) if first is not None else type(info).__name__)
+        return usage_instructions(info)
 
     def _status(self, token: str, invoice_id: str) -> Any:
         status, body, _ = self.http("GET", f"{API}/invoice/status?" + urllib.parse.urlencode({"invoice_id": invoice_id}),

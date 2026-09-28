@@ -961,6 +961,7 @@ function renderCard(card, key) {
     return `<div class="card accent"><div class="spread"><h3>${esc(card.name)}</h3><span class="status ok">Paid ${esc(card.price)} USDC</span></div>
       ${card.txId ? `<p class="faint"><a href="https://basescan.org/tx/${esc(card.txId)}" target="_blank" rel="noopener">Transaction ↗</a></p>` : ""}
       ${card.result ? `<pre class="result">${esc(card.result)}</pre>` : ""}
+      ${card.howToUse ? `<div class="how-to-use"><span class="label">How to use</span><p>${esc(card.howToUse)}</p></div>` : ""}
       ${card.giftcard ? `<div class="row"><button class="btn btn-ghost btn-sm" data-action="go" data-view="purchases">Show my code</button></div>` : ""}</div>`;
   }
   if (card.type === "purchases") {

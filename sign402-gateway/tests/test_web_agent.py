@@ -42,7 +42,8 @@ class FakeShop:
                                                 {"value": "25", "currency": "EUR", "priceUsd": "27.1"}]},
             "bitrefill-quote": {"ok": True, "quoteId": "aq_1", "name": "Steam DE", "package": body.get("package"),
                                 "packageCurrency": "EUR", "priceUsd": "10.9"},
-            "bitrefill-buy": {"ok": True, "invoiceId": "inv-1", "delivered": True},
+            "bitrefill-buy": {"ok": True, "invoiceId": "inv-1", "delivered": True,
+                              "howToUse": "Show the barcode to the cashier."},
             "purchases": {"ok": True, "purchases": [{"id": "p1", "name": "Crypto News"}]},
         }
         return 200, replies[action]
@@ -149,6 +150,7 @@ class AgentTests(unittest.TestCase):
         reply = self.agent.action(ACCOUNT, chat, {"type": "buy_giftcard", "slug": "steam-germany", "package": "10"})
         self.assertEqual([c[0] for c in self.shop.calls][-2:], ["bitrefill-quote", "bitrefill-buy"])
         self.assertTrue(reply["messages"][0]["cards"][0]["giftcard"])
+        self.assertEqual(reply["messages"][0]["cards"][0]["howToUse"], "Show the barcode to the cashier.")
 
     def test_an_esim_is_searched_among_esims_by_the_place(self):
         self.model_replies = [json.dumps({"query": "eSIM", "country": "DE", "place": "Germany", "amount": "", "buy": False})]

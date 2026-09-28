@@ -522,3 +522,7 @@ body.in-app .nav-wrap, body.in-app .shell { display: none; }
 .chain-tag { font: 500 10px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; padding: 1px 5px;
   border-radius: 5px; border: 1px solid rgba(62, 207, 142, 0.35); color: var(--accent); }
 .btn .chain-tag { margin-left: 8px; }
+
+.how-to-use { margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--hairline); }
+.how-to-use p { margin-top: 4px; font-size: 13.5px; color: var(--text-soft); line-height: 1.55; }
