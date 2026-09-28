@@ -60,8 +60,10 @@ class ToolQuotes:
 
 
 # What a Solana account may do before the Solana allowance exists: look, never pay.
-SOLANA_READ_ONLY = {"tools", "catalog-search", "purchases", "venice-models", "venice-model", "venice-usage",
-                    "venice-chat", "venice-solana-topup"}  # these two pay only through the account's Solana allowance
+SOLANA_READ_ONLY = {"tools", "catalog-search", "purchases", "purchase-reveal", "venice-models", "venice-model",
+                    "venice-usage", "bitrefill-packages", "buyer-email", "buyer-email-set",
+                    # these pay, and only through the account's own Solana allowance:
+                    "venice-chat", "venice-solana-topup", "bitrefill-solana-buy"}
 
 
 def _account(server: Any, payload: dict[str, Any], action: str = "") -> str:
@@ -171,6 +173,21 @@ def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict
 
     if action == "catalog-search":
         return catalog_search(server, payload)
+
+    if account.startswith(SOLANA_PREFIX) and action in ("bitrefill-packages", "bitrefill-solana-buy", "buyer-email",
+                                                        "buyer-email-set"):
+        from . import solana_bitrefill  # noqa: PLC0415
+        if action == "bitrefill-packages":
+            return 200, {"ok": True, **solana_bitrefill.packages(server, payload.get("productId"))}
+        if action == "buyer-email":
+            return 200, {"ok": True, "hasEmail": bool(solana_bitrefill.email(server, account))}
+        if action == "buyer-email-set":
+            solana_bitrefill.set_email(server, account, payload.get("email"))
+            return 200, {"ok": True, "hasEmail": True}
+        try:
+            return 200, solana_bitrefill.buy(server, account, payload.get("productId"), payload.get("package"))
+        except solana_bitrefill.NeedsEmail as exc:
+            return 409, {"ok": False, "error": "email_needed", "text": str(exc)}
 
     if action == "purchases":
         summaries = server.user_event_store.summaries(account)

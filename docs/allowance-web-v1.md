@@ -482,8 +482,19 @@ A Solana account has the same lane as a Base one, through the same routes
   credit, the reply is a card with Venice's exact quote, and confirming it pulls,
   pays and answers (the Solana x402 service never pays a quote nobody approved).
   Usage shows the credit and each top-up.
-- Paid data and Bitrefill are sold on Base, so from Solana the agent says so;
-  the catalog is read-only there.
+- **Bitrefill** (gift cards, eSIMs, top-ups delivered as a code) works from
+  Solana too, by the path Bitrefill documents and this project verified live on
+  September 18 (docs/bitrefill-solana-checks.md): an MCP guest invoice with
+  `payment_method: usdc_solana`, paid over Bitrefill's x402 route
+  (`/x402/invoice/pay`, the Solana USDC option, sponsored by Bitrefill's fee
+  payer) from the agent's account after the pull (`solana_bitrefill.py`,
+  `solana-x402-service/src/invoice.mjs`). The invoice may not exceed the quote by
+  more than 2%; one payment attempt per invoice. Guest invoices need the buyer's
+  email: the agent asks for it once in the chat, stores it encrypted
+  (`BuyerEmailStore`), and finishes the purchase. The code is shown once, on
+  request, from the purchase record's encrypted invoice token.
+- Paid x402 data (crypto news, market data, ENS…) is sold on Base only; from
+  Solana the agent says so.
 
 Turned on with `SIGN402_SOLANA_ALLOWANCE_ENABLED=1` and
 `SIGN402_SOLANA_FEE_PAYER_KEY` (Fernet-encrypted, made by

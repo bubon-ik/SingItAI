@@ -8337,6 +8337,9 @@ def _last_bitrefill_purchase_response(
 ) -> dict[str, Any] | None:
     if event.get("mode") == "bitrefill_x402_allowance":
         return _allowance_bitrefill_reveal(server, event, telegram_user_id)
+    if event.get("mode") == "bitrefill_mcp_solana":
+        from .solana_bitrefill import reveal as _solana_reveal
+        return _solana_reveal(server, event, telegram_user_id)
     quote_id = str(event.get("quoteId", "") or "").strip()
     if not quote_id or "bitrefill" not in event:
         return None

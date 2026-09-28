@@ -93,6 +93,15 @@ class SolanaBridge:
                 'PAYMENT_UNCERTAIN': 'The payment result is uncertain. Check payment status; do not pay again.',
                 'TRANSACTION_REQUIRED': 'No transaction receipt is available yet. Contact support with the quote ID; do not pay again.',
             }
+            if operation == 'bitrefill-invoice-pay':
+                messages.update(
+                    PRICE_CHANGED='Bitrefill now asks more than your quote. Nothing was paid.',
+                    ALREADY_ATTEMPTED='This order was already paid or attempted. Nothing more was sent.',
+                    UNSUPPORTED_PAYMENT='Bitrefill offered no USDC payment on Solana for this order. Nothing was paid.',
+                    CHALLENGE_FAILED='Bitrefill did not ask for payment as expected. Nothing was paid.',
+                    INSUFFICIENT_USDC='The USDC for this order has not arrived at your agent yet. Nothing was paid.',
+                    PAYMENT_UNCERTAIN='The payment result is unclear. It was not repeated; check Purchases in a minute.',
+                    NETWORK_ERROR='Bitrefill did not answer. Nothing was paid.')
             if operation.startswith('allowance-'):
                 messages.update(
                     NO_USDC_ACCOUNT='This wallet has no USDC on Solana yet. Add some USDC first.',
@@ -107,7 +116,10 @@ class SolanaBridge:
                     EXA_PAYMENT_UNCERTAIN='Search payment is uncertain. Check search payment status; do not pay again.',
                     EXA_PAYMENT_PENDING='Check your pending search payment before searching again.',
                     TRANSACTION_REQUIRED='No search receipt is available yet. Contact support with the search ID; do not pay again.')
-            fallback = 'Exa could not complete this request. Check search payment status; no automatic retry was made.' if operation.startswith('exa-') else 'Venice could not complete this request. No automatic retry was made.'
+            fallback = ('Exa could not complete this request. Check search payment status; no automatic retry was made.' if operation.startswith('exa-')
+                        else 'Bitrefill could not complete this. Nothing was retried; check Purchases.' if operation.startswith('bitrefill-')
+                        else 'Solana did not complete this. Nothing was retried.' if operation.startswith('allowance-')
+                        else 'Venice could not complete this request. No automatic retry was made.')
             raise SolanaChatError(str(code), messages.get(code, fallback))
         return response['result']
 

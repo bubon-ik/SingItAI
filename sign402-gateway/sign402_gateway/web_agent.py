@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 MAX_MESSAGE = 2000
 HISTORY_FOR_MODEL = 20
 SOLANA_ACCOUNT = "solana:"  # web_accounts.SOLANA_PREFIX
+EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 CATALOG_KINDS = {"gift_card": "gift-cards", "esim": "esims", "topup": "topups"}  # Bitrefill's catalogs
 ESIM_WORDS = re.compile(r"(?i)\b(e-?sims?|sim\s*cards?|sims?|data|plans?|mobile|internet|travel)\b")
 
@@ -290,6 +291,8 @@ class ChatStore:
                     prompt_tokens INTEGER NOT NULL, completion_tokens INTEGER NOT NULL, cost_atomic INTEGER NOT NULL,
                     created_at INTEGER NOT NULL);
                 CREATE INDEX IF NOT EXISTS usage_by_account ON chat_usage(account_id, created_at);
+                CREATE TABLE IF NOT EXISTS chat_pending (
+                    chat_id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL);
             """)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(chats)")}
             for name in ("pinned", "archived"):
@@ -356,6 +359,19 @@ class ChatStore:
                                 (chat_id, role, text, json.dumps(cards), now))
             db.execute("UPDATE chats SET updated_at = ?, archived = 0 WHERE chat_id = ?", (now, chat_id))  # talking unarchives
         return {"id": cursor.lastrowid, "role": role, "text": text, "cards": cards, "createdAt": now}
+
+    def set_pending(self, chat_id: str, kind: str, payload: Mapping[str, Any], now: int) -> None:
+        with self._db() as db:
+            db.execute("INSERT OR REPLACE INTO chat_pending VALUES (?, ?, ?, ?)", (chat_id, kind, json.dumps(dict(payload)), now))
+
+    def take_pending(self, chat_id: str, kind: str, since: int) -> dict[str, Any] | None:
+        """The waiting step of this kind, if recent; it is removed as it is taken."""
+        with self._db() as db:
+            row = db.execute("SELECT * FROM chat_pending WHERE chat_id = ? AND kind = ? AND created_at >= ?",
+                             (chat_id, kind, since)).fetchone()
+            if row is not None:
+                db.execute("DELETE FROM chat_pending WHERE chat_id = ?", (chat_id,))
+        return json.loads(row["payload"]) if row is not None else None
 
     def record_usage(self, account: str, chat_id: str, reply: Mapping[str, Any], now: int) -> None:
         with self._db() as db:
@@ -444,7 +460,13 @@ class WebAgent:
         else:
             chat_id = self.store.new_chat(account, text, now)
         user = self.store.add(chat_id, "user", text, [], now)
-        reply_text, cards = self._respond(account, chat_id, text)
+        self._request.chat_id = chat_id
+        waiting = EMAIL.search(text) and self.store.take_pending(chat_id, "email", now - 1800)
+        if waiting:  # the email asked for a moment ago: save it and finish that purchase
+            lang = getattr(self._request, "language", None) or language_of(text)
+            reply_text, cards = self._guarded(lang, lambda: self._email_then_buy(account, lang, EMAIL.search(text).group(0), waiting))
+        else:
+            reply_text, cards = self._respond(account, chat_id, text)
         assistant = self.store.add(chat_id, "assistant", reply_text, cards, int(self.now()))
         return {"chatId": chat_id, "title": self.store.chat(account, chat_id)["title"], "messages": [user, assistant]}
 
@@ -454,6 +476,7 @@ class WebAgent:
             raise ValueError("No such chat.")
         kind = str(action.get("type") or "")
         lang = "ru" if action.get("lang") == "ru" else "en"
+        self._request.chat_id = chat_id
         work = {
             "create_limiter": lambda: self._create_limiter(account, lang, str(action.get("daily")), str(action.get("per")),
                                                            str(action.get("days") or "30")),
@@ -689,7 +712,7 @@ class WebAgent:
 
     def _on_catalog(self, account, lang, text, intent):
         """Research Bitrefill's catalog for the request, keep what fits, show it with its real options."""
-        solana = account.startswith(SOLANA_ACCOUNT)  # may look, may not buy yet
+        solana = account.startswith(SOLANA_ACCOUNT) and self.solana is None  # no Solana lane: may look, not buy
         blocked = None if solana else self._ready(account, lang)
         if blocked:
             return blocked
@@ -826,10 +849,39 @@ class WebAgent:
                 "amount": amount if re.fullmatch(r"\d{1,6}(\.\d{1,2})?", amount) else "",
                 "buy": data.get("buy") is True}
 
+    def _email_then_buy(self, account, lang, address, waiting):
+        self._shop("buyer-email-set", account, {"email": address})
+        text, cards = self._buy_giftcard(account, lang, waiting["slug"], waiting["package"], waiting.get("name", ""))
+        return say(lang, "Saved your email. ", "Сохранил email. ") + text, cards
+
+    def _buy_giftcard_solana(self, account, lang, slug, package, name):
+        """Bitrefill from a Solana wallet: an invoice in USDC on Solana, paid from the allowance."""
+        status, bought = self.shop("bitrefill-solana-buy", account, {"productId": slug, "package": package})
+        if bought.get("error") == "email_needed":
+            chat_id = getattr(self._request, "chat_id", None)
+            if chat_id:
+                self.store.set_pending(chat_id, "email", {"slug": slug, "package": package, "name": name}, int(self.now()))
+            return say(lang, "Bitrefill needs an email for your purchases, once: it also sends your codes there. "
+                             "What email should I use? Then I'll buy it right away.",
+                       "Bitrefill нужен email для покупок — один раз: туда он тоже присылает коды. "
+                       "На какой email оформлять? После этого сразу куплю."), []
+        if status >= 400 or bought.get("ok") is False:
+            raise LookupError(bought.get("text") or bought.get("message") or "Bitrefill refused that. Nothing was paid.")
+        title = f"{bought.get('name') or name} {bought.get('package')} {bought.get('packageCurrency') or ''}".strip()
+        delivered = bought.get("delivered", True)
+        return say(lang, f"Bought {title} for {bought.get('priceUsd')} USDC on Solana. "
+                         + ("Your code is ready in Purchases — shown once." if delivered else "Bitrefill is still delivering it."),
+                   f"Купил {title} за {bought.get('priceUsd')} USDC на Solana. "
+                   + ("Код в разделе «Покупки» — показывается один раз." if delivered else "Bitrefill ещё доставляет.")), [
+            {"type": "receipt", "name": title, "price": bought.get("priceUsd"), "invoiceId": bought.get("invoiceId"),
+             "giftcard": True, **({"howToUse": bought["howToUse"]} if bought.get("howToUse") else {})}]
+
     def _buy_giftcard(self, account, lang, slug, package, name):
         blocked = self._ready(account, lang)
         if blocked:
             return blocked
+        if account.startswith(SOLANA_ACCOUNT):
+            return self._buy_giftcard_solana(account, lang, slug, package, name)
         _, quote = self._shop("bitrefill-quote", account, {"productId": slug, "package": package})
         _, bought = self._shop("bitrefill-buy", account, {"quoteId": quote["quoteId"]})
         title = f"{quote.get('name') or name} {quote.get('package')} {quote.get('packageCurrency') or ''}".strip()
