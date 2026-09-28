@@ -5,6 +5,7 @@
 // Our fee payer covers network fees, so neither the owner nor the agent needs SOL.
 import {
   AccountRole, appendTransactionMessageInstructions, compileTransaction, createTransactionMessage,
+  decompileTransactionMessage, getCompiledTransactionMessageDecoder,
   getBase58Decoder, getBase58Encoder, getBase64EncodedWireTransaction, getProgramDerivedAddress,
   getTransactionDecoder, getSignatureFromTransaction, getPublicKeyFromAddress, isAddress,
   partiallySignTransaction, pipe, setTransactionMessageFeePayer, setTransactionMessageLifetimeUsingBlockhash,
@@ -14,6 +15,12 @@ import { ClientError, USDC, TOKEN_PROGRAM, ATA_PROGRAM } from './config.mjs';
 import { messageHash } from './chain.mjs';
 
 const SYSTEM_PROGRAM = '11111111111111111111111111111111';
+// What a wallet may add to a transaction it signs: fee settings, its own safety checks, a memo.
+const COMPUTE_BUDGET = 'ComputeBudget111111111111111111111111111111';
+const LIGHTHOUSE = 'L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95';  // Phantom's guard; x402 allows it too
+const MEMO = 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr';
+const MAX_UNITS = 400_000;
+const MAX_MICROLAMPORTS_PER_UNIT = 2_000_000n;  // with MAX_UNITS: at most 0.0008 SOL of priority fee
 const DECIMALS = 6;
 const MAX_ALLOWANCE = 10_000_000_000n; // 10,000 USDC: a sanity ceiling, not a policy
 
@@ -106,6 +113,32 @@ export async function assertDelegated(chain, owner, agent, amount) {
   return state;
 }
 
+// Wallets such as Phantom add fee settings and their own guard instructions before signing, so the
+// signed message is not byte for byte the prepared one. It is accepted when it does exactly the
+// prepared approve or revoke, once, with the expected fee payer, and nothing else but those additions.
+export function doesOnly(messageBytes, expected, feePayer) {
+  let message;
+  try { message = decompileTransactionMessage(getCompiledTransactionMessageDecoder().decode(messageBytes)); }
+  catch { return false; }  // e.g. address lookup tables: not something a wallet needs to add here
+  if (message.feePayer?.address !== feePayer) return false;
+  let ours = 0;
+  for (const ix of message.instructions) {
+    const data = ix.data ? Buffer.from(ix.data) : Buffer.alloc(0);
+    if (ix.programAddress === expected.programAddress) {
+      const accounts = (ix.accounts || []).map(a => a.address);
+      if (!data.equals(Buffer.from(expected.data)) || accounts.join() !== expected.accounts.map(a => a.address).join()) return false;
+      ours += 1;
+    } else if (ix.programAddress === COMPUTE_BUDGET) {
+      if (data[0] === 2 && data.length >= 5) { if (data.readUInt32LE(1) > MAX_UNITS) return false; }
+      else if (data[0] === 3 && data.length >= 9) { if (data.readBigUInt64LE(1) > MAX_MICROLAMPORTS_PER_UNIT) return false; }
+      else return false;
+    } else if (ix.programAddress !== LIGHTHOUSE && ix.programAddress !== MEMO) {
+      return false;
+    }
+  }
+  return ours === 1;
+}
+
 export class TokenAllowance {
   constructor({ chain, sleep = ms => new Promise(r => setTimeout(r, ms)), confirmTimeoutMs = 60000 }) {
     Object.assign(this, { chain, rpc: chain.rpc, sleep, confirmTimeoutMs });
@@ -151,11 +184,18 @@ export class TokenAllowance {
     return { transaction: getBase64EncodedWireTransaction(tx), messageHash: messageHash(tx.messageBytes) };
   }
 
-  async submit({ transaction, expectedHash, owner, feePayer }) {
+  async submit({ transaction, expectedHash, owner, feePayer, kind = null, delegate = null, amount = '0' }) {
     let tx;
     try { tx = getTransactionDecoder().decode(Buffer.from(String(transaction), 'base64')); }
     catch { throw new ClientError('INVALID_TRANSACTION', 'The signed transaction could not be read.'); }
-    if (messageHash(tx.messageBytes) !== expectedHash) throw new ClientError('TRANSACTION_MISMATCH', 'The wallet signed something other than what was prepared. Nothing was sent.');
+    if (messageHash(tx.messageBytes) !== expectedHash) {
+      const source = await usdcAccount(owner);
+      const expected = kind === 'approve' ? approveInstruction({ source, owner, delegate: address(delegate, 'agent'), amount })
+        : kind === 'revoke' ? revokeInstruction({ source, owner }) : null;
+      if (!expected || !doesOnly(tx.messageBytes, expected, feePayer ? feePayer.address : owner)) {
+        throw new ClientError('TRANSACTION_MISMATCH', 'The wallet signed something other than what was prepared. Nothing was sent.');
+      }
+    }
     const signature = tx.signatures[owner];
     if (!signature || !(await verifySignature(await getPublicKeyFromAddress(owner), signature, tx.messageBytes))) {
       throw new ClientError('SIGNATURE_REQUIRED', 'The wallet did not sign the transaction.');

@@ -173,10 +173,13 @@ class SolanaAllowanceService:
         return row["agent_address"], self.fernet.decrypt(row["encrypted_key"].encode()).decode()
 
     def _call(self, account: str, operation: str, *, fee_payer: bool = False, **payload: Any) -> dict[str, Any]:
+        from .solana_chat import SolanaChatError
         agent, key = self.agent_key(account)
         try:
             return self.bridge.run(account, agent, key, operation,
                                    fee_payer_key=self.fee_payer_key() if fee_payer and self.fee_payer_key else None, **payload)
+        except SolanaChatError as exc:
+            raise AllowanceError(str(exc.text)) from None  # already a sentence for the user
         finally:
             key = None
 
@@ -263,8 +266,11 @@ class SolanaAllowanceService:
             self.store.update_op(op_id, "EXPIRED", now, detail="Too late for this transaction; prepare it again.")
             return self.operation(account, op_id)
         owner_pays = bool(op["owner_pays_fee"])
+        # Wallets add their own fee settings and guards before signing; the bridge accepts those only
+        # around exactly this approve or revoke (solana-x402-service/src/allowance.mjs, doesOnly).
         result = self._call(account, "allowance-submit", fee_payer=not owner_pays, owner=self.owner(account),
-                            ownerPaysFee=owner_pays, transaction=str(transaction or ""), messageHash=op["message_hash"])
+                            ownerPaysFee=owner_pays, transaction=str(transaction or ""), messageHash=op["message_hash"],
+                            kind="approve" if op["kind"] == "GRANT" else "revoke", amount=str(op["amount"]))
         state = {"confirmed": "DONE", "failed": "FAILED", "rejected": "FAILED"}.get(result.get("state"), "UNCERTAIN")
         detail = {
             "DONE": (f"Allowance now {_text(op['amount'])}." if op["kind"] == "GRANT" else "Revoked: your agent can no longer spend."),

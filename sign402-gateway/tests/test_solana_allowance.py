@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest.mock import Mock
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -130,6 +131,16 @@ class SolanaAllowanceTests(unittest.TestCase):
         self.service.fee_payer_key = None
         with self.assertRaisesRegex(AllowanceError, "needs a little SOL"):
             self.service.prepare_wallet(ACCOUNT, "GRANT", amount="20")
+
+    def test_the_bridge_knows_what_was_prepared_and_its_refusal_is_readable(self):
+        from sign402_gateway.solana_chat import SolanaChatError
+        self.grant()
+        submit = [c for c in self.bridge.calls if c[0] == "allowance-submit"][-1][4]
+        self.assertEqual((submit["kind"], submit["amount"]), ("approve", "20000000"))
+        prepared = self.service.prepare_wallet(ACCOUNT, "REVOKE")
+        self.bridge.run = Mock(side_effect=SolanaChatError("TRANSACTION_MISMATCH", "Your wallet signed something other than what was prepared. Nothing was sent."))
+        with self.assertRaisesRegex(AllowanceError, "signed something other"):
+            self.service.submit_wallet(ACCOUNT, prepared["operation"], "SIGNED")
 
     def test_a_late_or_foreign_submission_is_not_sent(self):
         self.service.setup(ACCOUNT, "20", "5", "30")

@@ -117,3 +117,45 @@ test('the owner may pay their own approve’s fee: then theirs is the only signa
   assert.equal(result.state, 'confirmed');
   assert.equal(rpc.sent.length, 1);
 });
+
+// What Phantom does before signing: its compute budget and a Lighthouse guard around our instruction.
+async function asPhantomWould(prepared, owner, extra = []) {
+  const kit = await import('@solana/kit');
+  const { getSetComputeUnitLimitInstruction, getSetComputeUnitPriceInstruction } = await import('@solana-program/compute-budget');
+  const tx = getTransactionDecoder().decode(Buffer.from(prepared.transaction, 'base64'));
+  let message = kit.decompileTransactionMessage(getCompiledTransactionMessageDecoder().decode(tx.messageBytes));
+  message = kit.prependTransactionMessageInstructions([
+    getSetComputeUnitLimitInstruction({ units: 60_000 }), getSetComputeUnitPriceInstruction({ microLamports: 50_000n })], message);
+  message = kit.appendTransactionMessageInstructions([
+    { programAddress: 'L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95', accounts: [], data: new Uint8Array([1, 2, 3]) }, ...extra], message);
+  const signed = await partiallySignTransaction([owner.signer.keyPair], kit.compileTransaction(message));
+  return kit.getBase64EncodedWireTransaction(signed);
+}
+
+test('a wallet’s own additions are accepted when the approval is exactly the prepared one', async () => {
+  const [owner, agent] = [await testWallet(), await testWallet()];
+  const rpc = fakeRpc({ account: tokenAccount(owner.address) });
+  const args = { kind: 'approve', owner: owner.address, delegate: agent.address, amount: '20000000', feePayer: owner.address };
+  const prepared = await lane(rpc).prepare(args);
+  const wire = await asPhantomWould(prepared, owner);
+  const result = await lane(rpc).submit({ transaction: wire, expectedHash: prepared.messageHash, owner: owner.address, feePayer: null,
+    kind: 'approve', delegate: agent.address, amount: '20000000' });
+  assert.equal(result.state, 'confirmed');
+});
+
+test('an addition that moves value, or another amount, is never sent', async () => {
+  const [owner, agent, thief] = [await testWallet(), await testWallet(), await testWallet()];
+  const rpc = fakeRpc({ account: tokenAccount(owner.address) });
+  const prepared = await lane(rpc).prepare({ kind: 'approve', owner: owner.address, delegate: agent.address, amount: '20000000', feePayer: owner.address });
+  const drain = { programAddress: '11111111111111111111111111111111', accounts: [
+    { address: owner.address, role: 3 }, { address: thief.address, role: 1 }], data: new Uint8Array([2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]) };
+  const attempts = [
+    [await asPhantomWould(prepared, owner, [drain]), '20000000'],     // plus a SOL transfer
+    [await asPhantomWould(prepared, owner), '99000000'],              // checked against another amount
+  ];
+  for (const [wire, amount] of attempts) {
+    await assert.rejects(lane(rpc).submit({ transaction: wire, expectedHash: prepared.messageHash, owner: owner.address, feePayer: null,
+      kind: 'approve', delegate: agent.address, amount }), /other than what was prepared/);
+  }
+  assert.equal(rpc.sent.length, 0);
+});
