@@ -1148,7 +1148,7 @@ function renderUsage() {
       <p>Today, in UTC — the day your limiter and Venice count in.</p></div>
     ${u.failed ? `<p class="note warn">${esc(u.failed)}</p>` : ""}
     <div class="metrics">
-      ${metric("Chat credit", u.venice ? usd(u.venice.creditAtomic) : "—", u.venice ? `on Venice · ${esc(u.venice.modelLabel)}` : "private chat is off")}
+      ${metric("Chat credit", u.venice ? usd(u.venice.creditAtomic, Number(u.venice.creditAtomic) % 10000 ? 4 : 2) : "—", u.venice ? `on Venice · ${esc(u.venice.modelLabel)}` : "private chat is off")}
       ${metric("Spent today", spent === null ? "—" : usd(spent), a?.configured ? `of ${usd(a.dailyCapAtomic, 0)} daily limit` : "no limits yet")}
       ${metric("Messages today", String(today.messages), `${Number(today.tokens).toLocaleString("en-US")} tokens · ${usd(today.costAtomic, 4)}`)}
     </div>
