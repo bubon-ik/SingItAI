@@ -166,6 +166,7 @@ class WebApi:
         self.shop_by_account = RateLimit(60, 3600)
         self.chat_by_account = RateLimit(60, 3600)
         self.agent = None  # web_agent.WebAgent, when the chat is on
+        self.solana = None  # solana_allowance.SolanaAllowanceService, when the Solana lane is on
         self.link_by_account = RateLimit(10, 3600)
 
     def handle(self, method: str, path: str, *, token: str, csrf: str | None, body: dict[str, Any],
@@ -196,11 +197,12 @@ class WebApi:
             return 200, {"account": account, "address": owner, "chain": chain,
                          "telegramLinked": bool(self.auth.store.telegram_for(account))}, {}
         if chain == "solana" and path.startswith("/allowance"):
-            # The allowance lane is a Base contract; a Solana wallet signs in, chats and browses for now.
-            if method == "GET" and path == "/allowance":
-                return 200, {"configured": False, "chain": "solana", "supported": False,
-                             "text": SOLANA_NOT_YET}, {}
-            raise WebError(400, "solana_not_yet", SOLANA_NOT_YET)
+            if self.solana is None:  # the Solana lane is off on this server
+                if method == "GET" and path == "/allowance":
+                    return 200, {"configured": False, "chain": "solana", "supported": False,
+                                 "text": SOLANA_NOT_YET}, {}
+                raise WebError(400, "solana_not_yet", SOLANA_NOT_YET)
+            return self._solana_allowance(method, path, account, body)
         if method == "POST" and path == "/link/telegram":
             self.link_by_account.hit(account)
             code = self.auth.store.new_link_code(account, int(self.now()))
@@ -249,6 +251,34 @@ class WebApi:
             return 200, self._public(self.allowance.pause(account)), {}
         if method == "GET" and path.startswith("/allowance/operations/"):
             return 200, self.allowance.operation(account, path.rsplit("/", 1)[1]), {}
+        raise WebError(404, "not_found", "No such endpoint.")
+
+    # -- allowance on Solana (solana_allowance.py) --
+
+    def _solana_allowance(self, method: str, path: str, account: str, body: Mapping[str, Any]) -> tuple[int, dict[str, Any], dict]:
+        """The same routes as Base, for a Solana wallet: limits, one approval from the wallet, revoke."""
+        lane = self.solana
+        if method == "GET" and path == "/allowance":
+            return 200, {**lane.status(account), "alerts": [], "staleLimiters": []}, {}
+        if method == "POST" and path == "/allowance/setup":
+            self.setup_by_account.hit(account)
+            held = int(lane.chain_state(account)["owner"]["amount"])
+            if held < self.min_owner_usdc:
+                raise WebError(400, "owner_needs_usdc", (
+                    f"Your wallet needs at least {self.min_owner_usdc / 1_000_000:g} USDC on Solana before we "
+                    "set up your agent's limits."))
+            return 200, lane.setup(account, body.get("dailyCap"), body.get("perPurchaseCap"), body.get("days")), {}
+        if method == "POST" and path in ("/allowance/grant/prepare", "/allowance/revoke/prepare"):
+            self.prepare_by_account.hit(account)
+            kind = "GRANT" if path.startswith("/allowance/grant") else "REVOKE"
+            return 200, lane.prepare_wallet(account, kind, amount=body.get("amount")), {}
+        if method == "POST" and path in ("/allowance/grant/submit", "/allowance/revoke/submit"):
+            self.permit_by_account.hit(account)  # each one costs our fee payer a network fee
+            return 200, lane.submit_wallet(account, str(body.get("operation") or ""), body.get("transaction")), {}
+        if method == "GET" and path.startswith("/allowance/operations/"):
+            return 200, lane.operation(account, path.rsplit("/", 1)[1]), {}
+        if method == "POST" and path == "/allowance/pause":
+            raise WebError(400, "solana_revoke", "On Solana, revoking the approval is the stop: it takes effect at once.")
         raise WebError(404, "not_found", "No such endpoint.")
 
     # -- allowance --
@@ -523,7 +553,8 @@ class WebServer(ThreadingHTTPServer):
         self.static_root = Path(static_root).resolve() if static_root else None
 
 
-def build_web_api_from_env(allowance: AllowanceService, env: Mapping[str, str] | None = None) -> tuple[WebApi, str]:
+def build_web_api_from_env(allowance: AllowanceService, env: Mapping[str, str] | None = None,
+                           solana: Any = None) -> tuple[WebApi, str]:
     values = os.environ if env is None else env
     domain = str(values.get("SIGN402_WEB_DOMAIN", "")).strip()
     uri = str(values.get("SIGN402_WEB_URI", "")).strip().rstrip("/")
@@ -548,11 +579,15 @@ def build_web_api_from_env(allowance: AllowanceService, env: Mapping[str, str] |
         max_deploys_per_day=int(values.get("SIGN402_WEB_MAX_DEPLOYS_PER_DAY", "50")),
         shop=shop,
     )
+    api.solana = solana
     if str(values.get("SIGN402_WEB_CHAT_ENABLED", "1")) == "1":
         from .web_agent import ChatStore, build_agent_from_env
 
         agent = build_agent_from_env(allowance, shop, ChatStore(store.path), env=values)
-        agent.setup = lambda account, body: api._setup(account, store.owner_for(account), body)
+        agent.setup = lambda account, body: (
+            api._solana_allowance("POST", "/allowance/setup", account, body)[1] if account.startswith("solana:")
+            else api._setup(account, store.owner_for(account), body))
+        agent.solana = solana
         api.agent = agent
     return api, str(values.get("SIGN402_WEB_CORS_ORIGIN", "") or uri).rstrip("/")
 
@@ -565,11 +600,15 @@ def main() -> int:
     if os.environ.get("SIGN402_WEB_ENABLED") != "1":
         logger.error("web api: SIGN402_WEB_ENABLED is not 1")
         return 1
-    allowance = build_allowance_service_from_env(load_master_key())
+    from .solana_allowance import build_solana_allowance_from_env
+
+    master = load_master_key()
+    allowance = build_allowance_service_from_env(master)
+    solana = build_solana_allowance_from_env(master)
     if allowance is None:
         logger.error("web api: the allowance lane is off (SIGN402_ALLOWANCE_ENABLED != 1)")
         return 1
-    api, cors_origin = build_web_api_from_env(allowance)
+    api, cors_origin = build_web_api_from_env(allowance, solana=solana)
     port = int(os.environ.get("SIGN402_WEB_PORT", DEFAULT_PORT))
     static = os.environ.get("SIGN402_WEB_STATIC_DIR", "")
     server = WebServer(("127.0.0.1", port), api, cors_origin, Path(static).expanduser() if static else None)

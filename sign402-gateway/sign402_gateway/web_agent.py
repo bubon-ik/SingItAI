@@ -424,6 +424,7 @@ class WebAgent:
         self.model = model
         self.rank = rank
         self.now = now
+        self.solana = None  # solana_allowance.SolanaAllowanceService: the lane for solana: accounts
         self._request = threading.local()  # what Jev read from the message being answered
 
     # -- entry points --
@@ -459,6 +460,7 @@ class WebAgent:
             "buy_giftcard": lambda: self._buy_giftcard(account, lang, str(action.get("slug")),
                                                        str(action.get("package")), str(action.get("name") or "")),
             "buy_tool": lambda: self._buy_tool(account, lang, str(action.get("tool")), dict(action.get("args") or {})),
+            "venice_topup": lambda: self._venice_topup(account, chat_id, lang, action),
         }.get(kind)
         if work is None:
             raise ValueError("Unknown action.")
@@ -492,8 +494,14 @@ class WebAgent:
     def _respond(self, account: str, chat_id: str, text: str) -> tuple[str, list[dict[str, Any]]]:
         lang = getattr(self._request, "language", None) or language_of(text)
         intent = self._intent(text)
-        if account.startswith(SOLANA_ACCOUNT) and intent in ("set_limits", "grant", "revoke", "status", "buy_tool"):
-            return self._solana_not_yet(lang)
+        if account.startswith(SOLANA_ACCOUNT):
+            if self.solana is None and intent in ("set_limits", "grant", "revoke", "status", "buy_tool"):
+                return self._solana_not_yet(lang)
+            if intent == "buy_tool":  # these sellers take payment on Base only
+                return say(lang, "Paid data (crypto news, market data, ENS…) is sold on Base. From Solana your agent pays "
+                                 "for your private chat; connect a Base wallet to buy data.",
+                           "Платные данные (новости, рынки, ENS…) продаются только на Base. С Solana агент оплачивает "
+                           "приватный чат; для данных подключите кошелёк на Base."), []
         handler = {
             "set_limits": self._on_set_limits, "grant": self._on_grant, "revoke": self._on_revoke,
             "status": self._on_status, "purchases": self._on_purchases, "buy_tool": self._on_buy_tool,
@@ -521,14 +529,20 @@ class WebAgent:
             return say(lang, "Something went wrong on our side. Nothing was paid.",
                        "Что-то пошло не так на нашей стороне. Ничего не оплачено."), []
 
+    def _lane(self, account: str) -> Any:
+        """The allowance behind this account: the Base limiter, or the Solana approval."""
+        return self.solana if account.startswith(SOLANA_ACCOUNT) else self.allowance
+
     def _state(self, account: str) -> dict[str, Any]:
-        if account.startswith(SOLANA_ACCOUNT):
-            return {"configured": False, "chain": "solana"}  # the allowance lane is Base-only for now
-        status = self.allowance.status(account)
+        solana = account.startswith(SOLANA_ACCOUNT)
+        if solana and self.solana is None:
+            return {"configured": False, "chain": "solana"}  # the Solana lane is off on this server
+        status = self._lane(account).status(account)
         if not status.get("configured"):
-            return {"configured": False}
+            return {"configured": False, **({"chain": "solana"} if solana else {})}
         return {k: status.get(k) for k in ("configured", "state", "limiter", "dailyCapAtomic", "perPurchaseCapAtomic",
-                                           "remainingTodayAtomic", "allowanceAtomic", "floatAtomic", "expiry")}
+                                           "remainingTodayAtomic", "allowanceAtomic", "floatAtomic", "expiry", "chain")
+                if k in status}
 
     # -- handlers --
 
@@ -584,10 +598,10 @@ class WebAgent:
     def _stale_cards(self, account) -> list[dict[str, Any]]:
         return [{"type": "wallet", "kind": "revoke", "limiter": s["limiter"], "old": True,
                  "allowance": str(Decimal(s["allowanceAtomic"]) / Decimal(1_000_000))}
-                for s in self.allowance.stale_allowances(account)]
+                for s in self._lane(account).stale_allowances(account)]
 
     def _stale_note(self, lang, account) -> str:
-        if not self.allowance.stale_allowances(account):
+        if not self._lane(account).stale_allowances(account):
             return ""
         return say(lang, "\n\nAn older limiter still has an allowance from your wallet. It isn't used any more — revoke it below.",
                    "\n\nУ старого лимитера ещё осталось разрешение с вашего кошелька. Он больше не используется — отзовите его ниже.")
@@ -622,7 +636,7 @@ class WebAgent:
                    "Привяжите Telegram в меню слева: Telegram → Link, и отправьте код боту."), [{"type": "link_telegram"}]
 
     def _ready(self, account, lang) -> tuple[str, list] | None:
-        if account.startswith(SOLANA_ACCOUNT):
+        if account.startswith(SOLANA_ACCOUNT) and self.solana is None:
             return self._solana_not_yet(lang)
         state = self._state(account)
         if not state["configured"]:
@@ -827,6 +841,13 @@ class WebAgent:
             {"type": "receipt", "name": title, "price": quote.get("priceUsd"), "invoiceId": bought.get("invoiceId"),
              "giftcard": True, **({"howToUse": bought["howToUse"]} if bought.get("howToUse") else {})}]
 
+    def _venice_topup(self, account: str, chat_id: str, lang: str, action: Mapping[str, Any]) -> tuple[str, list]:
+        """The top-up the user confirmed on the card, then the answer they were waiting for."""
+        _, paid = self._shop("venice-solana-topup", account,
+                             {"quoteId": str(action.get("quoteId") or ""), "approvalHash": str(action.get("approvalHash") or "")})
+        text, cards = self._converse(account, chat_id, lang)
+        return f"{paid.get('text') or ''}\n\n{text}".strip(), cards
+
     def _converse(self, account: str, chat_id: str, lang: str) -> tuple[str, list[dict[str, Any]]]:
         """Talk. On Venice, paid from the allowance, once it is approved; the concierge before that.
 
@@ -835,6 +856,8 @@ class WebAgent:
         state = self._state(account)
         history = [{"role": m["role"], "content": m["text"]}
                    for m in self.store.messages(chat_id)[-HISTORY_FOR_MODEL:] if m["text"]]
+        while history and history[-1]["role"] == "assistant":
+            history.pop()  # answering after a top-up card: the question is the last user message
         if self.shop is not None and state.get("state") == "granted":
             system = {"role": "system", "content": VENICE_SYSTEM.format(state=json.dumps(state)) + self._language_rule()}
             _, reply = self.shop("venice-chat", account, {"messages": [system] + history})
@@ -845,6 +868,11 @@ class WebAgent:
                 return str(reply.get("text") or "…"), [{
                     "type": "usage", "model": reply.get("modelLabel") or reply.get("model") or "Venice",
                     "tokens": tokens, "costUsd": f"{int(reply.get('costAtomic') or 0) / 1_000_000:.4f}"}]
+            if reply.get("error") == "topup_needed":  # Solana: the user confirms Venice's exact quote
+                quote = reply.get("quote") or {}
+                return str(reply.get("text") or ""), [{
+                    "type": "venice_topup", "amount": str(quote.get("amountUsdc") or "").rstrip("0").rstrip("."),
+                    "quoteId": quote.get("quoteId"), "approvalHash": quote.get("approvalHash"), "lang": lang}]
             if reply.get("error") != "chat_off":
                 return str(reply.get("text") or say(lang, "The private chat did not answer. Nothing was paid.",
                                                     "Приватный чат не ответил. Ничего не оплачено.")), []

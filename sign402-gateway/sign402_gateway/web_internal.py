@@ -60,7 +60,8 @@ class ToolQuotes:
 
 
 # What a Solana account may do before the Solana allowance exists: look, never pay.
-SOLANA_READ_ONLY = {"tools", "catalog-search", "purchases", "venice-models", "venice-model", "venice-usage"}
+SOLANA_READ_ONLY = {"tools", "catalog-search", "purchases", "venice-models", "venice-model", "venice-usage",
+                    "venice-chat", "venice-solana-topup"}  # these two pay only through the account's Solana allowance
 
 
 def _account(server: Any, payload: dict[str, Any], action: str = "") -> str:
@@ -145,10 +146,15 @@ def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict
     if action == "tool-buy":
         return _buy_tool(server, gw, account, str(payload.get("quoteId") or ""))
 
-    if action in ("venice-chat", "venice-models", "venice-model", "venice-usage"):
+    if action in ("venice-chat", "venice-models", "venice-model", "venice-usage", "venice-solana-topup"):
         from . import web_venice  # noqa: PLC0415 - Venice only loads when the chat is used
+        solana = account.startswith(SOLANA_PREFIX)
+        if action == "venice-solana-topup":
+            return web_venice.topup_solana(server, account, payload.get("quoteId"), payload.get("approvalHash"))
         if action == "venice-usage":
-            return web_venice.usage(server, account)
+            return web_venice.usage_solana(server, account) if solana else web_venice.usage(server, account)
+        if action == "venice-chat" and solana:
+            return web_venice.chat_solana(server, account, payload.get("messages"))
         if action == "venice-models":
             return web_venice.models(server, account)
         if action == "venice-model":

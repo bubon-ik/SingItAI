@@ -209,3 +209,91 @@ def usage(server: Any, account: str) -> tuple[int, dict[str, Any]]:
                if p.get("name") == VENICE_CREDIT["name"]][:20]
     return 200, {"ok": True, "creditAtomic": session.outstanding_atomic, "model": model,
                  "modelLabel": _label(base, model), "topUps": top_ups}
+
+
+# -- Solana: the same conversation, paid from a Solana wallet's allowance (solana_allowance.py) --
+#
+# Venice meters the account's Solana agent address, which the bot's Node bridge signs in with.
+# A top-up is Venice's exact quote, confirmed by the user on a card (the Solana x402 service
+# never pays a quote nobody approved); the agent then pulls it from the owner's wallet, within
+# the limits, and pays.
+
+def _solana_lane(server: Any) -> Any:
+    lane = getattr(server, "solana_allowance", None)
+    if lane is None:
+        raise AllowanceUnavailable("Solana payments are not set up on this server.")
+    return lane
+
+
+def _atomic(usdc: Any) -> int:
+    from decimal import Decimal
+    return int(Decimal(str(usdc)) * 1_000_000)
+
+
+def chat_solana(server: Any, account: str, raw_messages: Any) -> tuple[int, dict[str, Any]]:
+    lane = _solana_lane(server)
+    messages = _messages(raw_messages)
+    if lane.status(account).get("state") != "granted":
+        raise AllowanceUnavailable("Set your limits and approve them from your wallet first.")
+    base = getattr(server, "chat_service", None)
+    model = (base.store.get_session(account).model or base.default_model) if base is not None else "venice-uncensored-1-2"
+    before = lane._call(account, "balance")
+    if not before.get("canConsume"):
+        quote = lane._call(account, "quote")
+        return 402, {"ok": False, "error": "topup_needed",
+                     "text": f"Your private chat needs Venice credit: {quote['amountUsdc'].rstrip('0').rstrip('.')} USDC "
+                             "from your Solana allowance. Confirm to top up; I'll answer right after.",
+                     "quote": {k: quote[k] for k in ("quoteId", "amountUsdc", "approvalHash", "expiresAt", "recipient")}}
+    answer = lane._call(account, "chat", model=model, conversation=messages)
+    usage = answer.get("usage") or {}
+    try:
+        after = lane._call(account, "balance")
+        cost = max(0, _atomic(before["balanceUsd"]) - _atomic(after["balanceUsd"]))
+        credit = _atomic(after["balanceUsd"])
+    except Exception:
+        cost, credit = 0, _atomic(before["balanceUsd"])
+    return 200, {"ok": True, "text": answer["text"], "costAtomic": cost, "creditAtomic": credit,
+                 "model": model, "modelLabel": _label(base, model) if base is not None else model,
+                 "promptTokens": int(usage.get("prompt_tokens") or 0),
+                 "completionTokens": int(usage.get("completion_tokens") or 0)}
+
+
+def topup_solana(server: Any, account: str, quote_id: Any, approval_hash: Any) -> tuple[int, dict[str, Any]]:
+    """The top-up the user confirmed on the card: exactly that quote, funded within the limits."""
+    lane = _solana_lane(server)
+    status = lane._call(account, "status", quoteId=str(quote_id or ""))
+    quote = status["quote"]
+    if quote.get("approvalHash") != approval_hash:
+        raise AllowanceError("That is not the top-up you were shown. Nothing was paid.")
+    if status.get("attempted"):
+        return 409, {"ok": False, "error": "already_attempted", "text": "This top-up was already sent. Nothing more was paid."}
+    amount = _atomic(quote["amountUsdc"])
+    lane.fund(account, amount, "Venice AI credit")
+    paid = lane._call(account, "pay", quoteId=quote["quoteId"], approvalHash=approval_hash)
+    ok = paid.get("state") == "confirmed"
+    events = getattr(server, "user_event_store", None)
+    if ok and events is not None:
+        events.write(account, {
+            "ok": True, "toolId": VENICE_CREDIT["id"], "toolName": VENICE_CREDIT["name"], "network": "solana",
+            "txId": paid.get("transaction"), "amountAtomic": str(amount),
+            "receipt": {"name": VENICE_CREDIT["name"], "paid": f"{amount / 1_000_000:g} USDC", "network": "Solana",
+                        "txId": paid.get("transaction"), "status": "Completed"}})
+    text = (f"Added {amount / 1_000_000:g} USDC of Venice credit." if ok else
+            "The top-up was sent but not confirmed yet. It was not repeated; check Usage in a moment.")
+    return (200 if ok else 202), {"ok": ok, "state": paid.get("state"), "transaction": paid.get("transaction"), "text": text}
+
+
+def usage_solana(server: Any, account: str) -> tuple[int, dict[str, Any]]:
+    lane = _solana_lane(server)
+    base = getattr(server, "chat_service", None)
+    model = (base.store.get_session(account).model or base.default_model) if base is not None else "venice-uncensored-1-2"
+    try:
+        credit = _atomic(lane._call(account, "balance")["balanceUsd"])
+    except Exception:
+        credit = 0
+    events = getattr(server, "user_event_store", None)
+    top_ups = [{"at": p.get("recordedAt"), "paid": p.get("paid"), "transactionUrl": p.get("transactionUrl")}
+               for p in (events.summaries(account) if events is not None else [])
+               if p.get("name") == VENICE_CREDIT["name"]][:20]
+    return 200, {"ok": True, "creditAtomic": credit, "model": model,
+                 "modelLabel": _label(base, model) if base is not None else model, "topUps": top_ups}

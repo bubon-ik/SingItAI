@@ -1317,7 +1317,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "forbidden"}, status=403)
             return
         action = path[len(WEB_INTERNAL_PREFIX):]
-        if action in ("tool-buy", "bitrefill-buy") and self._reject_if_purchases_paused():
+        if action in ("tool-buy", "bitrefill-buy", "venice-solana-topup") and self._reject_if_purchases_paused():
             return
         try:
             status, body = web_internal.handle(self.server, action, self._read_json())
@@ -3355,6 +3355,13 @@ def build_server(
     except (ValueError, OSError) as exc:
         logger.error("allowance lane disabled: %s", exc)
         server.allowance = None
+    try:
+        from .solana_allowance import build_solana_allowance_from_env
+        # The same lane for web accounts signed in with a Solana wallet (an SPL approval).
+        server.solana_allowance = build_solana_allowance_from_env(user_wallet_service.master_key)
+    except (ValueError, OSError) as exc:
+        logger.error("solana allowance lane disabled: %s", exc)
+        server.solana_allowance = None
     server.allowance_bitrefill = (
         BitrefillX402(server.allowance, user_x402_buyer.base_payment_client)
         if server.allowance is not None else None
