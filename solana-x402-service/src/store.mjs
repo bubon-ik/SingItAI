@@ -12,7 +12,8 @@ export class Store {
     this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;
       CREATE TABLE IF NOT EXISTS quotes (id TEXT PRIMARY KEY, document TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS attempts (quote_id TEXT PRIMARY KEY REFERENCES quotes(id), payer TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('sending','uncertain','confirmed','failed')), message_hash TEXT NOT NULL, transaction_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE UNIQUE INDEX IF NOT EXISTS one_unresolved_per_payer ON attempts(payer) WHERE state IN ('sending','uncertain');`);
+      CREATE UNIQUE INDEX IF NOT EXISTS one_unresolved_per_payer ON attempts(payer) WHERE state IN ('sending','uncertain');
+      CREATE TABLE IF NOT EXISTS invoice_attempts (invoice_id TEXT PRIMARY KEY, payer TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('sending','uncertain','accepted')), message_hash TEXT NOT NULL, amount TEXT NOT NULL, transaction_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);`);
   }
   close() { this.db.close(); }
   saveQuote(quote) { this.db.prepare('INSERT INTO quotes VALUES (?, ?)').run(quote.id, JSON.stringify(quote)); }
@@ -32,6 +33,16 @@ export class Store {
       this.db.prepare('INSERT INTO attempts VALUES (?, ?, ?, ?, NULL, ?, ?)').run(id, payer, 'sending', messageHash, now, now);
       this.db.exec('COMMIT');
     } catch (e) { this.db.exec('ROLLBACK'); throw e; }
+  }
+  invoiceAttempt(invoiceId) { return this.db.prepare('SELECT * FROM invoice_attempts WHERE invoice_id=?').get(invoiceId) || null; }
+  claimInvoice(invoiceId, payer, messageHash, amount) {
+    // One attempt per invoice, ever: the primary key refuses a second one even across processes.
+    const now = new Date().toISOString();
+    try { this.db.prepare('INSERT INTO invoice_attempts VALUES (?, ?, ?, ?, ?, NULL, ?, ?)').run(invoiceId, payer, 'sending', messageHash, String(amount), now, now); }
+    catch { throw new ClientError('ALREADY_ATTEMPTED', 'This invoice was already paid or attempted. Nothing more was sent.'); }
+  }
+  updateInvoice(invoiceId, state, transaction = null) {
+    this.db.prepare('UPDATE invoice_attempts SET state=?, transaction_id=COALESCE(?, transaction_id), updated_at=? WHERE invoice_id=?').run(state, transaction, new Date().toISOString(), invoiceId);
   }
   update(id, state, transaction = null) {
     this.db.prepare('UPDATE attempts SET state=?, transaction_id=COALESCE(?, transaction_id), updated_at=? WHERE quote_id=?').run(state, transaction, new Date().toISOString(), id);
