@@ -789,8 +789,12 @@ class SpendingEvm(DeviceLaneEvm):
             return hex(self.block)
         if method == "eth_getLogs":
             query = params[0]
+            low, high = int(query["fromBlock"], 16), int(query["toBlock"], 16)
+            if high - low + 1 > 10:  # what a free Base RPC plan answers (September 2026)
+                raise aa.AllowanceError("Base refused eth_getLogs: Under the Free tier plan, you can make eth_getLogs "
+                                        "requests with up to a 10 block range.")
             return [entry for entry in self.logs
-                    if entry["topics"][1:] == query["topics"][1:] and int(entry["blockNumber"], 16) >= int(query["fromBlock"], 16)]
+                    if entry["topics"][1:] == query["topics"][1:] and low <= int(entry["blockNumber"], 16) <= high]
         return super().call(method, params)
 
     def quote(self, sender, *, to, data="0x", value=0):
@@ -908,6 +912,17 @@ class SpendingLaneTests(unittest.TestCase):
                 self.assertIn("cannot fund", str(raised.exception))
                 self.assertEqual(self.evm.spends, [])
                 self.assertEqual(client.calls, [])
+
+    def test_a_settlement_many_blocks_later_is_found_a_few_blocks_at_a_time(self):
+        """A seller slower than ten blocks (a phone call): a free RPC plan still finds it."""
+        x402 = FakeX402(self.evm)
+
+        def slow(resource_url, **kwargs):
+            self.evm.block += 37  # about 75 seconds of Base blocks before the seller settles
+            return x402(resource_url, **kwargs)
+        paid, _ = self.pay(120_000, slow)
+        self.assertTrue(paid["ok"])
+        self.assertIsNotNone(paid["settlementTx"])
 
     def test_delivered_without_settlement_is_not_paid(self):
         result, _ = self.pay(120_000, FakeX402(self.evm, settle=False))

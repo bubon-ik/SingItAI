@@ -74,6 +74,7 @@ DEFAULT_FLOAT_TARGET = Decimal("0.20")
 DEFAULT_FLOAT_LOW = Decimal("0.05")
 DEFAULT_EXACT_ABOVE = Decimal("0.05")
 SETTLEMENT_WAIT_SECONDS = 60
+LOG_RANGE = 10  # blocks per eth_getLogs: the most free Base RPC plans answer (allowance_watcher.MIN_BLOCK_RANGE)
 TRANSFER_TOPIC = "0x" + keccak(text="Transfer(address,address,uint256)").hex()
 
 BASE_CHAIN_ID = 8453
@@ -1448,24 +1449,26 @@ class AllowanceService:
         return {"funding": f"{kind} {_usdc_text(size)}", "fundingTx": tx, "floatBefore": float_now}
 
     def find_settlement(self, agent: str, pay_to: str, amount: int, from_block: int,
-                        seen: set[tuple[str, str]] = frozenset()) -> tuple[str, str] | None:
+                        seen: set[tuple[str, str]] = frozenset(),
+                        wait: float = SETTLEMENT_WAIT_SECONDS) -> tuple[str, str] | None:
         """(tx hash, log index) of a USDC Transfer agent -> pay_to of exactly `amount`,
         mined from `from_block` on and not already counted for another purchase.
 
         Two identical micro-payments to one seller are ordinary; without `seen`, the
         second would find the first's transfer and pass as paid.
         """
-        deadline = self.now() + SETTLEMENT_WAIT_SECONDS
+        deadline = self.now() + wait
+        query = {"address": USDC, "topics": [TRANSFER_TOPIC, "0x" + _word(agent), "0x" + _word(pay_to)]}
+        cursor = from_block
         while True:
             latest = int(self.evm.call("eth_blockNumber", []), 16)
-            logs = self.evm.call("eth_getLogs", [{
-                "fromBlock": hex(from_block), "toBlock": hex(latest), "address": USDC,
-                "topics": [TRANSFER_TOPIC, "0x" + _word(agent), "0x" + _word(pay_to)],
-            }]) or []
-            for entry in logs:
-                key = (str(entry["transactionHash"]).lower(), str(entry.get("logIndex", "0x0")))
-                if int(entry["data"], 16) == amount and key not in seen:
-                    return key
+            while cursor <= latest:  # a few blocks at a time, each read once: free RPC plans refuse wide ranges
+                end = min(latest, cursor + LOG_RANGE - 1)
+                for entry in self.evm.call("eth_getLogs", [{**query, "fromBlock": hex(cursor), "toBlock": hex(end)}]) or []:
+                    key = (str(entry["transactionHash"]).lower(), str(entry.get("logIndex", "0x0")))
+                    if int(entry["data"], 16) == amount and key not in seen:
+                        return key
+                cursor = end + 1
             if self.now() >= deadline:
                 return None
             self.evm.sleep(3)
@@ -1508,7 +1511,14 @@ class AllowanceService:
                 self.evm.sleep(6)
                 result = x402_client(resource_url, **kwargs)
             status = int(result.get("status") or 0)
-            found = self.find_settlement(agent, pay_to, amount, start, self.store.counted_settlements(user_id))
+            if not 200 <= status < 300:
+                # The seller's answer, short and without any payment payload: why nothing was bought.
+                body = result.get("body")
+                reason = (body.get("error") if isinstance(body, dict) else None) or result.get("error")
+                logger.warning("allowance: %s answered HTTP %s: %s", resource_url.split("?")[0], status, str(reason or "")[:200])
+            # A refusal is looked for briefly (a payment may still have settled); a delivery, until it shows.
+            found = self.find_settlement(agent, pay_to, amount, start, self.store.counted_settlements(user_id),
+                                         wait=SETTLEMENT_WAIT_SECONDS if 200 <= status < 300 else 9)
             settlement = None
             if found is not None:
                 settlement = found[0]
