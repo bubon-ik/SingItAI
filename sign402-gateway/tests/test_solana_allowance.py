@@ -81,6 +81,20 @@ class SolanaAllowanceTests(unittest.TestCase):
         status = self.service.status(ACCOUNT)
         self.assertEqual((status["state"], status["allowanceAtomic"], status["remainingTodayAtomic"]), ("granted", 20_000_000, 20_000_000))
 
+    def test_what_the_chain_said_is_reused_for_a_moment_but_a_payment_reads_it_fresh(self):
+        self.grant()
+        reads = lambda: sum(1 for c in self.bridge.calls if c[0] == "allowance-state")
+        before = reads()
+        self.service.status(ACCOUNT)
+        self.service.status(ACCOUNT)
+        self.assertEqual(reads(), before + 1)  # one chat message asks several times; the public RPC refuses bursts
+        self.service.spend(ACCOUNT, 1_000_000, "Weather", self.paid(1_000_000))
+        self.assertEqual(reads(), before + 2)  # paying always looks again
+        self.assertEqual(self.service.status(ACCOUNT)["allowanceAtomic"], 19_000_000)  # and forgets the old answer
+        self.clock[0] += 11
+        self.service.status(ACCOUNT)
+        self.assertEqual(reads(), before + 4)
+
     def paid(self, amount, state="accepted"):
         def pay():
             self.bridge.charge(amount)

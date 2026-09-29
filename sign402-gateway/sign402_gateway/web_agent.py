@@ -1028,7 +1028,12 @@ class WebAgent:
 
         Only the text of past messages goes to a model: purchase results live on cards and never do.
         """
-        state = self._state(account)
+        try:
+            state = self._state(account)
+        except Exception:
+            if not context:
+                raise
+            state = {"configured": True, "state": "granted"}  # the data was just bought from these limits
         history = [{"role": m["role"], "content": m["text"]}
                    for m in self.store.messages(chat_id)[-HISTORY_FOR_MODEL:] if m["text"]]
         while history and history[-1]["role"] == "assistant":

@@ -154,6 +154,9 @@ class SolanaAllowanceService:
         self.max_daily, self.max_per_purchase, self.max_days, self.max_grant = max_daily, max_per_purchase, max_days, max_grant
         self.now = now
         self._spend_lock = threading.Lock()
+        # What the chain said a moment ago, for showing and routing: one chat message asks several times, and
+        # the public RPC refuses bursts. A payment always reads it fresh; paying or signing forgets it.
+        self._seen: dict[str, tuple[float, dict[str, Any]]] = {}
 
     # -- identity --
 
@@ -185,15 +188,22 @@ class SolanaAllowanceService:
 
     # -- reads --
 
-    def chain_state(self, account: str) -> dict[str, Any]:
-        return self._call(account, "allowance-state", owner=self.owner(account))
+    SEEN_SECONDS = 10
+
+    def chain_state(self, account: str, *, fresh: bool = True) -> dict[str, Any]:
+        seen = self._seen.get(account)
+        if not fresh and seen is not None and self.now() - seen[0] < self.SEEN_SECONDS:
+            return seen[1]
+        state = self._call(account, "allowance-state", owner=self.owner(account))
+        self._seen[account] = (self.now(), state)
+        return state
 
     def status(self, account: str) -> dict[str, Any]:
         owner = self.owner(account)
         limits = self.store.limits(account)
         if limits is None:
             return {"configured": False, "chain": "solana", "owner": owner}
-        chain = self.chain_state(account)
+        chain = self.chain_state(account, fresh=False)
         allowed = int(chain["owner"]["delegatedToAgent"])
         spent = self.store.spent_since(account, int(self.now()) // DAY * DAY)
         expired = limits["expiry"] <= self.now()
@@ -256,6 +266,7 @@ class SolanaAllowanceService:
                 "walletShows": shows, "expiresAt": now + PREPARE_SECONDS}
 
     def submit_wallet(self, account: str, op_id: str, transaction: Any) -> dict[str, Any]:
+        self._seen.pop(account, None)
         op = self.store.op(account, str(op_id))
         if op is None:
             raise AllowanceError("No such request.")
@@ -319,6 +330,7 @@ class SolanaAllowanceService:
                 raise AllowanceError("Your wallet's approval is used up or revoked. Approve a new allowance to continue. Nothing was paid.")
             if amount > int(owner["amount"]):
                 raise AllowanceError(f"Your Solana wallet holds {_text(int(owner['amount']))}; this costs {_text(amount)}. Nothing was paid.")
+            self._seen.pop(account, None)
             result = pay()
             if result.get("state") in ("accepted", "confirmed"):
                 self.store.add_spend(account, amount, purpose, result.get("transaction"), int(self.now()))

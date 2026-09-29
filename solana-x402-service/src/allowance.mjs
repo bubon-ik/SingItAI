@@ -148,8 +148,12 @@ export class TokenAllowance {
     address(owner, 'owner');
     const account = await usdcAccount(owner);
     let info;
-    try { info = await this.rpc.getAccountInfo(account, { encoding: 'base64', commitment: 'confirmed' }).send({ abortSignal: AbortSignal.timeout(20000) }); }
-    catch { throw new ClientError('RPC_UNAVAILABLE', 'Could not read the Solana USDC account.'); }
+    const read = () => this.rpc.getAccountInfo(account, { encoding: 'base64', commitment: 'confirmed' }).send({ abortSignal: AbortSignal.timeout(20000) });
+    try { info = await read(); }
+    catch {  // a read only: the public RPC refuses bursts, and a second look a moment later is harmless
+      await this.sleep(1200);
+      try { info = await read(); } catch { throw new ClientError('RPC_UNAVAILABLE', 'Could not read the Solana USDC account.'); }
+    }
     if (!info.value) return { account, exists: false, amount: '0', delegate: null, delegatedAmount: '0', delegatedToAgent: '0' };
     if (info.value.owner !== TOKEN_PROGRAM) throw new ClientError('INVALID_TOKEN_ACCOUNT', 'The USDC account is not a token account.');
     const parsed = parseTokenAccount(Buffer.from(info.value.data[0], 'base64'), owner);
