@@ -198,6 +198,28 @@ second search. Real funded model/search quality evaluation remains pending;
 scripted provider fixtures are not evidence of every model's semantic accuracy.
 Local checks passed: 1,319 gateway tests, 423 plugin tests and 52 Solana Node tests.
 
+### September 29: web search and live data from a Solana wallet on the web page
+
+On app.singitai.app a Solana wallet approves an SPL allowance to its agent once; the agent then pays straight
+from the owner's USDC account as delegate, within limits the server enforces, with the seller's fee payer
+sponsoring the fee.
+
+[`dfa47b7`](https://github.com/bubon-ik/SingItAI/commit/dfa47b7) adds Exa web search to the web chat: a
+question about now is searched once and Venice answers from the pages, with the price and links under the
+answer. The Exa payment on Solana is built by `buildDelegated` from the owner's account. Verified on mainnet
+after deployment: a real 0.007-USDC search, transaction
+[`4Lr4rE…Sesd6`](https://solscan.io/tx/4Lr4rECE7GzLjuyf6TZcZdgnXLgyjykQnj52tEHp9knrH6kNzaBdgMv8LMEwDS82SkoySdSRYDC9ajKDeu9Sesd6),
+signed by the agent as delegate, paid to Exa's Solana address, fee sponsored; the allowance and the day's limit
+fell by the same amount.
+
+[`6334ca4`](https://github.com/bubon-ik/SingItAI/commit/6334ca4) adds live data per question, picked from
+Coinbase's Agentic Market and PayAI's Bazaar: weather, exchange rates, token and stock prices, Polymarket, crypto
+news and funding rates (Otto AI), reading a link (Exa), a flight's status (FlightAware) and flight prices (Google
+Flights) via stabletravel.dev, and Tripadvisor places. The bridge's new `data-pay` pays only listed hosts, only
+the address bound for each seller, never above its ceiling, one attempt per request. Unpaid 402 checks confirmed
+every source's Base and Solana address and price. Local checks passed: 1,581 gateway tests and 74 Solana Node
+tests. No real live-data payment has been made yet.
+
 ## Pending work — not claimed as completed
 
 - Manually verify the deployed wallet commands and refreshed navigation in Telegram.
