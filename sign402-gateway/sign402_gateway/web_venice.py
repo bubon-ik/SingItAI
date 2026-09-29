@@ -13,6 +13,8 @@ does not fit those limits is refused with the reason, and nothing is paid.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import secrets
 from typing import Any
@@ -44,6 +46,20 @@ VENICE_CREDIT = {
     "resourceUrl": TOPUP_URL, "mcpStyleName": "venice_credit", "inputSchema": {"type": "object", "properties": {}},
     "command": "/chat",
 }
+
+# How a web search appears in the spend ledger. It is counted against the limits like any
+# purchase, but kept out of the purchase history: twenty searches a day would push the gift
+# cards (and codes not yet shown) out of it.
+EXA_SEARCH = {
+    "id": "exa.search", "name": "Exa web search", "kind": "x402_search", "source": "Exa",
+    "description": "One live web search behind a chat answer.",
+    "resourceUrl": "https://api.exa.ai/search", "mcpStyleName": "exa_search",
+    "inputSchema": {"type": "object", "properties": {}}, "command": "/chat",
+}
+# Exa's Solana address for search, as its 402 names it (September 2026). A different one is
+# never paid: search pauses for the account instead, as it does on Base.
+SOLANA_EXA_PAY_TO_ENV = "SIGN402_AI_SEARCH_SOLANA_PAYTO"
+SOLANA_EXA_PAY_TO = "12Ec2cJmfR1C9uwejzxcuMhUgEC7wDrLgm1wBvvR5w9E"
 
 # Transport is a seam for tests; nothing else changes it.
 transport = _urllib_transport
@@ -132,18 +148,19 @@ def chat(server: Any, gw: Any, account: str, raw_messages: Any) -> tuple[int, di
     used: dict[str, int] = {}
 
     def watched(method: str, url: str, **kwargs: Any) -> Any:
-        """Venice's own token counts for the answer, read off the completion it returns."""
+        """Venice's own token counts for the answer, read off the completions it returns."""
         response = transport(method, url, **kwargs)
         if url.endswith("/chat/completions") and response.status == 200:
             usage = (response.json() or {}).get("usage") or {}
             for key in ("prompt_tokens", "completion_tokens"):
                 if isinstance(usage.get(key), int):
-                    used[key] = usage[key]
+                    used[key] = used.get(key, 0) + usage[key]
         return response
 
     model = store.get_session(account).model or config.model
     client = VeniceChatClient(store=store, transport=watched, signer=sign, settle=settle, config=config,
-                              purchases_paused=getattr(base.client, "purchases_paused", None))
+                              purchases_paused=getattr(base.client, "purchases_paused", None),
+                              web_search=_base_search(server, gw, account, row, base))
     try:
         result = client.send(account, messages, wallet_address=agent)
     except ChatError as exc:
@@ -155,7 +172,50 @@ def chat(server: Any, gw: Any, account: str, raw_messages: Any) -> tuple[int, di
                              "completionTokens": used.get("completion_tokens", 0)}
     if result.prefunded and paid:
         reply["topUpUsd"] = _usd(paid["amount"])
-    return 200, reply
+    return 200, {**reply, **_searched(result.web_outcome, result.web_footer)}
+
+
+def _searched(outcome: Any, footer: str) -> dict[str, Any]:
+    """What the page shows under an answer the web went into: the cost and the pages it read."""
+    if outcome is None:
+        return {"searchNote": footer} if footer else {}
+    return {"search": {"costUsd": f"{outcome.cost_atomic / 1_000_000:.3f}",
+                       "sources": [{"title": hit.title[:200], "url": hit.url} for hit in outcome.results
+                                   if hit.url.startswith(("https://", "http://"))][:3]}}
+
+
+def _base_search(server: Any, gw: Any, account: str, row: Any, base: Any) -> Any:
+    """The bot's web search, paid from this account's limiter: None when search is off here."""
+    bot = getattr(base.client, "web_search", None)
+    if bot is None:
+        return None
+    import dataclasses
+
+    from .web_search import ChatStoreSearchLedger, SearchUnavailable, WebSearchClient
+
+    def from_limiter(requirement: dict[str, Any], *, user_id: str, request_body: dict[str, Any]) -> dict[str, Any]:
+        from .web_internal import pay_from_allowance  # noqa: PLC0415 - avoids an import cycle
+
+        url = bot.config.endpoint
+        requirements = gw.normalize_x402_payment_required({"accepts": [requirement]}, resource_url=url)
+        gw._validate_base_usdc_x402_requirement(requirements)
+        if int(requirements["amountAtomic"]) > int(row["per_purchase_cap"]):
+            raise AllowanceError("A web search costs more than your per-purchase limit.")
+        event = pay_from_allowance(
+            server, gw, account, dict(EXA_SEARCH), url, requirements, request_body=request_body,
+            payment_context={"title": "WEB SEARCH", "subject": "chat answer"},
+            approval={"ok": True, "status": "approved", "source": "web_allowance",
+                      "approvalId": "web-search-" + secrets.token_hex(6)},
+            claim_scope="exa-" + secrets.token_hex(6), record=False)
+        return {"ok": bool(event.get("ok")), "body": (event.get("resourceResult") or {}).get("body")}
+
+    def never(*_: Any, **__: Any) -> dict[str, Any]:
+        raise SearchUnavailable("A web search here is paid from the account's own limits.")
+
+    return WebSearchClient(ledger=ChatStoreSearchLedger(base.store), transport=bot.transport,
+                           settle_from_gateway=never, settle_from_user=from_limiter,
+                           config=dataclasses.replace(bot.config, free_calls=0),
+                           purchases_paused=bot.purchases_paused, on_merchant_change=bot.on_merchant_change)
 
 
 def models(server: Any, account: str) -> tuple[int, dict[str, Any]]:
@@ -246,18 +306,109 @@ def chat_solana(server: Any, account: str, raw_messages: Any) -> tuple[int, dict
                              "Solana allowance. Pick an amount; I'll answer right after.",
                      "quote": {k: quote[k] for k in ("quoteId", "amountUsdc", "approvalHash", "expiresAt", "recipient")},
                      "options": _topup_options(lane, account, minimum)}
-    answer = lane._call(account, "chat", model=model, conversation=messages)
-    usage = answer.get("usage") or {}
+    usage: dict[str, int] = {}
+
+    def ask(conversation: list[dict[str, str]]) -> str:
+        answer = lane._call(account, "chat", model=model, conversation=conversation)
+        for key, value in (answer.get("usage") or {}).items():
+            if isinstance(value, int):
+                usage[key] = usage.get(key, 0) + value
+        return str(answer["text"])
+
+    search = _solana_search(server, lane, account, base)
+    if search is None:
+        text, searched = ask(messages), {}
+    else:
+        from .web_search import answer_with_web
+        web = answer_with_web(ask=ask, search=search, user_id=account, message=messages, wallet_address="")
+        text, searched = web.text, _searched(web.outcome, web.footer)
     try:
         after = lane._call(account, "balance")
         cost = max(0, _atomic(before["balanceUsd"]) - _atomic(after["balanceUsd"]))
         credit = _atomic(after["balanceUsd"])
     except Exception:
         cost, credit = 0, _atomic(before["balanceUsd"])
-    return 200, {"ok": True, "text": answer["text"], "costAtomic": cost, "creditAtomic": credit,
+    return 200, {"ok": True, "text": text, "costAtomic": cost, "creditAtomic": credit,
                  "model": model, "modelLabel": _label(base, model) if base is not None else model,
                  "promptTokens": int(usage.get("prompt_tokens") or 0),
-                 "completionTokens": int(usage.get("completion_tokens") or 0)}
+                 "completionTokens": int(usage.get("completion_tokens") or 0), **searched}
+
+
+class SolanaWebSearch:
+    """One Exa search, paid in USDC on Solana from the owner's account by their agent as delegate.
+
+    The same checks as the Base search (web_search.WebSearchClient): today's count, the bound
+    address, the per-call price; then the owner's limits (lane.spend). One attempt per quote:
+    an unclear payment is never retried, and the bridge refuses the next search until it is resolved.
+    """
+
+    def __init__(self, lane: Any, account: str, *, ledger: Any, pay_to: str, max_per_call_atomic: int,
+                 max_per_day: int, purchases_paused: Any = None, now: Any = None):
+        import time
+        self.lane, self.account, self.ledger, self.pay_to = lane, account, ledger, pay_to
+        self.max_per_call_atomic, self.max_per_day = max_per_call_atomic, max_per_day
+        self.purchases_paused = purchases_paused or (lambda: False)
+        self.now = now or time.time
+
+    def search(self, user_id: str, query: str, *, wallet_address: str = "") -> Any:
+        from .web_search import (MerchantChanged, SearchBudgetExhausted, SearchHit, SearchOutcome,
+                                 SearchTooExpensive, SearchUnavailable)
+        if self.ledger.is_paused(user_id):
+            raise SearchUnavailable("Web search is paused for this account.")
+        if self.max_per_day and self.ledger.count_today(user_id) >= self.max_per_day:
+            raise SearchBudgetExhausted("Today's web searches are used up. They reset at 00:00 UTC.")
+        if self.purchases_paused():
+            raise SearchUnavailable("Purchases are paused right now.")
+        try:
+            quote = self.lane._call(self.account, "exa-quote", query=query)
+        except Exception as exc:
+            logger.warning("solana web search quote failed: %s", str(exc)[:200])
+            raise SearchUnavailable("The web is unavailable right now.") from None
+        if quote.get("recipient") != self.pay_to:
+            self.ledger.pause(user_id, "merchant_changed")
+            logger.warning("solana web search merchant changed: expected=%s seen=%s", self.pay_to, quote.get("recipient"))
+            raise MerchantChanged("The search provider asked to be paid somewhere unexpected.")
+        amount = int(quote.get("amountAtomic") or 0)
+        if not 0 < amount <= self.max_per_call_atomic:
+            raise SearchTooExpensive("The search provider asked for more than the agreed price.")
+        # The bridge's own guard: the terms this one search is paid under, bound to this account's limits.
+        limits = dict(self.lane.store.limits(self.account) or {})
+        policy = hashlib.sha256(json.dumps({"account": self.account, "payTo": self.pay_to,
+                                            "maxPerCallAtomic": self.max_per_call_atomic,
+                                            "limits": {k: int(limits.get(k) or 0) for k in ("per_purchase_cap", "daily_cap", "expiry")}},
+                                           sort_keys=True).encode()).hexdigest()
+        authorization = {"policyHash": policy, "payer": quote["payer"], "recipient": self.pay_to,
+                         "network": quote["network"], "asset": quote["asset"], "endpoint": quote["endpoint"],
+                         "expiresAt": int(self.now()) + 600, "maxPerCallAtomic": self.max_per_call_atomic}
+        owner = self.lane.owner(self.account)
+        try:
+            paid = self.lane.spend(self.account, amount, "Exa web search", lambda: self.lane._call(
+                self.account, "exa-search", quoteId=quote["quoteId"], approvalHash=quote["approvalHash"],
+                query=query, authorization=authorization, owner=owner))
+        except Exception as exc:
+            logger.warning("solana web search payment failed: %s", str(exc)[:200])
+            raise SearchUnavailable("The web search did not go through.") from None
+        if paid.get("state") not in ("accepted", "confirmed"):
+            raise SearchUnavailable("The web search did not go through.")
+        self.ledger.record(user_id, amount)  # paid: counted, whatever came back
+        hits = tuple(SearchHit(url=str(r.get("url") or ""), title=str(r.get("title") or ""), text=str(r.get("text") or ""))
+                     for r in paid.get("results") or [] if isinstance(r, dict))
+        left = max(0, self.max_per_day - self.ledger.count_today(user_id)) if self.max_per_day else None
+        return SearchOutcome(results=hits, cost_atomic=amount, free=False, searches_left_today=left)
+
+
+def _solana_search(server: Any, lane: Any, account: str, base: Any) -> SolanaWebSearch | None:
+    """Web search for a Solana account: on where the bot's own search is, None otherwise."""
+    bot = getattr(getattr(base, "client", None), "web_search", None) if base is not None else None
+    if bot is None:
+        return None
+    import os
+
+    from .web_search import ChatStoreSearchLedger
+    return SolanaWebSearch(lane, account, ledger=ChatStoreSearchLedger(base.store),
+                           pay_to=(os.environ.get(SOLANA_EXA_PAY_TO_ENV) or SOLANA_EXA_PAY_TO).strip(),
+                           max_per_call_atomic=bot.config.max_per_call_atomic, max_per_day=bot.config.max_per_day,
+                           purchases_paused=bot.purchases_paused)
 
 
 TOPUP_CHOICES = (5_000_000, 10_000_000, 20_000_000)  # Venice's minimum is $5; its own suggestion is $10

@@ -16,6 +16,8 @@ ACCOUNT = "wallet:0x1111111111111111111111111111111111111111"
 VENICE_PAY_TO = "0x2670B922ef37C7Df47158725C0CC407b5382293F"
 USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 AGENT = Account.create()
+EXA_PAY_TO = "0x6d6E695b09861467c7d462f5AAF31cF3540B9192"
+OTHER_EXA = "0xB98eF29eb2be19Ae646A8FC0248255B90A332dbC"
 ROW = {"limiter_address": "0xLIM", "daily_cap": 20_000_000, "per_purchase_cap": 5_000_000, "expiry": 4_000_000_000}
 
 
@@ -141,6 +143,52 @@ class WebVeniceTests(unittest.TestCase):
         self.chat("hi")
         sent = next(body for method, url, body in self.venice.requests if url.endswith("/chat/completions"))
         self.assertEqual(sent["model"], "grok-4-6")
+
+    def with_search(self):
+        """The bot's web search switched on, Exa offering two Base legs, the bound one second."""
+        from sign402_gateway.web_search import SearchConfig
+        exa = Mock(return_value=FakeResponse(402, {"x402Version": 2, "accepts": [
+            {"scheme": "exact", "network": "eip155:8453", "amount": "7000", "asset": USDC, "payTo": OTHER_EXA,
+             "maxTimeoutSeconds": 300, "extra": {"name": "USD Coin", "version": "2"}},
+            {"scheme": "exact", "network": "eip155:8453", "amount": "7000", "asset": USDC, "payTo": EXA_PAY_TO,
+             "maxTimeoutSeconds": 300, "extra": {"name": "USD Coin", "version": "2"}}]}))
+        self.server.chat_service.client.web_search = SimpleNamespace(
+            config=SearchConfig(bound_pay_to=EXA_PAY_TO), transport=exa, purchases_paused=lambda: False,
+            on_merchant_change=Mock())
+        self.pay.return_value = {"ok": True, "txId": "0xsearch", "resourceResult": {"status": 200, "body": {"results": [
+            {"url": "https://solana.com/news", "title": "Solana news", "text": "Firedancer shipped."}]}}}
+        self.venice.balance = 3_000_000
+        return exa
+
+    def test_a_question_about_now_is_searched_once_paid_from_the_limiter_and_shown(self):
+        self.with_search()
+        status, reply = self.chat("What is the latest news about Solana today?")
+        self.assertEqual(status, 200)
+        _, _, account, tool, url, requirements = self.pay.call_args.args
+        self.assertEqual((account, tool["id"], url), (ACCOUNT, "exa.search", "https://api.exa.ai/search"))
+        self.assertEqual((requirements["amountAtomic"], requirements["receiver"].lower()), ("7000", EXA_PAY_TO.lower()))
+        self.assertFalse(self.pay.call_args.kwargs["record"])  # counted against the limits, not a purchase in the list
+        self.assertEqual(self.pay.call_args.kwargs["request_body"]["query"], "What is the latest news about Solana today?")
+        sent = next(body for method, url, body in self.venice.requests if url.endswith("/chat/completions"))
+        self.assertIn("Firedancer shipped.", sent["messages"][-1]["content"])
+        self.assertEqual(sent["messages"][0], {"role": "system", "content": "You are SingIt."})
+        self.assertEqual(reply["search"], {"costUsd": "0.007", "sources": [{"title": "Solana news", "url": "https://solana.com/news"}]})
+        self.assertEqual(self.server.chat_service.store.get_session(ACCOUNT).searches_this_window, 1)
+
+    def test_a_plain_chat_is_not_searched_and_search_off_means_none(self):
+        self.with_search()
+        self.assertNotIn("search", self.chat("thanks!")[1])
+        self.pay.assert_not_called()
+        self.server.chat_service.client.web_search = None
+        self.assertNotIn("search", self.chat("What is the latest news about Solana today?")[1])
+        self.pay.assert_not_called()
+
+    def test_a_search_the_limits_refuse_still_answers_from_memory(self):
+        self.with_search()
+        self.pay.side_effect = web_venice.AllowanceError("That would pass today's limit.")
+        status, reply = self.chat("What is the latest news about Solana today?")
+        self.assertEqual((status, reply["text"]), (200, "Hi! Venice here."))
+        self.assertEqual(reply["searchNote"], "the web was unavailable · answered from memory")
 
     def test_only_a_conversation_ending_with_the_user_is_sent(self):
         with self.assertRaises(ValueError):

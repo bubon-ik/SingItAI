@@ -53,8 +53,8 @@ INTENTS = {
     "revoke": "Revoke, cancel or stop the allowance; take the permission back; an emergency stop.",
     "status": "How much the agent can spend, the current limits, the allowance state or the wallet balance.",
     "purchases": "What was bought, purchase history, the last order, a gift card code or delivery status.",
-    "buy_tool": "Buy or get paid data: crypto news, market data, funding rates, token prices, an ENS lookup, "
-                "a risk check or weather.",
+    "buy_tool": "Explicitly buy or get one of these paid data feeds: crypto news, market data, funding rates, "
+                "token prices, an ENS lookup, a risk check or weather.",
     "gift_card": "Explicitly find or buy a gift card or voucher, for a brand, a store or a kind of shop.",
     "esim": "Find internet access or data in a destination country, travel connectivity, mobile internet or an eSIM. "
             "'I need internet in Germany' belongs here even without the word eSIM.",
@@ -63,7 +63,8 @@ INTENTS = {
     "goods": "Buy physical goods or shop online, not an explicit gift-card request.",
     "travel": "Book a hotel, flight, transport or another travel service, not mobile data.",
     "link_telegram": "Connect or link the Telegram bot to this account.",
-    "chat": "Conversation, a question, an explanation or advice; no action.",
+    "chat": "Conversation, a question, an explanation or advice; no action. Questions about current events, "
+            "sports, people or what is happening now belong here: the chat looks them up on the web.",
     "unsupported": "Transfers, swaps, withdrawals or other actions this assistant does not do.",
     "clarify": "Several tasks at once, or unclear.",
 }
@@ -162,7 +163,7 @@ def keyword_intent(text: str) -> str:
         ("food", ("food", "pizza", "grocer", "еда", "еду", "продукт", "доставк")),
         ("topup", ("top up", "пополн")),
         ("gift_card", ("gift card", "voucher", "подароч", "steam", "amazon", "netflix", "spotify", "карт")),
-        ("buy_tool", ("news", "новост", "funding", "weather", "погод", "ens ", "risk")),
+        ("buy_tool", ("crypto news", "market news", "крипто", "funding", "weather", "погод", "ens ", "risk")),
         ("link_telegram", ("telegram", "телеграм")),
     ]
     for intent, words in table:
@@ -920,7 +921,10 @@ class WebAgent:
                 # What the answer used, shown quietly under it; money itself lives on the Usage page.
                 return str(reply.get("text") or "…"), [{
                     "type": "usage", "model": reply.get("modelLabel") or reply.get("model") or "Venice",
-                    "tokens": tokens, "costUsd": f"{int(reply.get('costAtomic') or 0) / 1_000_000:.4f}"}]
+                    "tokens": tokens, "costUsd": f"{int(reply.get('costAtomic') or 0) / 1_000_000:.4f}",
+                    # The web search behind the answer, when there was one: its price and the pages read.
+                    **({"search": reply["search"]} if isinstance(reply.get("search"), dict) else {}),
+                    **({"searchNote": str(reply["searchNote"])} if reply.get("searchNote") else {})}]
             if reply.get("error") == "topup_needed":  # Solana: the user confirms Venice's exact quote
                 quote = reply.get("quote") or {}
                 return str(reply.get("text") or ""), [{

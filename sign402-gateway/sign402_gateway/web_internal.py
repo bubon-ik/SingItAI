@@ -233,7 +233,7 @@ def _buy_tool(server: Any, gw: Any, account: str, quote_id: str) -> tuple[int, d
 def pay_from_allowance(server: Any, gw: Any, account: str, tool: dict[str, Any], resource_url: str,
                        requirements: dict[str, Any], *, request_body: dict[str, Any] | None,
                        payment_context: dict[str, str] | None, approval: dict[str, Any],
-                       claim_scope: str) -> dict[str, Any]:
+                       claim_scope: str, record: bool = True) -> dict[str, Any]:
     """Pay one x402 resource from the account's limiter, held to the same caps, memory and history as the bot.
 
     `approval` is what stands for the owner's yes when spending memory asks for one: a
@@ -260,7 +260,8 @@ def pay_from_allowance(server: Any, gw: Any, account: str, tool: dict[str, Any],
             gw._settle_user_wallet_spend(server, reservation_id, tool, resource_url, requirements, enriched,
                                          payment=payment, claim_id=claim_id)
             settled = True
-            server.user_event_store.write(account, enriched)
+            if record:  # a web search is counted against the limits, not listed as a purchase
+                server.user_event_store.write(account, enriched)
         return enriched
     finally:
         if not settled:

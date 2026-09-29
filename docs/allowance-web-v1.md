@@ -247,6 +247,29 @@ the conversation. It works the way the Telegram bot does
   under the top-up refuses it with the reason, nothing paid. The chat's Venice
   policy mirrors the limiter (daily cap, expiry). Needs `SIGN402_AI_CHAT_ENABLED`
   on the gateway, as for the bot.
+- **The web, when the answer needs it** (Exa `/search` over x402, the bot's own
+  search: `sign402_gateway/web_search.py`, on where `SIGN402_AI_SEARCH_ENABLED`
+  is). The last user message is read the bot's way: a question about now
+  ("today", "latest", "who won") is searched at once; an ambiguous one lets
+  Venice ask for it with `NEED_WEB: <query>`; small talk never is. One search per
+  message at most, 20 an account a day (the chat store's counter, shared with the
+  bot), at most $0.02 a call. The pages go into the last user message for Venice
+  and never into history; under the answer one line says "searched the web · $0.007"
+  with links to the pages read. A search that fails or does not fit the limits
+  never fails the message: Venice answers from memory and says so.
+  - *Base*: paid from the limiter like any purchase (limits, spending memory,
+    the agent key), to the Exa address bound in `SIGN402_AI_SEARCH_MERCHANT_PAYTO`;
+    Exa offers two Base legs and the bound one is taken wherever it sits. It is
+    counted against the limits but kept out of the Purchases list, where twenty
+    searches a day would push out gift cards whose codes were not yet shown.
+  - *Solana*: the agent pays Exa straight from the owner's USDC account as their
+    delegate (`solana-x402-service/src/exa.mjs` with `owner`), Exa's fee payer
+    paying the fee, within the Solana limits (`lane.spend`), only to Exa's Solana
+    address (`SIGN402_AI_SEARCH_SOLANA_PAYTO`, default the one its 402 names). An
+    unclear payment is never retried; the bridge refuses the next search until it
+    is resolved.
+  - Jev sends "buy crypto news" to the paid feed and any other question about
+    current events to the chat, which searches.
 - **The model is theirs to choose** from Venice's own list (every chat model with
   a published price, cheapest first, filtered by Venice's capability tags): the
   chip under the message box, `GET /chat/models` and `POST /chat/model {model}`.

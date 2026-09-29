@@ -121,3 +121,34 @@ test('only bounded public http(s) source links are returned', () => {
   assert.throws(() => searchBody(''));
   assert.throws(() => searchBody('x'.repeat(2001)));
 });
+
+test('on the web the search is paid from the owner’s account, the agent as their delegate', async t => {
+  const f = await fixture(t), owner = await testWallet();
+  const { getBase58Encoder } = await import('@solana/kit');
+  const { TOKEN_PROGRAM } = await import('../src/config.mjs');
+  let delegated = 0n;
+  const account = () => {
+    const data = Buffer.alloc(165), enc = getBase58Encoder();
+    Buffer.from(enc.encode(USDC)).copy(data, 0);
+    Buffer.from(enc.encode(owner.address)).copy(data, 32);
+    data.writeBigUInt64LE(5_000_000n, 64);
+    data.writeUInt32LE(1, 72); Buffer.from(enc.encode(f.wallet.address)).copy(data, 76); data.writeBigUInt64LE(delegated, 121);
+    data[108] = 1;
+    return data;
+  };
+  f.chain.rpc = { getAccountInfo: () => ({ send: async () => ({ value: { owner: TOKEN_PROGRAM, data: [account().toString('base64'), 'base64'] } }) }) };
+  f.chain.balances = async () => { throw new Error('the agent’s own balance is not what pays here'); };
+  f.chain.build = async () => { throw new Error('never paid from the agent’s own account'); };
+  const built = [];
+  f.chain.buildDelegated = async (requirement, resource, wallet, from) => {
+    built.push({ agent: wallet.address, from });
+    return { messageHash: 'signed-message-hash', payload: { fixture: 'signed-payload-secret' } };
+  };
+  await assert.rejects(f.payments.pay({ ...f.input, owner: owner.address }), { code: 'ALLOWANCE_TOO_LOW' });
+  assert.equal(f.calls(), 0);
+  delegated = 1_000_000n;
+  const result = await dispatch({ ...f.input, owner: owner.address, operation: 'exa-search' }, f);
+  assert.equal(result.state, 'confirmed');
+  assert.deepEqual(built, [{ agent: f.wallet.address, from: owner.address }]);
+  assert.equal(f.calls(), 1);
+});

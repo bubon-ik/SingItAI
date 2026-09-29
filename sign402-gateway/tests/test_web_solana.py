@@ -20,6 +20,7 @@ class VeniceBridge(FakeBridge):
     def __init__(self):
         super().__init__()
         self.credit, self.paid = "0", []
+        self.exa_recipient = web_venice.SOLANA_EXA_PAY_TO
         self.quotes = {"q1": {"quoteId": "q1", "amountUsdc": "5.000000", "approvalHash": "h" * 64,
                               "expiresAt": "2027-01-01T00:00:00Z", "recipient": "Venice"}}
 
@@ -43,6 +44,16 @@ class VeniceBridge(FakeBridge):
             self.charge(amount)
             self.credit = str(amount / 1_000_000)
             return {"state": "confirmed", "transaction": "5" * 88}
+        if operation == "exa-quote":
+            self.calls.append((operation, payer, True, None, payload))
+            return {"quoteId": "s1", "approvalHash": "e" * 64, "payer": payer, "recipient": self.exa_recipient,
+                    "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", "asset": "USDC-MINT",
+                    "amountAtomic": "7000", "endpoint": "https://api.exa.ai/search", "expiresAt": 0}
+        if operation == "exa-search":
+            self.calls.append((operation, payer, True, None, payload))
+            self.charge(7000)
+            return {"quoteId": "s1", "state": "confirmed", "transaction": "6" * 88, "delivered": True,
+                    "results": [{"url": "https://solana.com/news", "title": "Solana news", "text": "Firedancer shipped."}]}
         if operation == "chat":
             self.calls.append((operation, payer, True, None, payload))
             self.credit = "4.9989"
@@ -133,6 +144,56 @@ class SolanaVeniceTests(unittest.TestCase):
         self.assertTrue(reply["text"].startswith("Added 5 USDC of Venice credit."))
         self.assertIn("Hi from Venice on Solana", reply["text"])
         self.assertEqual(reply["cards"][0]["type"], "usage")
+
+    def with_search(self):
+        from sign402_gateway.chat_store import ChatStore
+        from sign402_gateway.web_search import SearchConfig
+        store = ChatStore(":memory:")
+        self.addCleanup(store.close)
+        self.server.chat_service = SimpleNamespace(
+            store=store, default_model="venice-uncensored-1-2", _catalogue=Mock(side_effect=OSError),
+            client=SimpleNamespace(web_search=SimpleNamespace(config=SearchConfig(bound_pay_to="0xBASE"),
+                                                              purchases_paused=lambda: False)))
+        self.bridge.credit = "5"
+        self.grant()
+        return store
+
+    def test_a_question_about_now_is_searched_once_from_the_owners_account_as_delegate(self):
+        store = self.with_search()
+        question = [{"role": "system", "content": "SingIt"}, {"role": "user", "content": "What is the latest Solana news today?"}]
+        status, reply = web_venice.chat_solana(self.server, ACCOUNT, question)
+        self.assertEqual(status, 200)
+        search = next(c[4] for c in self.bridge.calls if c[0] == "exa-search")
+        self.assertEqual((search["owner"], search["quoteId"], search["query"]), (OWNER, "s1", "What is the latest Solana news today?"))
+        self.assertEqual((search["authorization"]["recipient"], search["authorization"]["maxPerCallAtomic"]),
+                         (web_venice.SOLANA_EXA_PAY_TO, 20_000))
+        self.assertRegex(search["authorization"]["policyHash"], "^[0-9a-f]{64}$")
+        conversation = next(c[4] for c in self.bridge.calls if c[0] == "chat")["conversation"]
+        self.assertIn("Firedancer shipped.", conversation[-1]["content"])
+        self.assertEqual(reply["search"]["costUsd"], "0.007")
+        self.assertEqual(self.lane.status(ACCOUNT)["remainingTodayAtomic"], 20_000_000 - 7000)  # within the limits
+        self.assertEqual(store.get_session(ACCOUNT).searches_this_window, 1)
+        self.assertNotIn("exa-search", [c[0] for c in self.bridge.calls[-1:]])
+
+    def test_the_agent_puts_the_search_under_its_answer(self):
+        self.with_search()
+        agent = wg.WebAgent(allowance=Mock(), shop=lambda action, account, body: web_venice.chat_solana(
+            self.server, account, body["messages"]), store=wg.ChatStore(Path(self.tmp.name) / "web.db"),
+            classify=lambda text: "chat")
+        agent.solana = self.lane
+        card = agent.message(ACCOUNT, None, "What is the latest Solana news today?")["messages"][1]["cards"][0]
+        self.assertEqual((card["type"], card["search"]["costUsd"], card["search"]["sources"][0]["url"]),
+                         ("usage", "0.007", "https://solana.com/news"))
+
+    def test_another_exa_address_is_never_paid_and_the_answer_still_comes(self):
+        store = self.with_search()
+        self.bridge.exa_recipient = "SomeoneElse111111111111111111111111111111111"
+        question = [{"role": "user", "content": "What is the latest Solana news today?"}]
+        status, reply = web_venice.chat_solana(self.server, ACCOUNT, question)
+        self.assertEqual((status, reply["text"]), (200, "Hi from Venice on Solana"))
+        self.assertNotIn("exa-search", [c[0] for c in self.bridge.calls])
+        self.assertTrue(store.get_session(ACCOUNT).search_paused)
+        self.assertEqual(reply["searchNote"], "the web was unavailable · answered from memory")
 
     def test_the_agent_sets_solana_limits_and_asks_the_wallet_to_approve(self):
         agent = wg.WebAgent(allowance=Mock(), shop=None, store=wg.ChatStore(Path(self.tmp.name) / "web.db"),

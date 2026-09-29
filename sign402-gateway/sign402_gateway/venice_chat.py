@@ -1115,6 +1115,8 @@ class ChatResult:
     remaining_window_atomic: int
     outstanding_atomic: int
     web_footer: str = ""
+    # The search behind the answer, when there was one: its cost and sources.
+    web_outcome: Any = None
 
 
 class VeniceChatClient:
@@ -1205,7 +1207,7 @@ class VeniceChatClient:
         #    failure on existing credit: the first means money moved and no
         #    answer came back.
         try:
-            text, remaining, web_footer = self._answer(
+            text, remaining, web_footer, web_outcome = self._answer(
                 user_id, prompt, wallet_address=wallet_address
             )
         except ProviderUnavailable:
@@ -1229,11 +1231,12 @@ class VeniceChatClient:
             remaining_window_atomic=self._remaining_window(session),
             outstanding_atomic=session.outstanding_atomic,
             web_footer=web_footer,
+            web_outcome=web_outcome,
         )
 
     def _answer(
         self, user_id: str, prompt: str, *, wallet_address: str
-    ) -> tuple[str, str | None, str]:
+    ) -> tuple[str, str | None, str, Any]:
         """One completion, or one search and one completion.
 
         With `web_search` unset this is exactly `_ask` and nothing else, which
@@ -1245,13 +1248,13 @@ class VeniceChatClient:
             text, remaining = self._ask(
                 user_id, fact, wallet_address=wallet_address
             )
-            return text, remaining, footer
+            return text, remaining, footer, None
 
         if self.web_search is None:
             text, remaining = self._ask(
                 user_id, prompt, wallet_address=wallet_address
             )
-            return text, remaining, ""
+            return text, remaining, "", None
 
         from .web_search import answer_with_web
 
@@ -1273,7 +1276,7 @@ class VeniceChatClient:
             message=prompt,
             wallet_address=wallet_address,
         )
-        return result.text, seen["remaining"], result.footer
+        return result.text, seen["remaining"], result.footer, result.outcome
 
     def _onchain_footnote(
         self, user_id: str, prompt: str

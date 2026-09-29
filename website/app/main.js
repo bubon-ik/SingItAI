@@ -1064,7 +1064,12 @@ function renderCard(card, key) {
       <div class="row"><button class="btn btn-primary btn-sm" data-action="add-funds">Add funds</button></div></div>`;
   }
   if (card.type === "usage") {
-    return `<div class="msg-meta">${esc(card.model)} · ${Number(card.tokens || 0).toLocaleString("en-US")} tokens · $${esc(card.costUsd)}</div>`;
+    const search = card.search, links = ((search && search.sources) || [])
+      .filter((s) => /^https?:\/\//.test(s.url || ""))
+      .map((s) => `<a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer nofollow">${esc(s.title || s.url.replace(/^https?:\/\//, "").split("/")[0])}</a>`);
+    return `<div class="msg-meta">${esc(card.model)} · ${Number(card.tokens || 0).toLocaleString("en-US")} tokens · $${esc(card.costUsd)}`
+      + (search ? ` · searched the web · $${esc(search.costUsd)}` : card.searchNote ? ` · ${esc(card.searchNote)}` : "")
+      + `</div>` + (links.length ? `<div class="msg-sources">${links.join("")}</div>` : "");
   }
   if (card.type === "credit") {
     return `<div class="note-line">Private chat credit topped up: <b>${esc(card.price)} USDC</b> on Venice, paid from your allowance.

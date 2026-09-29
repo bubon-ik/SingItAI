@@ -4,6 +4,7 @@ import { isAddress } from '@solana/kit';
 import { ClientError, canonical, NETWORK, USDC } from './config.mjs';
 import { quoteHash } from './payments.mjs';
 import { isTransactionId } from './chain.mjs';
+import { assertDelegated } from './allowance.mjs';
 
 export const EXA_URL = 'https://api.exa.ai/search';
 export const MAX_SEARCH_ATOMIC = 20000n;
@@ -91,7 +92,7 @@ export class ExaPayments {
     const attempt = this.store.attempt(id);
     return { quoteId: id, attempted: !!attempt, state: attempt?.state || 'quoted', transaction: attempt?.transaction_id || null };
   }
-  async pay({ quoteId, approvalHash, query, authorization }) {
+  async pay({ quoteId, approvalHash, query, authorization, owner = null }) {
     const quote = this.owned(quoteId), body = searchBody(query);
     const validate = () => {
       if (quote.approvalHash !== approvalHash || quoteHash(quote) !== approvalHash || quote.requestHash !== bodyHash(body)) throw new ClientError('EXA_QUOTE_MISMATCH', 'Search request or quote changed.');
@@ -102,9 +103,15 @@ export class ExaPayments {
     validate();
     if (this.store.attempt(quoteId)) throw new ClientError('ALREADY_ATTEMPTED', 'This search payment was already attempted.');
     if (this.store.unresolved(this.wallet.address)) throw new ClientError('EXA_PAYMENT_PENDING', 'Resolve the existing search payment first.');
-    const balance = await this.chain.balances(this.wallet.address);
-    if (BigInt(balance.usdcAtomic) < BigInt(quote.requirement.amount)) throw new ClientError('INSUFFICIENT_USDC', 'Insufficient USDC for web search.');
-    const built = await this.chain.build(quote.requirement, quote.resource, this.wallet);
+    let built;
+    if (owner) {  // the web: straight from the owner's account, the agent as their approved delegate
+      await assertDelegated(this.chain, owner, this.wallet.address, quote.requirement.amount);
+      built = await this.chain.buildDelegated(quote.requirement, quote.resource, this.wallet, owner);
+    } else {
+      const balance = await this.chain.balances(this.wallet.address);
+      if (BigInt(balance.usdcAtomic) < BigInt(quote.requirement.amount)) throw new ClientError('INSUFFICIENT_USDC', 'Insufficient USDC for web search.');
+      built = await this.chain.build(quote.requirement, quote.resource, this.wallet);
+    }
     validate();
     this.store.claim(quoteId, this.wallet.address, built.messageHash);
     let response;
