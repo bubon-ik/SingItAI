@@ -38,6 +38,10 @@ CALL = DataTool("call", "Phone call", "StablePhone", {BASE: "0xD219dB8179Bb9C189
 CALL_STATUS_URL = "https://stablephone.dev/api/call/"
 PER_DAY = {"email": 10, "call": 3}
 PHONE = re.compile(r"\+[1-9]\d{7,14}")
+# StablePhone's /api/call schema (2026-09-29), not general E.164 support.
+CALL_PHONE = re.compile(r"\+1[0-9]{10}")
+CALL_REGION_MESSAGE = ("StablePhone currently accepts only +1 numbers with 10 following digits. "
+                       "Calls to +420 and other country codes are not available here. Nothing was paid.")
 EMAIL_ADDRESS = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 FOOTER = ("\n\n—\nSent by your SingIt agent because you asked for it in your chat on app.singitai.app. "
           "Replies go to you.")
@@ -125,7 +129,9 @@ def start_call(server: Any, gw: Any, account: str, phone: Any, task: Any, langua
         raise AllowanceError("Phone calls work from a Base wallet for now.")
     phone = re.sub(r"[\s().-]", "", str(phone or ""))
     if not PHONE.fullmatch(phone):
-        raise AllowanceError("That is not a full phone number with its country code, like +420 123 456 789.")
+        raise AllowanceError("That is not a full phone number with its country code, like +1 202 555 0123.")
+    if not CALL_PHONE.fullmatch(phone):
+        raise AllowanceError(CALL_REGION_MESSAGE)
     task = str(task or "").strip()
     if not task:
         raise AllowanceError("What should the call be about?")

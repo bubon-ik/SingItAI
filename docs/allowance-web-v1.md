@@ -299,10 +299,15 @@ the conversation. It works the way the Telegram bot does
   - *Email to yourself* (StableEmail, $0.02, Base or Solana): "email me that" drafts plain text from the chat
     (the concierge model, or the last answer without Markdown); only to the address the account saved (asked once),
     from relay@stableemail.dev, replies to the user; never a code; ten a day.
-  - *A phone call to a business* (StablePhone, $0.54, Base only): "call Lokal +420 … and book a table for two at
+  - *A phone call to a business* (StablePhone, $0.54, Base only): "call the restaurant +1 202 555 0123 and book a table for two at
     8pm". The number must be one the user typed; the task is theirs, in the callee's language. The AI says it is
     an AI calling for a customer, is not recorded, lasts at most three minutes, never agrees to pay or shares
     details; three a day. "Check result" reads the summary and transcript signed in as the paying agent (SIWX).
+    StablePhone currently accepts only `+1` followed by ten digits, per its
+    [API schema](https://stablephone.dev/openapi.json). Other country codes, including `+420`, are rejected
+    before a call card or payment; saved older drafts are also checked by the gateway. A button press shows
+    a pending request, and only a returned call ID confirms that the call started. An error or missing
+    confirmation does not show a success checkmark or automatically retry the call.
     Not on Solana yet: which wallet StablePhone counts as the payer of a delegated payment is unverified.
 - **The model is theirs to choose** from Venice's own list (every chat model with
   a published price, cheapest first, filtered by Venice's capability tags): the

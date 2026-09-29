@@ -56,23 +56,30 @@ class ActionTests(unittest.TestCase):
 
     def test_a_call_is_disclosed_as_an_ai_not_recorded_and_short(self):
         self.pay.return_value = (540_000, {"success": True, "call_id": "abc-123-def"}, "")
-        started = web_actions.start_call(self.server, Mock(), BASE, "+420 123 456 789", "Book a table for 2 at 20:00 under Max.", "Czech")
+        started = web_actions.start_call(self.server, Mock(), BASE, "+1 202 555 0123", "Book a table for 2 at 20:00 under Max.", "Czech")
         _, _, _, tool, method, url, body = self.pay.call_args.args
-        self.assertEqual((tool.id, url, body["phone_number"]), ("call", "https://stablephone.dev/api/call", "+420123456789"))
+        self.assertEqual((tool.id, url, body["phone_number"]), ("call", "https://stablephone.dev/api/call", "+12025550123"))
         self.assertEqual((body["record"], body["max_duration"], body["voicemail_action"]), (False, 3, "hangup"))
         self.assertIn("Speak Czech", body["task"])
         self.assertIn("you are an AI assistant calling for a customer", body["task"])
         self.assertIn("Never agree to pay anything", body["task"])
         self.assertIn("Book a table for 2 at 20:00 under Max.", body["task"])
-        self.assertEqual(started, {"ok": True, "callId": "abc-123-def", "phone": "+420123456789", "costUsd": "0.54"})
+        self.assertEqual(started, {"ok": True, "callId": "abc-123-def", "phone": "+12025550123", "costUsd": "0.54"})
 
     def test_calls_need_a_base_wallet_and_a_full_number(self):
         with self.assertRaisesRegex(AllowanceError, "Base wallet"):
-            web_actions.start_call(self.server, Mock(), SOLANA, "+420123456789", "hi")
+            web_actions.start_call(self.server, Mock(), SOLANA, "+12025550123", "hi")
         for number in ("123456", "911", "+0 123 456 789", "call me"):
             with self.assertRaisesRegex(AllowanceError, "country code"):
                 web_actions.start_call(self.server, Mock(), BASE, number, "hi")
         self.pay.assert_not_called()
+
+    def test_unsupported_country_codes_are_rejected_before_any_payment(self):
+        for number in ("+420 222 316 265", "+44 20 7946 0000", "+49 30 12345678", "+1202555012"):
+            with self.subTest(number=number), self.assertRaisesRegex(AllowanceError, r"only \+1"):
+                web_actions.start_call(self.server, Mock(), BASE, number, "Ask about the weather")
+        self.pay.assert_not_called()
+        self.assertEqual(sum(web_actions._counts.values()), 0)
 
     def test_the_result_is_read_signed_in_as_the_paying_agent(self):
         seen = []
@@ -175,14 +182,14 @@ class AgentActionTests(unittest.TestCase):
         self.model_reply = json.dumps({"phone": "+420999888777", "place": "Lokal", "task": "Book a table", "language": "Czech"})
         _, invented = self.say("call Lokal and book a table for two at 8pm")
         self.assertIn("What number should I call", invented["text"])  # the model's number was not theirs
-        self.model_reply = json.dumps({"phone": "+420 222 316 265", "place": "Lokal", "task": "Book a table for 2 at 20:00.",
+        self.model_reply = json.dumps({"phone": "+1 202 555 0123", "place": "Lokal", "task": "Book a table for 2 at 20:00.",
                                        "language": "Czech"})
-        chat, draft = self.say("call Lokal +420 222 316 265 and book a table for two at 8pm")
+        chat, draft = self.say("call Lokal +1 202 555 0123 and book a table for two at 8pm")
         card = draft["cards"][0]
-        self.assertEqual((card["type"], card["phone"], card["language"], card["price"]), ("call_draft", "+420222316265", "Czech", "0.54"))
+        self.assertEqual((card["type"], card["phone"], card["language"], card["price"]), ("call_draft", "+12025550123", "Czech", "0.54"))
         self.assertNotIn("call-start", [a for a, _ in self.calls])
         started = self.agent.action(BASE, chat, {"type": "start_call"})["messages"][0]
-        self.assertEqual(self.calls[-1], ("call-start", {"phone": "+420222316265", "task": "Book a table for 2 at 20:00.",
+        self.assertEqual(self.calls[-1], ("call-start", {"phone": "+12025550123", "task": "Book a table for 2 at 20:00.",
                                                           "language": "Czech"}))
         self.assertEqual(started["cards"][0]["callId"], "abc-123-def")
         done = self.agent.action(BASE, chat, {"type": "call_status", "callId": "abc-123-def", "place": "Lokal"})["messages"][0]
@@ -198,25 +205,36 @@ class AgentActionTests(unittest.TestCase):
         _, draft = self.say("email me that", chat)
         self.assertEqual(draft["cards"][0]["body"], "Nonstop BER-FCO on 15 Oct from 89 EUR.")
         self.assertEqual(wg.plain("**LH400** is `late`, see [FA](https://fa.com)"), "LH400 is late, see FA (https://fa.com)")
-        call = wg.plan_call("call Lokal +420 222 316 265 and book a table for two at 8pm", [], None)
+        call = wg.plan_call("call Lokal +1 202 555 0123 and book a table for two at 8pm", [], None)
         self.assertEqual((call["phone"], call["task"], call["missing"]),
-                         ("+420222316265", "call Lokal and book a table for two at 8pm", ""))
+                         ("+12025550123", "call Lokal and book a table for two at 8pm", ""))
 
     def test_a_number_with_call_is_a_call_and_email_me_is_an_email_whatever_the_reader_says(self):
         self.intent = "chat"  # Jev thought it was conversation: the paid chat must not take it
-        self.model_reply = json.dumps({"phone": "+420773173967", "place": "me", "task": "Ask what the weather is like.",
+        self.model_reply = json.dumps({"phone": "+12025550123", "place": "me", "task": "Ask what the weather is like.",
                                        "language": "English"})
-        _, draft = self.say("call me +420773173967 and ask what the weather is like where I am")
-        self.assertEqual((draft["cards"][0]["type"], draft["cards"][0]["phone"]), ("call_draft", "+420773173967"))
+        _, draft = self.say("call me +12025550123 and ask what the weather is like where I am")
+        self.assertEqual((draft["cards"][0]["type"], draft["cards"][0]["phone"]), ("call_draft", "+12025550123"))
         self.assertNotIn("venice-chat", [a for a, _ in self.calls])
         for text in ("email me that", "пришли это на почту", "send it to my email"):
             self.assertEqual(wg.explicit_action(text), "email_me", text)
         for text in ("what is the phone number of Lokal?", "call of duty tips", "tell me about email security"):
             self.assertEqual(wg.explicit_action(text), "", text)
 
+    def test_unsupported_number_has_no_call_card_or_paid_chat(self):
+        self.intent = "chat"
+        self.agent.model = None
+        for message, expected in (("call me +420222316265 and ask about the weather", "only +1"),
+                                  ("позвони мне +420222316265 и спроси про погоду", "только номера +1")):
+            chat, reply = self.say(message)
+            self.assertIn(expected, reply["text"])
+            self.assertEqual(reply["cards"], [])
+            self.assertIsNone(self.agent.store.take_pending(chat, "call_draft", 0))
+        self.assertEqual(self.calls, [])
+
     def test_calls_from_a_solana_wallet_are_not_offered_yet(self):
         self.intent = "call"
-        reply = self.agent.message(SOLANA, None, "call +420222316265")["messages"][1]
+        reply = self.agent.message(SOLANA, None, "call +12025550123")["messages"][1]
         self.assertIn("Base wallet", reply["text"])
         self.assertEqual(self.calls, [])
 

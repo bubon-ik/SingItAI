@@ -37,6 +37,7 @@ from typing import Any, Callable, Iterator, Mapping
 
 from .agent_allowance import AllowanceError
 from .web_data import FROM_PAID_TOOLS
+from .web_actions import CALL_PHONE, CALL_REGION_MESSAGE
 
 logger = logging.getLogger(__name__)
 
@@ -276,8 +277,8 @@ def plain(text: str) -> str:
 
 
 CALL_ASK = {
-    "phone": ("What number should I call? Write it with the country code, e.g. +420 123 456 789.",
-              "На какой номер звонить? Напишите его с кодом страны, например +420 123 456 789."),
+    "phone": ("What number should I call? Calls currently support +1 numbers, e.g. +1 202 555 0123.",
+              "На какой номер звонить? Сейчас доступны номера +1, например +1 202 555 0123."),
     "task": ("What should the assistant say or ask on the call?", "Что ассистенту сказать или спросить по телефону?"),
 }
 
@@ -990,6 +991,10 @@ class WebAgent:
         draft = plan_call(text, self._recent(chat_id, 7)[:-1], self.model)
         if draft.get("missing"):
             return say(lang, *CALL_ASK[draft["missing"]]), []
+        if not CALL_PHONE.fullmatch(draft["phone"]):
+            return say(lang, CALL_REGION_MESSAGE,
+                       "StablePhone сейчас принимает только номера +1 и 10 цифр после кода. "
+                       "Звонки на +420 и другие коды стран здесь недоступны. Ничего не оплачено."), []
         self.store.set_pending(chat_id, "call_draft", draft, int(self.now()))
         return say(lang, "Here is the call. Press Call and an AI assistant phones them for you:",
                    "Вот звонок. Нажмите «Позвонить» — и ИИ-ассистент позвонит за вас:"), [

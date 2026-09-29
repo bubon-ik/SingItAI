@@ -1075,7 +1075,12 @@ function renderCard(card, key) {
       <div class="row"><button class="btn btn-primary btn-sm has-orb" data-action="card-email" data-key="${esc(key)}">Send${orb}</button></div></div>`;
   }
   if (card.type === "call_draft") {  // a phone call: the number and what will be said, made only by this press
-    if (state.done[key]) return `<div class="card done"><h3>Call started ✓</h3></div>`;
+    if (state.done[key]) {
+      const label = { pending: "Requesting call…", started: "Call started ✓",
+        unconfirmed: "Call not confirmed — see the reply below",
+        unknown: "Call status unknown — check before retrying" }[state.done[key]] || "Call request submitted";
+      return `<div class="card"><h3>${label}</h3></div>`;
+    }
     return `<div class="card accent"><div class="spread"><h3>Call ${esc(card.place || card.phone)}</h3><span class="status">${esc(card.price)} USDC</span></div>
       <p class="faint">${esc(card.phone)} · in ${esc(card.language || "English")}</p>
       <pre class="draft">${esc(card.task)}</pre>
@@ -1351,16 +1356,21 @@ async function sendMessage(text) {
   }
 }
 
-async function cardAction(action) {
+async function cardAction(action, callKey = null) {
   if (state.sending) return;
+  if (callKey && state.done[callKey]) return;
+  if (callKey) state.done[callKey] = "pending";
   state.sending = true;
   startThinking();
   render();
   try {
     const reply = await api.act(state.chatId, action);
     state.messages = state.messages.concat(reply.messages);
+    if (callKey) state.done[callKey] = reply.messages.some((message) =>
+      (message.cards || []).some((card) => card.type === "call" && card.callId)) ? "started" : "unconfirmed";
     await loadAllowance().catch(() => {});
   } catch (error) {
+    if (callKey) state.done[callKey] = "unknown";
     toast(explain(error), true);
   } finally {
     stopThinking();
@@ -1578,7 +1588,7 @@ const actions = {
   },
   reload: () => location.reload(),
   "card-email": (el) => { state.done[el.dataset.key] = true; cardAction({ type: "send_email" }); },
-  "card-call": (el) => { state.done[el.dataset.key] = true; cardAction({ type: "start_call" }); },
+  "card-call": (el) => cardAction({ type: "start_call" }, el.dataset.key),
   "card-call-status": (el) => cardAction({ type: "call_status", callId: el.dataset.call, place: el.dataset.place }),
   "card-limits": (el) => {
     const key = el.dataset.key;
