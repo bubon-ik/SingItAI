@@ -151,6 +151,25 @@ class AgentActionTests(unittest.TestCase):
         again = self.agent.action(BASE, chat, {"type": "send_email"})["messages"][0]
         self.assertIn("expired or was already sent", again["text"])  # one press, one email
 
+    def test_a_bare_address_is_saved_by_the_agent_and_a_changed_address_is_shown_before_sending(self):
+        self.intent = "chat"
+        self.saved = "old@example.com"
+        chat, _ = self.say("flights Berlin to Rome?")
+        self.intent = "email_me"
+        self.model_reply = json.dumps({"subject": "Flights", "body": "Nonstop BER-FCO."})
+        _, draft = self.say("email me that", chat)
+        self.assertEqual(draft["cards"][0]["to"], "old@example.com")
+        _, saved = self.say("new@example.com", chat)  # no model is asked: the app saves it and says so
+        self.assertEqual(self.calls[-1], ("email-address-set", {"email": "new@example.com"}))
+        self.assertIn("Saved: I'll send your emails to new@example.com", saved["text"])
+        self.assertEqual(saved["cards"][0]["to"], "new@example.com")  # the waiting draft, now to the new address
+        self.saved = "elsewhere@example.com"  # changed behind the card's back
+        changed = self.agent.action(BASE, chat, {"type": "send_email"})["messages"][0]
+        self.assertEqual(changed["cards"][0]["to"], "elsewhere@example.com")
+        self.assertNotIn("email-send", [a for a, _ in self.calls])
+        sent = self.agent.action(BASE, chat, {"type": "send_email"})["messages"][0]
+        self.assertIn("Sent to elsewhere@example.com", sent["text"])
+
     def test_a_call_uses_only_a_number_the_user_wrote(self):
         self.intent = "call"
         self.model_reply = json.dumps({"phone": "+420999888777", "place": "Lokal", "task": "Book a table", "language": "Czech"})

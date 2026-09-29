@@ -559,7 +559,9 @@ rates, token and stock prices, Polymarket odds, a flight's status, flight prices
 reviews, the text of a link. When it came with the question, answer from it. You never buy from inside this answer:
 when they want something bought or their limits changed, tell them the short phrase to type, e.g. "Buy crypto
 news", "Find a Steam gift card in Germany", "Set a $20 daily limit, $5 per purchase", "Weather in Lisbon",
-"Where is flight LH400?". Never invent prices, balances or purchases: the current state is below.
+"Where is flight LH400?", "Email me that", "Call +420 … and book a table for two at 8pm". You cannot save an email
+address, send an email, make a call or change a setting from inside this answer, so never say you did: the app does
+those and shows a card. Never invent prices, balances or purchases: the current state is below.
 Current state: {state}"""
 
 
@@ -600,6 +602,9 @@ class WebAgent:
         if waiting:  # the email asked for a moment ago: save it and finish that purchase
             lang = getattr(self._request, "language", None) or language_of(text)
             reply_text, cards = self._guarded(lang, lambda: self._email_then_buy(account, lang, EMAIL.search(text).group(0), waiting))
+        elif EMAIL.fullmatch(text.strip(" .")):  # just an address: saved here, never "saved" by a model that cannot
+            lang = getattr(self._request, "language", None) or language_of(text)
+            reply_text, cards = self._guarded(lang, lambda: self._save_address(account, chat_id, lang, text.strip(" .")))
         else:
             reply_text, cards = self._respond(account, chat_id, text)
         assistant = self.store.add(chat_id, "assistant", reply_text, cards, int(self.now()))
@@ -901,7 +906,7 @@ class WebAgent:
         if not body:
             return say(lang, "There is nothing in this chat to send yet. Ask me something first.",
                        "В этом чате пока нечего отправить. Сначала спросите меня о чём-нибудь."), []
-        self.store.set_pending(chat_id, "email_draft", {"subject": subject, "body": body}, int(self.now()))
+        self.store.set_pending(chat_id, "email_draft", {"to": to, "subject": subject, "body": body}, int(self.now()))
         return say(lang, "Here is the email. Press Send and it goes to your address:",
                    "Вот письмо. Нажмите «Отправить» — и оно уйдёт на ваш адрес:"), [
             {"type": "email_draft", "to": to, "subject": subject, "body": body, "price": "0.02", "lang": lang}]
@@ -924,11 +929,33 @@ class WebAgent:
         except (AgentUnavailable, ValueError, AttributeError):
             return "From your SingIt chat", plain(answers[-1]) if answers else ""
 
+    def _save_address(self, account, chat_id, lang, address):
+        _, saved = self._shop("email-address-set", account, {"email": address})
+        text = say(lang, f"Saved: I'll send your emails to {saved.get('email')}.",
+                   f"Сохранил: письма буду отправлять на {saved.get('email')}.")
+        draft = self.store.take_pending(chat_id, "email_draft", int(self.now()) - self.DRAFT_SECONDS)
+        if draft is None:
+            return text + say(lang, " Say \"email me that\" to send something from this chat.",
+                              " Напишите «пришли это на почту», чтобы отправить что-то из чата."), []
+        draft["to"] = saved.get("email")  # the draft waiting to be sent now shows, and goes to, the new address
+        self.store.set_pending(chat_id, "email_draft", draft, int(self.now()))
+        return text + say(lang, " Here is the email again:", " Вот письмо ещё раз:"), [
+            {"type": "email_draft", "to": draft["to"], "subject": draft["subject"], "body": draft["body"], "price": "0.02",
+             "lang": lang}]
+
     def _send_email(self, account, chat_id, lang):
         draft = self.store.take_pending(chat_id, "email_draft", int(self.now()) - self.DRAFT_SECONDS)
         if draft is None:
             return say(lang, "That draft expired or was already sent. Ask me again.",
                        "Этот черновик устарел или уже отправлен. Попросите ещё раз."), []
+        _, saved = self._shop("email-address", account, {})
+        if draft.get("to") and saved.get("email") != draft["to"]:  # it would go somewhere the card did not show
+            draft["to"] = saved.get("email")
+            self.store.set_pending(chat_id, "email_draft", draft, int(self.now()))
+            return say(lang, "Your saved address changed since this draft. Check it and press Send again:",
+                       "Сохранённый адрес изменился после черновика. Проверьте и нажмите «Отправить» ещё раз:"), [
+                {"type": "email_draft", "to": draft["to"], "subject": draft["subject"], "body": draft["body"],
+                 "price": "0.02", "lang": lang}]
         _, sent = self._shop("email-send", account, {"subject": draft["subject"], "text": draft["body"]})
         return say(lang, f"Sent to {sent.get('to')} for {sent.get('costUsd')} USDC. It comes from relay@stableemail.dev; "
                          "check spam if you don't see it in a minute.",

@@ -1132,7 +1132,9 @@ function renderCard(card, key) {
       ? `<p>Send <span class="mono">/link ${esc(state.linkCode.code)}</span> to the SingIt bot within 10 minutes.</p>`
       : `<button class="btn btn-ghost btn-sm" data-action="link">Get a code</button>`}</div>`;
   }
-  return "";
+  // A card from a newer release than this page: never a silent gap where a button should be.
+  return card.type ? `<div class="card"><p class="faint">This page is out of date and can't show this.</p>
+    <div class="row"><button class="btn btn-ghost btn-sm" data-action="reload">Refresh the page</button></div></div>` : "";
 }
 
 // -- account menu, Usage and Settings --
@@ -1574,6 +1576,7 @@ const actions = {
     cardAction({ type: "venice_topup", quoteId: el.dataset.quote, approvalHash: el.dataset.hash,
                  ...(el.dataset.amount ? { amount: el.dataset.amount } : {}) });
   },
+  reload: () => location.reload(),
   "card-email": (el) => { state.done[el.dataset.key] = true; cardAction({ type: "send_email" }); },
   "card-call": (el) => { state.done[el.dataset.key] = true; cardAction({ type: "start_call" }); },
   "card-call-status": (el) => cardAction({ type: "call_status", callId: el.dataset.call, place: el.dataset.place }),
@@ -1687,6 +1690,15 @@ document.addEventListener("keydown", (event) => {
 
 // Caches in front of the page (Cloudflare's browser TTL) can keep an old copy of it for hours.
 // The running scripts carry the page's version (?v=…); if the page now names another, reload once.
+// A tab left open across a release keeps running the old page: look again when they come back to it,
+// and every few minutes, and move to the new one when nothing is in flight.
+function watchForNewPage() {
+  const check = () => { if (!state.sending && document.visibilityState === "visible") reloadIfStale(); };
+  document.addEventListener("visibilitychange", check);
+  window.addEventListener("focus", check);
+  setInterval(check, 5 * 60 * 1000);
+}
+
 async function reloadIfStale() {
   const running = new URL(import.meta.url).searchParams.get("v");
   if (!running) return false;
@@ -1704,6 +1716,7 @@ async function reloadIfStale() {
 
 async function start() {
   if (await reloadIfStale()) return;
+  watchForNewPage();
   discover(() => { if (state.modal?.type === "wallets") renderModal(); });
   if (appKitConfigured()) watchAppKit(setWallet).catch((error) => toast(explain(error), true));
   if (csrf()) {
