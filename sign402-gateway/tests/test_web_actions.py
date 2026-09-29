@@ -202,6 +202,18 @@ class AgentActionTests(unittest.TestCase):
         self.assertEqual((call["phone"], call["task"], call["missing"]),
                          ("+420222316265", "call Lokal and book a table for two at 8pm", ""))
 
+    def test_a_number_with_call_is_a_call_and_email_me_is_an_email_whatever_the_reader_says(self):
+        self.intent = "chat"  # Jev thought it was conversation: the paid chat must not take it
+        self.model_reply = json.dumps({"phone": "+420773173967", "place": "me", "task": "Ask what the weather is like.",
+                                       "language": "English"})
+        _, draft = self.say("call me +420773173967 and ask what the weather is like where I am")
+        self.assertEqual((draft["cards"][0]["type"], draft["cards"][0]["phone"]), ("call_draft", "+420773173967"))
+        self.assertNotIn("venice-chat", [a for a, _ in self.calls])
+        for text in ("email me that", "пришли это на почту", "send it to my email"):
+            self.assertEqual(wg.explicit_action(text), "email_me", text)
+        for text in ("what is the phone number of Lokal?", "call of duty tips", "tell me about email security"):
+            self.assertEqual(wg.explicit_action(text), "", text)
+
     def test_calls_from_a_solana_wallet_are_not_offered_yet(self):
         self.intent = "call"
         reply = self.agent.message(SOLANA, None, "call +420222316265")["messages"][1]

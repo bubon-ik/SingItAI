@@ -253,6 +253,20 @@ def plan_data(text: str, model: Callable | None, today: str) -> tuple[str, dict[
     return tool, params, missing
 
 
+CALL_WORDS = re.compile(r"(?i)\b(call|phone|ring|dial)\b|позвони|позвонить|набери|звякни")
+EMAIL_WORDS = re.compile(r"(?i)\b(e-?mail|mail) (me|it|this|that|the|to me)\b|\bto my (e-?mail|inbox)\b|"
+                         r"на (мою )?(почту|мейл|имейл|email)|по почте")
+
+
+def explicit_action(text: str) -> str:
+    """"call" with a phone number in it, or "email me": plain requests that must not wander into the chat."""
+    if CALL_WORDS.search(text) and re.search(r"\+?\d[\d\s().-]{6,20}\d", text):
+        return "call"
+    if EMAIL_WORDS.search(text):
+        return "email_me"
+    return ""
+
+
 def plain(text: str) -> str:
     """Markdown as plain text, for an email: no stars, hashes or backticks."""
     text = re.sub(r"(?m)^#{1,6}\s*", "", text)
@@ -640,6 +654,9 @@ class WebAgent:
     def _intent(self, text: str) -> str:
         """The intent; the country and kind of shop Jev read, if any, are kept for the handler."""
         self._request.hints = {}
+        plain = explicit_action(text)
+        if plain:  # a number and "call", or "email me": no reading needed, and never the paid chat by mistake
+            return plain
         if self.classify is not None:
             try:
                 read = self.classify(text)

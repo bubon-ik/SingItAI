@@ -178,6 +178,10 @@ def chat(server: Any, gw: Any, account: str, raw_messages: Any, context: Any = N
         result = client.send(account, messages, wallet_address=agent)
     except ChatError as exc:
         text = refusal.get("text") if exc.__class__.__name__ == "PrefundFailed" and refusal else str(exc)
+        if exc.__class__.__name__ == "PrefundFailed" and refusal:
+            text = ("Your private chat runs on Venice credit, bought from your limits $5 at a time, and that top-up "
+                    f"did not go through: {text} Add USDC to your wallet to chat; live data, emails and calls cost "
+                    "cents and work without it.")
         return 400, {"ok": False, "error": "chat_refused", "text": text}
     reply: dict[str, Any] = {"ok": True, "text": result.text, "costAtomic": result.cost_atomic,
                              "creditAtomic": result.outstanding_atomic, "model": model, "modelLabel": _label(base, model),
