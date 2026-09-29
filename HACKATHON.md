@@ -220,6 +220,19 @@ the address bound for each seller, never above its ceiling, one attempt per requ
 every source's Base and Solana address and price. Local checks passed: 1,581 gateway tests and 74 Solana Node
 tests. No real live-data payment has been made yet.
 
+### September 29: correct phone-call refusals on the web page
+
+[`b8058ca`](https://github.com/bubon-ik/SingItAI/commit/b8058ca) rejects numbers outside StablePhone's
+published `+1` format before showing a call card or attempting payment, including drafts saved before
+this change. The page shows a call as started only after the provider returns its call ID; refusals and
+lost responses no longer show a success checkmark or automatically repeat the request. This follows
+[`a1640bc`](https://github.com/bubon-ik/SingItAI/commit/a1640bc), which keeps settlement queries within
+the Base RPC's ten-block limit so they no longer hide the provider's refusal.
+
+Verification: 211 web gateway tests and five frontend call-state regression tests passed. The observed
+production attempt returned HTTP 400, `Validation failed`. Czech `+420` calls are not supported by this
+integration; a successful real call has not been verified. These fixes do not add a new calling provider.
+
 ## Pending work — not claimed as completed
 
 - Manually verify the deployed wallet commands and refreshed navigation in Telegram.
