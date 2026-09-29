@@ -8,7 +8,8 @@ import { ClientError, NETWORK, USDC } from './config.mjs';
 import { isTransactionId } from './chain.mjs';
 import { assertDelegated, TokenAllowance } from './allowance.mjs';
 
-export const DATA_HOSTS = new Set(['x402.ottoai.services', 'api.exa.ai', 'stabletravel.dev', 'tripadvisor.x402.paysponge.com']);
+export const DATA_HOSTS = new Set(['x402.ottoai.services', 'api.exa.ai', 'stabletravel.dev', 'tripadvisor.x402.paysponge.com',
+  'stableemail.dev']);  // an email the user sent to themselves, after pressing Send
 export const MAX_DATA_ATOMIC = 50000n;  // $0.05: data, never a purchase
 const MAX_BODY = 1_500_000;
 

@@ -63,7 +63,8 @@ class ToolQuotes:
 SOLANA_READ_ONLY = {"tools", "catalog-search", "purchases", "purchase-reveal", "venice-models", "venice-model",
                     "venice-usage", "bitrefill-packages", "buyer-email", "buyer-email-set",
                     # these pay, and only through the account's own Solana allowance:
-                    "venice-chat", "venice-solana-topup", "bitrefill-solana-buy", "data-buy"}
+                    "venice-chat", "venice-solana-topup", "bitrefill-solana-buy", "data-buy",
+                    "email-address", "email-address-set", "email-send", "call-start", "call-status"}
 
 
 def _account(server: Any, payload: dict[str, Any], action: str = "") -> str:
@@ -147,6 +148,21 @@ def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict
 
     if action == "tool-buy":
         return _buy_tool(server, gw, account, str(payload.get("quoteId") or ""))
+
+    if action in ("email-address", "email-address-set", "email-send", "call-start", "call-status"):
+        from . import web_actions  # noqa: PLC0415 - an email to themselves, a call they pressed Call on
+        if action == "email-address":
+            return 200, {"ok": True, "email": web_actions.saved_email(server, account)}
+        if action == "email-address-set":
+            return 200, {"ok": True, "email": web_actions.save_email(server, account, payload.get("email"))}
+        if action == "call-status":
+            return 200, web_actions.call_status(server, account, payload.get("callId"))
+        if not account.startswith(SOLANA_PREFIX):
+            _limits_from_limiter(server, gw, account)
+        if action == "email-send":
+            return 200, web_actions.send_email(server, gw, account, payload.get("subject"), payload.get("text"))
+        return 200, web_actions.start_call(server, gw, account, payload.get("phone"), payload.get("task"),
+                                           payload.get("language"))
 
     if action == "data-buy":  # live data for one chat answer, paid from the account's own limits
         from . import web_data  # noqa: PLC0415

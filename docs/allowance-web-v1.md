@@ -292,6 +292,18 @@ the conversation. It works the way the Telegram bot does
   address and the ceiling again and makes one attempt per request. Crypto news and funding rates now work from a
   Solana wallet too; Hyperliquid data, ENS and risk checks stay on Base. Calls, email and bookings are not here:
   they act on other people, not only on the user's money.
+- **Actions on the user's behalf, one press each** (`sign402_gateway/web_actions.py`, gateway actions
+  `email-address`, `email-address-set`, `email-send`, `call-start`, `call-status`). They reach other people or
+  inboxes, so the limits alone never trigger them: the agent drafts, the card shows the exact recipient, text and
+  price, and only the press on it sends. One draft, one press.
+  - *Email to yourself* (StableEmail, $0.02, Base or Solana): "email me that" drafts plain text from the chat
+    (the concierge model, or the last answer without Markdown); only to the address the account saved (asked once),
+    from relay@stableemail.dev, replies to the user; never a code; ten a day.
+  - *A phone call to a business* (StablePhone, $0.54, Base only): "call Lokal +420 … and book a table for two at
+    8pm". The number must be one the user typed; the task is theirs, in the callee's language. The AI says it is
+    an AI calling for a customer, is not recorded, lasts at most three minutes, never agrees to pay or shares
+    details; three a day. "Check result" reads the summary and transcript signed in as the paying agent (SIWX).
+    Not on Solana yet: which wallet StablePhone counts as the payer of a delegated payment is unverified.
 - **The model is theirs to choose** from Venice's own list (every chat model with
   a published price, cheapest first, filtered by Venice's capability tags): the
   chip under the message box, `GET /chat/models` and `POST /chat/model {model}`.

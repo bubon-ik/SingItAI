@@ -495,6 +495,9 @@ body.in-app .nav-wrap, body.in-app .shell { display: none; }
 .menu-item.back { color: var(--text-soft); }
 .msg-meta { margin-top: 8px; font: 12px var(--mono); color: var(--text-faint); }
 .typing + .msg-meta { margin-top: 6px; }
+pre.draft { white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto; margin: 6px 0 10px;
+  padding: 10px 12px; border: 1px solid var(--hairline); border-radius: 10px; font: 13px/1.5 var(--sans); color: var(--text-soft); }
+details.card summary { cursor: pointer; color: var(--text-soft); }
 .msg-sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .msg-sources a { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 8px;
   border: 1px solid var(--hairline); border-radius: 999px; font-size: 12px; color: var(--text-soft); text-decoration: none; }

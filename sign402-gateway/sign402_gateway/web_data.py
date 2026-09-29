@@ -203,7 +203,8 @@ def _offer(gw: Any, tool: DataTool, network: str, method: str, url: str, body: A
     return {**payload, "accepts": [leg]}
 
 
-def _pay_base(server: Any, gw: Any, account: str, tool: DataTool, method: str, url: str, body: Any) -> tuple[int, Any, str]:
+def _pay_base(server: Any, gw: Any, account: str, tool: DataTool, method: str, url: str, body: Any,
+              record: bool = False) -> tuple[int, Any, str]:
     from .web_internal import pay_from_allowance  # noqa: PLC0415 - avoids an import cycle
     row = server.allowance.lane_for(account)
     if row is None:
@@ -222,7 +223,7 @@ def _pay_base(server: Any, gw: Any, account: str, tool: DataTool, method: str, u
         url, requirements, request_body=body if method == "POST" else None,
         payment_context={"title": tool.name.upper(), "subject": "chat answer"},
         approval={"ok": True, "status": "approved", "source": "web_allowance", "approvalId": "web-data-" + secrets.token_hex(6)},
-        claim_scope="data-" + secrets.token_hex(6), record=False)
+        claim_scope="data-" + secrets.token_hex(6), record=record)
     if not event.get("ok"):
         raise AllowanceError(f"{tool.name} did not answer. Nothing more was paid.")
     result = event.get("resourceResult") or {}
@@ -245,6 +246,16 @@ def _pay_solana(server: Any, account: str, tool: DataTool, gw: Any, method: str,
     return amount, paid.get("data"), str(paid.get("transaction") or "")
 
 
+def pay_once(server: Any, gw: Any, account: str, tool: DataTool, method: str, url: str, body: Any, *,
+             record: bool = False) -> tuple[int, Any, str]:
+    """One paid request to a bound seller, from this account's limits on its own network."""
+    if network_of(account) not in tool.networks:
+        raise AllowanceError(f"{tool.name} is not sold on {'Solana' if network_of(account) == SOLANA else 'Base'}.")
+    if network_of(account) == SOLANA:
+        return _pay_solana(server, account, tool, gw, method, url, body)
+    return _pay_base(server, gw, account, tool, method, url, body, record=record)
+
+
 def buy(server: Any, gw: Any, account: str, tool_id: Any, params: Any) -> dict[str, Any]:
     """One question's data: the request, any follow-ups of the same seller, digested for the answer."""
     tool = TOOLS.get(str(tool_id or ""))
@@ -261,9 +272,7 @@ def buy(server: Any, gw: Any, account: str, tool_id: Any, params: Any) -> dict[s
         raise AllowanceError("Purchases are paused right now. Try again later.")
 
     def pay(method: str, url: str, body: Any) -> tuple[int, Any, str]:
-        if network == SOLANA:
-            return _pay_solana(server, account, tool, gw, method, url, body)
-        return _pay_base(server, gw, account, tool, method, url, body)
+        return pay_once(server, gw, account, tool, method, url, body)
 
     method, url, body = tool.request(params)
     spent, data, tx = pay(method, url, body)

@@ -1066,6 +1066,33 @@ function renderCard(card, key) {
         data-amount="${esc(o.atomic || "")}" ${o.ok ? "" : `disabled title="${esc(o.why || "")}"`}>Top up ${esc(o.amount)} USDC${i === 0 ? orb : ""}</button>`).join("")}</div>
       ${why ? `<p class="hint">${esc(why)}</p>` : ""}</div>`;
   }
+  if (card.type === "email_draft") {  // an email to themselves: exactly what goes out, sent only by this press
+    if (state.done[key]) return `<div class="card done"><h3>Email sent ✓</h3></div>`;
+    return `<div class="card accent"><div class="spread"><h3>Email to you</h3><span class="status">${esc(card.price)} USDC</span></div>
+      <p class="faint">To <b>${esc(card.to)}</b> · from relay@stableemail.dev · replies go to you</p>
+      <p style="margin:10px 0 6px"><b>${esc(card.subject)}</b></p>
+      <pre class="draft">${esc(card.body)}</pre>
+      <div class="row"><button class="btn btn-primary btn-sm has-orb" data-action="card-email" data-key="${esc(key)}">Send${orb}</button></div></div>`;
+  }
+  if (card.type === "call_draft") {  // a phone call: the number and what will be said, made only by this press
+    if (state.done[key]) return `<div class="card done"><h3>Call started ✓</h3></div>`;
+    return `<div class="card accent"><div class="spread"><h3>Call ${esc(card.place || card.phone)}</h3><span class="status">${esc(card.price)} USDC</span></div>
+      <p class="faint">${esc(card.phone)} · in ${esc(card.language || "English")}</p>
+      <pre class="draft">${esc(card.task)}</pre>
+      <p class="hint">An AI assistant calls, says it is an AI calling for you, and does only this. Not recorded; at most 3
+        minutes; it never agrees to pay or shares your details. Call businesses only.</p>
+      <div class="row"><button class="btn btn-primary btn-sm has-orb" data-action="card-call" data-key="${esc(key)}">Call now${orb}</button></div></div>`;
+  }
+  if (card.type === "call") {
+    return `<div class="card"><div class="spread"><h3>Calling ${esc(card.place || card.phone || "")}</h3><span class="status">in progress</span></div>
+      <div class="row"><button class="btn btn-ghost btn-sm" data-action="card-call-status" data-call="${esc(card.callId)}"
+        data-place="${esc(card.place || "")}">Check result</button></div></div>`;
+  }
+  if (card.type === "call_result") {
+    if (!card.transcript) return "";
+    return `<details class="card"><summary>Transcript${card.answeredBy ? ` · answered by ${esc(card.answeredBy)}` : ""}</summary>
+      <pre class="draft">${esc(card.transcript)}</pre></details>`;
+  }
   if (card.type === "add_funds") {
     return `<div class="card"><p>Your wallet needs more USDC on Base for this.</p>
       <div class="row"><button class="btn btn-primary btn-sm" data-action="add-funds">Add funds</button></div></div>`;
@@ -1547,6 +1574,9 @@ const actions = {
     cardAction({ type: "venice_topup", quoteId: el.dataset.quote, approvalHash: el.dataset.hash,
                  ...(el.dataset.amount ? { amount: el.dataset.amount } : {}) });
   },
+  "card-email": (el) => { state.done[el.dataset.key] = true; cardAction({ type: "send_email" }); },
+  "card-call": (el) => { state.done[el.dataset.key] = true; cardAction({ type: "start_call" }); },
+  "card-call-status": (el) => cardAction({ type: "call_status", callId: el.dataset.call, place: el.dataset.place }),
   "card-limits": (el) => {
     const key = el.dataset.key;
     const value = (name) => document.querySelector(`[data-field-of="${CSS.escape(key)}"][data-name="${name}"]`)?.value.trim();
