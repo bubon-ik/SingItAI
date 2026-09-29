@@ -986,6 +986,13 @@ function renderMessage(m) {
     <div class="text">${formatText(m.text)}</div>${cards ? `<div class="cards">${cards}</div>` : ""}</div></div>`;
 }
 
+// The page behind live data (a flight on FlightAware, the fares on Google Flights, the link read).
+function dataLink(data) {
+  if (!/^https:\/\//.test(data.link || "")) return "";
+  const host = data.link.replace(/^https:\/\/(www\.)?/, "").split(/[/?#]/)[0];
+  return `<div class="msg-sources"><a href="${esc(data.link)}" target="_blank" rel="noopener noreferrer nofollow">${esc(host)}</a></div>`;
+}
+
 function renderCard(card, key) {
   const a = state.allowance;
   if (card.type === "allowance" && a?.configured) {
@@ -1063,13 +1070,17 @@ function renderCard(card, key) {
     return `<div class="card"><p>Your wallet needs more USDC on Base for this.</p>
       <div class="row"><button class="btn btn-primary btn-sm" data-action="add-funds">Add funds</button></div></div>`;
   }
+  if (card.type === "data") {  // live data bought for an answer that came without Venice's line
+    return `<div class="msg-meta">${esc(card.name)} · $${esc(card.costUsd)}</div>` + dataLink(card);
+  }
   if (card.type === "usage") {
-    const search = card.search, links = ((search && search.sources) || [])
+    const search = card.search, data = card.data, links = ((search && search.sources) || [])
       .filter((s) => /^https?:\/\//.test(s.url || ""))
       .map((s) => `<a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer nofollow">${esc(s.title || s.url.replace(/^https?:\/\//, "").split("/")[0])}</a>`);
     return `<div class="msg-meta">${esc(card.model)} · ${Number(card.tokens || 0).toLocaleString("en-US")} tokens · $${esc(card.costUsd)}`
       + (search ? ` · searched the web · $${esc(search.costUsd)}` : card.searchNote ? ` · ${esc(card.searchNote)}` : "")
-      + `</div>` + (links.length ? `<div class="msg-sources">${links.join("")}</div>` : "");
+      + (data ? ` · ${esc(data.name)} · $${esc(data.costUsd)}` : "")
+      + `</div>` + (links.length ? `<div class="msg-sources">${links.join("")}</div>` : "") + (data ? dataLink(data) : "");
   }
   if (card.type === "credit") {
     return `<div class="note-line">Private chat credit topped up: <b>${esc(card.price)} USDC</b> on Venice, paid from your allowance.

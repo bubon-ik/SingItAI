@@ -11,6 +11,7 @@ import { SolanaChain } from './chain.mjs';
 import { Payments, quoteSummary } from './payments.mjs';
 import { TokenAllowance } from './allowance.mjs';
 import { InvoicePayments } from './invoice.mjs';
+import { ResourcePayments } from './resource.mjs';
 
 export async function dispatch(input, { wallet, venice, chain, store, exa, feePayer = null, allowance = null }) {
   if (wallet.address !== input.payer) throw new ClientError('WRONG_WALLET', 'Wallet mismatch.');
@@ -18,6 +19,10 @@ export async function dispatch(input, { wallet, venice, chain, store, exa, feePa
     return new InvoicePayments({ wallet, chain, store }).pay({ url: input.url, invoiceId: input.invoiceId, maxAmount: input.maxAmount, owner: input.owner || null });
   }
   if (input.operation === 'bitrefill-invoice-attempt') return store.invoiceAttempt(input.invoiceId);
+  if (input.operation === 'data-pay') {
+    return new ResourcePayments({ wallet, chain, store }).pay({ callId: input.callId, url: input.url, method: input.method || 'GET',
+      body: input.body ?? null, payTo: input.payTo, maxAmount: input.maxAmount, owner: input.owner });
+  }
   if (typeof input.operation === 'string' && input.operation.startsWith('allowance-')) {
     // `wallet` is the agent: the owner's delegate and the payer of every purchase.
     const lane = allowance || new TokenAllowance({ chain });

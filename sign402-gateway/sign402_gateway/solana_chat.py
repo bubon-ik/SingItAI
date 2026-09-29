@@ -116,9 +116,19 @@ class SolanaBridge:
                     EXA_PAYMENT_UNCERTAIN='Search payment is uncertain. Check search payment status; do not pay again.',
                     EXA_PAYMENT_PENDING='Check your pending search payment before searching again.',
                     TRANSACTION_REQUIRED='No search receipt is available yet. Contact support with the search ID; do not pay again.')
+            if operation == 'data-pay':
+                messages.update(
+                    MERCHANT_CHANGED='The data seller asked to be paid somewhere unexpected. Nothing was paid.',
+                    PRICE_CHANGED='The data seller asks more than its usual price. Nothing was paid.',
+                    UNSUPPORTED_PAYMENT='This data seller takes no USDC on Solana. Nothing was paid.',
+                    ALLOWANCE_TOO_LOW='The approval in your wallet does not cover this. Nothing was paid.',
+                    INSUFFICIENT_USDC='Your wallet does not hold enough USDC for this. Nothing was paid.',
+                    CHALLENGE_FAILED='The data seller did not ask for payment as expected. Nothing was paid.',
+                    NETWORK_ERROR='The data seller did not answer. Nothing was paid.',
+                    PAYMENT_UNCERTAIN='The data was paid but did not arrive clearly. It was not repeated.')
             fallback = ('Exa could not complete this request. Check search payment status; no automatic retry was made.' if operation.startswith('exa-')
                         else 'Bitrefill could not complete this. Nothing was retried; check Purchases.' if operation.startswith('bitrefill-')
-                        else 'Solana did not complete this. Nothing was retried.' if operation.startswith('allowance-')
+                        else 'Solana did not complete this. Nothing was retried.' if operation.startswith(('allowance-', 'data-'))
                         else 'Venice could not complete this request. No automatic retry was made.')
             raise SolanaChatError(str(code), messages.get(code, fallback))
         return response['result']

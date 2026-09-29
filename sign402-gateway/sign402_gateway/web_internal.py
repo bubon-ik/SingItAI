@@ -63,7 +63,7 @@ class ToolQuotes:
 SOLANA_READ_ONLY = {"tools", "catalog-search", "purchases", "purchase-reveal", "venice-models", "venice-model",
                     "venice-usage", "bitrefill-packages", "buyer-email", "buyer-email-set",
                     # these pay, and only through the account's own Solana allowance:
-                    "venice-chat", "venice-solana-topup", "bitrefill-solana-buy"}
+                    "venice-chat", "venice-solana-topup", "bitrefill-solana-buy", "data-buy"}
 
 
 def _account(server: Any, payload: dict[str, Any], action: str = "") -> str:
@@ -148,6 +148,12 @@ def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict
     if action == "tool-buy":
         return _buy_tool(server, gw, account, str(payload.get("quoteId") or ""))
 
+    if action == "data-buy":  # live data for one chat answer, paid from the account's own limits
+        from . import web_data  # noqa: PLC0415
+        if not account.startswith(SOLANA_PREFIX):
+            _limits_from_limiter(server, gw, account)
+        return 200, web_data.buy(server, gw, account, payload.get("tool"), payload.get("params"))
+
     if action in ("venice-chat", "venice-models", "venice-model", "venice-usage", "venice-solana-topup"):
         from . import web_venice  # noqa: PLC0415 - Venice only loads when the chat is used
         solana = account.startswith(SOLANA_PREFIX)
@@ -157,12 +163,12 @@ def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict
         if action == "venice-usage":
             return web_venice.usage_solana(server, account) if solana else web_venice.usage(server, account)
         if action == "venice-chat" and solana:
-            return web_venice.chat_solana(server, account, payload.get("messages"))
+            return web_venice.chat_solana(server, account, payload.get("messages"), context=payload.get("context"))
         if action == "venice-models":
             return web_venice.models(server, account)
         if action == "venice-model":
             return web_venice.choose_model(server, account, payload.get("model"))
-        return web_venice.chat(server, gw, account, payload.get("messages"))
+        return web_venice.chat(server, gw, account, payload.get("messages"), context=payload.get("context"))
 
     if account.startswith(SOLANA_PREFIX) and action in ("bitrefill-packages", "bitrefill-solana-buy", "buyer-email",
                                                         "buyer-email-set"):

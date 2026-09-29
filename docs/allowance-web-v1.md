@@ -270,6 +270,28 @@ the conversation. It works the way the Telegram bot does
     is resolved.
   - Jev sends "buy crypto news" to the paid feed and any other question about
     current events to the chat, which searches.
+- **Live data, bought per question** (`sign402_gateway/web_data.py`, gateway action `data-buy`). Jev's
+  `live_data` intent, or a link or flight number in the message, picks one read-only source; the concierge model
+  fills its fields as JSON, each checked by pattern (a city, a ticker, `LH400`, IATA codes, a future date), and a
+  missing one is asked for. The data is bought from the limits, then handed to Venice with the question as untrusted
+  data; under the answer, "FlightAware · $0.010" and a link. Sources, picked from Coinbase's Agentic Market and
+  PayAI's Bazaar for being used and read-only (September 29, 2026):
+
+  | Source | Seller | Price | |
+  |---|---|---|---|
+  | Weather, exchange rates, token details, stocks and indices, Polymarket, crypto news, funding rates | Otto AI | $0.001–0.003 | |
+  | Read a link (`/contents`) | Exa | $0.001 | |
+  | A flight's status | FlightAware via stabletravel.dev | $0.01 | |
+  | Flight prices between cities (booking happens on the airline's page) | Google Flights via stabletravel.dev | $0.02 | |
+  | Restaurants, hotels, things to do, with the top three's ratings | Tripadvisor via paysponge | $0.01 each | |
+
+  Every seller is bound to its Base and Solana address as its 402 named it, with a price ceiling; another address
+  or a higher price is refused before anything is paid. Base pays from the limiter (spending memory, limits;
+  kept out of Purchases like searches). Solana pays from the owner's account as delegate within the Solana limits,
+  through the bridge's `data-pay` (`solana-x402-service/src/resource.mjs`), which checks the host list, the bound
+  address and the ceiling again and makes one attempt per request. Crypto news and funding rates now work from a
+  Solana wallet too; Hyperliquid data, ENS and risk checks stay on Base. Calls, email and bookings are not here:
+  they act on other people, not only on the user's money.
 - **The model is theirs to choose** from Venice's own list (every chat model with
   a published price, cheapest first, filtered by Venice's capability tags): the
   chip under the message box, `GET /chat/models` and `POST /chat/model {model}`.

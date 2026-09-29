@@ -203,7 +203,7 @@ class SolanaVeniceTests(unittest.TestCase):
         reply = agent.message(ACCOUNT, None, "Set a $20 daily limit, $5 per purchase")["messages"][1]
         self.assertEqual((reply["cards"][0]["type"], reply["cards"][0]["kind"]), ("wallet", "grant"))
         agent.classify = lambda text: "buy_tool"
-        self.assertIn("sold on Base", agent.message(ACCOUNT, None, "buy crypto news")["messages"][1]["text"])
+        self.assertIn("sold on Base only", agent.message(ACCOUNT, None, "resolve vitalik.eth ens")["messages"][1]["text"])
 
 
 if __name__ == "__main__":
