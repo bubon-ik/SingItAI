@@ -187,6 +187,22 @@ class AgentDataTests(unittest.TestCase):
         self.assertEqual(reply["cards"][0]["data"], {"name": "FlightAware", "costUsd": "0.010",
                                                      "link": "https://www.flightaware.com/live/flight/LH400"})
 
+    def test_a_refused_data_purchase_still_gets_an_answer_that_says_why(self):
+        self.intent = "live_data"
+        shop = self.agent.shop
+
+        def refusing(action, account, body):
+            if action == "data-buy":
+                self.calls.append((action, dict(body)))
+                return 400, {"ok": False, "text": "The data seller refused the payment. Nothing was paid. (payer_not_allowed)"}
+            return shop(action, account, body)
+        self.agent.shop = refusing
+        reply = self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "Where is flight LH400 now?")["messages"][1]
+        self.assertEqual(reply["text"], "LH400 is delayed.")
+        self.assertNotIn("context", self.calls[-1][1])
+        self.assertEqual(reply["cards"][0]["searchNote"],
+                         "The data seller refused the payment. Nothing was paid. (payer_not_allowed)")
+
     def test_crypto_news_works_from_solana_now_and_base_only_tools_say_so(self):
         self.intent = "buy_tool"
         self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "buy crypto news")

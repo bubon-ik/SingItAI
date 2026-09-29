@@ -6,7 +6,7 @@
 import { isAddress } from '@solana/kit';
 import { ClientError, NETWORK, USDC } from './config.mjs';
 import { isTransactionId } from './chain.mjs';
-import { assertDelegated } from './allowance.mjs';
+import { assertDelegated, TokenAllowance } from './allowance.mjs';
 
 export const DATA_HOSTS = new Set(['x402.ottoai.services', 'api.exa.ai', 'stabletravel.dev', 'tripadvisor.x402.paysponge.com']);
 export const MAX_DATA_ATOMIC = 50000n;  // $0.05: data, never a purchase
@@ -27,6 +27,15 @@ export function selectDataRequirement(challenge, { payTo, maxAmount, payer, owne
   if (BigInt(r.amount) > BigInt(maxAmount)) throw new ClientError('PRICE_CHANGED', 'The seller asks more than agreed. Nothing was paid.');
   if (!r.extra?.feePayer || [payer, owner].includes(r.extra.feePayer)) throw new ClientError('UNEXPECTED_FEE_PAYER', 'This payment must be sponsored by the seller.');
   return structuredClone(r);
+}
+
+// The seller's own words for a refusal, reduced to plain text: the x402 error code, never a payload.
+export function refusalReason(response, text) {
+  let reason = '';
+  const header = response.headers.get('payment-required');
+  if (header) { try { reason = JSON.parse(Buffer.from(header, 'base64').toString('utf8')).error || ''; } catch { reason = ''; } }
+  if (!reason) { try { reason = JSON.parse(text).error || ''; } catch { reason = ''; } }
+  return String(reason).replace(/[^\w\s:.,()/-]/g, '').slice(0, 160);
 }
 
 function transactionOf(response) {
@@ -70,7 +79,7 @@ export class ResourcePayments {
     else { try { offer = await challenge.json(); } catch { throw new ClientError('INVALID_CHALLENGE', 'The seller sent no payment request.'); } }
     const requirement = selectDataRequirement(offer, { payTo, maxAmount, payer: this.wallet.address, owner });
     const resource = offer.resource || { url, description: 'x402 data', mimeType: 'application/json' };
-    await assertDelegated(this.chain, owner, this.wallet.address, requirement.amount);
+    const before = await assertDelegated(this.chain, owner, this.wallet.address, requirement.amount);
     const built = await this.chain.buildDelegated(requirement, resource, this.wallet, owner);
     this.store.claimInvoice(callId, this.wallet.address, built.messageHash, requirement.amount);
     let response;
@@ -84,7 +93,18 @@ export class ResourcePayments {
     try { text = (await response.text()).slice(0, MAX_BODY); } catch { text = ''; }
     if (response.status !== 200) {
       this.store.updateInvoice(callId, 'uncertain', transaction);
-      throw new ClientError('PAYMENT_UNCERTAIN', `The seller answered HTTP ${response.status}. It was not repeated.`);
+      const reason = refusalReason(response, text);
+      // A 402 to a signed payment is a refusal: when the owner's balance did not move, nothing was paid.
+      let moved = true;
+      if (response.status === 402 && !transaction) {
+        try { moved = BigInt((await new TokenAllowance({ chain: this.chain }).state(owner, this.wallet.address)).amount) < BigInt(before.amount); }
+        catch { moved = true; }
+      }
+      const error = moved
+        ? new ClientError('PAYMENT_UNCERTAIN', `The seller answered HTTP ${response.status}. It was not repeated.`)
+        : new ClientError('PAYMENT_REFUSED', 'The seller refused the payment. Nothing was paid.');
+      error.reason = reason;
+      throw error;
     }
     this.store.updateInvoice(callId, 'accepted', transaction);
     let data;

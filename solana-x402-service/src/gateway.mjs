@@ -98,7 +98,9 @@ async function main() {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch(error => {
     // Never include arbitrary SDK/provider errors, auth, signed payloads or input.
-    process.stdout.write(JSON.stringify({ ok: false, code: error instanceof ClientError ? error.code : 'BRIDGE_FAILED' }));
+    process.stdout.write(JSON.stringify({ ok: false, code: error instanceof ClientError ? error.code : 'BRIDGE_FAILED',
+      // A seller's refusal code (plain text, cut short) says why a data payment was turned down.
+      ...(error instanceof ClientError && typeof error.reason === 'string' && error.reason ? { reason: error.reason } : {}) }));
     process.exitCode = 1;
   });
 }

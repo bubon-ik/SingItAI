@@ -802,7 +802,14 @@ class WebAgent:
 
     def _with_data(self, account, lang, tool, params):
         chat_id = getattr(self._request, "chat_id", "")
-        _, bought = self._shop("data-buy", account, {"tool": tool, "params": params})
+        try:
+            _, bought = self._shop("data-buy", account, {"tool": tool, "params": params})
+        except LookupError as exc:  # the seller refused or is down: the chat still answers, and says why
+            text, cards = self._converse(account, chat_id, lang)
+            if cards and cards[0].get("type") == "usage":
+                cards[0]["searchNote"] = str(exc)[:200]
+                return text, cards
+            return (f"{exc}\n\n{text}" if text else str(exc)), cards
         note = {"name": bought.get("name") or tool, "costUsd": bought.get("costUsd") or "0",
                 **({"link": bought["link"]} if str(bought.get("link") or "").startswith("https://") else {})}
         text, cards = self._converse(account, chat_id, lang, context={

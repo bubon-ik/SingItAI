@@ -9,6 +9,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -19,6 +20,8 @@ import time
 from .solana_chat_store import SolanaChatStore
 from .solana_wallets import SOLANA_NETWORK
 from .venice_chat import ChatService, DEFAULT_MODEL
+
+logger = logging.getLogger(__name__)
 
 USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 ROOT = Path(__file__).resolve().parents[2] / 'solana-x402-service'
@@ -125,12 +128,18 @@ class SolanaBridge:
                     INSUFFICIENT_USDC='Your wallet does not hold enough USDC for this. Nothing was paid.',
                     CHALLENGE_FAILED='The data seller did not ask for payment as expected. Nothing was paid.',
                     NETWORK_ERROR='The data seller did not answer. Nothing was paid.',
-                    PAYMENT_UNCERTAIN='The data was paid but did not arrive clearly. It was not repeated.')
+                    PAYMENT_REFUSED='The data seller refused the payment. Nothing was paid.',
+                    PAYMENT_UNCERTAIN='The data seller did not answer clearly after the payment was sent. It was not repeated.')
             fallback = ('Exa could not complete this request. Check search payment status; no automatic retry was made.' if operation.startswith('exa-')
                         else 'Bitrefill could not complete this. Nothing was retried; check Purchases.' if operation.startswith('bitrefill-')
                         else 'Solana did not complete this. Nothing was retried.' if operation.startswith(('allowance-', 'data-'))
                         else 'Venice could not complete this request. No automatic retry was made.')
-            raise SolanaChatError(str(code), messages.get(code, fallback))
+            text = messages.get(code, fallback)
+            reason = str(response.get('reason') or '')[:160] if isinstance(response, dict) else ''
+            if reason:  # the seller's refusal code: plain text, no payload
+                logger.warning('solana %s refused: %s %s', operation, code, reason)
+                text = f'{text} ({reason})'
+            raise SolanaChatError(str(code), text)
         return response['result']
 
 

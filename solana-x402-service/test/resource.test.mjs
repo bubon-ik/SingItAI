@@ -40,6 +40,10 @@ async function fixture({ delegated = 1_000_000n, paidStatus = 200, payTo = null 
     if (!init.headers['PAYMENT-SIGNATURE']) {
       return new Response('{}', { status: 402, headers: { 'payment-required': Buffer.from(JSON.stringify(offer)).toString('base64') } });
     }
+    if (paidStatus === 402) {
+      return new Response('{"error":"payment_required"}', { status: 402, headers: { 'payment-required': Buffer.from(JSON.stringify(
+        { ...offer, error: 'invalid_exact_svm_payload: <script>x</script> "payer" not allowed' })).toString('base64') } });
+    }
     return new Response('{"current":{"tempC":14}}', { status: paidStatus, headers: { 'payment-response': Buffer.from(JSON.stringify({ transaction: TX })).toString('base64') } });
   };
   const store = new Store(directory());
@@ -98,4 +102,13 @@ test('only a sponsored Solana USDC option to the bound seller is taken', () => {
   const offer = { accepts: [{ scheme: 'exact', network: NETWORK, asset: USDC, amount: '1000', payTo: 'A', extra: { feePayer: 'me' } }] };
   assert.throws(() => selectDataRequirement(offer, { payTo: 'A', maxAmount: '5000', payer: 'me', owner: 'o' }), /sponsored/);
   assert.throws(() => selectDataRequirement({ accepts: [] }, { payTo: 'A', maxAmount: '5000', payer: 'me', owner: 'o' }), /no USDC on Solana/);
+});
+
+test('a refusal that moved nothing says so, with the seller’s reason, and is not retried', async () => {
+  const f = await fixture({ paidStatus: 402 });
+  await assert.rejects(f.payments.pay(f.call), e => e.code === 'PAYMENT_REFUSED' && /Nothing was paid/.test(e.message)
+    && e.reason === 'invalid_exact_svm_payload: scriptx/script payer not allowed');
+  assert.equal(f.store.invoiceAttempt(f.call.callId).state, 'uncertain');
+  await assert.rejects(f.payments.pay(f.call), /already paid or attempted/);
+  f.store.close();
 });
