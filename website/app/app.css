@@ -48,6 +48,8 @@ a:hover { text-decoration: underline; }
 .orb-c { width: 520px; height: 520px; left: 30%; bottom: -280px;
   background: radial-gradient(circle, rgba(14, 52, 38, 0.55), transparent 70%); }
 .pixel-stars { position: fixed; inset: 0; z-index: -1; pointer-events: none; opacity: 0.7; }
+/* On a phone the stars read as specks on the screen, over the text: the orbs are enough there. */
+@media (max-width: 720px) { .pixel-stars { display: none; } }
 .grain {
   position: fixed; inset: 0; z-index: 60; pointer-events: none; opacity: 0.05;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.6'/%3E%3C/svg%3E");
@@ -416,9 +418,16 @@ body.in-app .nav-wrap, body.in-app .shell { display: none; }
   background-image: linear-gradient(45deg, transparent 50%, var(--text-soft) 50%), linear-gradient(135deg, var(--text-soft) 50%, transparent 50%);
   background-position: calc(100% - 16px) 52%, calc(100% - 11px) 52%; background-size: 5px 5px; background-repeat: no-repeat; }
 .product .select option { background: #111412; color: var(--text); }
+.product-side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+.card .product-buy { margin: 0; flex-wrap: nowrap; gap: 8px; }
+.limit-note { font-size: 13px; color: var(--warn); text-align: right; }
+.product .btn[disabled] { opacity: 0.35; cursor: not-allowed; }
 @media (max-width: 620px) {
-  .product { flex-direction: column; align-items: stretch; }
-  .product .select { max-width: none; flex: 1; }
+  .product { flex-direction: column; align-items: stretch; gap: 8px; }
+  .product-side { align-items: stretch; }
+  .limit-note { text-align: left; }
+  .product .select { max-width: none; flex: 1; min-width: 0; }
+  .product .btn { flex: none; }
 }
 
 .composer-wrap { padding: 10px 24px 18px; }
@@ -467,6 +476,12 @@ body.in-app .nav-wrap, body.in-app .shell { display: none; }
 .send:hover { background: #52dc9e; }
 .send[disabled] { opacity: 0.35; cursor: not-allowed; }
 .composer-hint { max-width: 780px; margin: 8px auto 0; text-align: center; font-size: 12px; color: var(--text-faint); }
+/* A phone's screen is for the conversation: the reminder under the box and the model's badge step back. */
+@media (max-width: 620px) {
+  .composer-hint { display: none; }
+  .model-chip { font-size: 12px; color: var(--text-faint); gap: 5px; }
+  .model-chip .venice { display: none; }
+}
 
 .scrim { display: none; }
 @media (max-width: 860px) {

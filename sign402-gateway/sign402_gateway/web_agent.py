@@ -145,18 +145,21 @@ def parse_limits(text: str) -> dict[str, str]:
     lower = text.lower()
     found: dict[str, str] = {}
     patterns = {
-        "days": r"(\d{1,3})\s*(?:days?|дн|дней|день\b(?!\s*лимит))",
+        "days": r"(\d{1,3})\s*(?:days?|дн(?:ей|я)?\b|день\b(?!\s*лимит))",  # not "дневной"
         "per": r"(\d{1,6}(?:[.,]\d{1,6})?)\s*\$?\s*(?:usdc|usd|\$|долл\w*)?\s*(?:per|a|an|each|за|на)\s*(?:purchase|buy|order|transaction|txn|tx|payment|покупк\w*|заказ\w*|транзакци\w*|платеж\w*|платёж\w*)",
-        "daily": r"(\d{1,6}(?:[.,]\d{1,6})?)\s*\$?\s*(?:usdc|usd|\$|долл\w*)?\s*(?:per|a|an|в|за)\s*(?:day|день|сутки)",
+        "daily": r"(\d{1,6}(?:[.,]\d{1,6})?)\s*\$?\s*(?:usdc|usd|\$|долл\w*)?\s*"
+                 r"(?:(?:per|a|an|в|за)\s*(?:day|день|сутки)|daily|дневн\w*)",
     }
+    rest = lower
     for name, pattern in patterns.items():
         match = re.search(pattern, lower)
         if match:
             found[name] = match.group(1).replace(",", ".")
-    if "daily" not in found:
-        rest = [n for n in numbers(lower) if str(n) not in found.values()]
-        if rest:
-            found["daily"] = str(max(rest))
+            rest = rest[:match.start()] + " " * (match.end() - match.start()) + rest[match.end():]
+    if "daily" not in found:  # "limit 20": the number no other pattern took (the same value may be both)
+        left = numbers(rest)
+        if left:
+            found["daily"] = str(max(left))
     return found
 
 
@@ -1083,11 +1086,11 @@ class WebAgent:
             if not first.get("packages") or any(o["value"] == amount for o in first["packages"]):
                 return self._buy_giftcard(account, lang, first["slug"], amount, first.get("name", ""))
         if intent in ALTERNATIVES:
-            what = {"food": ("food", "еду"), "goods": ("goods", "товары"), "travel": ("travel", "поездку")}[intent]
-            text_en = (f"I can't order {what[0]} directly, but these gift cards pay for it in {country}. "
-                       "Pick one and a value; I'll buy it from your allowance.")
-            text_ru = (f"Заказать {what[1]} напрямую я не могу, но этими подарочными картами можно за это "
-                       f"заплатить ({country}). Выберите карту и номинал — куплю из вашего лимита.")
+            # What they can do, first: the cards that pay for it. What the agent cannot do is not the opening line.
+            what = {"food": ("food delivery and groceries", "доставку еды и продукты"), "goods": ("shopping", "покупки"),
+                    "travel": ("travel", "поездки")}[intent]
+            text_en = f"These gift cards pay for {what[0]}. Pick a value and I'll buy it inside your limits."
+            text_ru = f"Этими подарочными картами можно оплатить {what[1]}. Выберите номинал — куплю в пределах ваших лимитов."
         elif intent == "esim":
             text_en = "Here are the eSIMs I found. Pick a plan and I'll buy it from your allowance."
             text_ru = "Вот какие eSIM нашёл. Выберите тариф — куплю из вашего лимита."
@@ -1098,7 +1101,10 @@ class WebAgent:
             text_en += " Buying needs a Base wallet for now; Solana spending limits are coming."
             text_ru += " Покупка пока только с кошельком на Base; лимиты на Solana скоро будут."
         return say(lang, text_en, text_ru), [{"type": "products", "kind": intent, "items": items, "lang": lang,
-                                               **({"readOnly": True} if solana else {})}]
+                                               **({"readOnly": True} if solana else {}),
+                                               # Hungry now: places to eat there are one press away (live data).
+                                               **({"places": {"country": country, "place": wanted.get("place") or ""}}
+                                                  if intent == "food" else {})}]
 
     def _research(self, account: str, text: str, intent: str, query: str, country: str, category: str,
                   place: str) -> tuple[list[dict[str, Any]], bool]:

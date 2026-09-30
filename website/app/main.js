@@ -397,10 +397,13 @@ function renderHero() {
 }
 
 // What the agent can really spend today: the day's room within the allowance, plus what it already holds.
+// What the agent can really spend today: what is left of today's limit, the allowance, and the USDC
+// actually in the wallet — whichever is smallest — plus what the agent already holds.
 function spendableToday(a) {
-  const left = BigInt(a.remainingTodayAtomic);
-  const allowed = BigInt(a.allowanceAtomic);
-  return (left < allowed ? left : allowed) + BigInt(a.floatAtomic || 0);
+  const known = [a.remainingTodayAtomic, a.allowanceAtomic, a.ownerUsdcAtomic]
+    .filter((value) => value !== undefined && value !== null).map((value) => BigInt(value));
+  const least = known.length ? known.reduce((low, value) => (value < low ? value : low)) : 0n;
+  return least + BigInt(a.floatAtomic || 0);
 }
 
 function statusPill(code) {
@@ -1008,6 +1011,43 @@ function dataLink(data) {
   return `<div class="msg-sources"><a href="${esc(data.link)}" target="_blank" rel="noopener noreferrer nofollow">${esc(host)}</a></div>`;
 }
 
+// What one purchase can cost right now: the smallest of the per-purchase limit, what is left today, the
+// allowance and the wallet's USDC — what the limiter itself checks (agent_allowance._fund). Null: not known here.
+function spendRoom() {
+  const a = state.allowance;
+  if (!a || a.state !== "granted" || a.perPurchaseCapAtomic === undefined) return null;
+  const n = (value) => (value === undefined || value === null ? Infinity : Number(value));
+  return { per: n(a.perPurchaseCapAtomic), today: Math.min(n(a.remainingTodayAtomic), n(a.allowanceAtomic)),
+           wallet: n(a.ownerUsdcAtomic) };
+}
+
+// "per" | "today" | "wallet": the first limit a price is over; "" when it can be paid.
+function overLimit(priceUsd, room) {
+  if (!room) return "";
+  const atomic = Math.round(Number(priceUsd) * 1e6);
+  return atomic > room.per ? "per" : atomic > room.today ? "today" : atomic > room.wallet ? "wallet" : "";
+}
+
+// Under a product nothing of which fits: which limit, and the one step that changes it.
+function limitNote(kind, cheapest) {
+  const a = state.allowance;
+  if (kind === "per") {
+    const need = Math.ceil(Number(cheapest.priceUsd));
+    const daily = Math.max(need, Math.ceil(Number(a.dailyCapAtomic || 0) / 1e6));
+    return `<p class="limit-note">Above your ${usd(a.perPurchaseCapAtomic)} per-purchase limit.
+      <button class="linkish" data-action="suggest" data-text="Set a $${daily} daily limit, $${need} per purchase">Raise it to $${need}</button></p>`;
+  }
+  if (kind === "wallet") {
+    return `<p class="limit-note">Your wallet holds ${usd(a.ownerUsdcAtomic)} in USDC.
+      <button class="linkish" data-action="add-funds">Add funds</button></p>`;
+  }
+  return `<p class="limit-note">More than your limits allow right now. Pick a smaller value or try again tomorrow.</p>`;
+}
+
+function regionName(code) {
+  try { return new Intl.DisplayNames(["en"], { type: "region" }).of(String(code || "").toUpperCase()) || ""; } catch { return ""; }
+}
+
 function renderCard(card, key) {
   const a = state.allowance;
   if (card.type === "allowance" && a?.configured) {
@@ -1052,21 +1092,34 @@ function renderCard(card, key) {
   }
   if (card.type === "products") {
     const plan = card.kind === "esim" ? "Choose a plan" : "Choose a value";
+    const room = spendRoom();
+    const label = (o) => `${esc(o.value)}${o.currency && !/[a-z]/i.test(o.value) ? ` ${esc(o.currency)}` : ""} — ${esc(o.priceUsd)} USDC`;
     const choice = (p) => {
       if (p.needsRecipient) return `<span class="faint">Delivered to a phone number — not available here yet</span>`;
-      const control = p.packages?.length
+      // Cheapest first, and the first one the limits can pay is chosen; the rest stay visible but cannot be picked.
+      const packages = [...(p.packages || [])].sort((a, b) => Number(a.priceUsd) - Number(b.priceUsd));
+      const pick = packages.find((o) => !overLimit(o.priceUsd, room));
+      const blocked = packages.length && !pick ? overLimit(packages[0].priceUsd, room) : "";
+      const control = packages.length
         ? `<select class="input select" data-package="${esc(p.slug)}" aria-label="${plan}">
-            ${p.packages.map((o) => `<option value="${esc(o.value)}">${esc(o.value)}${o.currency && !/[a-z]/i.test(o.value) ? ` ${esc(o.currency)}` : ""} — ${esc(o.priceUsd)} USDC</option>`).join("")}
+            ${packages.map((o) => {
+              const over = overLimit(o.priceUsd, room);
+              const shown = o === (pick || packages[0]);  // its reason is written under the list, where it fits
+              return `<option value="${esc(o.value)}"${over ? " disabled" : ""}${shown ? " selected" : ""}>${label(o)}${over && !shown ? " · over your limit" : ""}</option>`;
+            }).join("")}
           </select>`
         : `<input class="input" placeholder="value" data-package="${esc(p.slug)}" aria-label="Value">`;
-      return `<div class="row" style="margin:0">${control}
+      return `<div class="product-side"><div class="row product-buy">${control}
         <button class="btn btn-primary btn-sm" data-action="card-buy" data-slug="${esc(p.slug)}" data-name="${esc(p.name)}"
-          data-lang="${esc(card.lang || "en")}">Buy</button></div>`;
+          data-lang="${esc(card.lang || "en")}"${blocked ? " disabled" : ""}>Buy</button></div>
+        ${blocked ? limitNote(blocked, packages[0]) : ""}</div>`;
     };
+    const where = card.places && (card.places.place || regionName(card.places.country));
     return `<div class="card">${(card.items || []).map((p) => `
       <div class="product"><div><h3>${esc(p.name)}</h3>
         <p class="faint">${p.packages?.length ? `${p.packages.length} ${card.kind === "esim" ? "plans" : "options"} · from ${esc(Math.min(...p.packages.map((o) => Number(o.priceUsd))))} USDC` : esc(p.slug)}</p></div>
         ${choice(p)}</div>`).join("")}
+      ${where ? `<div class="row"><button class="btn btn-ghost btn-sm" data-action="suggest" data-text="Restaurants in ${esc(where)}">Find a place to eat in ${esc(where)}</button></div>` : ""}
       <p class="faint" style="margin-top:8px">Paid from your allowance, inside your limits. The price is checked again before paying.</p></div>`;
   }
   if (card.type === "venice_topup") {

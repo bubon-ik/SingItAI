@@ -5,6 +5,7 @@
 (function () {
   var canvas = document.getElementById('pixel-stars');
   if (!canvas) return;
+  if (window.matchMedia('(max-width: 720px)').matches) return;  // hidden on phones (app.css): no need to animate
   var ctx = canvas.getContext('2d');
   if (!ctx) return;
 

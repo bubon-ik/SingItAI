@@ -118,9 +118,13 @@ class AgentTests(unittest.TestCase):
                                ("20 usdc per day and 2.5 per order for 7 days", {"daily": "20", "per": "2.5", "days": "7"}),
                                ("лимит 50 в день, 10 за покупку", {"daily": "50", "per": "10"}),
                                ("set up limits $10 per day and $2 per transaction", {"daily": "10", "per": "2"}),
-                               ("10 в день и 2 за транзакцию", {"daily": "10", "per": "2"})):
+                               ("10 в день и 2 за транзакцию", {"daily": "10", "per": "2"}),
+                               # What "Raise it to $24" under a product sends: the same number for both.
+                               ("Set a $24 daily limit, $24 per purchase", {"daily": "24", "per": "24"}),
+                               ("30 дневной лимит, 10 за покупку", {"daily": "30", "per": "10"})):
             with self.subTest(text=text):
                 self.assertEqual({k: v for k, v in wg.parse_limits(text).items() if k in expected}, expected)
+        self.assertNotIn("days", wg.parse_limits("30 дневной лимит, 10 за покупку"))  # "дневной" is not a number of days
 
     def test_news_is_bought_in_one_step_once_the_allowance_is_approved(self):
         message = self.send("buy crypto news", "buy_tool")
@@ -177,7 +181,9 @@ class AgentTests(unittest.TestCase):
         self.hints = {"country": "CZ"}
         message = self.send("я хочу заказать еду в Чехии", "food")
         self.assertEqual(self.shop.calls[0][2], {"query": "", "country": "CZ", "category": "food", "productType": "gift_card"})
-        self.assertIn("напрямую я не могу", message["text"])
+        self.assertIn("доставку еды", message["text"])
+        self.assertNotIn("не могу", message["text"])  # what can be done comes first
+        self.assertEqual(message["cards"][0]["places"], {"country": "CZ", "place": ""})
         self.hints = {}
         self.assertIn("В какой стране", self.send("хочу заказать еду", "food")["text"])
 
