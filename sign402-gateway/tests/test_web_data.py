@@ -235,6 +235,33 @@ class AgentDataTests(unittest.TestCase):
         self.assertTrue(sent[1]["content"].endswith("Where is flight LH400 now?"))
         self.assertNotIn("secret plan", json.dumps(sent))
 
+    def test_places_somewhere_buy_tripadvisor_whatever_the_reader_says(self):
+        self.intent = "chat"  # Jev thought it was conversation: the paid chat must not take it
+        self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "Restaurants in Czechia")
+        self.assertEqual(self.calls[0], ("data-buy", {"tool": "places",
+                                                      "params": {"query": "Restaurants in Czechia", "kind": "restaurants"}}))
+        self.assertEqual(wg.places_plan("hotels in Lisbon")[1]["kind"], "hotels")
+        self.assertEqual(wg.places_plan("где поесть в Праге")[1]["kind"], "restaurants")
+        for text, kind in (("restaurace v Praze", "restaurants"), ("kde se dá v Praze dobře najíst", "restaurants"),
+                           ("ubytování v Brně", "hotels"), ("Wo kann man in Berlin gut essen", "restaurants"),
+                           ("Unterkunft in Hamburg", "hotels"), ("Sehenswürdigkeiten in Dresden", "attractions"),
+                           ("where can I eat in Lisbon", "restaurants"), ("где в Праге поесть", "restaurants")):
+            with self.subTest(text=text):
+                self.assertEqual(wg.explicit_action(text), "live_data")
+                self.assertEqual(wg.places_plan(text)[1]["kind"], kind)
+        for text in ("tell me about hotel economics", "restaurant gift card in Germany", "book a hotel in Paris",
+                     "I am hungry", "call the restaurant +12025550123 and book a table", "where is my order?",
+                     "dárkový poukaz do restaurace v Praze", "Hotel in Berlin buchen", "Restaurace je drahá"):
+            with self.subTest(text=text):
+                self.assertNotEqual(wg.explicit_action(text), "live_data")
+                self.assertIsNone(wg.places_plan(text))
+
+    def test_the_planner_saying_none_still_finds_places(self):
+        self.intent = "live_data"
+        self.agent.model = lambda messages, json_mode=False, max_tokens=700: '{"tool": "none"}' if json_mode else "Try U Fleků."
+        self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "cafes near Charles Bridge")
+        self.assertEqual(self.calls[0][1]["params"], {"query": "cafes near Charles Bridge", "kind": "restaurants"})
+
     def test_without_data_a_venice_refusal_is_the_reply(self):
         self.intent = "chat"
         shop = self.agent.shop

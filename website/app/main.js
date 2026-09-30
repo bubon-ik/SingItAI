@@ -1120,7 +1120,7 @@ function renderCard(card, key) {
         <p class="faint">${p.packages?.length ? `${p.packages.length} ${card.kind === "esim" ? "plans" : "options"} · from ${esc(Math.min(...p.packages.map((o) => Number(o.priceUsd))))} USDC` : esc(p.slug)}</p></div>
         ${choice(p)}</div>`).join("")}
       ${where ? `<div class="row"><button class="btn btn-ghost btn-sm" data-action="suggest" data-text="Restaurants in ${esc(where)}">Find a place to eat in ${esc(where)}</button></div>` : ""}
-      <p class="faint" style="margin-top:8px">Paid from your allowance, inside your limits. The price is checked again before paying.</p></div>`;
+      ${card.items?.length ? `<p class="faint" style="margin-top:8px">Paid from your allowance, inside your limits. The price is checked again before paying.</p>` : ""}</div>`;
   }
   if (card.type === "venice_topup") {
     if (state.done[key]) return `<div class="card done"><h3>Venice credit topped up ✓</h3></div>`;
@@ -1705,7 +1705,8 @@ const actions = {
     cardAction({ type: "create_limiter", daily: value("daily"), per: value("per"), days: value("days"), lang: el.dataset.lang });
   },
   "card-buy": (el) => {
-    const pkg = document.querySelector(`[data-package="${CSS.escape(el.dataset.slug)}"]`)?.value.trim();
+    // The value chosen next to this button: the same product may be on an older card further up the chat.
+    const pkg = el.closest(".product")?.querySelector(`[data-package="${CSS.escape(el.dataset.slug)}"]`)?.value.trim();
     if (!pkg) { toast("Enter the card value first.", true); return; }
     cardAction({ type: "buy_giftcard", slug: el.dataset.slug, package: pkg, name: el.dataset.name, lang: el.dataset.lang });
   },

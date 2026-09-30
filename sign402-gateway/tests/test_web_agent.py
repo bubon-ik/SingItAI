@@ -186,6 +186,16 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(message["cards"][0]["places"], {"country": "CZ", "place": ""})
         self.hints = {}
         self.assertIn("В какой стране", self.send("хочу заказать еду", "food")["text"])
+        # A city they named is where places to eat are looked for, not the whole country.
+        self.model_replies = [json.dumps({"query": "", "country": "DE", "place": "Germany", "city": "Berlin"})]
+        message = self.send("I'm hungry in Berlin", "food")
+        self.assertEqual(message["cards"][0]["places"], {"country": "DE", "place": "Berlin"})
+        # Nothing sold for food there: no dead end, places to eat are still offered.
+        self.shop.catalog = {"ok": True, "products": []}
+        self.model_replies = [json.dumps({"query": "", "country": "TH", "place": "Thailand", "city": "Bangkok"})]
+        message = self.send("I'm hungry in Bangkok", "food")
+        self.assertIn("places to eat", message["text"])
+        self.assertEqual((message["cards"][0]["items"], message["cards"][0]["places"]), ([], {"country": "TH", "place": "Bangkok"}))
 
     def test_without_the_catalog_bitrefills_own_search_is_used(self):
         self.shop.catalog = {"ok": False, "error": "catalog_off", "products": []}
