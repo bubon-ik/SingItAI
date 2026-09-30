@@ -186,10 +186,6 @@ class AgentTests(unittest.TestCase):
         self.model_replies = [json.dumps({"query": "", "country": "CZ", "place": "Czechia", "city": "Prague"})]
         message = self.send("I'm hungry in Prague", "food")
         self.assertEqual([i["slug"] for i in message["cards"][0]["items"]], ["wolt-cz", "foodora-cz", "kaufland-cz", "albert-cz"])
-        self.assertEqual(wg.explicit_action("I want to go to a supermarket in Prague"), "food")
-        self.assertEqual(wg.explicit_action("хочу купить продукты в Праге"), "food")
-        self.assertEqual(wg.explicit_action("supermarket gift card Kaufland"), "")  # a gift card: Jev decides
-        self.assertEqual(wg.explicit_action("продуктивность работы"), "")
 
     def test_a_paused_or_expired_limiter_is_offered_new_limits_not_an_approval(self):
         for state in ("paused", "expired"):
@@ -216,7 +212,7 @@ class AgentTests(unittest.TestCase):
         def down(*args, **kwargs):
             raise wg.AgentUnavailable("down")
         self.agent.classify, self.agent.model = down, down
-        chat = self.agent.message(ACCOUNT, None, "хочу есть")["chatId"]
+        chat = self.agent.message(ACCOUNT, None, "хочу еду")["chatId"]  # Jev down: the keywords read "еду"
         self.agent.message(ACCOUNT, chat, "Прага")
         self.assertEqual(self.shop.calls[0][2]["country"], "CZ")
         self.assertEqual(wg.country_in("Ich habe Hunger in Berlin"), "DE")
@@ -225,7 +221,7 @@ class AgentTests(unittest.TestCase):
     def test_the_answer_to_in_which_country_finishes_the_request(self):
         self.hints = {}
         self.model_replies = ["(no answer)"]
-        self.intent = "chat"
+        self.intent = "food"
         asked = self.agent.message(ACCOUNT, None, "хочу есть")
         self.assertIn("В какой стране", asked["messages"][1]["text"])
         # "Прага" alone: Jev would call it chat. It answers the question that was asked.
@@ -245,7 +241,7 @@ class AgentTests(unittest.TestCase):
         # Production: the model timed out on "I'm hungry in Prague" and the agent asked which country.
         self.hints = {"country": "CZ"}
         self.model_replies = ["(no answer)"]  # not JSON: the extraction fails, as a timeout would
-        message = self.send("I'm hungry in Prague", "chat")
+        message = self.send("I'm hungry in Prague", "food")
         self.assertEqual(self.shop.calls[0][2]["country"], "CZ")
         self.assertNotIn("В какой стране", message["text"])
         self.assertNotIn("which country", message["text"].lower())
@@ -261,41 +257,6 @@ class AgentTests(unittest.TestCase):
             with self.assertRaises(wg.AgentUnavailable):
                 model([{"role": "user", "content": "hi"}], json_mode=json_mode)
         self.assertEqual(waits, [15, 40])
-
-    def test_food_in_any_words_is_food(self):
-        # Production, 20:41: "I wanna food in Prague" went to Venice, which had no credit.
-        for text in ("I wanna food in Prague", "food in Prague", "pizza in Prague", "order lunch in Prague",
-                     "где тут пожрать в Праге", "хочу поесть", "chci jídlo v Praze", "Ich will Essen in Berlin"):
-            self.assertEqual(wg.explicit_action(text), "food", text)
-        for text in ("a recipe for pizza", "the history of Czech food", "I had pizza yesterday"):
-            self.assertEqual(wg.explicit_action(text), "", text)
-
-    def test_when_venice_cannot_answer_the_words_still_route(self):
-        self.shop.venice = {"ok": False, "error": "chat_refused", "text": "Your limiter cannot fund 5 USDC now."}
-        self.hints = {"country": "DE"}
-        self.model_replies = ["(no answer)"]
-        message = self.send("any good eSIM for Germany", "chat")  # Jev: conversation; Venice: no credit
-        self.assertEqual(message["cards"][0]["type"], "products")
-        self.assertEqual([c[0] for c in self.shop.calls][:2], ["venice-chat", "catalog-search"])
-        self.shop.calls.clear()
-        message = self.send("a recipe for pizza", "chat")  # a conversation stays one, and says why it cannot answer
-        self.assertEqual(message["text"], "Your limiter cannot fund 5 USDC now.")
-        self.shop.calls.clear()
-        message = self.send("is crypto news risky", "chat")  # paid tools are never bought this way
-        self.assertNotIn("tool-buy", [c[0] for c in self.shop.calls])
-
-    def test_hunger_is_food_whatever_the_reader_says(self):
-        # Jev read "I'm hungry in Prague" as conversation in production; it must not reach the paid chat.
-        self.model_replies = [json.dumps({"query": "", "country": "CZ", "place": "Czechia", "city": "Prague"})]
-        message = self.send("I'm hungry in Prague", "chat")
-        self.assertEqual(self.shop.calls[0][2], {"query": "", "country": "CZ", "category": "food", "productType": "gift_card"})
-        self.assertEqual(message["cards"][0]["places"], {"country": "CZ", "place": "Prague"})
-        self.assertNotIn("venice-chat", [c[0] for c in self.shop.calls])
-        for text in ("я голоден, я в Праге", "хочу есть", "Mám hlad v Praze", "jsem hladový", "Ich habe Hunger in Berlin",
-                     "Ich bin hungrig", "I am starving"):
-            self.assertEqual(wg.explicit_action(text), "food", text)
-        for text in ("The Hunger Games", "hunger strike history", "what does hlad mean", "Hungary visa rules"):
-            self.assertEqual(wg.explicit_action(text), "", text)
 
     def test_food_is_offered_as_gift_cards_for_food_in_that_country(self):
         self.hints = {"country": "CZ"}
@@ -464,8 +425,14 @@ class JevTests(unittest.TestCase):
         self.assertEqual(self.sent["model"], "jev-latest")
         self.assertEqual(set(self.sent["questions"]["intent"]["criteria"]), set(wg.INTENTS))
         self.assertLessEqual(len(self.sent["questions"]["country"]["criteria"]), 255)  # Jev's limit per choice
+        # Jev's first choice stands even when unsure ("I'm hungry in Prague" was food at 0.49 in production)...
+        jev = wg.Jev("key", opener=self.opener({"type": "choice", "choice": "food", "confidence": 0.49}))
+        self.assertEqual(jev("I'm hungry in Prague")["intent"], "food")
+        # ...except a paid tool, bought at once with no card to confirm: that needs Jev to be sure.
         jev = wg.Jev("key", opener=self.opener({"type": "choice", "choice": "buy_tool", "confidence": 0.4}))
         self.assertEqual(jev("hmm")["intent"], "clarify")
+        self.assertIn("hungry", wg.INTENTS["food"])
+        self.assertIn("recipe", wg.INTENTS["food"])
 
     def test_country_and_kind_of_shop_come_with_the_intent_and_products_are_ranked(self):
         choice = lambda c, p: {"type": "choice", "choice": c, "confidence": p}
