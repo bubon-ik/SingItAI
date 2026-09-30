@@ -739,6 +739,19 @@ function renderModal() {
     drawQr(address);
     return;
   }
+  if (m.type === "install") {  // iPhone and iPad only: other browsers use their own prompt
+    modalEl.innerHTML = modal(`
+      <div class="approval-head"><div class="avatar">${mark()}</div>
+        <div><strong>Install SingIt</strong><span>On your Home Screen, no App Store needed</span></div></div>
+      <ol class="install-steps">
+        <li>Tap <b>Share</b> <span class="faint">(the square with an arrow)</span> in your browser.</li>
+        <li>Choose <b>Add to Home Screen</b>.</li>
+        <li>Tap <b>Add</b>. SingIt then opens from its icon, full screen.</li>
+      </ol>
+      <p class="hint">Your wallet and limits stay the same: the app is this page, with its own icon.</p>
+      <div class="actions" style="margin-top:16px"><button class="btn btn-ghost" data-action="dismiss-button">Done</button></div>`);
+    return;
+  }
   if (m.type === "models") {
     const { query, category } = state.modelFilter;
     const granted = state.allowance?.state === "granted";
@@ -1156,6 +1169,7 @@ const ICONS = {
   back: '<path d="m15 18-6-6 6-6"/>',
   funds: '<path d="M20 12V8H6a2 2 0 0 1 0-4h12v4"/><path d="M4 6v12a2 2 0 0 0 2 2h14v-4"/><path d="M18 12a2 2 0 0 0 0 4h4v-4z"/>',
   check: '<path d="m5 12 5 5 9-10"/>',
+  install: '<rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M12 7v7m-3-3 3 3 3-3"/><path d="M11 18h2"/>',
 };
 const icon = (name) => name && ICONS[name]
   ? `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`
@@ -1180,6 +1194,7 @@ function renderAccountMenu() {
       + item("go", "settings", "Settings", "", 'data-view="settings"')
       + item("account-menu-language", "language", "Language", `<kbd>${esc(LANGUAGES.find(([c]) => c === state.replyLang)?.[1] || "Auto")} ›</kbd>`)
       + item("go", "telegram", "Telegram", "", 'data-view="telegram"')
+      + (canInstall() ? item("install-app", "install", "Install app") : "")
       + item("get-help", "help", "Get help", "<kbd>↗</kbd>")
       + `<hr>` + item("sign-out", "signout", "Sign out");
   el.hidden = false;
@@ -1503,6 +1518,18 @@ const actions = {
     toast({ en: "Your agent now answers in English.", ru: "Теперь агент отвечает по-русски." }[el.dataset.lang]
       || "Your agent answers in the language you write.");
   },
+  "install-app": async () => {
+    state.accountMenu = null;
+    if (installPrompt) {
+      const prompt = installPrompt;
+      installPrompt = null;  // a prompt can be shown only once
+      render();
+      await prompt.prompt().catch(() => {});
+      return;
+    }
+    state.modal = { type: "install" };
+    render();
+  },
   "get-help": () => { state.accountMenu = null; render(); window.open(HELP_URL, "_blank", "noopener"); },
   "open-models": async () => {
     await loadModels();  // Venice adds models; the list is cached for hours on the server
@@ -1696,6 +1723,27 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && event.target.id === "bf-query") searchBitrefill();
 });
 
+// -- installing as an app (website/app/manifest.webmanifest, sw.js) --
+
+// Chrome and Edge offer their own install prompt; Safari has none, so there the menu explains
+// Share → Add to Home Screen instead.
+let installPrompt = null;
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();  // shown from the menu, when asked, not as a banner over the chat
+  installPrompt = event;
+});
+window.addEventListener("appinstalled", () => { installPrompt = null; render(); });
+
+const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const isIos = () => /iPhone|iPad|iPod/.test(navigator.userAgent)
+  || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);  // iPadOS asks for the desktop site
+const canInstall = () => !isStandalone() && (Boolean(installPrompt) || isIos());
+
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  navigator.serviceWorker.register("sw.js", { scope: "./" }).catch(() => { /* the page works without it */ });
+}
+
 // -- start --
 
 // Caches in front of the page (Cloudflare's browser TTL) can keep an old copy of it for hours.
@@ -1727,6 +1775,7 @@ async function reloadIfStale() {
 async function start() {
   if (await reloadIfStale()) return;
   watchForNewPage();
+  registerServiceWorker();
   discover(() => { if (state.modal?.type === "wallets") renderModal(); });
   if (appKitConfigured()) watchAppKit(setWallet).catch((error) => toast(explain(error), true));
   if (csrf()) {

@@ -697,6 +697,12 @@ class StaticPageTests(unittest.TestCase):
         status, headers, _ = self.get("/")
         self.assertEqual((status, headers["Location"]), (302, "/app/"))
 
+    def test_the_app_manifest_is_served_as_one(self):
+        (Path(self.tmp.name) / "website" / "app" / "manifest.webmanifest").write_text('{"name": "SingIt"}')
+        status, headers, body = self.get("/app/manifest.webmanifest")
+        self.assertEqual((status, body), (200, b'{"name": "SingIt"}'))
+        self.assertEqual(headers["Content-Type"], "application/manifest+json")
+
     def test_nothing_outside_app_and_assets_is_reachable(self):
         for path in ("/index.html", "/../secret.txt", "/app/../../secret.txt", "/assets/../index.html",
                      "/app/%2e%2e/%2e%2e/secret.txt", "/nope"):

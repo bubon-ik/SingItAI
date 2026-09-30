@@ -592,3 +592,35 @@ warning to send only USDC on Base, and, for a wallet connected through AppKit,
 "Buy USDC with a card" (Reown's onramp partners; they may ask for ID and charge a
 fee). The money lands in the user's own wallet, never with us.
 
+
+## Installing as an app
+
+The page is a Progressive Web App: it can be added to a phone's Home Screen or
+installed on a desktop, and then opens full screen from its own icon, with no App
+Store. It is the same page and the same account; nothing about limits or signing
+changes.
+
+- `website/app/manifest.webmanifest`: name, colours, `display: standalone`,
+  scope and start URL `/app/`. The web API serves it as
+  `application/manifest+json`.
+- `website/assets/icons/`: `app-icon.svg` (the mark on the app's black, inside the
+  maskable safe zone) and the PNGs rendered from it: 512 and 192 for the
+  manifest, 180 for `apple-touch-icon`.
+- `website/app/sw.js`: a service worker that caches nothing. It makes the page
+  installable and, when a page load fails for lack of network, answers with a
+  short "You are offline" page instead of the browser's error. API calls, scripts
+  and wallet traffic are not intercepted. Caching is left to the page's own
+  versioning (`?v=…`, `reloadIfStale`); a second cache would let an old page
+  outlive a deploy.
+- Installing: Chrome and Edge offer their own prompt, which the page holds back
+  and shows from "Install app" in the account menu. Safari has no prompt, so on
+  iPhone and iPad the same item explains Share → Add to Home Screen. The item is
+  hidden once the page runs installed.
+
+Checked in headless Chrome against the local web server: the manifest parses
+without errors, Chrome reports no installability errors, the service worker
+controls the page after a reload, and with the server stopped a reload shows the
+offline page. The iPhone menu and instructions were checked with an iPhone user
+agent. Not yet checked on a real iPhone: the Home Screen install itself, and
+whether WalletConnect and the email or social sign-in return correctly to the
+installed app rather than to Safari. Push notifications are not part of this step.

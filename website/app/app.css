@@ -236,6 +236,8 @@ pre.result { white-space: pre-wrap; word-break: break-word; font: 13px/1.6 var(-
 .rows dt { font-size: 13px; color: var(--text-faint); white-space: nowrap; }
 .rows dd { font: 13px var(--mono); color: var(--text); text-align: right; overflow-wrap: anywhere; }
 .actions { display: flex; gap: 10px; }
+.install-steps { margin: 4px 0 18px 20px; display: grid; gap: 8px; color: var(--text-soft); }
+.install-steps b { color: var(--text); font-weight: 600; }
 .actions .btn { flex: 1; }
 .wallets { display: grid; gap: 8px; margin-top: 6px; }
 .wallet-option { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; cursor: pointer;
