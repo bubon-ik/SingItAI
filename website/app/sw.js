@@ -1,5 +1,6 @@
-// The SingIt app's service worker: what makes the page installable as an app, and what an
-// installed app shows when there is no network.
+// The SingIt app's service worker: what makes the page installable as an app, what an
+// installed app shows when there is no network, and the notifications the server sends
+// (sign402_gateway/web_push.py).
 //
 // It caches nothing. The page already versions its files (web_api.page_version) and moves an
 // open tab to a new release (reloadIfStale in main.js); a second cache here would only let an
@@ -34,4 +35,33 @@ self.addEventListener("fetch", (event) => {
   if (event.request.mode !== "navigate") return;
   event.respondWith(fetch(event.request).catch(() =>
     new Response(OFFLINE, { headers: { "Content-Type": "text/html; charset=utf-8" } })));
+});
+
+// A notification from the server: {title, body, url}, encrypted to this device on the way.
+self.addEventListener("push", (event) => {
+  let message = {};
+  try {
+    message = event.data ? event.data.json() : {};
+  } catch {
+    message = { body: event.data ? event.data.text() : "" };
+  }
+  event.waitUntil(self.registration.showNotification(message.title || "SingIt", {
+    body: message.body || "",
+    icon: "/assets/icons/icon-192.png",
+    data: { url: message.url || "/app/" },
+  }));
+});
+
+// Tapping it opens the app, or brings an open one forward. Only pages of this app are opened.
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const wanted = new URL(event.notification.data?.url || "/app/", self.location.origin);
+  const url = wanted.origin === self.location.origin && wanted.pathname.startsWith("/app/") ? wanted.href
+    : new URL("/app/", self.location.origin).href;
+  event.waitUntil((async () => {
+    const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    const open = windows.find((client) => new URL(client.url).pathname.startsWith("/app/"));
+    if (open) return open.focus();
+    return self.clients.openWindow(url);
+  })());
 });

@@ -515,6 +515,7 @@ details.card summary { cursor: pointer; color: var(--text-soft); }
 .usage-row a { color: var(--accent); }
 .settings { display: flex; flex-direction: column; }
 .setting { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 0; border-top: 1px solid var(--hairline); }
+.row-buttons { display: flex; gap: 8px; flex-shrink: 0; }
 .setting:first-child { border-top: none; padding-top: 4px; }
 .setting h3 { font-size: 15px; }
 .setting p { margin-top: 2px; font-size: 13px; overflow-wrap: anywhere; }

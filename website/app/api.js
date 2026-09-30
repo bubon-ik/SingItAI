@@ -71,4 +71,8 @@ export const api = {
   chooseModel: (model) => call("POST", "/chat/model", { model }),
   updateChat: (chatId, changes) => call("POST", "/chats/update", { chatId, ...changes }),
   deleteChat: (chatId) => call("POST", "/chats/delete", { chatId }),
+  pushKey: () => call("GET", "/push/key"),
+  pushSubscribe: (subscription) => call("POST", "/push/subscribe", { subscription }),
+  pushUnsubscribe: (endpoint) => call("POST", "/push/unsubscribe", { endpoint }),
+  pushTest: () => call("POST", "/push/test"),
 };

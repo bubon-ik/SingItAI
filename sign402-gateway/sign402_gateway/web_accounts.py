@@ -155,6 +155,14 @@ class WebAccountStore:
                     expires_at INTEGER NOT NULL,
                     used_at INTEGER
                 );
+                CREATE TABLE IF NOT EXISTS push_subscriptions (
+                    endpoint TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    p256dh TEXT NOT NULL,
+                    auth TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS push_by_account ON push_subscriptions(account_id);
                 """
             )
         try:
@@ -253,6 +261,36 @@ class WebAccountStore:
     def telegram_for(self, account_id: str) -> str | None:
         row = self.account(account_id)
         return row["telegram_user_id"] if row else None
+
+    def account_for_user(self, user_id: str) -> str | None:
+        """The web account behind a lane user: itself, or the one a Telegram user linked."""
+        if str(user_id).isdigit():
+            return self.account_for_telegram(user_id)
+        return user_id if self.account(user_id) is not None else None
+
+    # -- push subscriptions (web_push.py) --
+
+    def add_push(self, account_id: str, endpoint: str, p256dh: str, auth: str, now: int, keep: int) -> None:
+        """One row per device; a device that signs in to another account moves to it."""
+        with self._lock, self._db() as db:
+            db.execute("INSERT OR REPLACE INTO push_subscriptions(endpoint, account_id, p256dh, auth, created_at)"
+                       " VALUES (?, ?, ?, ?, ?)", (endpoint, account_id, p256dh, auth, now))
+            db.execute("DELETE FROM push_subscriptions WHERE account_id = ? AND endpoint NOT IN (SELECT endpoint"
+                       " FROM push_subscriptions WHERE account_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?)",
+                       (account_id, account_id, keep))
+
+    def pushes_for(self, account_id: str) -> list[sqlite3.Row]:
+        with self._db() as db:
+            return db.execute("SELECT * FROM push_subscriptions WHERE account_id = ? ORDER BY created_at",
+                              (account_id,)).fetchall()
+
+    def remove_push(self, account_id: str, endpoint: str) -> None:
+        with self._db() as db:
+            db.execute("DELETE FROM push_subscriptions WHERE account_id = ? AND endpoint = ?", (account_id, endpoint))
+
+    def drop_push(self, endpoint: str) -> None:
+        with self._db() as db:
+            db.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
 
     # -- sessions --
 

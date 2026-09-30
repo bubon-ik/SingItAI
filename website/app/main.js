@@ -43,6 +43,7 @@ const state = {
   modelFilter: { query: "", category: "" },
   accountMenu: null,   // null | "main" | "language": the menu over the wallet chip
   usage: null,         // GET /usage, for the Usage page
+  push: null,          // notifications on this device: see loadPush()
   replyLang: readPref("singit.replyLang"),  // "" follows each message; "en" | "ru"
   thinkingSince: 0,
 };
@@ -184,12 +185,13 @@ async function signIn() {
 }
 
 async function signOut() {
+  await disablePush().catch(() => {});  // this device stops getting the account's notices
   try { await api.logout(); } catch { /* the cookie may already be gone */ }
   setCsrf(null);
   await disconnectAppKit().catch(() => {});
   Object.assign(state, { session: null, wallet: null, allowance: null, quote: null, result: null, purchases: null,
                          linkCode: null, revealed: {}, tab: "allowance", modal: null, view: "chat", chats: [],
-                         chatId: null, messages: [], done: {}, chatMenu: null, renaming: null, showArchived: false, models: null, accountMenu: null, usage: null,
+                         chatId: null, messages: [], done: {}, chatMenu: null, renaming: null, showArchived: false, models: null, accountMenu: null, usage: null, push: null,
                          modelFilter: { query: "", category: "" } });
   showChatInUrl();
   render();
@@ -1257,6 +1259,7 @@ function renderSettings() {
       <div class="setting"><div><h3>Reply language</h3><p class="faint">${esc(lang[2] || `Your agent always answers in ${lang[1]}.`)}</p></div>
         <select class="input select-inline" data-setting="reply-lang">${LANGUAGES.map(([c, l]) =>
           `<option value="${c}" ${c === state.replyLang ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      ${notificationSetting()}
       <div class="setting"><div><h3>Allowance</h3><p class="faint">Your limits, approvals and emergency stop.</p></div>
         <button class="btn btn-ghost btn-sm" data-action="go" data-view="allowance">Open</button></div>
       <div class="setting"><div><h3>Telegram</h3><p class="faint">${state.session.telegramLinked ? "Linked to the SingIt bot." : "Use the same agent from the SingIt bot."}</p></div>
@@ -1530,6 +1533,30 @@ const actions = {
     state.modal = { type: "install" };
     render();
   },
+  "push-on": async () => {
+    try {
+      await enablePush();  // asks for permission first thing: iPhone allows that only straight from a tap
+      toast("Notifications are on for this device.");
+    } catch (error) {
+      toast(explain(error), true);
+    }
+    await loadPush();
+    render();
+  },
+  "push-off": async () => {
+    await disablePush().catch((error) => toast(explain(error), true));
+    await loadPush();
+    render();
+    toast("Notifications are off for this device.");
+  },
+  "push-test": async () => {
+    try {
+      await api.pushTest();
+      toast("Sent. It should appear in a few seconds.");
+    } catch (error) {
+      toast(explain(error), true);
+    }
+  },
   "get-help": () => { state.accountMenu = null; render(); window.open(HELP_URL, "_blank", "noopener"); },
   "open-models": async () => {
     await loadModels();  // Venice adds models; the list is cached for hours on the server
@@ -1596,6 +1623,7 @@ const actions = {
     if (state.view === "usage") state.usage = null;
     if (state.view === "purchases") state.purchases = null;
     render();
+    if (state.view === "settings") loadPush().then(() => { if (state.view === "settings") render(); });
   },
   "open-menu": () => { state.menuOpen = true; render(); },
   "close-menu": () => { state.menuOpen = false; render(); },
@@ -1744,6 +1772,80 @@ function registerServiceWorker() {
   navigator.serviceWorker.register("sw.js", { scope: "./" }).catch(() => { /* the page works without it */ });
 }
 
+// -- notifications (sw.js shows them; web_push.py sends them) --
+
+const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+
+function serverKey(text) {
+  const raw = atob(text.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (text.length % 4)) % 4));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+
+async function currentSubscription() {
+  if (!pushSupported()) return null;
+  const registration = await navigator.serviceWorker.getRegistration();
+  return (await registration?.pushManager.getSubscription()) || null;
+}
+
+// What the Settings row shows. On iPhone, notifications exist only in the installed app.
+async function loadPush() {
+  const push = { server: false, key: "", supported: pushSupported(), needsInstall: isIos() && !isStandalone(),
+                 permission: "Notification" in window ? Notification.permission : "default", subscribed: false };
+  try {
+    const reply = await api.pushKey();
+    push.server = Boolean(reply.enabled);
+    push.key = reply.publicKey || "";
+  } catch { /* shown as unavailable */ }
+  push.subscribed = push.permission === "granted" && Boolean(await currentSubscription().catch(() => null));
+  state.push = push;
+  return push;
+}
+
+async function enablePush() {
+  const permission = await Notification.requestPermission();
+  if (permission !== "granted") {
+    throw new Error(permission === "denied"
+      ? "Notifications are blocked for SingIt. Allow them in your device's settings, then try again."
+      : "Notifications stay off.");
+  }
+  const registration = await navigator.serviceWorker.ready;
+  const subscription = (await registration.pushManager.getSubscription())
+    || await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: serverKey(state.push.key) });
+  await api.pushSubscribe(subscription.toJSON());
+}
+
+async function disablePush() {
+  const subscription = await currentSubscription();
+  if (!subscription) return;
+  await api.pushUnsubscribe(subscription.endpoint).catch(() => {});
+  await subscription.unsubscribe();
+}
+
+// Browsers replace a subscription from time to time, and a device may have signed in to
+// another account: each start tells the server which subscription this device has now.
+async function syncPush() {
+  if (!pushSupported() || Notification.permission !== "granted") return;
+  const subscription = await currentSubscription();
+  if (subscription) await api.pushSubscribe(subscription.toJSON());
+}
+
+function notificationSetting() {
+  const push = state.push;
+  const row = (text, buttons = "") =>
+    `<div class="setting"><div><h3>Notifications</h3><p class="faint">${text}</p></div>${buttons ? `<div class="row-buttons">${buttons}</div>` : ""}</div>`;
+  const button = (action, label) => `<button class="btn btn-ghost btn-sm" data-action="${action}">${label}</button>`;
+  if (!push) return row("Checking this device…");
+  if (!push.server) return "";  // not turned on for this server
+  if (push.needsInstall) return row("On iPhone and iPad, notifications work in the installed app.", button("install-app", "Install"));
+  if (!push.supported) return row("This browser cannot show notifications from SingIt.");
+  if (push.permission === "denied") return row("Blocked for SingIt. Allow notifications in your device's settings.");
+  if (push.subscribed) {
+    return row("On for this device: alerts about your limiter.",
+      button("push-test", "Test") + button("push-off", "Turn off"));
+  }
+  return row("Get alerts on this device when your limiter is paused or money moves unexpectedly.", button("push-on", "Turn on"));
+}
+
 // -- start --
 
 // Caches in front of the page (Cloudflare's browser TTL) can keep an old copy of it for hours.
@@ -1782,6 +1884,7 @@ async function start() {
     try {
       state.session = await api.session();
       await Promise.all([loadAllowance(), loadChats(), loadModels()]);
+      syncPush().catch(() => { /* notifications are optional */ });
     } catch {
       state.session = null;
     }

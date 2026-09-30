@@ -20,6 +20,8 @@ Environment:
     SIGN402_WEB_INTERNAL_TOKEN           shared with the gateway for the shop (32+ characters)
     SIGN402_WEB_GATEWAY_URL              the gateway on loopback (http://127.0.0.1:8099)
     SIGN402_WEB_STATIC_DIR               the site's website/ folder: serves /app/ and /assets/ too
+    SIGN402_WEB_PUSH_VAPID_KEY           turns on notifications to the installed page (web_push.py)
+    SIGN402_WEB_PUSH_SUBJECT             how push services reach us (default: SIGN402_WEB_URI)
 plus everything SIGN402_ALLOWANCE_* the lane itself needs.
 """
 
@@ -169,6 +171,8 @@ class WebApi:
         self.agent = None  # web_agent.WebAgent, when the chat is on
         self.solana = None  # solana_allowance.SolanaAllowanceService, when the Solana lane is on
         self.link_by_account = RateLimit(10, 3600)
+        self.push = None  # web_push.WebPush, when SIGN402_WEB_PUSH_VAPID_KEY is set
+        self.push_by_account = RateLimit(20, 3600)
 
     def handle(self, method: str, path: str, *, token: str, csrf: str | None, body: dict[str, Any],
                client: str) -> tuple[int, dict[str, Any], dict[str, str]]:
@@ -212,6 +216,8 @@ class WebApi:
         if method == "POST" and path == "/link/telegram/remove":
             self.auth.store.unlink_telegram(account)
             return 200, {"telegramLinked": False}, {}
+        if path.startswith("/push/"):
+            return self._push(method, path, account, body)
         if path == "/chats" or path.startswith("/chats/"):
             return self._chats(method, path, account, body)
         if method == "GET" and path == "/usage":
@@ -252,6 +258,36 @@ class WebApi:
             return 200, self._public(self.allowance.pause(account)), {}
         if method == "GET" and path.startswith("/allowance/operations/"):
             return 200, self.allowance.operation(account, path.rsplit("/", 1)[1]), {}
+        raise WebError(404, "not_found", "No such endpoint.")
+
+    # -- notifications (web_push.py) --
+
+    def _push(self, method: str, path: str, account: str, body: Mapping[str, Any]) -> tuple[int, dict[str, Any], dict]:
+        from .web_push import PushError
+
+        if method == "GET" and path == "/push/key":
+            if self.push is None:
+                return 200, {"enabled": False}, {}
+            return 200, {"enabled": True, "publicKey": self.push.public_key,
+                         "devices": len(self.auth.store.pushes_for(account))}, {}
+        if self.push is None:
+            raise WebError(503, "push_off", "Notifications are not enabled on this server.")
+        if method == "POST" and path == "/push/subscribe":
+            self.push_by_account.hit(account)
+            try:
+                devices = self.push.subscribe(account, body.get("subscription"))
+            except PushError as exc:
+                raise WebError(400, "push_unsupported", str(exc)) from None
+            return 200, {"subscribed": True, "devices": devices}, {}
+        if method == "POST" and path == "/push/unsubscribe":
+            self.auth.store.remove_push(account, str(body.get("endpoint") or ""))
+            return 200, {"subscribed": False}, {}
+        if method == "POST" and path == "/push/test":
+            self.push_by_account.hit(account)
+            sent = self.push.send(account, "SingIt", "Notifications are on. You will hear from your agent here.")
+            if not sent:
+                raise WebError(502, "push_failed", "No device took the notification. Turn notifications off and on again.")
+            return 200, {"sent": sent}, {}
         raise WebError(404, "not_found", "No such endpoint.")
 
     # -- allowance on Solana (solana_allowance.py) --
@@ -581,6 +617,12 @@ def build_web_api_from_env(allowance: AllowanceService, env: Mapping[str, str] |
         shop=shop,
     )
     api.solana = solana
+    from .web_push import from_env as push_from_env
+
+    try:
+        api.push = push_from_env(store, values)
+    except ValueError as exc:  # a bad key leaves notifications off; the page works without them
+        logger.error("web api: notifications disabled: %s", exc)
     if str(values.get("SIGN402_WEB_CHAT_ENABLED", "1")) == "1":
         from .web_agent import ChatStore, build_agent_from_env
 

@@ -214,6 +214,45 @@ class AllowanceWatcher:
             self.notify(user, "⚠️ " + text)
 
 
+def build_notifier(values: Mapping[str, str]) -> Callable[[str, str], None] | None:
+    """Where the watcher's notices go: the Telegram chat, and devices with the web page's notifications on."""
+    token = str(values.get(BOT_TOKEN_ENV, "")).strip()
+    telegram: Callable[[str, str], None] | None = TelegramNotifier(token) if token else None
+    notifiers: list[Callable[[str, str], None]] = [telegram] if telegram else []
+    if values.get("SIGN402_WEB_ENABLED") == "1":
+        from pathlib import Path
+
+        from .web_accounts import DEFAULT_WEB_DB, WEB_DB_ENV, WebAccountStore
+        from .web_push import from_env as push_from_env
+
+        accounts = WebAccountStore(Path(str(values.get(WEB_DB_ENV, "") or DEFAULT_WEB_DB)).expanduser())
+        notifiers = []
+        if telegram:
+            # A web account's notices go to the Telegram chat linked to it, if any.
+            notifiers.append(lambda user, text: telegram(accounts.telegram_for(user) or user, text))
+        try:
+            push = push_from_env(accounts, values)
+        except ValueError as exc:
+            logger.error("allowance watcher: notifications disabled: %s", exc)
+            push = None
+        if push is not None:
+            # And to every device where the web page is installed with notifications on.
+            def to_devices(user: str, text: str) -> None:
+                account = accounts.account_for_user(user)
+                if account:
+                    push.send(account, "SingIt", text, urgent=text.startswith("⚠️"))
+            notifiers.append(to_devices)
+
+    def notify_all(user: str, text: str) -> None:
+        for send in notifiers:
+            try:
+                send(user, text)
+            except Exception as exc:  # a failed notice must not stop the watcher, or the next channel
+                logger.warning("allowance watcher: notice failed (%s)", type(exc).__name__)
+
+    return notify_all if notifiers else None
+
+
 def main() -> int:
     from .agent_allowance import build_allowance_service_from_env
     from .keyring import load_master_key
@@ -224,17 +263,7 @@ def main() -> int:
     if service is None:
         logger.error("allowance watcher: the lane is off (SIGN402_ALLOWANCE_ENABLED != 1)")
         return 1
-    token = str(values.get(BOT_TOKEN_ENV, "")).strip()
-    notify: Callable[[str, str], None] | None = TelegramNotifier(token) if token else None
-    if notify is not None and values.get("SIGN402_WEB_ENABLED") == "1":
-        from pathlib import Path
-
-        from .web_accounts import DEFAULT_WEB_DB, WEB_DB_ENV, WebAccountStore
-
-        accounts = WebAccountStore(Path(str(values.get(WEB_DB_ENV, "") or DEFAULT_WEB_DB)).expanduser())
-        telegram = notify
-        # A web account's notices go to the Telegram chat linked to it, if any.
-        notify = lambda user, text: telegram(accounts.telegram_for(user) or user, text)  # noqa: E731
+    notify = build_notifier(values)
     watcher = AllowanceWatcher(
         service,
         notify=notify,

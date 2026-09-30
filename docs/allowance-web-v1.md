@@ -621,6 +621,69 @@ Checked in headless Chrome against the local web server: the manifest parses
 without errors, Chrome reports no installability errors, the service worker
 controls the page after a reload, and with the server stopped a reload shows the
 offline page. The iPhone menu and instructions were checked with an iPhone user
-agent. Not yet checked on a real iPhone: the Home Screen install itself, and
-whether WalletConnect and the email or social sign-in return correctly to the
-installed app rather than to Safari. Push notifications are not part of this step.
+agent, and on 30 September the owner installed the deployed page on an iPhone
+and signed in from the installed app.
+
+## Notifications
+
+The installed page can show the allowance watcher's notices as system
+notifications: an alert when the limiter is paused, or when money left the agent
+without a matching purchase. They go to every device where the owner turned
+notifications on, beside the linked Telegram chat, not instead of it.
+
+- **Turning on.** Settings → Notifications → Turn on. The page asks for
+  permission, subscribes through its service worker (`pushManager.subscribe`, with
+  our VAPID public key from `GET /push/key`) and sends the subscription to
+  `POST /push/subscribe`. "Test" sends one notification (`POST /push/test`); "Turn
+  off" and signing out remove this device (`POST /push/unsubscribe`). Each start
+  sends the current subscription again, so a subscription the browser replaced, or
+  a device now signed in to another account, stays correct.
+- **iPhone and iPad** deliver notifications only to the installed app (iOS 16.4 or
+  later): in Safari the row says so and offers Install.
+- **Sending** (`sign402_gateway/web_push.py`): each message is encrypted to the
+  device's keys (RFC 8291, aes128gcm) and signed with our VAPID key (RFC 8292);
+  Apple, Google, Mozilla and Microsoft carry it without being able to read it. No
+  new dependency: `cryptography` does both. A device that the push service reports
+  as gone (404 or 410) is forgotten. At most ten devices per account.
+- **Only known push services.** The server POSTs to the endpoint URL the browser
+  chose, so it accepts only the push services' own hosts (`fcm.googleapis.com`,
+  `*.push.apple.com`, `updates.push.services.mozilla.com`,
+  `*.notify.windows.com`), over https on port 443. Any other URL is refused before
+  it is stored: otherwise a signed-in user could make the server call any host.
+  Endpoints are capabilities and are never logged, only their host.
+- **Storage.** `push_subscriptions` in the web database (`SIGN402_WEB_DB`): the
+  endpoint, the device's two public keys, the account, the time.
+- **Who is notified.** The watcher's user is a web account (`wallet:0x…`) or a
+  Telegram id; a Telegram id reaches the devices of the web account it is linked
+  to. An alarm (a paused limiter) is sent with `Urgency: high`.
+
+| Method and path | Body | Returns |
+| --- | --- | --- |
+| `GET /push/key` | — | `{enabled: false}`, or `{enabled: true, publicKey, devices}` |
+| `POST /push/subscribe` | `{subscription}` (the browser's `toJSON()`) | `{subscribed: true, devices}`; `push_unsupported` for another host or unreadable keys |
+| `POST /push/unsubscribe` | `{endpoint}` | `{subscribed: false}`; only this account's own device |
+| `POST /push/test` | — | `{sent}`; `push_failed` when no device took it |
+
+Turning it on for a server: generate a key once and add it to
+`/etc/sign402-gateway.env`, which both the web API and the watcher read, then
+restart `sign402-web-api` and `sign402-allowance-watcher`. The key is a secret; a
+new key invalidates every existing subscription, so devices must turn
+notifications on again.
+
+```bash
+sign402-gateway/.venv/bin/python -m sign402_gateway.web_push generate
+```
+
+`SIGN402_WEB_PUSH_SUBJECT` (a `mailto:` or `https://` address push services may
+contact) defaults to `SIGN402_WEB_URI`. Without the key, `GET /push/key` answers
+`enabled: false`, the Settings row is hidden, and the watcher uses Telegram alone,
+as before.
+
+Checked: the RFC 8291 test vector byte for byte; unit tests for decryption by the
+subscribing side, the VAPID signature, the host allowlist, device limits, the
+routes and the watcher's fan-out. End to end in headless Chrome against a local
+server: Turn on subscribed through Google's real push service, Test was encrypted
+and accepted by FCM, and the service worker showed the notification; Turn off
+removed it. Not yet checked on an iPhone or with a real watcher alert. Purchases
+and phone calls do not notify yet: a call's result is read by the open page, and a
+server-side poll would be needed to notify a closed app.
