@@ -274,7 +274,11 @@ the conversation. It works the way the Telegram bot does
   `live_data` intent, or a link or flight number in the message, picks one read-only source; the concierge model
   fills its fields as JSON, each checked by pattern (a city, a ticker, `LH400`, IATA codes, a future date), and a
   missing one is asked for. The data is bought from the limits, then handed to Venice with the question as untrusted
-  data; under the answer, "FlightAware · $0.010" and a link. Sources, picked from Coinbase's Agentic Market and
+  data; under the answer, "FlightAware · $0.010" and a link. When Venice cannot answer after the data is paid for —
+  most often because its credit needs a $5 top-up that the limits or the wallet cannot cover — the concierge model
+  answers from the data instead, and the reply says so (with Add funds when money is what is missing). Only that
+  question and its data go to it, never the rest of the private chat; without bought data, Venice's refusal stays
+  the reply. Sources, picked from Coinbase's Agentic Market and
   PayAI's Bazaar for being used and read-only (September 29, 2026):
 
   | Source | Seller | Price | |

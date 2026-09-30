@@ -203,6 +203,50 @@ class AgentDataTests(unittest.TestCase):
         self.assertEqual(reply["cards"][0]["searchNote"],
                          "The data seller refused the payment. Nothing was paid. (payer_not_allowed)")
 
+    def test_paid_data_still_gets_an_answer_when_venice_needs_a_top_up_the_limits_cannot_fund(self):
+        self.intent = "live_data"
+        shop, asked = self.agent.shop, []
+
+        def no_credit(action, account, body):
+            if action == "venice-chat":
+                self.calls.append((action, dict(body)))
+                return 400, {"ok": False, "error": "chat_refused", "text": (
+                    "Your private chat runs on Venice credit, bought from your limits $5 at a time, and that top-up did "
+                    "not go through: Your limiter cannot fund 5 USDC now: it allows 2.006965 USDC.")}
+            return shop(action, account, body)
+
+        def model(messages, json_mode=False, max_tokens=700):
+            if json_mode:  # plan_data: which source answers the question
+                return '{"tool": "flight_status", "flight": "LH400"}'
+            asked.append(messages)
+            return "LH400 is delayed by 20 minutes."
+        self.agent.shop, self.agent.model = no_credit, model
+        account = wg.SOLANA_ACCOUNT + "BTXX"
+        chat = self.agent.message(account, None, "My secret plan is to fly to Prague.")["chatId"]  # a private earlier turn
+        asked.clear()
+        reply = self.agent.message(account, chat, "Where is flight LH400 now?")["messages"][1]
+        self.assertEqual([a for a, _ in self.calls][-2:], ["data-buy", "venice-chat"])
+        self.assertTrue(reply["text"].startswith("LH400 is delayed by 20 minutes."))
+        self.assertIn("needs a $5 credit top-up", reply["text"])
+        self.assertEqual([c["type"] for c in reply["cards"]], ["add_funds", "data"])
+        sent = asked[-1]
+        self.assertEqual(len(sent), 2)  # the question and its data only, never the rest of the private chat
+        self.assertIn('{"flights":[{"status":"Delayed"}]}', sent[1]["content"])
+        self.assertTrue(sent[1]["content"].endswith("Where is flight LH400 now?"))
+        self.assertNotIn("secret plan", json.dumps(sent))
+
+    def test_without_data_a_venice_refusal_is_the_reply(self):
+        self.intent = "chat"
+        shop = self.agent.shop
+
+        def no_credit(action, account, body):
+            if action == "venice-chat":
+                return 400, {"ok": False, "error": "chat_refused", "text": "Your limiter cannot fund 5 USDC now."}
+            return shop(action, account, body)
+        self.agent.shop, self.agent.model = no_credit, Mock(side_effect=AssertionError("no fallback without data"))
+        reply = self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "Tell me a joke")["messages"][1]
+        self.assertEqual(reply["text"], "Your limiter cannot fund 5 USDC now.")
+
     def test_crypto_news_works_from_solana_now_and_base_only_tools_say_so(self):
         self.intent = "buy_tool"
         self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "buy crypto news")
