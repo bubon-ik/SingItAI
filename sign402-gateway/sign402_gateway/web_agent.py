@@ -288,6 +288,11 @@ HUNGRY = re.compile(r"(?i)\b(hungry|starving|starved|something to eat|want to ea
                     r"|m[aá]m hlad|hladov[yýáa]|ha(?:be|b) (?:gro(?:ß|ss)en |richtig )?hunger|hungrig")
 
 
+# A supermarket or groceries: food cards too, with the shops first (Jev ranks them by these words).
+GROCERIES = re.compile(r"(?i)\b(supermarkets?|groceries|grocery)\b|супермаркет|продукт(?:ы|ов|ами)\b|potravin|supermarkt|"
+                       r"lebensmittel")
+
+
 def about_places(text: str) -> bool:
     return bool(PLACE_WORDS.search(text) and SOMEWHERE.search(text) and not NOT_PLACES.search(text))
 
@@ -302,6 +307,8 @@ def explicit_action(text: str) -> str:
     if about_places(text):
         return "live_data"
     if HUNGRY.search(text):
+        return "food"
+    if GROCERIES.search(text) and not NOT_PLACES.search(text):  # "Kaufland gift card" is a gift card: Jev decides
         return "food"
     return ""
 
@@ -1131,7 +1138,7 @@ class WebAgent:
             where = " ".join(x for x in (query, country) if x)
             return say(lang, f"Bitrefill has nothing for \"{where}\". Try another name or country.",
                        f"У Bitrefill ничего нет по запросу «{where}». Попробуйте другое название или страну."), []
-        items = [self._offer(account, p) for p in found[:4]]
+        items = [self._offer(account, p) for p in found[:6 if intent in ALTERNATIVES else 4]]  # delivery and shops
         amount = wanted.get("amount")
         # Bought at once only when the message said so and the product is certain: Jev chose it, or it is the only one.
         if amount and wanted.get("buy") and sure and not solana and not items[0].get("needsRecipient"):
@@ -1179,10 +1186,15 @@ class WebAgent:
                 "query": words, "country": country, "kind": CATALOG_KINDS.get(intent, "gift-cards")})
             candidates = [{"slug": p.get("slug"), "name": p.get("name")} for p in found.get("products") or []]
         candidates = [c for c in candidates if c.get("slug")]
-        return self._best(text, candidates)
+        return self._best(text, candidates, browse=intent in ALTERNATIVES)
 
-    def _best(self, text: str, candidates: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
-        """Best first, and whether the first is certain enough to buy without showing the others."""
+    def _best(self, text: str, candidates: list[dict[str, Any]], browse: bool = False) -> tuple[list[dict[str, Any]], bool]:
+        """Best first, and whether the first is certain enough to buy without showing the others.
+
+        Jev answers "which one fits best", so the others get almost nothing. For a brand that is right: drop
+        what plainly does not fit. For a kind of shop (food, shopping, travel) it is not: "I'm hungry" puts Wolt
+        first, and the supermarkets must still be there after it.
+        """
         if self.rank is None or len(candidates) < 2:
             return candidates, len(candidates) == 1
         shortlist = candidates[:60]
@@ -1194,6 +1206,8 @@ class WebAgent:
         except AgentUnavailable:
             return candidates, False
         order = sorted(shortlist, key=lambda c: -fit.get(c["slug"], 0.0))
+        if browse:
+            return order, False
         good = [c for c in order if fit.get(c["slug"], 0.0) >= 0.03]
         return good or order, fit.get(order[0]["slug"], 0.0) >= 0.5
 

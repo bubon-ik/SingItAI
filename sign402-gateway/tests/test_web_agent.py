@@ -177,6 +177,20 @@ class AgentTests(unittest.TestCase):
         self.assertIn("Isimo Colombia", self.ranked["isimo-colombia"])
         self.assertEqual([i["slug"] for i in message["cards"][0]["items"]], ["steam-germany"])
 
+    def test_food_keeps_the_supermarkets_after_delivery(self):
+        # Jev answers "which fits best": nearly everything goes to Wolt. The shops must still be shown.
+        self.shop.catalog = {"ok": True, "products": [
+            {"slug": s, "name": n, "type": "gift_card", "country": "CZ", "categories": ["food"]}
+            for s, n in (("kaufland-cz", "Kaufland"), ("wolt-cz", "Wolt"), ("albert-cz", "Albert"), ("foodora-cz", "Foodora"))]}
+        self.fit = {"wolt-cz": 0.95, "foodora-cz": 0.03, "kaufland-cz": 0.01, "albert-cz": 0.01}
+        self.model_replies = [json.dumps({"query": "", "country": "CZ", "place": "Czechia", "city": "Prague"})]
+        message = self.send("I'm hungry in Prague", "food")
+        self.assertEqual([i["slug"] for i in message["cards"][0]["items"]], ["wolt-cz", "foodora-cz", "kaufland-cz", "albert-cz"])
+        self.assertEqual(wg.explicit_action("I want to go to a supermarket in Prague"), "food")
+        self.assertEqual(wg.explicit_action("хочу купить продукты в Праге"), "food")
+        self.assertEqual(wg.explicit_action("supermarket gift card Kaufland"), "")  # a gift card: Jev decides
+        self.assertEqual(wg.explicit_action("продуктивность работы"), "")
+
     def test_hunger_is_food_whatever_the_reader_says(self):
         # Jev read "I'm hungry in Prague" as conversation in production; it must not reach the paid chat.
         self.model_replies = [json.dumps({"query": "", "country": "CZ", "place": "Czechia", "city": "Prague"})]
