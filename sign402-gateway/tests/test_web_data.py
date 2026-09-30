@@ -341,9 +341,11 @@ class AgentDataTests(unittest.TestCase):
             return shop(action, account, body)
         self.agent.shop = failing
         self.agent.model = lambda messages, json_mode=False, max_tokens=700: (
-            '{"tool": "places", "query": "coffee in Los Angeles", "kind": "restaurants"}')
+            '{"tool": "places", "query": "coffee in Los Angeles", "kind": "restaurants"}' if json_mode else "Try Blue Bottle.")
         reply = self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "coffee in Los Angeles")["messages"][1]
-        self.assertEqual(reply["text"], "Tripadvisor is switched off for now. Nothing was paid.")
+        # The seller's reason first, then an answer anyway; never Venice's refusal on top.
+        self.assertTrue(reply["text"].startswith("Tripadvisor is switched off for now. Nothing was paid.\n\nTry Blue Bottle."))
+        self.assertNotIn("cannot fund", reply["text"])
 
     def test_paid_data_and_no_model_at_all_still_explains(self):
         self.intent = "live_data"
@@ -371,7 +373,24 @@ class AgentDataTests(unittest.TestCase):
             if action == "venice-chat":
                 return 400, {"ok": False, "error": "chat_refused", "text": "Your limiter cannot fund 5 USDC now."}
             return shop(action, account, body)
-        self.agent.shop, self.agent.model = no_credit, Mock(side_effect=AssertionError("no fallback without data"))
+        asked = []
+
+        def model(messages, json_mode=False, max_tokens=700):
+            asked.append(messages)
+            return "Why did the chicken cross the road?"
+        self.agent.shop, self.agent.model = no_credit, model
+        chat = self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "My private secret is 42")["chatId"]
+        asked.clear()
+        reply = self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", chat, "Tell me a joke")["messages"][1]
+        self.assertTrue(reply["text"].startswith("Why did the chicken cross the road?"))
+        self.assertIn("not the private chat", reply["text"])
+        self.assertEqual([c["type"] for c in reply["cards"]], ["add_funds"])
+        self.assertEqual(len(asked[-1]), 2)  # this question only, never the private chat before it
+        self.assertNotIn("secret is 42", json.dumps(asked[-1]))
+
+        def down(*args, **kwargs):
+            raise wg.AgentUnavailable("model")
+        self.agent.model = down  # no one to answer: Venice's reason stays the reply
         reply = self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "Tell me a joke")["messages"][1]
         self.assertEqual(reply["text"], "Your limiter cannot fund 5 USDC now.")
 
