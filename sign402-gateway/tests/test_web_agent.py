@@ -431,6 +431,13 @@ class JevTests(unittest.TestCase):
         # ...except a paid tool, bought at once with no card to confirm: that needs Jev to be sure.
         jev = wg.Jev("key", opener=self.opener({"type": "choice", "choice": "buy_tool", "confidence": 0.4}))
         self.assertEqual(jev("hmm")["intent"], "clarify")
+        # "clarify" is for several tasks: for one sentence Jev's next reading is taken ("Uber credit in the US").
+        jev = wg.Jev("key", opener=self.opener({"type": "choice", "choice": "clarify", "confidence": 0.42,
+                                                "probabilities": {"clarify": 0.42, "gift_card": 0.35, "chat": 0.2}}))
+        self.assertEqual(jev("Uber credit in the US")["intent"], "gift_card")
+        jev = wg.Jev("key", opener=self.opener({"type": "choice", "choice": "clarify", "confidence": 0.5,
+                                                "probabilities": {"clarify": 0.5, "buy_tool": 0.4}}))
+        self.assertEqual(jev("news and a card")["intent"], "clarify")  # never a paid tool by the back door
         self.assertIn("hungry", wg.INTENTS["food"])
         self.assertIn("recipe", wg.INTENTS["food"])
 

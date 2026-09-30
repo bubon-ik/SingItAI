@@ -64,7 +64,8 @@ INTENTS = {
                  "currencies, a crypto token's price, stock markets or a stock, Polymarket odds, a flight's status or "
                  "delay by its flight number, flight prices between two cities on a date, restaurants, hotels or "
                  "things to do in a place and their reviews, or reading a web page from a link in the message.",
-    "gift_card": "Explicitly find or buy a gift card or voucher, for a brand, a store or a kind of shop.",
+    "gift_card": "Find or buy a gift card, voucher, store credit or app credit (Uber, Amazon, Steam, Netflix...) for "
+                 "a brand, a store or a kind of shop, or buy something without saying what, at any price.",
     "esim": "Find internet access or data in a destination country, travel connectivity, mobile internet or an eSIM. "
             "'I need internet in Germany' belongs here even without the word eSIM.",
     "topup": "Top up an existing mobile phone or SIM balance.",
@@ -490,6 +491,13 @@ class Jev:
         # away right readings — "I'm hungry in Prague" was food at 0.49 and went to the chat. Except buy_tool,
         # which buys at once with no card to confirm: that one still needs Jev to be sure.
         intent = self._pick(answers, "intent", INTENTS, 0.0) or "clarify"
+        if intent == "clarify":  # meant for several tasks at once; one sentence usually has a next-best reading
+            ranked = (answers.get("intent") or {}).get("probabilities") or {}
+            ranked = {k: float(v) for k, v in ranked.items()
+                      if k in INTENTS and k != "clarify" and isinstance(v, (int, float)) and not isinstance(v, bool)}
+            best = max(ranked, key=ranked.get, default="")
+            if best and ranked[best] >= 0.15 and best != "buy_tool":
+                intent = best
         if intent == "buy_tool" and not self._pick(answers, "intent", INTENTS, 0.7):
             intent = "clarify"
         return {"intent": intent,
