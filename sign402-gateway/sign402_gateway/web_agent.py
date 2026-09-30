@@ -282,19 +282,27 @@ SOMEWHERE = re.compile(r"(?i)\b(in|near|nearby|around|im|bei|nahe)\b|(?<!\w)(в|
                        r"places? to (?:eat|stay|go)|куда сходить|kam na (?:jídlo|oběd|večeři)|essen gehen|" + WHERE_TO)
 
 
+# Hunger, said plainly: food gift cards and places to eat, never the paid chat by a guess.
+HUNGRY = re.compile(r"(?i)\b(hungry|starving|starved|something to eat|want to eat|need food)\b"
+                    r"|голоден|голодна|голодный|проголодал|хочу есть|хочется есть|есть хочу"
+                    r"|m[aá]m hlad|hladov[yýáa]|ha(?:be|b) (?:gro(?:ß|ss)en |richtig )?hunger|hungrig")
+
+
 def about_places(text: str) -> bool:
     return bool(PLACE_WORDS.search(text) and SOMEWHERE.search(text) and not NOT_PLACES.search(text))
 
 
 def explicit_action(text: str) -> str:
-    """"call" with a phone number in it, "email me", or places to eat or stay somewhere: plain requests that must
-    not wander into the chat."""
+    """"call" with a phone number in it, "email me", places to eat or stay somewhere, or hunger: plain requests
+    that must not wander into the chat."""
     if CALL_WORDS.search(text) and re.search(r"\+?\d[\d\s().-]{6,20}\d", text):
         return "call"
     if EMAIL_WORDS.search(text):
         return "email_me"
     if about_places(text):
         return "live_data"
+    if HUNGRY.search(text):
+        return "food"
     return ""
 
 

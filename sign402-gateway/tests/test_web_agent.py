@@ -177,6 +177,19 @@ class AgentTests(unittest.TestCase):
         self.assertIn("Isimo Colombia", self.ranked["isimo-colombia"])
         self.assertEqual([i["slug"] for i in message["cards"][0]["items"]], ["steam-germany"])
 
+    def test_hunger_is_food_whatever_the_reader_says(self):
+        # Jev read "I'm hungry in Prague" as conversation in production; it must not reach the paid chat.
+        self.model_replies = [json.dumps({"query": "", "country": "CZ", "place": "Czechia", "city": "Prague"})]
+        message = self.send("I'm hungry in Prague", "chat")
+        self.assertEqual(self.shop.calls[0][2], {"query": "", "country": "CZ", "category": "food", "productType": "gift_card"})
+        self.assertEqual(message["cards"][0]["places"], {"country": "CZ", "place": "Prague"})
+        self.assertNotIn("venice-chat", [c[0] for c in self.shop.calls])
+        for text in ("я голоден, я в Праге", "хочу есть", "Mám hlad v Praze", "jsem hladový", "Ich habe Hunger in Berlin",
+                     "Ich bin hungrig", "I am starving"):
+            self.assertEqual(wg.explicit_action(text), "food", text)
+        for text in ("The Hunger Games", "hunger strike history", "what does hlad mean", "Hungary visa rules"):
+            self.assertEqual(wg.explicit_action(text), "", text)
+
     def test_food_is_offered_as_gift_cards_for_food_in_that_country(self):
         self.hints = {"country": "CZ"}
         message = self.send("я хочу заказать еду в Чехии", "food")
