@@ -27,6 +27,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from . import bland_calls
 from .agent_allowance import AllowanceError, AllowanceUnavailable
 from .web_data import BASE, SOLANA, DataTool, network_of, pay_once
 
@@ -125,9 +126,16 @@ def call_task(task: str, language: str) -> str:
 
 def start_call(server: Any, gw: Any, account: str, phone: Any, task: Any, language: Any = "") -> dict[str, Any]:
     """The call the user pressed Call on: that number, that task, disclosed as an AI, not recorded."""
+    phone = re.sub(r"[\s().-]", "", str(phone or ""))
+    pilot = None if CALL_PHONE.fullmatch(phone) else bland_calls.from_env()
+    if pilot is not None and pilot.accepts(phone):  # Europe, through our Bland: the pilot's numbers, no charge
+        task = str(task or "").strip()
+        if not task:
+            raise AllowanceError("What should the call be about?")
+        language = re.sub(r"[^A-Za-z -]", "", str(language or ""))[:30]
+        return pilot.start(account, phone, task, language, call_task(task, language))
     if network_of(account) != BASE:
         raise AllowanceError("Phone calls work from a Base wallet for now.")
-    phone = re.sub(r"[\s().-]", "", str(phone or ""))
     if not PHONE.fullmatch(phone):
         raise AllowanceError("That is not a full phone number with its country code, like +1 202 555 0123.")
     if not CALL_PHONE.fullmatch(phone):
@@ -168,6 +176,11 @@ def call_status(server: Any, account: str, call_id: Any, http: Any = None) -> di
     """How the call went, signed in as the agent that paid for it (only it may read it)."""
     from .allowance_bitrefill import siwx_header  # noqa: PLC0415
     call_id = str(call_id or "")
+    if call_id.startswith(bland_calls.PILOT_PREFIX):
+        pilot = bland_calls.from_env()
+        if pilot is None:
+            raise AllowanceError("The calling pilot is off on this server.")
+        return pilot.status(account, call_id)
     if not re.fullmatch(r"[\w-]{6,80}", call_id) or network_of(account) != BASE:
         raise AllowanceError("Unknown call.")
     http = http or _get

@@ -1081,7 +1081,7 @@ function renderCard(card, key) {
         unknown: "Call status unknown — check before retrying" }[state.done[key]] || "Call request submitted";
       return `<div class="card"><h3>${label}</h3></div>`;
     }
-    return `<div class="card accent"><div class="spread"><h3>Call ${esc(card.place || card.phone)}</h3><span class="status">${esc(card.price)} USDC</span></div>
+    return `<div class="card accent"><div class="spread"><h3>Call ${esc(card.place || card.phone)}</h3><span class="status">${card.pilot ? "pilot · no charge" : `${esc(card.price)} USDC`}</span></div>
       <p class="faint">${esc(card.phone)} · in ${esc(card.language || "English")}</p>
       <pre class="draft">${esc(card.task)}</pre>
       <p class="hint">An AI assistant calls, says it is an AI calling for you, and does only this. Not recorded; at most 3

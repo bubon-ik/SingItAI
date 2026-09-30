@@ -37,6 +37,7 @@ from typing import Any, Callable, Iterator, Mapping
 
 from .agent_allowance import AllowanceError
 from .web_data import FROM_PAID_TOOLS
+from .bland_calls import pilot_accepts
 from .web_actions import CALL_PHONE, CALL_REGION_MESSAGE
 
 logger = logging.getLogger(__name__)
@@ -982,24 +983,25 @@ class WebAgent:
 
     def _on_call(self, account, chat_id, lang, text):
         """A call to a business: a draft with the exact number and task, made when they press Call."""
-        if account.startswith(SOLANA_ACCOUNT):
-            return say(lang, "Phone calls work from a Base wallet for now.",
-                       "Звонки пока работают только с кошелька на Base."), []
         blocked = self._ready(account, lang)
         if blocked:
             return blocked
         draft = plan_call(text, self._recent(chat_id, 7)[:-1], self.model)
         if draft.get("missing"):
             return say(lang, *CALL_ASK[draft["missing"]]), []
-        if not CALL_PHONE.fullmatch(draft["phone"]):
+        pilot = pilot_accepts(draft["phone"])  # a number on our own calling pilot (Europe): no charge, any wallet
+        if account.startswith(SOLANA_ACCOUNT) and not pilot:
+            return say(lang, "Phone calls work from a Base wallet for now.",
+                       "Звонки пока работают только с кошелька на Base."), []
+        if not pilot and not CALL_PHONE.fullmatch(draft["phone"]):
             return say(lang, CALL_REGION_MESSAGE,
                        "StablePhone сейчас принимает только номера +1 и 10 цифр после кода. "
                        "Звонки на +420 и другие коды стран здесь недоступны. Ничего не оплачено."), []
         self.store.set_pending(chat_id, "call_draft", draft, int(self.now()))
         return say(lang, "Here is the call. Press Call and an AI assistant phones them for you:",
                    "Вот звонок. Нажмите «Позвонить» — и ИИ-ассистент позвонит за вас:"), [
-            {"type": "call_draft", **{k: draft[k] for k in ("phone", "place", "task", "language")}, "price": "0.54",
-             "lang": lang}]
+            {"type": "call_draft", **{k: draft[k] for k in ("phone", "place", "task", "language")},
+             "price": "0" if pilot else "0.54", **({"pilot": True} if pilot else {}), "lang": lang}]
 
     def _start_call(self, account, chat_id, lang):
         draft = self.store.take_pending(chat_id, "call_draft", int(self.now()) - self.DRAFT_SECONDS)
@@ -1008,8 +1010,9 @@ class WebAgent:
                        "Этот звонок устарел или уже сделан. Попросите ещё раз."), []
         _, started = self._shop("call-start", account, {k: draft[k] for k in ("phone", "task", "language")})
         place = draft.get("place") or draft["phone"]
-        return say(lang, f"Calling {place} now ({started.get('costUsd')} USDC). It takes a minute or two; press Check result.",
-                   f"Звоню: {place} ({started.get('costUsd')} USDC). Это займёт минуту-две; нажмите «Проверить итог»."), [
+        paid = say(lang, "pilot, no charge", "пилот, бесплатно") if started.get("pilot") else f"{started.get('costUsd')} USDC"
+        return say(lang, f"Calling {place} now ({paid}). It takes a minute or two; press Check result.",
+                   f"Звоню: {place} ({paid}). Это займёт минуту-две; нажмите «Проверить итог»."), [
             {"type": "call", "callId": started.get("callId"), "place": place, "phone": draft["phone"], "lang": lang}]
 
     def _call_status(self, account, lang, call_id, place):

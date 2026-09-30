@@ -309,6 +309,17 @@ the conversation. It works the way the Telegram bot does
     a pending request, and only a returned call ID confirms that the call started. An error or missing
     confirmation does not show a success checkmark or automatically retry the call.
     Not on Solana yet: which wallet StablePhone counts as the payer of a delegated payment is unverified.
+  - *The calling pilot, Europe first* (`sign402_gateway/bland_calls.py`, step A of
+    [singit-call-x402-spec.md](singit-call-x402-spec.md)): a number that is not `+1` goes to our own Bland account
+    when `SIGN402_CALLS_BLAND_ENABLED=1`, `SIGN402_BLAND_API_KEY` is set and the number is on
+    `SIGN402_CALLS_ALLOWED_NUMBERS` (the owner's test numbers). No charge to the user: the minutes come from our
+    Bland credit while the real price is measured, so it works from Base and Solana wallets alike. Czech (`cs`),
+    German and English openings disclose the AI; not recorded; three minutes; voicemail hangs up; Bland's `retry`
+    is never sent. The order is written (`SIGN402_CALLS_DB`, default `~/.sign402/calls.db`, number kept as a hash
+    and last four digits, no task) before Bland is asked; a lost answer is not repeated and blocks the next call
+    for ten minutes; three a day. Bland calls abroad from its own numbers once the account holds at least $5 of
+    purchased credit; with our Twilio (Bland BYOT: `SIGN402_BLAND_ENCRYPTED_KEY`, `SIGN402_BLAND_FROM`) calls go out
+    from that number and the destination must be enabled in Twilio's Geo Permissions.
 - **The model is theirs to choose** from Venice's own list (every chat model with
   a published price, cheapest first, filtered by Venice's capability tags): the
   chip under the message box, `GET /chat/models` and `POST /chat/model {model}`.
