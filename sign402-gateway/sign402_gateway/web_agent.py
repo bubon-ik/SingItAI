@@ -178,7 +178,8 @@ def keyword_intent(text: str) -> str:
                        "tripadvisor", "restaurant", "ресторан", "hotel", "отел", "polymarket", "stock", "акци",
                        "price of", "token price", "цена", "http://", "https://")),
         ("purchases", ("bought", "purchase", "order", "покупк", "купил", "заказ", "code", "код")),
-        ("status", ("balance", "status", "can spend", "left", "баланс", "статус", "осталось", "сколько")),
+        ("status", ("balance", "status", "can spend", "left", "баланс", "статус", "осталось", "сколько", "spend today",
+                    "agent spend", "how much can", "могу потратить", "может потратить", "kolik", "wie viel")),
         ("esim", ("esim", "е-сим", "есим", "internet in", "интернет в")),
         ("food", ("food", "pizza", "grocer", "еда", "еду", "продукт", "доставк")),
         ("topup", ("top up", "пополн")),
@@ -297,6 +298,17 @@ GROCERIES = re.compile(r"(?i)\b(supermarkets?|groceries|grocery)\b|суперм�
                        r"lebensmittel")
 
 
+# Food itself, wanted or somewhere — "I wanna food in Prague", "pizza in Prague", "chci jídlo v Praze" —
+# and not food as a topic ("a recipe for pizza", "the history of Czech food").
+FOOD_WORDS = re.compile(r"(?i)\b(food|meal|lunch|dinner|breakfast|pizza|burgers?|sushi|takeaway|take-?out|snacks?)\b"
+                        r"|\bед[аыу]\b|поесть|покушать|пожрать|перекус|обед|ужин|завтрак|пицц|суши"
+                        r"|\bjídl|\boběd|večeř|snídan|\bessen\b|mittagessen|abendessen|frühstück")
+WANT = re.compile(r"(?i)\b(want|wanna|need|get|order|looking for|find|craving)\b|хочу|хочется|нужн|закаж|найди"
+                  r"|\bchci\b|potřebuj|objedn|najdi|möchte|\bwill\b|brauche|bestell")
+ABOUT_FOOD = re.compile(r"(?i)recipe|how to (?:cook|make)|history of|culture|рецепт|как приготов|истори|recept|"
+                        r"jak (?:uvařit|připravit)|rezept|wie (?:kocht|macht)")
+
+
 def about_places(text: str) -> bool:
     return bool(PLACE_WORDS.search(text) and SOMEWHERE.search(text) and not NOT_PLACES.search(text))
 
@@ -313,6 +325,9 @@ def explicit_action(text: str) -> str:
     if HUNGRY.search(text):
         return "food"
     if GROCERIES.search(text) and not NOT_PLACES.search(text):  # "Kaufland gift card" is a gift card: Jev decides
+        return "food"
+    if (FOOD_WORDS.search(text) and (WANT.search(text) or SOMEWHERE.search(text))
+            and not NOT_PLACES.search(text) and not ABOUT_FOOD.search(text)):
         return "food"
     return ""
 
@@ -865,7 +880,7 @@ class WebAgent:
                            "Данные Hyperliquid, ENS и проверка рисков продаются только на Base. На Solana могу взять "
                            "криптоновости, фандинг, погоду, курсы, цены токенов и акций, рейсы, рестораны и отели, "
                            "прочитать ссылку."), []
-        handler = {
+        handlers = {
             "set_limits": self._on_set_limits, "grant": self._on_grant, "revoke": self._on_revoke,
             "status": self._on_status, "purchases": self._on_purchases, "buy_tool": self._on_buy_tool,
             "live_data": lambda a, l, t, i: self._on_data(a, chat_id, l, t),
@@ -873,9 +888,22 @@ class WebAgent:
             "call": lambda a, l, t, i: self._on_call(a, chat_id, l, t),
             **{intent: self._on_catalog for intent in CATALOG_INTENTS},
             "link_telegram": self._on_link,
-        }.get(intent)
-        return self._guarded(lang, lambda: handler(account, lang, text, intent) if handler is not None
-                             else self._converse(account, chat_id, lang))
+        }
+        handler = handlers.get(intent)
+        if handler is not None:
+            return self._guarded(lang, lambda: handler(account, lang, text, intent))
+        self._request.chat_refused = False
+        reply = self._guarded(lang, lambda: self._converse(account, chat_id, lang))
+        if getattr(self._request, "chat_refused", False):
+            # Jev read it as conversation and Venice could not answer (no credit): rather than that dead end, what
+            # the words themselves ask for. Never a paid tool this way: those are bought only when asked by name.
+            plain = keyword_intent(text)
+            if plain == "food" and ABOUT_FOOD.search(text):
+                plain = "chat"  # a recipe is a conversation, whether Venice can have it or not
+            fallback = handlers.get(plain) if plain not in ("chat", "buy_tool") else None
+            if fallback is not None:
+                return self._guarded(lang, lambda: fallback(account, lang, text, plain))
+        return reply
 
     def _guarded(self, lang: str, work: Callable[[], tuple[str, list]]) -> tuple[str, list]:
         """Run a handler; a refusal from the lane, the web API or the shop becomes the reply, in its own words."""
@@ -1484,6 +1512,7 @@ class WebAgent:
                                                        "Приватный чат не ответил. Ничего не оплачено."))
                 if context and history and self.model is not None:
                     return self._from_data(lang, history[-1]["content"], context, refused)
+                self._request.chat_refused = True  # _respond may still find what the words ask for
                 return refused, []
         if self.model is None:
             return say(lang, "I can set limits, buy crypto news and other data, and find gift cards, eSIMs and top-ups. "

@@ -262,6 +262,28 @@ class AgentTests(unittest.TestCase):
                 model([{"role": "user", "content": "hi"}], json_mode=json_mode)
         self.assertEqual(waits, [15, 40])
 
+    def test_food_in_any_words_is_food(self):
+        # Production, 20:41: "I wanna food in Prague" went to Venice, which had no credit.
+        for text in ("I wanna food in Prague", "food in Prague", "pizza in Prague", "order lunch in Prague",
+                     "где тут пожрать в Праге", "хочу поесть", "chci jídlo v Praze", "Ich will Essen in Berlin"):
+            self.assertEqual(wg.explicit_action(text), "food", text)
+        for text in ("a recipe for pizza", "the history of Czech food", "I had pizza yesterday"):
+            self.assertEqual(wg.explicit_action(text), "", text)
+
+    def test_when_venice_cannot_answer_the_words_still_route(self):
+        self.shop.venice = {"ok": False, "error": "chat_refused", "text": "Your limiter cannot fund 5 USDC now."}
+        self.hints = {"country": "DE"}
+        self.model_replies = ["(no answer)"]
+        message = self.send("any good eSIM for Germany", "chat")  # Jev: conversation; Venice: no credit
+        self.assertEqual(message["cards"][0]["type"], "products")
+        self.assertEqual([c[0] for c in self.shop.calls][:2], ["venice-chat", "catalog-search"])
+        self.shop.calls.clear()
+        message = self.send("a recipe for pizza", "chat")  # a conversation stays one, and says why it cannot answer
+        self.assertEqual(message["text"], "Your limiter cannot fund 5 USDC now.")
+        self.shop.calls.clear()
+        message = self.send("is crypto news risky", "chat")  # paid tools are never bought this way
+        self.assertNotIn("tool-buy", [c[0] for c in self.shop.calls])
+
     def test_hunger_is_food_whatever_the_reader_says(self):
         # Jev read "I'm hungry in Prague" as conversation in production; it must not reach the paid chat.
         self.model_replies = [json.dumps({"query": "", "country": "CZ", "place": "Czechia", "city": "Prague"})]
