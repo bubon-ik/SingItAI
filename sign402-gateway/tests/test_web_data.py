@@ -256,11 +256,69 @@ class AgentDataTests(unittest.TestCase):
                 self.assertNotEqual(wg.explicit_action(text), "live_data")
                 self.assertIsNone(wg.places_plan(text))
 
-    def test_the_planner_saying_none_still_finds_places(self):
+    def test_an_unavailable_planner_still_finds_places_but_its_no_is_respected(self):
         self.intent = "live_data"
-        self.agent.model = lambda messages, json_mode=False, max_tokens=700: '{"tool": "none"}' if json_mode else "Try U Fleků."
+
+        def down(messages, json_mode=False, max_tokens=700):
+            if json_mode:
+                raise wg.AgentUnavailable("model")
+            return "Try U Fleků."
+        self.agent.model = down
         self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "cafes near Charles Bridge")
         self.assertEqual(self.calls[0][1]["params"], {"query": "cafes near Charles Bridge", "kind": "restaurants"})
+        self.calls.clear()
+        # Down, and the message only mentions a place: no guess that costs money.
+        self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "I work in a restaurant in Prague")
+        self.assertNotIn("data-buy", [a for a, _ in self.calls])
+        self.calls.clear()
+        # The planner answered "no data needed": a place is named, but nothing is to be looked up.
+        self.agent.model = lambda messages, json_mode=False, max_tokens=700: '{"tool": "none"}' if json_mode else "Nice!"
+        self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "I work in a restaurant in Prague")
+        self.assertNotIn("data-buy", [a for a, _ in self.calls])
+
+    def test_without_a_planner_the_weather_somewhere_is_still_found(self):
+        for text, place in (("weather in Prague", "Prague"), ("what is the weather like in Lisbon today", "Lisbon"),
+                            ("počasí v Praze", "Praze"), ("Wetter in Berlin morgen", "Berlin")):
+            self.assertEqual(wg.fallback_plan(text), ("weather", {"place": place}, ""), text)
+        self.assertIsNone(wg.fallback_plan("weather"))
+
+    def test_paid_places_and_no_model_at_all_show_their_names(self):
+        self.intent = "live_data"
+        shop = self.agent.shop
+
+        def places(action, account, body):
+            if action == "data-buy":
+                self.calls.append((action, dict(body)))
+                return 200, {"ok": True, "tool": "places", "name": "Tripadvisor", "costUsd": "0.040",
+                             "digest": '[{"id":1,"name":"U Fleků","address":"Křemencova"},{"id":2,"name":"Eska"}]'}
+            if action == "venice-chat":
+                return 400, {"ok": False, "error": "chat_refused", "text": "Your limiter cannot fund 5 USDC now."}
+            return shop(action, account, body)
+
+        def down(*args, **kwargs):
+            raise wg.AgentUnavailable("model")
+        self.agent.shop, self.agent.model = places, down
+        reply = self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "Restaurants in Prague")["messages"][1]
+        self.assertTrue(reply["text"].startswith("Here is what I found:\n- U Fleků\n- Eska"))
+        self.assertIn("needs a $5 credit top-up", reply["text"])
+
+    def test_paid_data_and_no_model_at_all_still_explains(self):
+        self.intent = "live_data"
+        shop = self.agent.shop
+
+        def no_credit(action, account, body):
+            if action == "venice-chat":
+                return 400, {"ok": False, "error": "chat_refused", "text": "Your limiter cannot fund 5 USDC now."}
+            return shop(action, account, body)
+
+        def model(messages, json_mode=False, max_tokens=700):
+            if json_mode:
+                return '{"tool": "flight_status", "flight": "LH400"}'
+            raise wg.AgentUnavailable("model")
+        self.agent.shop, self.agent.model = no_credit, model
+        reply = self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "Where is flight LH400 now?")["messages"][1]
+        self.assertEqual(reply["text"], "Your limiter cannot fund 5 USDC now.")
+        self.assertEqual([c["type"] for c in reply["cards"]], ["add_funds", "data"])
 
     def test_without_data_a_venice_refusal_is_the_reply(self):
         self.intent = "chat"

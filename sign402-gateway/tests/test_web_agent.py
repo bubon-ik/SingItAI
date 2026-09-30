@@ -191,6 +191,77 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(wg.explicit_action("supermarket gift card Kaufland"), "")  # a gift card: Jev decides
         self.assertEqual(wg.explicit_action("продуктивность работы"), "")
 
+    def test_a_paused_or_expired_limiter_is_offered_new_limits_not_an_approval(self):
+        for state in ("paused", "expired"):
+            with self.subTest(state=state):
+                self.allowance.status.return_value = {**GRANTED, "state": state}
+                message = self.send("I'm hungry in Prague", "food")
+                self.assertEqual([c["type"] for c in message["cards"]], ["limits_proposal"])
+                self.assertEqual((message["cards"][0]["daily"], message["cards"][0]["per"]), ("20", "5"))
+                self.assertNotIn("not approved", message["text"])
+                self.assertEqual(self.shop.calls, [])
+
+    def test_a_paused_limiter_does_not_answer_a_conversation(self):
+        self.allowance.status.return_value = {**GRANTED, "state": "paused"}
+        self.model_replies = ['{"tool": "none"}', "Nice job!"]
+        message = self.send("I work in a restaurant in Prague", "chat")
+        self.assertNotIn("paused", message["text"])
+
+    def test_a_failed_model_still_searches_the_words(self):
+        self.model_replies = ["(no answer)"]
+        self.send("Steam gift card in Germany", "gift_card")
+        self.assertEqual(self.shop.calls[0][2]["query"], "steam")
+
+    def test_with_jev_and_the_model_both_down_prague_is_still_czechia(self):
+        def down(*args, **kwargs):
+            raise wg.AgentUnavailable("down")
+        self.agent.classify, self.agent.model = down, down
+        chat = self.agent.message(ACCOUNT, None, "хочу есть")["chatId"]
+        self.agent.message(ACCOUNT, chat, "Прага")
+        self.assertEqual(self.shop.calls[0][2]["country"], "CZ")
+        self.assertEqual(wg.country_in("Ich habe Hunger in Berlin"), "DE")
+        self.assertEqual(wg.country_in("примерно"), "")
+
+    def test_the_answer_to_in_which_country_finishes_the_request(self):
+        self.hints = {}
+        self.model_replies = ["(no answer)"]
+        self.intent = "chat"
+        asked = self.agent.message(ACCOUNT, None, "хочу есть")
+        self.assertIn("В какой стране", asked["messages"][1]["text"])
+        # "Прага" alone: Jev would call it chat. It answers the question that was asked.
+        self.hints = {"country": "CZ"}
+        self.model_replies = [json.dumps({"query": "", "country": "CZ", "place": "Czechia", "city": "Prague"})]
+        message = self.agent.message(ACCOUNT, asked["chatId"], "Прага")["messages"][1]
+        self.assertEqual(message["cards"][0]["type"], "products")
+        self.assertEqual(message["cards"][0]["places"], {"country": "CZ", "place": "Prague"})
+        self.assertNotIn("venice-chat", [c[0] for c in self.shop.calls])
+        # Asked once: a later short message is a message of its own.
+        self.shop.calls.clear()
+        self.intent = "chat"
+        self.agent.message(ACCOUNT, asked["chatId"], "спасибо")
+        self.assertEqual([c[0] for c in self.shop.calls], ["venice-chat"])
+
+    def test_a_slow_model_does_not_cost_the_country_jev_read(self):
+        # Production: the model timed out on "I'm hungry in Prague" and the agent asked which country.
+        self.hints = {"country": "CZ"}
+        self.model_replies = ["(no answer)"]  # not JSON: the extraction fails, as a timeout would
+        message = self.send("I'm hungry in Prague", "chat")
+        self.assertEqual(self.shop.calls[0][2]["country"], "CZ")
+        self.assertNotIn("В какой стране", message["text"])
+        self.assertNotIn("which country", message["text"].lower())
+
+    def test_short_extractions_wait_15_seconds_answers_40(self):
+        waits = []
+
+        def opener(request, timeout):
+            waits.append(timeout)
+            raise TimeoutError
+        model = wg.ChatModel("key", "m", opener=opener)
+        for json_mode in (True, False):
+            with self.assertRaises(wg.AgentUnavailable):
+                model([{"role": "user", "content": "hi"}], json_mode=json_mode)
+        self.assertEqual(waits, [15, 40])
+
     def test_hunger_is_food_whatever_the_reader_says(self):
         # Jev read "I'm hungry in Prague" as conversation in production; it must not reach the paid chat.
         self.model_replies = [json.dumps({"query": "", "country": "CZ", "place": "Czechia", "city": "Prague"})]
