@@ -3,7 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from sign402_gateway import web_agent as wg
 
@@ -51,6 +51,9 @@ class FakeShop:
 
 class AgentTests(unittest.TestCase):
     def setUp(self):
+        on = patch.dict("os.environ", {"SIGN402_WEB_DATA_OFF": ""})  # places offered: the default switch is tested apart
+        on.start()
+        self.addCleanup(on.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.allowance = Mock()
@@ -217,6 +220,12 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(self.shop.calls[0][2]["country"], "CZ")
         self.assertEqual(wg.country_in("Ich habe Hunger in Berlin"), "DE")
         self.assertEqual(wg.country_in("примерно"), "")
+
+    def test_no_places_button_while_places_are_off(self):
+        with patch.dict("os.environ", {"SIGN402_WEB_DATA_OFF": "places"}):
+            self.hints = {"country": "CZ"}
+            message = self.send("я хочу заказать еду в Чехии", "food")
+            self.assertNotIn("places", message["cards"][0])
 
     def test_the_answer_to_in_which_country_finishes_the_request(self):
         self.hints = {}

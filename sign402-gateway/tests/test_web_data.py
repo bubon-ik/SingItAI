@@ -87,6 +87,9 @@ class BaseDataTests(unittest.TestCase):
 
 class SolanaDataTests(unittest.TestCase):
     def setUp(self):
+        on = patch.dict("os.environ", {web_data.OFF_ENV: ""})  # every source on: these test how sources pay
+        on.start()
+        self.addCleanup(on.stop)
         self.calls, self.spent = [], []
         lane = Mock()
         lane.status.return_value = {"state": "granted"}
@@ -156,6 +159,9 @@ GRANTED = {"configured": True, "state": "granted", "limiter": "0xLIM", "dailyCap
 
 class AgentDataTests(unittest.TestCase):
     def setUp(self):
+        on = patch.dict("os.environ", {web_data.OFF_ENV: ""})
+        on.start()
+        self.addCleanup(on.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.calls = []
@@ -308,6 +314,36 @@ class AgentDataTests(unittest.TestCase):
         for leak in ("node:internal", "at async", "file:///", "TypeError"):
             self.assertNotIn(leak, json.dumps(reply))
         self.assertIn("did not answer", reply["cards"][0]["searchNote"])
+
+    def test_a_seller_that_took_payment_without_answering_is_off_until_turned_on(self):
+        # Tripadvisor via paysponge, 30 September: 0.01 USDC twice, HTTP 403 twice.
+        with patch.dict("os.environ", {}, clear=False):
+            import os
+            os.environ.pop(web_data.OFF_ENV, None)
+            self.assertIn("places", web_data.switched_off())
+            with self.assertRaises(AllowanceError) as caught:
+                web_data.buy(Mock(), Mock(), wg.SOLANA_ACCOUNT + "BTXX", "places", {"query": "coffee in Los Angeles"})
+            self.assertIn("Nothing was paid", str(caught.exception))
+            self.assertFalse(wg.places_on())
+        with patch.dict("os.environ", {web_data.OFF_ENV: ""}):
+            self.assertEqual(web_data.switched_off(), set())
+            self.assertTrue(wg.places_on())
+
+    def test_a_failed_purchase_is_one_reason_not_two(self):
+        self.intent = "live_data"
+        shop = self.agent.shop
+
+        def failing(action, account, body):
+            if action == "data-buy":
+                return 400, {"ok": False, "text": "Tripadvisor is switched off for now. Nothing was paid."}
+            if action == "venice-chat":
+                return 400, {"ok": False, "error": "chat_refused", "text": "Your limiter cannot fund 5 USDC now."}
+            return shop(action, account, body)
+        self.agent.shop = failing
+        self.agent.model = lambda messages, json_mode=False, max_tokens=700: (
+            '{"tool": "places", "query": "coffee in Los Angeles", "kind": "restaurants"}')
+        reply = self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "coffee in Los Angeles")["messages"][1]
+        self.assertEqual(reply["text"], "Tripadvisor is switched off for now. Nothing was paid.")
 
     def test_paid_data_and_no_model_at_all_still_explains(self):
         self.intent = "live_data"

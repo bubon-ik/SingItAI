@@ -42,6 +42,13 @@ from .bland_calls import pilot_accepts
 from .web_actions import CALL_PHONE, CALL_REGION_MESSAGE
 from .web_internal import public_error
 
+
+def places_on() -> bool:
+    """Whether the places source may be offered (web_data.switched_off): no button for a seller that is off."""
+    from .web_data import switched_off  # noqa: PLC0415 - web_data imports the allowance lane
+
+    return "places" not in switched_off()
+
 logger = logging.getLogger(__name__)
 
 MAX_MESSAGE = 2000
@@ -1077,7 +1084,10 @@ class WebAgent:
         try:
             _, bought = self._shop("data-buy", account, {"tool": tool, "params": params})
         except LookupError as exc:  # the seller refused or is down: the chat still answers, and says why
+            self._request.venice_refused = False
             text, cards = self._converse(account, chat_id, lang)
+            if getattr(self._request, "venice_refused", False):
+                return str(exc), []  # one reason is enough: not the seller's and then Venice's
             if cards and cards[0].get("type") == "usage":
                 cards[0]["searchNote"] = str(exc)[:200]
                 return text, cards
@@ -1257,7 +1267,7 @@ class WebAgent:
         found, sure = self._research(account, text, intent, query, country, category, wanted.get("place") or "")
         places = {"country": country, "place": wanted.get("city") or wanted.get("place") or ""}
         if not found:
-            if intent == "food":  # no food cards sold there: places to eat still are one press away
+            if intent == "food" and places_on():  # no food cards sold there: places to eat are one press away
                 return say(lang, "Bitrefill sells no food gift cards there. I can find places to eat instead:",
                            "Bitrefill не продаёт там карт для еды. Могу найти, где поесть:"), [
                     {"type": "products", "kind": intent, "items": [], "lang": lang, "places": places}]
@@ -1293,7 +1303,7 @@ class WebAgent:
         return say(lang, text_en, text_ru), [{"type": "products", "kind": intent, "items": items, "lang": lang,
                                                **({"readOnly": True} if solana else {}),
                                                # Hungry now: places to eat there are one press away (live data).
-                                               **({"places": places} if intent == "food" else {})}]
+                                               **({"places": places} if intent == "food" and places_on() else {})}]
 
     def _research(self, account: str, text: str, intent: str, query: str, country: str, category: str,
                   place: str) -> tuple[list[dict[str, Any]], bool]:
@@ -1488,6 +1498,7 @@ class WebAgent:
                                                        "Приватный чат не ответил. Ничего не оплачено."))
                 if context and history and self.model is not None:
                     return self._from_data(lang, history[-1]["content"], context, refused)
+                self._request.venice_refused = True
                 return refused, []
         if self.model is None:
             return say(lang, "I can set limits, buy crypto news and other data, and find gift cards, eSIMs and top-ups. "

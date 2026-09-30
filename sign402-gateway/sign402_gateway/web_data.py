@@ -22,6 +22,7 @@ untrusted data for the answer; it is never stored.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import urllib.parse
 from dataclasses import dataclass, field
@@ -35,6 +36,14 @@ SOLANA = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
 BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 SOLANA_USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 DIGEST_CHARS = 7000
+# Sources switched off until their seller is fixed; SIGN402_WEB_DATA_OFF names them (comma-separated, "" for none).
+# Tripadvisor via paysponge: on 30 September it took 0.01 USDC twice and answered HTTP 403 both times.
+OFF_ENV = "SIGN402_WEB_DATA_OFF"
+DEFAULT_OFF = "places"
+
+
+def switched_off() -> set[str]:
+    return {name.strip() for name in os.environ.get(OFF_ENV, DEFAULT_OFF).split(",") if name.strip()}
 
 OTTO = {BASE: "0x0E84dDEdAaE6A779c462C22a59F301EC31B6b808", SOLANA: "6XcSfqJHr9vNW2vbiRaMqUYVm7shDgLepca54wUTDPN5"}
 EXA = {BASE: "0x6d6E695b09861467c7d462f5AAF31cF3540B9192", SOLANA: "12Ec2cJmfR1C9uwejzxcuMhUgEC7wDrLgm1wBvvR5w9E"}
@@ -261,6 +270,9 @@ def buy(server: Any, gw: Any, account: str, tool_id: Any, params: Any) -> dict[s
     tool = TOOLS.get(str(tool_id or ""))
     if tool is None:
         raise AllowanceError("Unknown data source.")
+    if tool.id in switched_off():
+        raise AllowanceError(f"{tool.name} is switched off for now: its seller took payment without answering. "
+                             "Nothing was paid.")
     params = {str(k): str(v).strip()[:300] for k, v in (params or {}).items() if str(v or "").strip()}
     missing = [name for name in tool.required if not params.get(name)]
     if missing:
