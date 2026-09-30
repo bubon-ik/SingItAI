@@ -1330,7 +1330,10 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         except AllowanceUnavailable as exc:
             self._send_json({"ok": False, "error": "not_enabled", "text": str(exc)}, status=403)
         except (AllowanceError, ValueError) as exc:
-            self._send_json({"ok": False, "error": "refused", "text": str(exc)}, status=400)
+            text = web_internal.public_error(exc)
+            if text != str(exc).strip()[:500]:  # a stack from the signer or a seller: the whole of it for us only
+                logger.warning("web internal: %s refused: %s", action, str(exc)[:4000])
+            self._send_json({"ok": False, "error": "refused", "text": text}, status=400)
         except Exception:
             logger.exception("web internal: %s failed", action)
             self._send_json({"ok": False, "error": "internal", "text": "The purchase failed on our side. "

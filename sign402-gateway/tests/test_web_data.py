@@ -302,6 +302,24 @@ class AgentDataTests(unittest.TestCase):
         self.assertTrue(reply["text"].startswith("Here is what I found:\n- U Fleků\n- Eska"))
         self.assertIn("needs a $5 credit top-up", reply["text"])
 
+    def test_a_signer_stack_never_reaches_the_page(self):
+        # Production, 30 September: the paid Tripadvisor request failed in the Node signer and its stack was the reply.
+        self.intent = "live_data"
+        shop = self.agent.shop
+        stack = ("TypeError: fetch failed\n    at node:internal/deps/undici/undici:15141:13\n    at async "
+                 "buyPaidResourceWithSigner (file:///home/hermes/apps/sign402/cdp-x402-service/src/index.mjs:242:20)")
+
+        def failing(action, account, body):
+            if action == "data-buy":
+                self.calls.append((action, dict(body)))
+                return 400, {"ok": False, "error": "refused", "text": stack}
+            return shop(action, account, body)
+        self.agent.shop = failing
+        reply = self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "Where is flight LH400 now?")["messages"][1]
+        for leak in ("node:internal", "at async", "file:///", "TypeError"):
+            self.assertNotIn(leak, json.dumps(reply))
+        self.assertIn("did not answer", reply["cards"][0]["searchNote"])
+
     def test_paid_data_and_no_model_at_all_still_explains(self):
         self.intent = "live_data"
         shop = self.agent.shop

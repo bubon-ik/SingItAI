@@ -92,6 +92,18 @@ class GatewayWebShopTests(unittest.TestCase):
         news = next(t for t in body["tools"] if t["id"] == "otto.crypto_news")
         self.assertEqual(news["resourceUrl"], "https://x402.ottoai.services/crypto-news")
 
+    def test_a_signer_stack_is_logged_and_never_sent(self):
+        stack = ("TypeError: fetch failed\n    at node:internal/deps/undici/undici:15141:13\n    at async "
+                 "buyPaidResourceWithSigner (file:///home/hermes/apps/sign402/cdp-x402-service/src/index.mjs:242:20)")
+        self.server.allowance.pay_x402.side_effect = ValueError(stack)
+        _, quote = self.call("tool-quote", {"tool": "news"})
+        with self.assertLogs("sign402_gateway.server", level="WARNING") as logged:
+            status, body = self.call("tool-buy", {"quoteId": quote["quoteId"]})
+        self.assertEqual(status, 400)
+        self.assertNotIn("node:internal", json.dumps(body))
+        self.assertIn("did not answer", body["text"])
+        self.assertIn("buyPaidResourceWithSigner", "\n".join(logged.output))
+
     def test_a_quote_then_buy_pays_from_the_accounts_own_lane(self):
         status, quote = self.call("tool-quote", {"tool": "news"})
         self.assertEqual((status, quote["priceAtomic"], quote["payTo"]), (200, "1000", SELLER))

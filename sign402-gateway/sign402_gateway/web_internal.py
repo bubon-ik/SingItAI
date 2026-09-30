@@ -14,6 +14,7 @@ the recipient, and a purchase that would pay more, or someone else, is refused.
 
 from __future__ import annotations
 
+import re
 import secrets
 import threading
 import time
@@ -22,6 +23,15 @@ from typing import Any
 
 from .agent_allowance import AllowanceError, AllowanceUnavailable
 from .web_accounts import ACCOUNT_PREFIX, SOLANA_PREFIX
+
+# An error as a seller or a signer raised it: a Node or Python stack is for our log, never for the page.
+TECHNICAL = re.compile(r"\n\s*at\s|node:internal|file:///|Traceback \(most recent call last\)|^\w*Error: ", re.M)
+UNANSWERED = "The seller did not answer, so nothing came back. Try again in a moment."
+
+
+def public_error(text: Any) -> str:
+    text = str(text or "").strip()
+    return UNANSWERED if TECHNICAL.search(text) else text[:500]
 
 QUOTE_SECONDS = 600
 PUBLIC_TOOL_FIELDS = ("id", "name", "description", "source", "resourceUrl", "inputSchema")

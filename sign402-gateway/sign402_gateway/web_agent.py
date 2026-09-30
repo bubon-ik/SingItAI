@@ -40,6 +40,7 @@ from .agent_allowance import AllowanceError
 from .web_data import FROM_PAID_TOOLS
 from .bland_calls import pilot_accepts
 from .web_actions import CALL_PHONE, CALL_REGION_MESSAGE
+from .web_internal import public_error
 
 logger = logging.getLogger(__name__)
 
@@ -886,7 +887,7 @@ class WebAgent:
         except Exception as exc:
             public = getattr(exc, "message", None)  # WebError: already a sentence for the user
             if public or isinstance(exc, (ValueError, LookupError, AllowanceError)):
-                text = str(public or exc)
+                text = public_error(public or exc)
                 # Short of USDC in the wallet: the reply comes with the way to add some.
                 short = getattr(exc, "code", "") == "owner_needs_usdc" or "cannot fund" in text
                 return text, [{"type": "add_funds"}] if short else []
@@ -1529,8 +1530,8 @@ class WebAgent:
             raise LookupError("The shop is not enabled on this server.")
         status, reply = self.shop(action, account, body)
         if status >= 400 or reply.get("ok") is False:
-            raise LookupError(reply.get("text") or reply.get("telegramText") or reply.get("message")
-                              or "The shop refused that.")
+            raise LookupError(public_error(reply.get("text") or reply.get("telegramText") or reply.get("message")
+                                           or "The shop refused that."))
         return status, reply
 
     setup: Callable[[str, Mapping[str, Any]], dict[str, Any]]  # set by the web API
