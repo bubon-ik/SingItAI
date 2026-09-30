@@ -233,6 +233,21 @@ Verification: 211 web gateway tests and five frontend call-state regression test
 production attempt returned HTTP 400, `Validation failed`. Czech `+420` calls are not supported by this
 integration; a successful real call has not been verified. These fixes do not add a new calling provider.
 
+### September 30: the web page installs as an app
+
+[`157224c`](https://github.com/bubon-ik/SingItAI/commit/157224c) makes the web page a Progressive Web App:
+a manifest, icons and a service worker let it be added to an iPhone's Home Screen or installed from Chrome,
+and it then opens full screen from its own icon without the App Store. "Install app" in the account menu uses
+Chrome's prompt, or on iPhone and iPad explains Share → Add to Home Screen. The service worker caches nothing;
+a page load without network shows an offline notice instead of the browser's error. This is web client work,
+not a Solana payment feature.
+
+Verification: in headless Chrome against the local web server, the manifest parsed without errors, Chrome
+reported no installability errors, the service worker controlled the page, and a reload with the server
+stopped showed the offline page; the menu and instructions were checked with an iPhone user agent. 60 web API
+tests and five frontend tests passed. Not verified on a real iPhone: the Home Screen install, and whether
+WalletConnect and email or social sign-in return to the installed app. Not deployed; no push notifications.
+
 ## Pending work — not claimed as completed
 
 - Manually verify the deployed wallet commands and refreshed navigation in Telegram.
