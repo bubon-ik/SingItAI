@@ -1,9 +1,9 @@
 """Phone calls to numbers StablePhone cannot reach (Europe first), through our own Bland account.
 
-Step A of docs/singit-call-x402-spec.md: a closed pilot inside SingIt. Only numbers on an allowlist
-the owner sets are called, a few a day, and the user is not charged: the minutes come out of our Bland
-credit while the real price per minute is measured. Charging (and the separate x402 service the spec
-describes) comes after that.
+Step A of the SingIt Call plan, which ends in a separate x402 service selling AI phone calls for USDC
+on Base or Solana. This step is a closed pilot inside SingIt: only numbers on an allowlist the owner
+sets are called, a few a day, and the user is not charged: the minutes come out of our Bland credit
+while the real price per minute is measured. Charging and the separate service come after that.
 
 Bland places the call from its own number pool once the account holds purchased credit (international
 calls need at least $5 bought). With our own Twilio connected (Bland "BYOT": an `encrypted_key` made in
