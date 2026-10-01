@@ -329,6 +329,15 @@ class AgentDataTests(unittest.TestCase):
             self.assertEqual(web_data.switched_off(), set())
             self.assertTrue(wg.places_on())
 
+    def test_while_places_are_off_a_coffee_question_buys_nothing_and_is_answered(self):
+        self.intent = "live_data"
+        self.agent.model = lambda messages, json_mode=False, max_tokens=700: (
+            '{"tool": "places", "query": "good coffee in Berlin", "kind": "restaurants"}' if json_mode else "The Barn.")
+        with patch.dict("os.environ", {web_data.OFF_ENV: "places"}):
+            reply = self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "What about good coffee in Berlin?")["messages"][1]
+        self.assertNotIn("data-buy", [a for a, _ in self.calls])
+        self.assertNotIn("switched off", reply["text"])
+
     def test_a_failed_purchase_is_one_reason_not_two(self):
         self.intent = "live_data"
         shop = self.agent.shop

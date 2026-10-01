@@ -714,6 +714,13 @@ those and shows a card. Never invent prices, balances or purchases: the current 
 Current state: {state}"""
 
 
+# Answering a question when Venice has no credit: from what the model knows, offering nothing it cannot do.
+WITHOUT_VENICE = """You are SingIt's assistant. Answer the user's question directly and helpfully from what you know:
+be brief and concrete, use Markdown lists when there are several things. Do not offer to look anything up, book,
+reserve, call or buy from inside this answer, and never say you will: you cannot. If they want to buy something, tell
+them the short phrase to type, e.g. "I'm hungry in Prague", "Steam gift card in Germany", "eSIM for Germany".
+Never invent prices, balances or purchases. Reply in the user's language."""
+
 # Answering from bought data when the private chat cannot: only the question and the data, no history.
 DATA_ANSWER = """You are SingIt, a buying agent's assistant. The user's question comes with live data bought for it.
 Answer the question from that data only: be brief and concrete (names, ratings, prices, times), use Markdown lists when
@@ -1067,7 +1074,8 @@ class WebAgent:
     def _on_data(self, account, chat_id, lang, text):
         """A question live data answers: buy it from the limits, then Venice answers from it."""
         planned = plan_data(text, self.model, time.strftime("%Y-%m-%d", time.gmtime(self.now())))
-        if planned is None:
+        if planned is None or (planned[0] == "places" and not places_on()):
+            # Nothing to buy, or the places seller is off: the chat answers from what it knows.
             return self._converse(account, chat_id, lang)  # the chat, with the web if it needs it
         blocked = self._ready(account, lang)  # only now: "I work in a restaurant" is no purchase
         if blocked:
@@ -1519,7 +1527,7 @@ class WebAgent:
         return self.model([{"role": "system", "content": system}] + history) or say(lang, "…", "…"), []
 
     def _without_venice(self, lang: str, question: str, state: Mapping[str, Any]) -> tuple[str, list] | None:
-        system = SYSTEM.format(state=json.dumps(state)) + self._language_rule()
+        system = WITHOUT_VENICE + self._language_rule()
         try:
             answer = self.model([{"role": "system", "content": system}, {"role": "user", "content": question}])
         except AgentUnavailable:
