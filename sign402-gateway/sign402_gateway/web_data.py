@@ -109,7 +109,7 @@ def _search(data: Any) -> str:
 
 
 def _places_search(p: dict[str, str]) -> tuple[str, str, Any]:
-    query, kind = p["query"], p.get("kind") or "restaurants"
+    query, kind = p["query"], p.get("kind") or ""
     if kind == "hotels" and "hotel" not in query.lower():
         query = f"hotels {query}"
     elif kind == "attractions" and "things to do" not in query.lower():
@@ -172,7 +172,7 @@ TOOLS: dict[str, DataTool] = {t.id: t for t in (
                  departure_id=p["from"], arrival_id=p["to"], outbound_date=p["date"], return_date=p.get("return"),
                  type="1" if p.get("return") else "2", currency=p.get("currency") or "USD", hl="en", adults=1), None),
              ("from", "to", "date"), _flights_search, link=_flights_link),
-    DataTool("places", "Places", "Exa", EXA, 10_000, _places_search, ("query",), _search),
+    DataTool("places", "Web search", "Exa", EXA, 10_000, _places_search, ("query",), _search),
 )}
 
 # The bot's paid tools a Solana account can now use too: the same seller, the Solana leg.

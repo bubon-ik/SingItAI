@@ -118,8 +118,8 @@ class SolanaDataTests(unittest.TestCase):
                          (web_data.EXA[web_data.SOLANA], "7000", "BTXXtaRQfzd7BF6zADrMtqDeDhdiiP3t2WYXHz3hCCSK", "POST"))
         self.assertEqual(first["url"], "https://api.exa.ai/search")
         self.assertEqual(first["body"]["query"], "good coffee near Alexanderplatz Berlin")
-        self.assertEqual(self.spent, [(7000, "Places")])  # within the Solana limits
-        self.assertEqual((got["costUsd"], got["network"], got["name"]), ("0.007", "solana", "Places"))
+        self.assertEqual(self.spent, [(7000, "Web search")])  # within the Solana limits
+        self.assertEqual((got["costUsd"], got["network"], got["name"]), ("0.007", "solana", "Web search"))
         self.assertIn("https://berlin.example/coffee", got["digest"])
         hotels = web_data.TOOLS["places"].request({"query": "Prague", "kind": "hotels"})[2]["query"]
         self.assertEqual(hotels, "hotels Prague")
@@ -142,7 +142,9 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(wg.plan_data("summarize https://x402.org/writing.", None, self.TODAY),
                          ("read_link", {"url": "https://x402.org/writing"}, ""))
         self.assertEqual(wg.plan_data("where is flight LH400?", None, self.TODAY), ("flight_status", {"flight": "LH400"}, ""))
-        self.assertIsNone(wg.plan_data("hello there", None, self.TODAY))
+        self.assertEqual(wg.plan_data("кофе рядом с Колизеем", None, self.TODAY),
+                         ("places", {"query": "кофе рядом с Колизеем"}, ""))
+        self.assertIsNone(wg.plan_data("???", None, self.TODAY))  # nothing to search for
 
     def test_the_model_picks_the_source_and_every_field_is_checked(self):
         plan = wg.plan_data("flights Berlin to Barcelona Oct 15", self.model(
@@ -151,7 +153,10 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(wg.plan_data("flights to Rome", self.model({"tool": "flight_search", "to": "FCO", "date": "2020-01-01"}),
                                       self.TODAY)[2], "from")
         self.assertEqual(wg.plan_data("weather?", self.model({"tool": "weather"}), self.TODAY), ("weather", {}, "place"))
-        self.assertIsNone(wg.plan_data("rm -rf", self.model({"tool": "shell"}), self.TODAY))
+        # "none" or nonsense from the model: the question is searched on the web (Jev already read live data).
+        self.assertEqual(wg.plan_data("What about good coffee near the Colosseum?", self.model({"tool": "none"}), self.TODAY),
+                         ("places", {"query": "What about good coffee near the Colosseum"}, ""))
+        self.assertEqual(wg.plan_data("dobrá káva v Praze", self.model({"tool": "shell"}), self.TODAY)[0], "places")
 
 
 GRANTED = {"configured": True, "state": "granted", "limiter": "0xLIM", "dailyCapAtomic": 20_000_000,
@@ -242,41 +247,25 @@ class AgentDataTests(unittest.TestCase):
         self.assertTrue(sent[1]["content"].endswith("Where is flight LH400 now?"))
         self.assertNotIn("secret plan", json.dumps(sent))
 
-    def test_places_bought_from_jevs_reading_and_the_planner_fallback_only_asks(self):
+    def test_places_bought_from_jevs_reading(self):
         self.intent = "live_data"
         self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "Restaurants in Czechia")
-        self.assertEqual(self.calls[0], ("data-buy", {"tool": "places",
-                                                      "params": {"query": "Restaurants in Czechia", "kind": "restaurants"}}))
-        self.assertEqual(wg.places_plan("hotels in Lisbon")[1]["kind"], "hotels")
-        for text in ("tell me about hotel economics", "restaurant gift card in Germany", "book a hotel in Paris",
-                     "I work in a restaurant in Prague", "where is my order?"):
-            self.assertIsNone(wg.places_plan(text), text)
+        self.assertEqual(self.calls[0], ("data-buy", {"tool": "places", "params": {"query": "Restaurants in Czechia"}}))
 
-    def test_an_unavailable_planner_still_finds_places_but_its_no_is_respected(self):
+    def test_no_planner_searches_the_question_and_a_conversation_never_reaches_data(self):
         self.intent = "live_data"
 
         def down(messages, json_mode=False, max_tokens=700):
             if json_mode:
                 raise wg.AgentUnavailable("model")
-            return "Try U Fleků."
+            return "Try Sant'Eustachio."
         self.agent.model = down
-        self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "cafes near Charles Bridge")
-        self.assertEqual(self.calls[0][1]["params"], {"query": "cafes near Charles Bridge", "kind": "restaurants"})
+        self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "кофе рядом с Колизеем")
+        self.assertEqual(self.calls[0], ("data-buy", {"tool": "places", "params": {"query": "кофе рядом с Колизеем"}}))
         self.calls.clear()
-        # Down, and the message only mentions a place: no guess that costs money.
+        self.intent = "chat"  # Jev reads "I work in a restaurant" as conversation (live check): no data is bought
         self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "I work in a restaurant in Prague")
         self.assertNotIn("data-buy", [a for a, _ in self.calls])
-        self.calls.clear()
-        # The planner answered "no data needed": a place is named, but nothing is to be looked up.
-        self.agent.model = lambda messages, json_mode=False, max_tokens=700: '{"tool": "none"}' if json_mode else "Nice!"
-        self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "I work in a restaurant in Prague")
-        self.assertNotIn("data-buy", [a for a, _ in self.calls])
-
-    def test_without_a_planner_the_weather_somewhere_is_still_found(self):
-        for text, place in (("weather in Prague", "Prague"), ("what is the weather like in Lisbon today", "Lisbon"),
-                            ("počasí v Praze", "Praze"), ("Wetter in Berlin morgen", "Berlin")):
-            self.assertEqual(wg.fallback_plan(text), ("weather", {"place": place}, ""), text)
-        self.assertIsNone(wg.fallback_plan("weather"))
 
     def test_paid_places_and_no_model_at_all_show_their_names(self):
         self.intent = "live_data"
