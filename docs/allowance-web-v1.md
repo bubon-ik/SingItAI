@@ -287,7 +287,7 @@ the conversation. It works the way the Telegram bot does
   | Read a link (`/contents`) | Exa | $0.001 | |
   | A flight's status | FlightAware via stabletravel.dev | $0.01 | |
   | Flight prices between cities (booking happens on the airline's page) | Google Flights via stabletravel.dev | $0.02 | |
-  | Restaurants, hotels, things to do, with the top three's ratings | Tripadvisor via paysponge | $0.01 each | |
+  | Restaurants, cafés, hotels, things to do: five web pages with their text, linked in the answer | Exa `/search` | $0.007 | Tripadvisor via paysponge until 1 October: it took payment and answered 403 |
 
   Every seller is bound to its Base and Solana address as its 402 named it, with a price ceiling; another address
   or a higher price is refused before anything is paid. Base pays from the limiter (spending memory, limits;

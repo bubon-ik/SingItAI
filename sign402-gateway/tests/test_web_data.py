@@ -101,31 +101,32 @@ class SolanaDataTests(unittest.TestCase):
 
         def call(account, operation, **payload):
             self.calls.append((operation, payload))
-            location = payload["url"].rsplit("/", 2)[-2] if "/details" in payload["url"] else None
-            data = ({"name": f"Trattoria {location}", "rating": "4.5", "num_reviews": "812", "web_url": "https://tripadvisor.com/x"}
-                    if location else {"data": [{"location_id": "11"}, {"location_id": "12"}, {"location_id": "13"}, {"location_id": "14"}]})
+            data = {"results": [{"title": "Best coffee near Alexanderplatz", "url": "https://berlin.example/coffee",
+                                 "text": "The Barn, Bonanza and more."}]}
             return {"state": "accepted", "transaction": "5" * 88, "data": data}
         lane.spend.side_effect, lane._call.side_effect = spend, call
         self.server = SimpleNamespace(solana_allowance=lane)
-        self.gw = SimpleNamespace(fetch_x402_payment_required=lambda url, request_body=None: offer(web_data.TOOLS["places"], amount="10000"),
+        self.gw = SimpleNamespace(fetch_x402_payment_required=lambda url, request_body=None: offer(web_data.TOOLS["places"], amount="7000"),
                                   _purchases_paused=lambda: False)
 
-    def test_places_are_paid_from_the_owners_account_to_the_bound_address_with_three_details(self):
-        got = web_data.buy(self.server, self.gw, SOLANA_ACCOUNT, "places", {"query": "Italian restaurants in Rome"})
-        self.assertEqual([op for op, _ in self.calls], ["data-pay"] * 4)  # the search, then three places' details
+    def test_places_are_one_exa_search_paid_from_the_owners_account_to_the_bound_address(self):
+        got = web_data.buy(self.server, self.gw, SOLANA_ACCOUNT, "places",
+                           {"query": "good coffee near Alexanderplatz Berlin", "kind": "restaurants"})
+        self.assertEqual([op for op, _ in self.calls], ["data-pay"])  # one search; no follow-ups
         first = self.calls[0][1]
         self.assertEqual((first["payTo"], first["maxAmount"], first["owner"], first["method"]),
-                         (web_data.TRIPADVISOR[web_data.SOLANA], "10000", "BTXXtaRQfzd7BF6zADrMtqDeDhdiiP3t2WYXHz3hCCSK", "GET"))
-        self.assertIn("searchQuery=Italian+restaurants+in+Rome", first["url"])
-        self.assertTrue(all(c[1]["callId"].startswith("data-") for c in self.calls))
-        self.assertEqual(len({c[1]["callId"] for c in self.calls}), 4)  # one attempt per request
-        self.assertEqual(self.spent, [(10000, "Tripadvisor")] * 4)  # each within the Solana limits
-        self.assertEqual((got["costUsd"], got["network"]), ("0.040", "solana"))
-        self.assertIn("Trattoria 13", got["digest"])
+                         (web_data.EXA[web_data.SOLANA], "7000", "BTXXtaRQfzd7BF6zADrMtqDeDhdiiP3t2WYXHz3hCCSK", "POST"))
+        self.assertEqual(first["url"], "https://api.exa.ai/search")
+        self.assertEqual(first["body"]["query"], "good coffee near Alexanderplatz Berlin")
+        self.assertEqual(self.spent, [(7000, "Places")])  # within the Solana limits
+        self.assertEqual((got["costUsd"], got["network"], got["name"]), ("0.007", "solana", "Places"))
+        self.assertIn("https://berlin.example/coffee", got["digest"])
+        hotels = web_data.TOOLS["places"].request({"query": "Prague", "kind": "hotels"})[2]["query"]
+        self.assertEqual(hotels, "hotels Prague")
 
     def test_an_unbound_solana_address_pays_nothing(self):
         self.gw.fetch_x402_payment_required = lambda url, request_body=None: offer(
-            web_data.TOOLS["places"], amount="10000", solana_pay_to="SomeoneElse1111111111111111111111111111111")
+            web_data.TOOLS["places"], amount="7000", solana_pay_to="SomeoneElse1111111111111111111111111111111")
         with self.assertRaisesRegex(AllowanceError, "somewhere unexpected"):
             web_data.buy(self.server, self.gw, SOLANA_ACCOUNT, "places", {"query": "Rome"})
         self.assertEqual((self.calls, self.spent), ([], []))
@@ -315,19 +316,17 @@ class AgentDataTests(unittest.TestCase):
             self.assertNotIn(leak, json.dumps(reply))
         self.assertIn("did not answer", reply["cards"][0]["searchNote"])
 
-    def test_a_seller_that_took_payment_without_answering_is_off_until_turned_on(self):
-        # Tripadvisor via paysponge, 30 September: 0.01 USDC twice, HTTP 403 twice.
+    def test_a_source_can_be_switched_off_and_is_then_never_paid(self):
+        import os
         with patch.dict("os.environ", {}, clear=False):
-            import os
             os.environ.pop(web_data.OFF_ENV, None)
-            self.assertIn("places", web_data.switched_off())
+            self.assertEqual(web_data.switched_off(), set())  # Exa answers places: nothing is off by default
+            self.assertTrue(wg.places_on())
+        with patch.dict("os.environ", {web_data.OFF_ENV: "places"}):
             with self.assertRaises(AllowanceError) as caught:
                 web_data.buy(Mock(), Mock(), wg.SOLANA_ACCOUNT + "BTXX", "places", {"query": "coffee in Los Angeles"})
             self.assertIn("Nothing was paid", str(caught.exception))
             self.assertFalse(wg.places_on())
-        with patch.dict("os.environ", {web_data.OFF_ENV: ""}):
-            self.assertEqual(web_data.switched_off(), set())
-            self.assertTrue(wg.places_on())
 
     def test_while_places_are_off_a_coffee_question_buys_nothing_and_is_answered(self):
         self.intent = "live_data"
@@ -355,6 +354,27 @@ class AgentDataTests(unittest.TestCase):
         # The seller's reason first, then an answer anyway; never Venice's refusal on top.
         self.assertTrue(reply["text"].startswith("Tripadvisor is switched off for now. Nothing was paid.\n\nTry Blue Bottle."))
         self.assertNotIn("cannot fund", reply["text"])
+
+    def test_exa_pages_and_no_model_are_listed_with_their_links(self):
+        self.intent = "live_data"
+        shop = self.agent.shop
+
+        def pages(action, account, body):
+            if action == "data-buy":
+                self.calls.append((action, dict(body)))
+                return 200, {"ok": True, "tool": "places", "name": "Places", "costUsd": "0.007",
+                             "digest": '[{"title":"Best coffee near Alexanderplatz","url":"https://berlin.example/coffee",'
+                                       '"text":"The Barn..."}]'}
+            if action == "venice-chat":
+                return 400, {"ok": False, "error": "chat_refused", "text": "Your limiter cannot fund 5 USDC now."}
+            return shop(action, account, body)
+
+        def down(*args, **kwargs):
+            raise wg.AgentUnavailable("model")
+        self.agent.shop, self.agent.model = pages, down
+        reply = self.agent.message(wg.SOLANA_ACCOUNT + "BTXX", None, "cafes near Alexanderplatz")["messages"][1]
+        self.assertTrue(reply["text"].startswith(
+            "Here is what I found:\n- [Best coffee near Alexanderplatz](https://berlin.example/coffee)"))
 
     def test_paid_data_and_no_model_at_all_still_explains(self):
         self.intent = "live_data"

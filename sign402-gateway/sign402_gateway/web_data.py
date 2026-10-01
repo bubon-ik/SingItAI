@@ -37,9 +37,10 @@ BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 SOLANA_USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 DIGEST_CHARS = 7000
 # Sources switched off until their seller is fixed; SIGN402_WEB_DATA_OFF names them (comma-separated, "" for none).
-# Tripadvisor via paysponge: on 30 September it took 0.01 USDC twice and answered HTTP 403 both times.
+# Places came from Tripadvisor via paysponge until 1 October: it took 0.01 USDC twice and answered HTTP 403 both
+# times, so places are searched on Exa now.
 OFF_ENV = "SIGN402_WEB_DATA_OFF"
-DEFAULT_OFF = "places"
+DEFAULT_OFF = ""
 
 
 def switched_off() -> set[str]:
@@ -48,7 +49,6 @@ def switched_off() -> set[str]:
 OTTO = {BASE: "0x0E84dDEdAaE6A779c462C22a59F301EC31B6b808", SOLANA: "6XcSfqJHr9vNW2vbiRaMqUYVm7shDgLepca54wUTDPN5"}
 EXA = {BASE: "0x6d6E695b09861467c7d462f5AAF31cF3540B9192", SOLANA: "12Ec2cJmfR1C9uwejzxcuMhUgEC7wDrLgm1wBvvR5w9E"}
 STABLETRAVEL = {BASE: "0xDd257723b86B4947483905cdAcBbBC70fACF2ec0", SOLANA: "6u5LMGQC2qk9peNibahmRWxGVXrBypk8nhTCcqtiuqMY"}
-TRIPADVISOR = {BASE: "0x6302D9e6DBB22fEC3c350551568Bb39B4b35Ad57", SOLANA: "9246XrsAEKH6hAyEQe5PvdpUL1p5Ktj9c7ySnwQn6ois"}
 
 
 def _q(**params: Any) -> str:
@@ -99,24 +99,23 @@ def _flights_search(data: Any) -> str:
                  "typical": insights.get("typical_price_range"), "level": insights.get("price_level")})
 
 
-def _places(data: Any) -> str:
-    rows = []
-    for place in (data.get("data") if isinstance(data, dict) else None) or []:
-        if isinstance(place, dict):
-            rows.append({"id": place.get("location_id"), "name": place.get("name"),
-                         "address": (place.get("address_obj") or {}).get("address_string")})
-    return _cut(rows or data)
+def _search(data: Any) -> str:
+    """Exa's pages for a places question: title, address of the page, and what it says (cut)."""
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        return _cut(data)
+    return _cut([{"title": page.get("title"), "url": page.get("url"), "text": str(page.get("text") or "")[:1200]}
+                 for page in results if isinstance(page, dict)])
 
 
-def _place(data: Any) -> str:
-    if not isinstance(data, dict):
-        return _cut(data, 1500)
-    keep = {k: data.get(k) for k in ("name", "rating", "num_reviews", "price_level", "web_url", "phone", "website")
-            if data.get(k) not in (None, "")}
-    keep["address"] = (data.get("address_obj") or {}).get("address_string")
-    keep["ranking"] = (data.get("ranking_data") or {}).get("ranking_string")
-    keep["cuisine"] = [c.get("localized_name") or c.get("name") for c in data.get("cuisine") or [] if isinstance(c, dict)][:4]
-    return _cut(keep, 1500)
+def _places_search(p: dict[str, str]) -> tuple[str, str, Any]:
+    query, kind = p["query"], p.get("kind") or "restaurants"
+    if kind == "hotels" and "hotel" not in query.lower():
+        query = f"hotels {query}"
+    elif kind == "attractions" and "things to do" not in query.lower():
+        query = f"things to do {query}"
+    return "POST", "https://api.exa.ai/search", {"query": query, "numResults": 5,
+                                                 "contents": {"text": {"maxCharacters": 1200}}}
 
 
 def _page(data: Any) -> str:
@@ -140,13 +139,6 @@ class DataTool:
     follow: Callable[[Any], list[str]] | None = None  # further requests of the same seller, e.g. details
     link: Callable[[dict[str, str]], str] | None = None
     networks: tuple[str, ...] = field(default=(BASE, SOLANA))
-
-
-def _details(data: Any) -> list[str]:
-    ids = [str(p.get("location_id")) for p in ((data.get("data") if isinstance(data, dict) else None) or [])
-           if isinstance(p, dict) and str(p.get("location_id") or "").isdigit()]
-    return [f"https://tripadvisor.x402.paysponge.com/api/v1/location/{i}/details?{_q(language='en', currency='USD')}"
-            for i in ids[:3]]
 
 
 def _flights_link(p: dict[str, str]) -> str:
@@ -180,12 +172,8 @@ TOOLS: dict[str, DataTool] = {t.id: t for t in (
                  departure_id=p["from"], arrival_id=p["to"], outbound_date=p["date"], return_date=p.get("return"),
                  type="1" if p.get("return") else "2", currency=p.get("currency") or "USD", hl="en", adults=1), None),
              ("from", "to", "date"), _flights_search, link=_flights_link),
-    DataTool("places", "Tripadvisor", "Tripadvisor", TRIPADVISOR, 15_000,
-             lambda p: ("GET", "https://tripadvisor.x402.paysponge.com/api/v1/location/search?" + _q(
-                 searchQuery=p["query"], category=p.get("kind") or "restaurants", language="en"), None),
-             ("query",), _places, follow=_details),
+    DataTool("places", "Places", "Exa", EXA, 10_000, _places_search, ("query",), _search),
 )}
-DETAILS = _place  # the digest of each follow-up (a Tripadvisor place)
 
 # The bot's paid tools a Solana account can now use too: the same seller, the Solana leg.
 FROM_PAID_TOOLS = {"otto.crypto_news": "crypto_news", "otto.funding_rates": "funding"}
@@ -296,7 +284,7 @@ def buy(server: Any, gw: Any, account: str, tool_id: Any, params: Any) -> dict[s
             except (AllowanceError, AllowanceUnavailable):
                 break  # what was already bought still answers the question
             spent += cost
-            parts.append(DETAILS(extra))
+            parts.append(tool.digest(extra))
     return {"ok": True, "tool": tool.id, "name": tool.name, "source": tool.source, "costAtomic": spent,
             "costUsd": f"{spent / 1_000_000:.3f}", "network": "solana" if network == SOLANA else "base", "txId": tx,
             "digest": "\n".join(parts)[:DIGEST_CHARS * 2], **({"link": tool.link(params)} if tool.link else {})}
