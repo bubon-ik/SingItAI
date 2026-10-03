@@ -306,3 +306,5 @@ specific funding rules that override obsolete advice in earlier chat messages.
 Greetings should not trigger unsolicited wallet checklists. All 297 isolated web
 tests pass; the two-file source-hash preflight passes. This context correction is
 staged pending operator activation; it does not change the payment implementation.
+
+Context correction: [1cd8e64](https://github.com/bubon-ik/SingItAI/commit/1cd8e646d59e7d358371eeebadfa232ccc250e60).
