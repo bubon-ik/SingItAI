@@ -67,11 +67,12 @@ Base retains its existing reservation TTL and durable Ask retry block.
 
 **Deployment status, October 3:** the Base actual-usage payment was verified at
 0.001055 USDC for 833 tokens; see [CHECKS.md](CHECKS.md). The previous user-funded
-Solana implementation was activated at 11:25:35 UTC. This direct-payment update
-is tested and staged, pending operator activation with
-`python3 ~/.config/singit-ask/activate-direct-solana.py`. It saves private
-code/config/state backups, preserves wallet identities and checks all three
-services. Its manifest pins nine reviewed files to exact before/after hashes.
+Solana implementation was activated at 11:25:35 UTC. The direct-payment update
+was activated at 12:08:02 UTC with private rollback snapshot
+`20261003T120802Z-before-direct-solana`. All nine deployed hashes match, all
+three services are active, and the public Node client receives the new pricing
+and updated UI. Wallet identities were preserved; no pending Solana Ask journal
+remained at inspection. The activation manifest is now historical.
 
 Verification for this update: 43 Node tests and 294 isolated web tests passed on
 the VPS, including the real delegated transaction builder with simulated

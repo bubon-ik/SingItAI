@@ -466,3 +466,13 @@ payments. Live CDP verify accepted the existing agent's delegated exact transfer
 settle was never called. Nine-file deployment preflight passed. This update is
 staged, pending sudo activation and a real user-initiated Solana chat payment.
 Implementation: [d405ca0](https://github.com/bubon-ik/SingItAI/commit/d405ca0ccc4ff2291277ef5477517ff722fe346f).
+
+
+Operator activation completed at 2026-10-03 12:08:02 UTC with private rollback
+snapshot `20261003T120802Z-before-direct-solana`. All nine deployed hashes match;
+gateway, web API and merchant services are active. Public health and JavaScript
+checks with the actual Node client return 200 and advertise the new 0.001-USDC
+fee and no-agent-SOL flow. The preparation route requires authentication. Wallet
+identities were preserved, there are no pending Solana Ask journals and the
+new quote ledger has no paid records. This confirms deployment/readiness;
+a real user-initiated direct Solana settlement remains to be verified.
