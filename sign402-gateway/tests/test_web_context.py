@@ -23,7 +23,7 @@ class ContextTests(unittest.TestCase):
             if action == 'data-buy': return 200, {'ok': True, 'name': 'Web search', 'costUsd': '0.007', 'digest': '{}'}
             raise AssertionError('Unexpected action: '+action)
         self.agent = wg.WebAgent(allowance=lane, shop=shop, store=wg.ChatStore(Path(tmp.name)/'web.db'),
-                                classify=lambda text: {'intent': self.intent})
+                                classify=lambda text: {'intent': self.intent}, prefetch=False)
 
     def test_prague_survives_planner_failure_and_wrong_assistant_city(self):
         chat = self.agent.message(ACCOUNT, None, "Hey, I'm hungry in now in Prague")['chatId']

@@ -222,6 +222,13 @@ def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict
         except solana_bitrefill.NeedsEmail as exc:
             return 409, {"ok": False, "error": "email_needed", "text": str(exc)}
 
+    if action == "bitrefill-warm":  # sign in at Bitrefill while the agent is still reading the message
+        bitrefill = getattr(server, "allowance_bitrefill", None)
+        if bitrefill is None or server.allowance.lane_for(gw._allowance_user(server, account)) is None:
+            return 200, {"ok": False}
+        bitrefill.token(gw._allowance_user(server, account))
+        return 200, {"ok": True}
+
     if action in ("bitrefill-search", "bitrefill-packages", "bitrefill-quote", "bitrefill-buy"):
         if action == "bitrefill-buy":
             _limits_from_limiter(server, gw, account)

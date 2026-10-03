@@ -30,7 +30,7 @@ import sqlite3
 import threading
 import time
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 MAX_MESSAGE = 2000
 HISTORY_FOR_MODEL = 20
 SOLANA_ACCOUNT = "solana:"  # web_accounts.SOLANA_PREFIX
+BASE_ACCOUNT = "wallet:"  # web_accounts.ACCOUNT_PREFIX
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 CATALOG_KINDS = {"gift_card": "gift-cards", "esim": "esims", "topup": "topups"}  # Bitrefill's catalogs
 ESIM_WORDS = re.compile(r"(?i)\b(e-?sims?|sim\s*cards?|sims?|data|plans?|mobile|internet|travel)\b")
@@ -423,24 +424,35 @@ class Jev:
     results, the products that fit the request.
     """
 
+    # Seconds for the whole answer, first try and one retry. A socket timeout bounds each read, not the answer:
+    # on 3 October one reading took 12 s while every read stayed under it. Usually Jev answers in 1-3 s.
+    DEADLINES = (5.0, 4.0)
+    _pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="jev")  # a late answer finishes here, unused
+
     def __init__(self, api_key: str, model: str = "jev-latest", opener: Callable = urllib.request.urlopen):
         self.api_key, self.model, self.opener = api_key, model, opener
 
-    def _ask(self, text: str, questions: dict[str, Any]) -> dict[str, Any]:
-        payload = {"model": self.model, "state": {"user_message": text}, "questions": questions}
+    def _post(self, payload: bytes, timeout: float) -> Any:
         request = urllib.request.Request(
-            "https://api.typesafe.ai/v1/systemone", data=json.dumps(payload).encode(), method="POST",
+            "https://api.typesafe.ai/v1/systemone", data=payload, method="POST",
             headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"})
-        started = time.monotonic()
-        try:
-            with self.opener(request, timeout=6) as response:
-                answers = json.loads(response.read(65537))["answers"]
-        except Exception as exc:
-            logger.warning("web agent: Jev did not answer in %.1fs (%s)", time.monotonic() - started, type(exc).__name__)
-            raise AgentUnavailable("classifier") from None
-        if not isinstance(answers, dict):
-            raise AgentUnavailable("classifier")
-        return answers
+        with self.opener(request, timeout=timeout) as response:
+            return json.loads(response.read(65537))["answers"]
+
+    def _ask(self, text: str, questions: dict[str, Any]) -> dict[str, Any]:
+        payload = json.dumps({"model": self.model, "state": {"user_message": text}, "questions": questions}).encode()
+        for attempt, deadline in enumerate(self.DEADLINES, 1):
+            started = time.monotonic()
+            try:
+                answers = self._pool.submit(self._post, payload, deadline).result(timeout=deadline)
+            except Exception as exc:
+                reason = "too slow" if isinstance(exc, FutureTimeout) else type(exc).__name__
+                logger.warning("web agent: Jev did not answer in %.1fs, try %d (%s)", time.monotonic() - started,
+                               attempt, reason)
+                continue
+            if isinstance(answers, dict):
+                return answers
+        raise AgentUnavailable("classifier")
 
     @staticmethod
     def _pick(answers: Mapping[str, Any], name: str, allowed, threshold: float) -> str | None:
@@ -726,14 +738,27 @@ class WebAgent:
     def __init__(self, *, allowance: Any, shop: Callable | None, store: ChatStore,
                  classify: Callable[[str], Any] | None = None, model: Callable | None = None,
                  rank: Callable[[str, Mapping[str, str]], dict[str, float]] | None = None,
-                 now: Callable[[], float] = time.time):
+                 now: Callable[[], float] = time.time, prefetch: bool = True):
         self.allowance, self.shop, self.store = allowance, shop, store
+        self.prefetch = prefetch  # off where a test scripts the model's replies in order
         self.classify = classify
         self.model = model
         self.rank = rank
         self.now = now
         self.solana = None  # solana_allowance.SolanaAllowanceService: the lane for solana: accounts
         self._request = threading.local()  # what Jev read from the message being answered
+        self._pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="web-agent")  # work started ahead
+
+    @contextmanager
+    def _timed(self, step: str) -> Iterator[None]:
+        """How long one step of the answer took, for the "answered in" log line."""
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            steps = getattr(self._request, "steps", None)
+            if steps is not None:
+                steps.append(f"{step} {time.monotonic() - started:.1f}")
 
     # -- entry points --
 
@@ -766,10 +791,13 @@ class WebAgent:
             reply_text, cards = self._guarded(lang, lambda: self._finish_where(account, chat_id, lang, asked, text))
         else:
             started = time.monotonic()
+            self._request.steps = []
             reply_text, cards = self._respond(account, chat_id, text)
             took = time.monotonic() - started
             (logger.warning if took > 20 else logger.info)(
-                "web agent: answered in %.1fs (%s)", took, ",".join(c.get("type", "") for c in cards) or "text")
+                "web agent: answered in %.1fs (%s): %s", took, ",".join(c.get("type", "") for c in cards) or "text",
+                ", ".join(self._request.steps) or "-")
+            self._request.steps = None
         assistant = self.store.add(chat_id, "assistant", reply_text, cards, int(self.now()))
         return {"chatId": chat_id, "title": self.store.chat(account, chat_id)["title"], "messages": [user, assistant]}
 
@@ -822,15 +850,18 @@ class WebAgent:
 
     # -- routing --
 
-    def _intent(self, text: str) -> str:
+    def _intent(self, text: str, account: str = "") -> str:
         """The intent; the country and kind of shop Jev read, if any, are kept for the handler."""
         self._request.hints = {}
+        self._request.parsing = None
         plain = explicit_action(text)
         if plain:  # a number and "call", "email me", hunger, places: never the paid chat by mistake
             return plain
         if self.classify is not None:
+            self._prefetch(account, text)
             try:
-                read = self.classify(text)
+                with self._timed("jev"):
+                    read = self.classify(text)
                 if isinstance(read, Mapping):
                     self._request.hints = {k: v for k, v in read.items() if k != "intent" and v}
                     return str(read["intent"])
@@ -838,6 +869,16 @@ class WebAgent:
             except AgentUnavailable:
                 logger.warning("web agent: classifier unavailable; using keywords")
         return keyword_intent(text)
+
+    def _prefetch(self, account: str, text: str) -> None:
+        """While Jev reads the message, what a purchase would need next: the request parsed by the model, and
+        the sign-in at Bitrefill. Unused when the message is not a purchase; each costs a fraction of a cent."""
+        if not self.prefetch:
+            return
+        if self.model is not None:
+            self._request.parsing = (text, self._pool.submit(self._parse_request, text))
+        if self.shop is not None and account.startswith(BASE_ACCOUNT):  # Solana needs no sign-in
+            self._pool.submit(self.shop, "bitrefill-warm", account, {})
 
     def _read_hints(self, text: str) -> None:
         """Jev's country and kind of shop for this text, when the intent is already known. The model may be slow."""
@@ -868,7 +909,7 @@ class WebAgent:
             self._request.hints = {}
             text = f"{topic['text']} — {text}"
         else:
-            intent = self._intent(text)
+            intent = self._intent(text, account)
         if account.startswith(SOLANA_ACCOUNT):
             if self.solana is None and intent in ("set_limits", "grant", "revoke", "status", "buy_tool"):
                 return self._solana_not_yet(lang)
@@ -1078,7 +1119,8 @@ class WebAgent:
     def _on_data(self, account, chat_id, lang, text):
         """A question live data answers: buy it from the limits, then Venice answers from it."""
         history = self._recent(chat_id, HISTORY_FOR_MODEL)[:-1]
-        planned = plan_data(text, self.model, time.strftime("%Y-%m-%d", time.gmtime(self.now())), history)
+        with self._timed("plan"):
+            planned = plan_data(text, self.model, time.strftime("%Y-%m-%d", time.gmtime(self.now())), history)
         self._request.data_question = text
         self.store.set_pending(chat_id, "data_topic", {"text": text[:400],
             "messageId": self.store.messages(chat_id)[-1]["id"]}, int(self.now()))
@@ -1094,7 +1136,8 @@ class WebAgent:
             if missing in ("place", "query"):
                 self._ask_where(text, "live_data")
             return say(lang, *ASK_FOR[missing]), []
-        return self._with_data(account, lang, tool, params)
+        with self._timed("data"):
+            return self._with_data(account, lang, tool, params)
 
     def _with_data(self, account, lang, tool, params):
         chat_id = getattr(self._request, "chat_id", "")
@@ -1260,7 +1303,7 @@ class WebAgent:
         if blocked:
             return blocked
         hints = self._hints()
-        wanted = self._catalog_request(text, intent)
+        wanted = self._catalog_request(text)
         country = hints.get("country") or wanted.get("country") or country_in(text)
         category = ALTERNATIVES.get(intent) or ("" if hints.get("category") in (None, "", "all", "mobile")
                                                 else hints["category"])
@@ -1282,7 +1325,8 @@ class WebAgent:
             self._ask_where(text, intent)
             return say(lang, "Which brand or store, and in which country? For example: \"Steam gift card in Germany\".",
                        "Какой бренд или магазин и в какой стране? Например: «подарочная карта Steam в Германии»."), []
-        found, sure = self._research(account, text, intent, query, country, category, wanted.get("place") or "")
+        with self._timed("catalog"):
+            found, sure = self._research(account, text, intent, query, country, category, wanted.get("place") or "")
         places = {"country": country, "place": wanted.get("city") or wanted.get("place") or ""}
         if not found:
             if intent == "food" and places_on():  # no food cards sold there: places to eat are one press away
@@ -1293,10 +1337,9 @@ class WebAgent:
             return say(lang, f"Bitrefill has nothing for \"{where}\". Try another name or country.",
                        f"У Bitrefill ничего нет по запросу «{where}». Попробуйте другое название или страну."), []
         shown = found[:6 if intent in ALTERNATIVES else 4]  # for a kind of shop: delivery and the shops
-        items = [self._offer(account, shown[0])]  # signs in to Bitrefill once; the rest ask at the same time
-        if len(shown) > 1:
-            with ThreadPoolExecutor(max_workers=len(shown) - 1) as pool:
-                items += list(pool.map(lambda product: self._offer(account, product), shown[1:]))
+        # All at once: the gateway signs in to Bitrefill once for them (begun ahead, in _prefetch).
+        with self._timed("offers"), ThreadPoolExecutor(max_workers=len(shown)) as pool:
+            items = list(pool.map(lambda product: self._offer(account, product), shown))
         amount = wanted.get("amount")
         # Bought at once only when the message said so and the product is certain: Jev chose it, or it is the only one.
         if amount and wanted.get("buy") and sure and not solana and not items[0].get("needsRecipient"):
@@ -1360,7 +1403,8 @@ class WebAgent:
             c.get("name"), c.get("type"), c.get("country"), ", ".join(c.get("categories") or [])) if x)[:200]
             for c in shortlist}
         try:
-            fit = self.rank(text, options)
+            with self._timed("rank"):
+                fit = self.rank(text, options)
         except AgentUnavailable:
             return candidates, False
         order = sorted(shortlist, key=lambda c: -fit.get(c["slug"], 0.0))
@@ -1383,7 +1427,19 @@ class WebAgent:
             item["needsRecipient"] = True  # delivered to a phone or account, not as a code: not sold here yet
         return item
 
-    def _catalog_request(self, text: str, intent: str) -> dict[str, Any]:
+    def _catalog_request(self, text: str) -> dict[str, Any]:
+        """Search words, country, amount and whether to buy now: parsed while Jev read the message, if it was."""
+        early = getattr(self._request, "parsing", None)
+        self._request.parsing = None
+        with self._timed("request"):
+            if early and early[0] == text:
+                try:
+                    return early[1].result()
+                except Exception:  # noqa: BLE001 - parse it here instead
+                    pass
+            return self._parse_request(text)
+
+    def _parse_request(self, text: str) -> dict[str, Any]:
         """Search words, country, amount and whether to buy now, from the user's message only."""
         def by_words() -> dict[str, Any]:
             words = re.sub(r"[^\w\s]", " ", text.lower()).split()
@@ -1493,8 +1549,9 @@ class WebAgent:
             history.pop()  # answering after a top-up card: the question is the last user message
         if self.shop is not None and state.get("state") == "granted":
             system = {"role": "system", "content": VENICE_SYSTEM.format(state=json.dumps(state)) + self._language_rule()}
-            _, reply = self.shop("venice-chat", account, {"messages": [system] + history,
-                                                          **({"context": dict(context)} if context else {})})
+            with self._timed("chat"):
+                _, reply = self.shop("venice-chat", account, {"messages": [system] + history,
+                                                              **({"context": dict(context)} if context else {})})
             if reply.get("ok"):
                 self.store.record_usage(account, chat_id, reply, int(self.now()))
                 tokens = int(reply.get("promptTokens") or 0) + int(reply.get("completionTokens") or 0)

@@ -1,5 +1,7 @@
 import io
 import json
+import time
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -67,7 +69,7 @@ class AgentTests(unittest.TestCase):
         self.fit = None  # Jev's ranking: slug -> probability
         self.agent = wg.WebAgent(allowance=self.allowance, shop=self.shop, store=wg.ChatStore(Path(self.tmp.name) / "web.db"),
                                  classify=lambda text: {"intent": self.intent, **self.hints}, model=self.model,
-                                 rank=self.rank)
+                                 rank=self.rank, prefetch=False)
         self.agent.setup = Mock(return_value={"limiter": "0xNEW"})
 
     def test_model_state_uses_owner_balance_not_internal_float(self):
@@ -425,6 +427,58 @@ class AgentTests(unittest.TestCase):
         self.assertIn("I can set limits", agent.message(ACCOUNT, None, "hi there")["messages"][1]["text"])
 
 
+class PrefetchTests(unittest.TestCase):
+    """While Jev reads a message, the request is parsed and Bitrefill signed in to, ahead of a purchase."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        allowance = Mock()
+        allowance.status.return_value = dict(GRANTED)
+        allowance.stale_allowances.return_value = []
+        self.shop = FakeShop()
+        self.parsed_during_jev = threading.Event()
+        self.parses = []
+
+    def agent(self, intent="gift_card"):
+        def jev(text):  # reads slowly: the parse must already be under way
+            self.parsed_during_jev.wait(2)
+            return {"intent": intent}
+        def model(messages, json_mode=False, max_tokens=700):
+            if json_mode:
+                self.parses.append(messages[-1]["content"])
+                self.parsed_during_jev.set()
+                return json.dumps({"query": "steam", "country": "DE"})
+            return "Hello!"
+        allowance = Mock()
+        allowance.status.return_value = dict(GRANTED)
+        allowance.stale_allowances.return_value = []
+        return wg.WebAgent(allowance=allowance, shop=self.shop, store=wg.ChatStore(Path(self.tmp.name) / "web.db"),
+                           classify=jev, model=model)
+
+    def test_the_request_is_parsed_once_while_jev_reads_and_its_reading_is_used(self):
+        with self.assertLogs("sign402_gateway.web_agent", "INFO") as logs:
+            self.agent().message(ACCOUNT, None, "Steam card for Germany")
+        self.assertTrue(self.parsed_during_jev.is_set())
+        self.assertEqual(self.parses, ["Steam card for Germany"])
+        search = next(body for action, _, body in self.shop.calls if action == "catalog-search")
+        self.assertEqual((search["query"], search["country"]), ("steam", "DE"))
+        timing = next(line for line in logs.output if "answered in" in line)
+        for step in ("jev ", "request ", "catalog ", "offers "):
+            self.assertIn(step, timing)
+
+    def test_bitrefill_is_signed_in_to_ahead_for_base_and_never_for_solana(self):
+        agent = self.agent()
+        agent.message(ACCOUNT, None, "Steam card for Germany")
+        agent._pool.shutdown(wait=True)
+        self.assertIn(("bitrefill-warm", ACCOUNT, {}), self.shop.calls)
+        self.shop.calls.clear()
+        agent = self.agent()
+        agent.message("solana:" + "1" * 32, None, "Steam card for Germany")
+        agent._pool.shutdown(wait=True)
+        self.assertNotIn("bitrefill-warm", [c[0] for c in self.shop.calls])
+
+
 class JevTests(unittest.TestCase):
     def opener(self, answer=None, error=None):
         def open_(request, timeout):
@@ -434,6 +488,34 @@ class JevTests(unittest.TestCase):
             answers = answer if isinstance(answer, dict) and "intent" in answer else {"intent": answer}
             return io.BytesIO(json.dumps({"answers": answers}).encode())
         return open_
+
+    def slow_then(self, delays):
+        answer = {"type": "choice", "choice": "food", "confidence": 0.9}
+        calls = []
+        def open_(request, timeout):
+            calls.append(timeout)
+            time.sleep(delays[len(calls) - 1])
+            return io.BytesIO(json.dumps({"answers": {"intent": answer}}).encode())
+        return open_, calls
+
+    def test_a_slow_answer_is_given_up_on_and_asked_once_more(self):
+        opener, calls = self.slow_then([0.5, 0.0])
+        jev = wg.Jev("key", opener=opener)
+        jev.DEADLINES = (0.1, 0.3)
+        started = time.monotonic()
+        self.assertEqual(jev("I'm hungry in Prague")["intent"], "food")
+        self.assertLess(time.monotonic() - started, 0.4)
+        self.assertEqual(calls, [0.1, 0.3])
+
+    def test_two_slow_answers_leave_the_keywords_to_route(self):
+        opener, calls = self.slow_then([0.5, 0.5])
+        jev = wg.Jev("key", opener=opener)
+        jev.DEADLINES = (0.1, 0.1)
+        started = time.monotonic()
+        with self.assertRaises(wg.AgentUnavailable):
+            jev("I'm hungry in Prague")
+        self.assertLess(time.monotonic() - started, 0.4)
+        self.assertEqual(len(calls), 2)
 
     def test_a_confident_choice_is_the_intent_and_a_weak_one_asks(self):
         jev = wg.Jev("key", opener=self.opener({"type": "choice", "choice": "buy_tool", "confidence": 0.93}))

@@ -22,6 +22,7 @@ import json
 import logging
 import math
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -221,6 +222,8 @@ class BitrefillX402:
         self.now = now
         self.sleep = sleep
         self._tokens: dict[str, tuple[str, float]] = {}
+        self._signing_in: dict[str, threading.Lock] = {}
+        self._signing_in_guard = threading.Lock()
 
     # -- sign-in --
 
@@ -236,6 +239,15 @@ class BitrefillX402:
         cached = self._tokens.get(agent)
         if cached and cached[1] > self.now():
             return cached[0]
+        with self._signing_in_guard:
+            lock = self._signing_in.setdefault(agent, threading.Lock())
+        with lock:  # price requests arriving together wait for one sign-in, then share its token
+            cached = self._tokens.get(agent)
+            if cached and cached[1] > self.now():
+                return cached[0]
+            return self._sign_in(agent, key)
+
+    def _sign_in(self, agent: str, key: str) -> str:
         header = siwx_header(self._challenge("POST", f"{API}/connect"), key)
         status, body, _ = self.http("POST", f"{API}/connect", headers={"SIGN-IN-WITH-X": header})
         token = body.get("token") if isinstance(body, dict) else None

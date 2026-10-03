@@ -1,5 +1,7 @@
 import base64
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 import shutil
 import subprocess
 import tempfile
@@ -116,6 +118,18 @@ class BitrefillX402Tests(unittest.TestCase):
         self.assertEqual(self.bitrefill.token("u"), "jwt-1")
         self.assertEqual(self.bitrefill.token("u"), "jwt-1")
         self.assertEqual(sum(1 for c in self.http.calls if c[1].endswith("/connect")), 2)
+
+    def test_price_requests_arriving_together_sign_in_once(self):
+        slow = self.http.__call__
+        def connect_slowly(method, url, **kw):
+            if url.endswith("/connect"):
+                time.sleep(0.05)  # long enough for the other requests to arrive while signing in
+            return slow(method, url, **kw)
+        self.bitrefill.http = connect_slowly
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            tokens = list(pool.map(lambda _: self.bitrefill.token("u"), range(6)))
+        self.assertEqual(set(tokens), {"jwt-1"})
+        self.assertEqual(sum(1 for c in self.http.calls if c[1].endswith("/connect")), 2)  # challenge + sign-in
 
     def test_a_quote_is_the_price_bitrefill_asks_now(self):
         quote = self.bitrefill.quote("u", "hediyen", "1")
