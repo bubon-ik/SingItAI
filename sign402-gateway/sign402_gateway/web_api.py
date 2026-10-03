@@ -305,12 +305,16 @@ class WebApi:
                     f"Your wallet needs at least {self.min_owner_usdc / 1_000_000:g} USDC on Solana before we "
                     "set up your agent's limits."))
             return 200, lane.setup(account, body.get("dailyCap"), body.get("perPurchaseCap"), body.get("days")), {}
-        if method == "POST" and path in ("/allowance/grant/prepare", "/allowance/revoke/prepare"):
+        if method == "POST" and path in ("/allowance/grant/prepare", "/allowance/revoke/prepare", "/allowance/fund-gas/prepare"):
             self.prepare_by_account.hit(account)
-            kind = "GRANT" if path.startswith("/allowance/grant") else "REVOKE"
+            kind = "FUND_GAS" if path.startswith("/allowance/fund-gas") else "GRANT" if path.startswith("/allowance/grant") else "REVOKE"
             return 200, lane.prepare_wallet(account, kind, amount=body.get("amount")), {}
-        if method == "POST" and path in ("/allowance/grant/submit", "/allowance/revoke/submit"):
-            self.permit_by_account.hit(account)  # each one costs our fee payer a network fee
+        if method == "POST" and path in ("/allowance/grant/submit", "/allowance/revoke/submit", "/allowance/fund-gas/submit"):
+            self.permit_by_account.hit(account)  # bound signed transaction submission
+            expected_kind = "FUND_GAS" if path.startswith("/allowance/fund-gas") else "GRANT" if path.startswith("/allowance/grant") else "REVOKE"
+            op = lane.store.op(account, str(body.get("operation") or ""))
+            if op is None or op["kind"] != expected_kind:
+                raise WebError(404, "no_such_operation", "No such request.")
             return 200, lane.submit_wallet(account, str(body.get("operation") or ""), body.get("transaction")), {}
         if method == "GET" and path.startswith("/allowance/operations/"):
             return 200, lane.operation(account, path.rsplit("/", 1)[1]), {}

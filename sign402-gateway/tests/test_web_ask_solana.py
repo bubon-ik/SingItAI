@@ -26,7 +26,7 @@ class SolanaAskTests(unittest.TestCase):
         store=SolanaAllowanceStore(self.root/'allowance.db');store.set_limits(ACCOUNT,'owner',10000,3000,NOW+3600,NOW)
         self.lane=SimpleNamespace(store=store,_spend_lock=threading.Lock(),now=lambda:NOW,max_per_purchase=10000,max_daily=10000,
             _seen={},bridge=SimpleNamespace(rpc='https://unused.test'),fee_payer_key=lambda:'not-a-real-key',owner=lambda _: 'owner',
-            agent_key=Mock(return_value=(AGENT,'not-a-real-key')),_call=Mock(return_value={'state':'confirmed','transaction':'fund-tx'}),
+            agent_key=Mock(return_value=(AGENT,'not-a-real-key')),_call=Mock(side_effect=lambda _,op,**kw: {'ready':True} if op=='allowance-funding-check' else {'state':'confirmed','transaction':'fund-tx'}),
             chain_state=Mock(return_value={'owner':{'delegatedToAgent':'9000','amount':'10000'},'agent':{'usdcAtomic':'0'}}))
         self.server=SimpleNamespace(solana_allowance=self.lane)
         self.helper=Mock(side_effect=self.run_helper)
@@ -40,7 +40,8 @@ class SolanaAskTests(unittest.TestCase):
     def pay(self):return m.pay(self.server,Mock(),ACCOUNT,{'messages':[]})
     def test_funds_only_shortfall_and_counts_actual_usage(self):
         amount,_,tx=self.pay();self.assertEqual((amount,tx),(2130,'solana-tx'))
-        self.lane._call.assert_called_once_with(ACCOUNT,'allowance-pull',fee_payer=True,owner='owner',amount='3000')
+        self.assertEqual(self.lane._call.call_count,2)
+        self.lane._call.assert_called_with(ACCOUNT,'allowance-pull',owner='owner',amount='3000')
         self.assertEqual(self.lane.store.spent_since(ACCOUNT,0),2130)
         self.assertFalse(list(self.root.glob('*.submitted')))
     def test_reuses_agent_refund_without_another_funding_transaction(self):
@@ -63,11 +64,23 @@ class SolanaAskTests(unittest.TestCase):
         with self.assertRaisesRegex(AllowanceError,'previous Solana'):self.pay()
         self.assertEqual(self.helper.call_count,calls)
     def test_uncertain_funding_is_not_pulled_twice(self):
-        self.lane._call.return_value={'state':'uncertain','transaction':'fund-tx'}
+        self.lane._call.side_effect=lambda _,op,**kw: {'ready':True} if op=='allowance-funding-check' else {'state':'uncertain','transaction':'fund-tx'}
         with self.assertRaises(AllowanceError):self.pay()
         with self.assertRaises(AllowanceError):self.pay()
-        self.lane._call.assert_called_once();self.assertEqual(self.lane.store.spent_since(ACCOUNT,0),3000)
+        self.assertEqual(self.lane._call.call_count,2);self.assertEqual(self.lane.store.spent_since(ACCOUNT,0),3000)
         self.assertEqual(self.helper.call_count,1)
+    def test_no_sol_preflight_releases_hold_without_attempting_funding(self):
+        self.lane._call.side_effect=None
+        self.lane._call.return_value={'ready':False,'requiredLamports':'1493440'}
+        with self.assertRaisesRegex(AllowanceUnavailable,'agent needs SOL'):self.pay()
+        self.lane._call.assert_called_once_with(ACCOUNT,'allowance-funding-check',owner='owner',amount='3000')
+        self.assertFalse(list(self.root.glob('*.json')))
+        self.assertEqual(self.lane.store.spent_since(ACCOUNT,0),0)
+    def test_sol_balance_changed_before_send_is_not_an_uncertain_payment(self):
+        self.lane._call.side_effect=lambda _,op,**kw: {'ready':True} if op=='allowance-funding-check' else {'state':'not_submitted','reason':'agent_sol_required'}
+        with self.assertRaisesRegex(AllowanceUnavailable,'agent needs SOL'):self.pay()
+        self.assertFalse(list(self.root.glob('*.json')))
+        self.assertEqual(self.lane.store.spent_since(ACCOUNT,0),0)
     def test_confirmed_full_refund_releases_hold_without_charging(self):
         def refund(lane,**p):
             output=self.run_helper(lane,**p)

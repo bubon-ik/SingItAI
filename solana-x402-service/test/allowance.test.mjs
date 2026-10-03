@@ -19,7 +19,7 @@ function tokenAccount(owner, { amount = 20_000_000n, delegate = null, delegated 
   return data;
 }
 
-function fakeRpc({ account = null, status = 'confirmed' } = {}) {
+function fakeRpc({ account = null, status = 'confirmed', balance = 10_000_000n } = {}) {
   const sent = [];
   const call = value => ({ send: async () => value });
   return {
@@ -28,7 +28,9 @@ function fakeRpc({ account = null, status = 'confirmed' } = {}) {
     getLatestBlockhash: () => call({ value: { blockhash: BLOCKHASH, lastValidBlockHeight: 100n } }),
     sendTransaction: wire => { sent.push(wire); return call('sig'); },
     getSignatureStatuses: () => call({ value: [status && { confirmationStatus: status, err: null }] }),
-    getBalance: () => call({ value: 0n }),
+    getBalance: () => call({ value: balance }),
+    getMinimumBalanceForRentExemption: () => call(1_488_440n),
+    getFeeForMessage: () => call({value: 5000n}),
   };
 }
 
@@ -101,7 +103,9 @@ test('the bridge runs allowance operations only for the agent it was given', asy
   const state = await dispatch({ operation: 'allowance-state', payer: agent.address, owner: owner.address }, { wallet: agent, chain, feePayer: payer, allowance: lane(rpc) });
   assert.equal(state.owner.delegatedToAgent, '3000000');
   await assert.rejects(dispatch({ operation: 'allowance-state', payer: owner.address, owner: owner.address }, { wallet: agent, chain }), /mismatch/);
-  await assert.rejects(dispatch({ operation: 'allowance-pull', payer: agent.address, owner: owner.address, amount: '1' }, { wallet: agent, chain, allowance: lane(rpc) }), /fee payer/);
+  const pulled = await dispatch({ operation: 'allowance-pull', payer: agent.address, owner: owner.address, amount: '1' }, { wallet: agent, chain, feePayer: payer, allowance: lane(rpc) });
+  assert.equal(pulled.state, 'confirmed');
+  assert.deepEqual(Object.keys(instructionsOf(rpc.sent[0]).tx.signatures), [agent.address]);
 });
 
 test('the owner may pay their own approve’s fee: then theirs is the only signature', async () => {
@@ -158,4 +162,33 @@ test('an addition that moves value, or another amount, is never sent', async () 
       kind: 'approve', delegate: agent.address, amount }), /other than what was prepared/);
   }
   assert.equal(rpc.sent.length, 0);
+});
+
+
+test('no agent SOL refuses funding before signing/sending even with an operator payer configured', async () => {
+  const [owner, agent, operator] = [await testWallet(), await testWallet(), await testWallet()];
+  const rpc = fakeRpc({balance: 0n});
+  const result = await dispatch({operation:'allowance-pull',payer:agent.address,owner:owner.address,amount:'3000'},
+    {wallet:agent,chain:{rpc},feePayer:operator,allowance:lane(rpc)});
+  assert.equal(result.state,'not_submitted');
+  assert.equal(result.payer,agent.address);
+  assert.equal(result.requiredLamports,'1493440');
+  assert.equal(rpc.sent.length,0);
+});
+
+test('wallet funds only its own agent with the exact SOL amount, including wallet-added instructions', async () => {
+  const [owner, agent, attacker] = [await testWallet(),await testWallet(),await testWallet()];
+  const rpc=fakeRpc(), service=lane(rpc);
+  const args={kind:'fund-gas',owner:owner.address,delegate:agent.address,amount:'5000000',feePayer:owner.address};
+  const prepared=await service.prepare(args);
+  const wire=await asPhantomWould(prepared,owner);
+  const submit={...args,feePayer:null,expectedHash:prepared.messageHash,transaction:wire};
+  await assert.rejects(service.submit({...submit,delegate:attacker.address}),/other than/);
+  await assert.rejects(service.submit({...submit,amount:'6000000'}),/other than/);
+  assert.equal(rpc.sent.length,0);
+  assert.equal((await service.submit(submit)).state,'confirmed');
+  const {tx,message}=instructionsOf(rpc.sent[0]);
+  assert.deepEqual(Object.keys(tx.signatures),[owner.address]);
+  const transfer=message.instructions.find(i=>message.staticAccounts[i.programAddressIndex]==='11111111111111111111111111111111');
+  assert.equal(Buffer.from(transfer.data).readBigUInt64LE(4),5000000n);
 });

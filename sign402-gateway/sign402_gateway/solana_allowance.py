@@ -13,9 +13,9 @@ contract here yet, so the pieces are split:
   facilitator checks the signer, mint, recipient and amount, not whose account it is:
   solana-x402-service/test/delegated.test.mjs).
 
-Nothing here costs us gas. The owner pays the one small fee of their approve or revoke
-from their own SOL; only a wallet with no SOL at all falls back to our fee payer, when
-one is configured. The chain work runs in the Node x402 service (solana-x402-service/src/allowance.mjs)
+The owner pays approval/revoke fees from their SOL. Metered Ask funding uses the
+user agent's own SOL for network fees and token-account rent. The owner explicitly
+funds that agent through a wallet-signed SOL transfer; there is no operator fallback. The chain work runs in the Node x402 service (solana-x402-service/src/allowance.mjs)
 through the same bridge the bot's Solana chat uses.
 """
 
@@ -153,6 +153,15 @@ class SolanaAllowanceStore:
                 raise AllowanceError("The request's maximum exceeds your remaining Solana daily limit. Nothing was paid.")
             db.execute("INSERT INTO metered_holds VALUES (?, ?, ?, ?)", (hold_id, account, ceiling, now))
 
+    def claim_gas_submission(self, account: str, op_id: str, now: int) -> bool:
+        with self._db() as db:
+            return db.execute("UPDATE ops SET state='SUBMITTING', updated_at=? WHERE account=? AND op_id=? AND kind='FUND_GAS' AND state='PREPARED'",
+                              (now, account, op_id)).rowcount == 1
+
+    def pending_gas(self, account: str) -> bool:
+        with self._db() as db:
+            return db.execute("SELECT 1 FROM ops WHERE account=? AND kind='FUND_GAS' AND state IN ('SUBMITTING','UNCERTAIN') LIMIT 1", (account,)).fetchone() is not None
+
     def release_metered(self, hold_id: str) -> None:
         with self._db() as db:
             db.execute("DELETE FROM metered_holds WHERE hold_id = ?", (hold_id,))
@@ -243,6 +252,8 @@ class SolanaAllowanceService:
             "dailyCapAtomic": limits["daily_cap"], "perPurchaseCapAtomic": limits["per_purchase_cap"],
             "remainingTodayAtomic": max(0, limits["daily_cap"] - spent), "allowanceAtomic": allowed,
             "floatAtomic": int(chain["agent"]["usdcAtomic"]), "ownerUsdcAtomic": int(chain["owner"]["amount"]),
+            "agentSolLamports": str(chain["agent"].get("solLamports") or "0"),
+            "ownerSolLamports": str(chain["owner"].get("solLamports") or "0"),
             "expiry": limits["expiry"],
         }
 
@@ -275,15 +286,26 @@ class SolanaAllowanceService:
             atomic = _usdc(amount, "The amount")
             if atomic > self.max_grant:
                 raise AllowanceError(f"Allow at most {_text(self.max_grant)} at a time.")
+        elif kind == "FUND_GAS":
+            if self.store.pending_gas(account):
+                raise AllowanceError("A previous SOL transfer needs confirmation. It was not repeated; check its transaction before funding again.")
+            try:
+                value = Decimal(str(amount)) * 1_000_000_000
+                if not value.is_finite() or value != value.to_integral_value() or not 0 < value <= 100_000_000:
+                    raise ValueError()
+                atomic = int(value)
+            except (ValueError, InvalidOperation):
+                raise AllowanceError("Enter a SOL amount above zero and at most 0.1, with at most 9 decimal places.") from None
         elif kind == "REVOKE":
             atomic = 0
         else:
             raise AllowanceError("Grant or revoke only.")
-        owner_pays = int(self.chain_state(account)["owner"].get("solLamports") or 0) >= OWNER_FEE_LAMPORTS
-        if not owner_pays and self.fee_payer_key is None:
-            raise AllowanceError("Your wallet needs a little SOL (about 0.00002) to pay this one signature's network fee.")
-        prepared = self._call(account, "allowance-prepare", fee_payer=not owner_pays, owner=owner, ownerPaysFee=owner_pays,
-                              kind="approve" if kind == "GRANT" else "revoke", amount=str(atomic))
+        owner_sol = int(self.chain_state(account)["owner"].get("solLamports") or 0)
+        if owner_sol < OWNER_FEE_LAMPORTS + (atomic if kind == "FUND_GAS" else 0):
+            raise AllowanceError("Your wallet needs SOL for this transfer and its network fee. SingIt does not sponsor it.")
+        owner_pays = True
+        prepared = self._call(account, "allowance-prepare", owner=owner, ownerPaysFee=True,
+                              kind={"GRANT": "approve", "REVOKE": "revoke", "FUND_GAS": "fund-gas"}[kind], amount=str(atomic))
         op_id = "sop_" + secrets.token_urlsafe(12)
         now = int(self.now())
         self.store.add_op({"op_id": op_id, "account": account, "kind": kind, "amount": atomic, "owner_pays_fee": int(owner_pays),
@@ -291,6 +313,8 @@ class SolanaAllowanceService:
         agent = self.agent_key(account)[0]
         shows = (f"Your wallet will ask you to let {agent[:4]}…{agent[-4:]} spend up to {_text(atomic)} of your USDC."
                  if kind == "GRANT" else "Your wallet will ask you to revoke your agent's permission to spend your USDC.")
+        if kind == "FUND_GAS":
+            shows = f"Transfer {Decimal(atomic) / 1_000_000_000} SOL to your own agent {agent} for network fees and account rent. Your wallet also pays the network fee."
         return {"operation": op_id, "chain": "solana", "kind": kind, "transaction": prepared["transaction"],
                 "walletShows": shows, "expiresAt": now + PREPARE_SECONDS}
 
@@ -305,18 +329,24 @@ class SolanaAllowanceService:
         if op["created_at"] + PREPARE_SECONDS < now:
             self.store.update_op(op_id, "EXPIRED", now, detail="Too late for this transaction; prepare it again.")
             return self.operation(account, op_id)
-        owner_pays = bool(op["owner_pays_fee"])
+        if not op["owner_pays_fee"]:
+            raise AllowanceError("This old sponsored request is disabled. Prepare a new transaction paid by your wallet.")
+        owner_pays = True
         # Wallets add their own fee settings and guards before signing; the bridge accepts those only
         # around exactly this approve or revoke (solana-x402-service/src/allowance.mjs, doesOnly).
+        if op["kind"] == "FUND_GAS" and not self.store.claim_gas_submission(account, op_id, now):
+            return self.operation(account, op_id)
         result = self._call(account, "allowance-submit", fee_payer=not owner_pays, owner=self.owner(account),
                             ownerPaysFee=owner_pays, transaction=str(transaction or ""), messageHash=op["message_hash"],
-                            kind="approve" if op["kind"] == "GRANT" else "revoke", amount=str(op["amount"]))
+                            kind={"GRANT": "approve", "REVOKE": "revoke", "FUND_GAS": "fund-gas"}[op["kind"]], amount=str(op["amount"]))
         state = {"confirmed": "DONE", "failed": "FAILED", "rejected": "FAILED"}.get(result.get("state"), "UNCERTAIN")
         detail = {
             "DONE": (f"Allowance now {_text(op['amount'])}." if op["kind"] == "GRANT" else "Revoked: your agent can no longer spend."),
             "FAILED": "Solana refused the transaction. Nothing changed.",
             "UNCERTAIN": "Sent; Solana has not confirmed it yet. Check again in a moment.",
         }[state]
+        if op["kind"] == "FUND_GAS" and state == "DONE":
+            detail = f"Added {Decimal(op['amount']) / 1_000_000_000} SOL to your agent for network fees."
         self.store.update_op(op_id, state, int(self.now()), tx=result.get("transaction"), detail=detail)
         return self.operation(account, op_id)
 
@@ -325,7 +355,7 @@ class SolanaAllowanceService:
         if op is None:
             raise AllowanceError("No such request.")
         return {"operation": op["op_id"], "kind": op["kind"], "state": op["state"], "chain": "solana",
-                "amountAtomic": str(op["amount"]), "txHash": op["tx"], "detail": op["detail"],
+                "amountAtomic": str(op["amount"]), "currency": "SOL" if op["kind"] == "FUND_GAS" else "USDC", "txHash": op["tx"], "detail": op["detail"],
                 "explorer": f"https://solscan.io/tx/{op['tx']}" if op["tx"] else None}
 
     def stale_allowances(self, account: str) -> list[dict[str, Any]]:

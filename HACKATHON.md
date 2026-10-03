@@ -415,3 +415,20 @@ receiver account is ready; a real funded metered Solana payment is still unteste
 The final model-picker price label correction is committed locally; this commit
 step did not redeploy that static asset. Earlier entries describe historical
 working-tree states; no PR was created for this integration.
+
+## October 3: user-funded Solana network fees
+
+The owner rejected operator-funded gas. Ask now checks the user's agent SOL
+balance against live network-fee and token-account-rent quotes before funding,
+and signs the funding transaction only with that agent. Insufficient SOL sends
+nothing and releases the Ask hold. Wallet approvals/revokes have no operator
+sponsor fallback. Allowance now exposes agent SOL and an explicit, wallet-signed
+SOL transfer to the account's own agent; amount and destination are validated.
+Unknown SOL transfers are not resubmitted, and new funding is blocked for review.
+
+Verification: 77 Solana Node tests, 297 isolated web tests and 13 allowance tests
+passed on the VPS without real payments. A pre-existing archive test assumed
+ordering of equal timestamps; it now selects the intended chat by ID. Six-file
+source-hash and unpaid-quote activation preflight passed. The update is staged,
+not active: the operator must run `activate-user-gas.py` with sudo. No new wallet
+or payment was created. Real user-funded Solana Ask settlement remains untested.

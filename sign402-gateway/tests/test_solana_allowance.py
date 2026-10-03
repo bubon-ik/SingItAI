@@ -137,14 +137,55 @@ class SolanaAllowanceTests(unittest.TestCase):
         self.clock[0] += 86400
         self.service.spend(ACCOUNT, 4_000_000, "b", self.paid(4_000_000))
 
-    def test_a_wallet_without_sol_uses_our_fee_payer_only_if_there_is_one(self):
+    def test_a_wallet_without_sol_never_uses_operator_fee_payer(self):
         self.bridge.owner_sol = 0
         self.service.setup(ACCOUNT, "20", "5", "30")
-        self.service.prepare_wallet(ACCOUNT, "GRANT", amount="20")
-        self.assertEqual(self.bridge.calls[-1][3], "FEE-PAYER-KEY")
-        self.service.fee_payer_key = None
-        with self.assertRaisesRegex(AllowanceError, "needs a little SOL"):
+        with self.assertRaisesRegex(AllowanceError, "wallet needs SOL"):
             self.service.prepare_wallet(ACCOUNT, "GRANT", amount="20")
+        self.assertFalse(any(c[0] == "allowance-prepare" for c in self.bridge.calls))
+
+    def test_wallet_explicitly_funds_own_agent_sol_and_no_operator_key_is_used(self):
+        self.service.setup(ACCOUNT, "20", "5", "30")
+        op = self.service.prepare_wallet(ACCOUNT, "FUND_GAS", amount="0.005")
+        self.assertIn("0.005 SOL", op["walletShows"])
+        self.assertIn(self.service.agent_key(ACCOUNT)[0], op["walletShows"])
+        call = self.bridge.calls[-1]
+        self.assertEqual(call[4]["kind"], "fund-gas")
+        self.assertEqual(call[4]["amount"], "5000000")
+        self.assertIsNone(call[3])
+        result = self.service.submit_wallet(ACCOUNT, op["operation"], "SIGNED")
+        self.assertEqual(result["currency"], "SOL")
+        self.assertIn("Added 0.005 SOL", result["detail"])
+        self.assertIsNone(self.bridge.calls[-1][3])
+        for amount in ["0", "-1", "NaN", "Infinity", "0.0000000001", "0.101"]:
+            with self.assertRaises(AllowanceError):
+                self.service.prepare_wallet(ACCOUNT, "FUND_GAS", amount=amount)
+
+    def test_uncertain_gas_transfer_cannot_be_repeated_or_replaced(self):
+        self.service.setup(ACCOUNT, "20", "5", "30")
+        op = self.service.prepare_wallet(ACCOUNT, "FUND_GAS", amount="0.005")
+        self.bridge.submit_state = "uncertain"
+        self.assertEqual(self.service.submit_wallet(ACCOUNT, op["operation"], "SIGNED")["state"], "UNCERTAIN")
+        calls = len(self.bridge.calls)
+        self.service.submit_wallet(ACCOUNT, op["operation"], "SIGNED")
+        self.assertEqual(len(self.bridge.calls), calls)
+        with self.assertRaisesRegex(AllowanceError, "previous SOL transfer"):
+            self.service.prepare_wallet(ACCOUNT, "FUND_GAS", amount="0.005")
+
+    def test_gas_routes_bind_the_operation_to_kind_and_account(self):
+        from types import SimpleNamespace
+        from sign402_gateway.web_api import WebApi, WebError
+        api = SimpleNamespace(solana=self.service, prepare_by_account=Mock(), permit_by_account=Mock())
+        self.service.setup(ACCOUNT, "20", "5", "30")
+        status, prepared, _ = WebApi._solana_allowance(api, "POST", "/allowance/fund-gas/prepare", ACCOUNT, {"amount": "0.005"})
+        self.assertEqual((status, prepared["kind"]), (200, "FUND_GAS"))
+        body = {"operation": prepared["operation"], "transaction": "SIGNED"}
+        with self.assertRaises(WebError):
+            WebApi._solana_allowance(api, "POST", "/allowance/grant/submit", ACCOUNT, body)
+        with self.assertRaises(WebError):
+            WebApi._solana_allowance(api, "POST", "/allowance/fund-gas/submit", "solana:other", body)
+        status, result, _ = WebApi._solana_allowance(api, "POST", "/allowance/fund-gas/submit", ACCOUNT, body)
+        self.assertEqual((status, result["state"], result["currency"]), (200, "DONE", "SOL"))
 
     def test_the_bridge_knows_what_was_prepared_and_its_refusal_is_readable(self):
         from sign402_gateway.solana_chat import SolanaChatError

@@ -38,16 +38,26 @@ account with an existing approved allowance. The account's own network agent pay
 there is no fallback across networks and no per-answer wallet confirmation.
 Solana `upto` requires the payer agent to own the escrow funds. The adapter reuses
 that agent's existing USDC, including previous refunds; if needed it pulls only
-the ceiling shortfall through the existing SPL delegate grant. The existing
-operator fee payer sponsors that funding transaction. Refunds remain in the same
+the ceiling shortfall through the existing SPL delegate grant. The user's own
+agent pays that funding transaction and any token-account rent from its SOL.
+In **Allowance → Agent network fees**, the user explicitly signs a SOL transfer
+from their wallet to their agent (default 0.005 SOL; editable). There is no
+operator sponsorship or automatic gas top-up. An unpaid RPC check prices rent
+and the network fee before funding; insufficient SOL releases the Ask hold
+without sending anything. Refunds remain in the same
 user's agent wallet. No new shared payer or merchant credit balance is created.
 Existing Venice and Telegram selections stay independent.
 
-The Solana allowance feature and encrypted funding fee payer must already be
-configured in the protected gateway environment. The guarded activation checked
-these prerequisites before installing the gateway changes. Funding gas/rent is borne by that existing sponsor, separately from
-CDP's published two-transaction service fee; this tariff is not a guarantee of net
-profit after all operating costs.
+The Solana allowance feature must be configured. The user pays approval/revoke
+fees in SOL and explicitly funds their agent's network-fee balance. Existing
+operator sponsor credentials are neither used by Ask funding nor used as a
+fallback for wallet operations. Solana network fees and initial token-account
+rent are separate from the published 0.002-USDC x402 settlement service fee.
+The user sees and confirms the SOL transfer in their own wallet. Unknown gas
+transfer outcomes prevent resubmission until reconciliation.
+
+**Rollout:** this user-funded gas update is prepared and tested; activation still
+requires the operator's sudo authentication. It has not made a real payment.
 
 The client pins the HTTPS merchant, native Base USDC, recipient, maximum and
 billing formula before signing. CDP advertises its settlement signer in the quote;

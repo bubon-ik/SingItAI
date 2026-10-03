@@ -405,7 +405,7 @@ class AgentTests(unittest.TestCase):
                          [(first, "Steam cards", True), (second, "second", False)])
         self.assertFalse(store.update("wallet:0x2222222222222222222222222222222222222222", second, archived=True))
         store.update(ACCOUNT, first, archived=True)
-        chat = store.chats(ACCOUNT)[0]
+        chat = next(c for c in store.chats(ACCOUNT) if c["id"] == first)
         self.assertEqual((chat["pinned"], chat["archived"]), (False, True))
         self.agent.message(ACCOUNT, first, "back again")
         self.assertFalse(next(c for c in store.chats(ACCOUNT) if c["id"] == first)["archived"])

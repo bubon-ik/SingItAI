@@ -76,6 +76,14 @@ export function transferInstruction({ source, destination, authority, amount }) 
   };
 }
 
+// Explicit wallet-signed SOL transfer to this account's own agent.
+export function gasTransferInstruction({ owner, agent, amount }) {
+  return { programAddress: SYSTEM_PROGRAM,
+    accounts: [{ address: owner, role: AccountRole.WRITABLE_SIGNER },
+      { address: address(agent, 'agent'), role: AccountRole.WRITABLE }],
+    data: new Uint8Array([2, 0, 0, 0, ...u64(amount)]) };
+}
+
 // Associated Token Account program, CreateIdempotent (1): the agent's USDC account, paid by the fee payer.
 export function createAccountInstruction({ payer, account, owner }) {
   return {
@@ -178,9 +186,10 @@ export class TokenAllowance {
   async prepare({ kind, owner, delegate, amount, feePayer }) {
     address(owner, 'owner'); address(feePayer, 'fee payer');
     const source = await usdcAccount(owner);
-    const state = await this.state(owner, delegate);
+    const state = kind === 'fund-gas' ? { exists: true } : await this.state(owner, delegate);
     if (!state.exists) throw new ClientError('NO_USDC_ACCOUNT', 'This wallet has no USDC account on Solana yet. Add some USDC first.');
-    const instruction = kind === 'approve'
+    const instruction = kind === 'fund-gas'
+      ? gasTransferInstruction({owner, agent: delegate, amount}) : kind === 'approve'
       ? approveInstruction({ source, owner, delegate: address(delegate, 'agent'), amount })
       : kind === 'revoke' ? revokeInstruction({ source, owner }) : null;
     if (!instruction) throw new ClientError('INVALID_OPERATION', 'Approve or revoke only.');
@@ -194,7 +203,7 @@ export class TokenAllowance {
     catch { throw new ClientError('INVALID_TRANSACTION', 'The signed transaction could not be read.'); }
     if (messageHash(tx.messageBytes) !== expectedHash) {
       const source = await usdcAccount(owner);
-      const expected = kind === 'approve' ? approveInstruction({ source, owner, delegate: address(delegate, 'agent'), amount })
+      const expected = kind === 'fund-gas' ? gasTransferInstruction({owner, agent: delegate, amount}) : kind === 'approve' ? approveInstruction({ source, owner, delegate: address(delegate, 'agent'), amount })
         : kind === 'revoke' ? revokeInstruction({ source, owner }) : null;
       if (!expected || !doesOnly(tx.messageBytes, expected, feePayer ? feePayer.address : owner)) {
         throw new ClientError('TRANSACTION_MISMATCH', 'The wallet signed something other than what was prepared. Nothing was sent.');
@@ -209,15 +218,36 @@ export class TokenAllowance {
     return this.send(signed);
   }
 
-  // The agent takes `amount` from the owner's account (as delegate) into its own, creating it if needed.
-  async pull({ owner, amount, agent, feePayer }) {
-    address(owner, 'owner');
+  async fundingTransaction({owner, amount, agent, feePayer}) {
     const agentAccount = await usdcAccount(agent.address);
-    const tx = await this.compile(feePayer.address, [
-      createAccountInstruction({ payer: feePayer.address, account: agentAccount, owner: agent.address }),
-      transferInstruction({ source: await usdcAccount(owner), destination: agentAccount, authority: agent.address, amount }),
+    return this.compile(feePayer.address, [
+      createAccountInstruction({payer: feePayer.address, account: agentAccount, owner: agent.address}),
+      transferInstruction({source: await usdcAccount(owner), destination: agentAccount, authority: agent.address, amount}),
     ]);
-    const signed = await partiallySignTransaction([agent.signer.keyPair, feePayer.signer.keyPair], tx);
+  }
+
+  async fundingCheck({owner, amount, agent, feePayer = agent}, tx = null) {
+    tx ??= await this.fundingTransaction({owner, amount, agent, feePayer});
+    const options = {abortSignal: AbortSignal.timeout(20000)};
+    const balance = (await this.rpc.getBalance(feePayer.address, {commitment: 'confirmed'}).send(options)).value;
+    const account = (await this.rpc.getAccountInfo(await usdcAccount(agent.address), {encoding: 'base64', commitment: 'confirmed'}).send(options)).value;
+    const rent = account ? 0n : await this.rpc.getMinimumBalanceForRentExemption(165).send(options);
+    const fee = (await this.rpc.getFeeForMessage(Buffer.from(tx.messageBytes).toString('base64'), {commitment: 'confirmed'}).send(options)).value;
+    if (fee === null) throw new ClientError('RPC_UNAVAILABLE', 'Could not price the network fee.');
+    const required = BigInt(rent) + BigInt(fee);
+    return {ready: BigInt(balance) >= required, payer: feePayer.address,
+      balanceLamports: String(balance), requiredLamports: String(required),
+      networkFeeLamports: String(fee), accountRentLamports: String(rent)};
+  }
+
+  // The user's own agent pays funding gas and its token-account rent from its SOL.
+  async pull({ owner, amount, agent, feePayer = agent }) {
+    address(owner, 'owner');
+    const tx = await this.fundingTransaction({owner, amount, agent, feePayer});
+    const funding = await this.fundingCheck({owner, amount, agent, feePayer}, tx);
+    if (!funding.ready) return {state: 'not_submitted', reason: 'agent_sol_required', ...funding};
+    const signers = agent.address === feePayer.address ? [agent.signer.keyPair] : [agent.signer.keyPair, feePayer.signer.keyPair];
+    const signed = await partiallySignTransaction(signers, tx);
     return this.send(signed);
   }
 
@@ -240,6 +270,6 @@ export class TokenAllowance {
       if (status && ['confirmed', 'finalized'].includes(status.confirmationStatus)) return { transaction: id, state: 'confirmed' };
       await this.sleep(1500);
     }
-    return { transaction: id, state: refused ? 'rejected' : 'uncertain' };
+    return { transaction: id, state: 'uncertain' };
   }
 }

@@ -104,16 +104,21 @@ def pay(server, gw, account, body):
             if int(owner["amount"]) < shortfall:
                 raise AllowanceError("Not enough native USDC in the Solana wallet for this request's reserve.")
             if shortfall:
-                if lane.fee_payer_key is None:
-                    raise AllowanceUnavailable("Solana agent funding sponsorship is not configured. Nothing was paid.")
+                funding_ready = lane._call(account, "allowance-funding-check", owner=lane.owner(account), amount=str(shortfall))
+                if funding_ready.get("ready") is not True:
+                    raise AllowanceUnavailable("Your agent needs SOL for network fees and its USDC account. Open Allowance → Agent network fees to add SOL from your wallet. Nothing was sent.")
                 state["fundingUncertain"] = True
                 _save(journal, state)
                 try:
-                    funding = lane._call(account, "allowance-pull", fee_payer=True, owner=lane.owner(account), amount=str(shortfall))
+                    funding = lane._call(account, "allowance-pull", owner=lane.owner(account), amount=str(shortfall))
                 except Exception:
                     raise AllowanceError("Solana funding could not be confirmed. No chat payment was attempted; funding must be checked before retrying.") from None
                 state["fundingTx"] = funding.get("transaction")
                 _save(journal, state)
+                if funding.get("state") == "not_submitted" and funding.get("reason") == "agent_sol_required":
+                    state["fundingUncertain"] = False
+                    _save(journal, state)
+                    raise AllowanceUnavailable("Your agent needs SOL. Open Allowance → Agent network fees. Nothing was sent.")
                 if funding.get("state") != "confirmed":
                     raise AllowanceError("Solana funding needs confirmation. No chat payment was attempted; do not repeat funding.")
                 state["fundingUncertain"] = False
