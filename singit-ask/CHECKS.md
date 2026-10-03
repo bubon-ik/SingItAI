@@ -252,6 +252,8 @@ working-tree states; no PR was created for this integration.
 
 ## October 3: user-funded Solana network fees
 
+Implementation: [91e9a07](https://github.com/bubon-ik/SingItAI/commit/91e9a07bf2c1461fc8c436454e4828074c04c092).
+
 The owner rejected operator-funded gas. Ask now checks the user's agent SOL
 balance against live network-fee and token-account-rent quotes before funding,
 and signs the funding transaction only with that agent. Insufficient SOL sends
