@@ -24,6 +24,9 @@ function required(name) {
 }
 
 const config = {
+  directSolana: process.env.SINGIT_ASK_DIRECT_SOLANA === "1",
+  quoteToken: process.env.SINGIT_ASK_QUOTE_TOKEN,
+  quoteDb: process.env.SINGIT_ASK_QUOTE_DB,
   meteredSolana: process.env.SINGIT_ASK_METERED_SOLANA === "1",
   payToSolana: required("SINGIT_ASK_PAY_TO_SOLANA"),
   payToBase: required("SINGIT_ASK_PAY_TO_BASE"),

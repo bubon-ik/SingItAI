@@ -15,7 +15,8 @@ import { ExactSvmScheme } from "@x402/svm/exact/server";
 import { bazaarResourceServerExtension, declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { addMeteredRoute } from "./metered.mjs";
 import { addSolanaMeteredRoute } from "./solana-metered.mjs";
-import { TERMS, METERED_ROUTE, SOLANA_TERMS, SOLANA_ROUTE } from "./pricing.mjs";
+import { addSolanaQuotedRoute } from "./solana-quoted.mjs";
+import { DIRECT_TERMS, QUOTED_ROUTE, TERMS, METERED_ROUTE, SOLANA_TERMS, SOLANA_ROUTE } from "./pricing.mjs";
 
 export const BASE = "eip155:8453";
 export const SOLANA = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
@@ -107,13 +108,14 @@ export function createApp(config, { facilitatorClient, meteredFacilitatorClient,
 
   app.get("/health", (_req, res) => {
     res.json({ ok: true, service: "singit-ask", model: config.model,
+               ...(config.directSolana ? { directSolana: {endpoint: QUOTED_ROUTE, ...DIRECT_TERMS} } : {}),
                price: { [SOLANA]: config.priceSolana, [BASE]: config.priceBase },
                ...(meteredFacilitatorClient ? { metered: TERMS } : {}),
                ...(meteredFacilitatorClient && config.meteredSolana ? { meteredSolana: SOLANA_TERMS } : {}) });
   });
   app.get("/v1/models", (_req, res) => {
     res.json({ object: "list", data: [{ id: "singit-ask", object: "model", owned_by: "singit",
-                                         upstream: config.model, ...(meteredFacilitatorClient && config.meteredSolana ? { meteredSolana: { endpoint: SOLANA_ROUTE, network: SOLANA, ...SOLANA_TERMS } } : {}), ...(meteredFacilitatorClient ? { metered: { endpoint: METERED_ROUTE, network: BASE, ...TERMS } } : {}), price_per_answer: { solana: config.priceSolana, base: config.priceBase } }] });
+                                         upstream: config.model, ...(config.directSolana ? {directSolana: {endpoint: QUOTED_ROUTE, ...DIRECT_TERMS}} : {}), ...(meteredFacilitatorClient && config.meteredSolana ? { meteredSolana: { endpoint: SOLANA_ROUTE, network: SOLANA, ...SOLANA_TERMS } } : {}), ...(meteredFacilitatorClient ? { metered: { endpoint: METERED_ROUTE, network: BASE, ...TERMS } } : {}), price_per_answer: { solana: config.priceSolana, base: config.priceBase } }] });
   });
 
   if (meteredFacilitatorClient) addMeteredRoute(app, config, {
@@ -123,6 +125,11 @@ export function createApp(config, { facilitatorClient, meteredFacilitatorClient,
   if (meteredFacilitatorClient && config.meteredSolana) addSolanaMeteredRoute(app, config, {
     facilitatorClient: meteredFacilitatorClient, readRequest, upstream, fetchImpl, log,
   });
+
+  if (config.directSolana) {
+    if (!meteredFacilitatorClient) throw new Error("CDP facilitator is required for direct Solana");
+    addSolanaQuotedRoute(app, config, {facilitatorClient: meteredFacilitatorClient, readRequest, upstream, fetchImpl});
+  }
 
   app.use(paymentMiddleware({
     [`POST ${ROUTE}`]: {

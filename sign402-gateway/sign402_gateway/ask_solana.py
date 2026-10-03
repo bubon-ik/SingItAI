@@ -1,8 +1,7 @@
-"""Solana Ask: one request escrow, actual settlement, automatic unused-USDC refund.
+"""Measured usage, paid directly from the user's delegated USDC account.
 
-Uses the account's existing agent and SPL delegate grant. The small funding
-shortfall (if any) is pulled into that user's agent, never a merchant balance.
-All uncertain funding/payment outcomes retain a durable hold and block retry.
+CDP is the network fee payer. No transfer to the agent or agent SOL is needed.
+An uncertain submitted payment retains its durable hold and blocks retry.
 """
 import fcntl
 import hashlib
@@ -16,12 +15,12 @@ import subprocess
 from .agent_allowance import AllowanceError, AllowanceUnavailable
 from .ask_metered import _journal_dir, _save
 
-CAP, FEE, MARKUP_BPS = 3000, 2000, 3000
+CAP, FEE, MARKUP_BPS = 3000, 1000, 3000
 PAY_TO = "4an2sqamWWhny9mjLsMtGXCDXakeNtg6vSLq4QvhdmQu"
 
 
 def _run(lane, **payload):
-    helper = Path(__file__).resolve().parents[2] / "singit-ask/src/solana-buyer-cli.mjs"
+    helper = Path(__file__).resolve().parents[2] / "singit-ask/src/solana-direct-cli.mjs"
     node = str(Path.home() / ".hermes/node/bin/node")
     if not Path(node).is_file():
         node = shutil.which("node")
@@ -39,7 +38,7 @@ def _run(lane, **payload):
 
 def _invoice(result, agent):
     if result.get("ok") is not True or result.get("payer") != agent:
-        raise AllowanceError("The Solana payment/refund needs settlement review. It was not repeated.")
+        raise AllowanceError("The Solana payment needs settlement review. It was not repeated.")
     data = result.get("body") or {}
     usage, bill = data.get("usage") or {}, data.get("billing") or {}
     raw = usage.get("buyer_cost_micro")
@@ -56,8 +55,6 @@ def _invoice(result, agent):
                 "markupAtomic": str(markup), "totalAtomic": str(amount), "currency": "USDC"}
     if cost < 0 or amount > CAP or any(bill.get(k) != v for k, v in expected.items()) or result.get("amountAtomic") != str(amount):
         raise AllowanceError("Solana invoice differs from the agreed price. Do not retry payment.")
-    if result.get("refundAtomic") != str(CAP - amount):
-        raise AllowanceError("The unused Solana reserve was not confirmed returned. Do not retry payment.")
     return amount, data
 
 
@@ -67,6 +64,9 @@ def pay(server, gw, account, body):
     lane = getattr(server, "solana_allowance", None)
     if lane is None:
         raise AllowanceUnavailable("Solana allowance payments are not configured.")
+    token = os.environ.get("SINGIT_ASK_QUOTE_TOKEN", "")
+    if len(token) < 32:
+        raise AllowanceUnavailable("Direct Solana payments are not configured. Nothing was paid.")
     root = _journal_dir()
     name = hashlib.sha256(account.encode()).hexdigest() + "-solana"
     journal, checkpoint = root / (name + ".json"), root / (name + ".submitted")
@@ -74,7 +74,7 @@ def pay(server, gw, account, body):
     with os.fdopen(fd, "w") as lock, lane._spend_lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if journal.exists() or checkpoint.exists():
-            raise AllowanceError("A previous Solana Ask payment/refund needs review. No new payment was sent.")
+            raise AllowanceError("A previous Solana Ask payment needs review. No new payment was sent.")
         now = int(lane.now())
         limits = lane.store.limits(account)
         if limits is None:
@@ -84,73 +84,47 @@ def pay(server, gw, account, body):
         if CAP > min(limits["per_purchase_cap"], lane.max_per_purchase):
             raise AllowanceError("This question needs a maximum allowance of 0.003 USDC; the actual charge can be lower.")
         hold = "ask-" + secrets.token_hex(16)
-        state = {"account": account, "holdId": hold, "ceilingAtomic": CAP, "createdAt": now, "fundingUncertain": False}
+        state = {"account": account, "holdId": hold, "ceilingAtomic": CAP, "createdAt": now, "requestId": secrets.token_hex(16), "mode": "direct_exact"}
         complete, reserved = False, False
         try:
             _save(journal, state)
             lane.store.reserve_metered(hold, account, CAP, min(limits["daily_cap"], lane.max_daily), now)
             reserved = True
-            ready = _run(lane, checkOnly=True, body=body)
-            if ready.get("error") == "receiver_not_ready":
-                raise AllowanceUnavailable("The SingIt Solana receiving wallet has no active native USDC account yet. No funds were moved.")
-            if ready.get("ready") is not True:
-                raise AllowanceUnavailable("The Solana payment quote could not be checked. Nothing was paid.")
             chain = lane.chain_state(account, fresh=True)
-            owner, agent_balance = chain["owner"], int(chain["agent"]["usdcAtomic"])
-            delegated = int(owner["delegatedToAgent"])
-            shortfall = max(0, CAP - agent_balance)
-            if delegated <= 0 or delegated < shortfall:
+            owner = lane.owner(account)
+            if int(chain["owner"]["delegatedToAgent"]) < CAP:
                 raise AllowanceError("Your Solana grant is revoked or insufficient. Nothing was paid.")
-            if int(owner["amount"]) < shortfall:
-                raise AllowanceError("Not enough native USDC in the Solana wallet for this request's reserve.")
-            if shortfall:
-                funding_ready = lane._call(account, "allowance-funding-check", owner=lane.owner(account), amount=str(shortfall))
-                if funding_ready.get("ready") is not True:
-                    raise AllowanceUnavailable("Your agent needs SOL for network fees and its USDC account. Open Allowance → Agent network fees to add SOL from your wallet. Nothing was sent.")
-                state["fundingUncertain"] = True
-                _save(journal, state)
-                try:
-                    funding = lane._call(account, "allowance-pull", owner=lane.owner(account), amount=str(shortfall))
-                except Exception:
-                    raise AllowanceError("Solana funding could not be confirmed. No chat payment was attempted; funding must be checked before retrying.") from None
-                state["fundingTx"] = funding.get("transaction")
-                _save(journal, state)
-                if funding.get("state") == "not_submitted" and funding.get("reason") == "agent_sol_required":
-                    state["fundingUncertain"] = False
-                    _save(journal, state)
-                    raise AllowanceUnavailable("Your agent needs SOL. Open Allowance → Agent network fees. Nothing was sent.")
-                if funding.get("state") != "confirmed":
-                    raise AllowanceError("Solana funding needs confirmation. No chat payment was attempted; do not repeat funding.")
-                state["fundingUncertain"] = False
-                _save(journal, state)
+            if int(chain["owner"]["amount"]) < CAP:
+                raise AllowanceError("At least 0.003 USDC must be available; only actual usage will be charged.")
             agent, key = lane.agent_key(account)
-            result = _run(lane, privateKey=key, body=body, checkpoint=str(checkpoint))
-            key = None
-            refunded = result.get("refunded") is True and result.get("payer") == agent
-            if refunded:
-                if result.get("amountAtomic") != "0" or result.get("refundAtomic") != str(CAP):
-                    raise AllowanceError("The complete Solana refund is not confirmed. Do not retry payment.")
-                amount, data = 0, None
-            else:
-                amount, data = _invoice(result, agent)
+            try:
+                result = _run(lane, privateKey=key, owner=owner, requestId=state["requestId"],
+                              token=token, body=body, checkpoint=str(checkpoint))
+            finally:
+                key = None
+            if not checkpoint.exists():
+                raise AllowanceUnavailable("The answer or payment could not be prepared. No payment was submitted.")
+            amount, data = _invoice(result, agent)
             saved = json.loads(checkpoint.read_text())
-            if saved.get("channelId") != result.get("channelId") or saved.get("payer") != agent:
+            if (saved.get("requestId") != state["requestId"] or saved.get("payer") != agent
+                    or saved.get("owner") != owner or result.get("owner") != owner
+                    or saved.get("amountAtomic") != str(amount)
+                    or saved.get("memo") != "singit-ask:" + state["requestId"]):
                 raise AllowanceError("Solana receipt belongs to a different request. Do not retry payment.")
             tx = result.get("transaction")
-            # A second read verifies this request's channel, exact payout and full unused refund.
-            verified = _run(lane, verify={"signature": tx, "channelId": saved["channelId"], "payer": agent, "amount": str(amount)})
-            if verified.get("verified") is not True:
-                raise AllowanceError("The Solana settlement/refund is not confirmed. No automatic retry was made.")
-            state.update(txId=tx, amountAtomic=amount, channelId=saved["channelId"], refundAtomic=CAP-amount)
+            # Preserve receipt identifiers before the independent chain read, for reconciliation.
+            state.update(txId=tx, amountAtomic=amount)
             _save(journal, state)
+            verified = _run(lane, verify={"signature": tx, "owner": owner, "agent": agent,
+                "amount": str(amount), "memo": saved["memo"], "feePayer": saved["feePayer"]})
+            if verified.get("verified") is not True:
+                raise AllowanceError("The Solana settlement is not confirmed. No automatic retry was made.")
             lane.store.settle_metered(hold, amount, tx, int(lane.now()))
             complete = True
-            if refunded:
-                raise AllowanceError("The model did not answer. The entire Solana request reserve was returned to your agent; no usage fee was charged.")
             return amount, data, tx
         finally:
             lane._seen.pop(account, None)
-            if complete or (not checkpoint.exists() and not state["fundingUncertain"]):
+            if complete or not checkpoint.exists():
                 if not complete and reserved:
                     lane.store.release_metered(hold)
                 checkpoint.unlink(missing_ok=True)

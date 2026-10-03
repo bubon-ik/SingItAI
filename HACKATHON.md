@@ -441,3 +441,28 @@ identities. All six deployed source hashes match, gateway/web API are active,
 and three health/page checks return 200. The live JavaScript includes the
 Agent network fees control. This confirms deployment, not a funded Solana
 end-to-end payment; no payment was sent during verification.
+
+
+## October 3: direct delegated Solana Ask payments
+
+The replacement web Ask path generates a measured invoice privately, then
+settles one CDP x402 `exact` payment directly from the user's existing USDC
+account using the existing agent's SPL delegate grant. CDP provides the network
+fee payer. No agent SOL funding, intermediate USDC transfer or agent token
+account is required. Pricing is actual model cost + rounded 30% markup +
+0.001 USDC, capped at 0.003. The legacy public Solana `upto` endpoint remains
+unchanged at 0.002 USDC; Base's working payment adapter is preserved.
+
+Preparation uses a server-only token and request-bound, expiring quotes. Answers
+remain private until settlement; a durable SQLite claim prevents repeated
+settlement after concurrent requests or restarts. Unknown results remain blocked.
+Both client and gateway verify the owner debit, receiver credit, delegated signer,
+request memo and facilitator gas payer against confirmed chain data. Existing
+wallets, approvals and unresolved holds are preserved. The merchant bears model
+cost if a prepared answer is abandoned before payment.
+
+Verification: 43 Node tests and 294 isolated web tests passed on the VPS without
+payments. Live CDP verify accepted the existing agent's delegated exact transfer;
+settle was never called. Nine-file deployment preflight passed. This update is
+staged, pending sudo activation and a real user-initiated Solana chat payment.
+Implementation commit link will be recorded after committing this change.

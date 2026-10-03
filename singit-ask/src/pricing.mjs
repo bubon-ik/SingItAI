@@ -26,3 +26,8 @@ export function billUsage(usage, terms = TERMS) {
   return { ...terms, providerCostAtomic: provider.toString(), markupAtomic: markup.toString(),
     totalAtomic: total.toString(), currency: "USDC" };
 }
+
+// Web Ask: measure privately, then settle once from the delegated owner account.
+export const QUOTED_ROUTE = "/v1/chat/completions/quoted/solana";
+export const QUOTED_URL = `https://ask.singitai.app${QUOTED_ROUTE}`;
+export const DIRECT_TERMS = TERMS;

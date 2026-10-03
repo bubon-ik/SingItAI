@@ -56,7 +56,7 @@ class AskTests(unittest.TestCase):
         web_ask.choose(self.server,SOLANA_ACCOUNT)
         self.assertTrue(web_ask.selected(self.server,SOLANA_ACCOUNT))
         self.assertFalse(web_ask.selected(self.server,ACCOUNT))
-        self.assertEqual(web_ask.usage(SOLANA_ACCOUNT)[1]["settlementFeeAtomic"],2000)
+        self.assertEqual(web_ask.usage(SOLANA_ACCOUNT)[1]["settlementFeeAtomic"],1000)
 
     def test_model_choice_is_per_account_and_moves_no_money(self):
         self.server.chat_service.store.set_model(ACCOUNT,"existing-venice-model")
@@ -74,7 +74,7 @@ class AskTests(unittest.TestCase):
         model=result["models"][0]
         self.assertEqual((model["markupPercent"],model["settlementFeeUsd"],model["maxChargeUsd"]),(30,"0.001","0.003"))
         self.assertNotIn("pricePerAnswerUsd",model)
-        self.assertEqual(web_ask.listing({"models":[],"categories":[],"chosen":"existing"},SOLANA_ACCOUNT)["models"][0]["settlementFeeUsd"],"0.002")
+        self.assertEqual(web_ask.listing({"models":[],"categories":[],"chosen":"existing"},SOLANA_ACCOUNT)["models"][0]["settlementFeeUsd"],"0.001")
 
     def test_too_long_question_is_refused_before_payment(self):
         with self.assertRaises(ValueError):self.chat([{"role":"user","content":"🙂"*12001}])

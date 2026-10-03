@@ -1,0 +1,38 @@
+{
+  "sign402-gateway/sign402_gateway/ask_solana.py": {
+    "before": "b67348c1efbc3138e7cc72781a21e67c4bc9351c2da0fc0c955b703f81d9c7b5",
+    "after": "5299a4f051c2b7693e444fbf11f0a4d583af1885c16054456ec37b31604b8c19"
+  },
+  "sign402-gateway/sign402_gateway/web_ask.py": {
+    "before": "f9438d87e91fd1af94a3483b263bec506d69999854b538d59a978ecba6b26f85",
+    "after": "05b11d9ed592f2e6234e3c4d18a436c1bd8c9a8bdb835347618e6b2818377fd2"
+  },
+  "website/app/main.js": {
+    "before": "e0be34ecb3cc18c07056772ff83d6137d495ad12f1d6485eef0da4bf142c7633",
+    "after": "681be4e6281099567325a70322264cb915ef2be94d522613f1183d3784cea1c1"
+  },
+  "singit-ask/src/app.mjs": {
+    "before": "b90fb931913a450e32b03ad30a45c123bf71809dc8b3342c7daaa3457526336a",
+    "after": "0ec05a27fdfc6a85964f6035484e3ce65e64524f2eb240ca709194b062bbc1fc"
+  },
+  "singit-ask/src/pricing.mjs": {
+    "before": "150f3a3415508c3a2883938f623cc44759f3d1101aa97c652ab5b5153a2aa9bb",
+    "after": "9434a5de06d3f905442e9a22a35f1c6333eb5ac97a8e9238b2daffb50ca728d7"
+  },
+  "singit-ask/src/server.mjs": {
+    "before": "00771abdbd5301837a7a600cf4f0c630eca2728df6b69a6f1cf0bcad88c20e64",
+    "after": "7f50fdab749573b9b78a10771c75a9e141f3e3c3e45f60aa5bda4a19572032c6"
+  },
+  "singit-ask/src/solana-quoted.mjs": {
+    "before": null,
+    "after": "78a2dbde39e5467d5a5a2a7da1f18ac929b1aa316faefd162119bf80adb0115c"
+  },
+  "singit-ask/src/solana-direct-buyer.mjs": {
+    "before": null,
+    "after": "851a0ed97a75eec9d817e4a88a96e495912c643758d61b81c2b42fdf60e5cdd2"
+  },
+  "singit-ask/src/solana-direct-cli.mjs": {
+    "before": null,
+    "after": "6f25ab6c98d705d9b2d57257890db4b64fb646e379b05db866314f9a6c2de8fe"
+  }
+}

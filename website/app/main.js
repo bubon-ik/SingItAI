@@ -468,14 +468,11 @@ function renderSolanaAllowance(a) {
       </div>
     </div></div>
     <div class="bezel" style="margin-top:18px"><div class="core">
-      <h2>Agent network fees</h2>
-      <p>Your agent holds ${(Number(a.agentSolLamports || 0) / 1e9).toFixed(6)} SOL.
-        It pays Solana network fees and creates its USDC account when needed.
-        You cover these costs separately from the USDC price of each answer.</p>
-      <p class="faint">SOL goes to your own agent: <span class="mono">${esc(a.limiter)}</span>.
-        Unused SOL stays there for future requests. Funding is never automatic.</p>
-      <div class="row"><input id="agent-gas-sol" class="input" style="width:140px" inputmode="decimal" value="0.005" aria-label="SOL for agent network fees">
-        <button class="btn btn-primary btn-sm" data-action="fund-agent-gas">Add SOL from my wallet</button></div>
+      <h2>Pay for answers in USDC</h2>
+      <p>SingIt Ask charges the actual token cost + 30% + 0.001 USDC per answer,
+        directly from your wallet within your limits. Your agent needs no SOL top-up.</p>
+      <p class="faint">Coinbase handles the payment's network fee. Keep a little SOL in your own wallet
+        only for actions you sign yourself, such as approving or revoking the allowance.</p>
     </div></div>`;
 }
 

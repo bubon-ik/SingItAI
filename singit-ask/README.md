@@ -1,89 +1,87 @@
 # SingIt Ask
 
-OpenAI-compatible model answers with direct USDC payments over x402.
+OpenAI-compatible model answers with USDC payments over x402.
 
-- **Base metered endpoint:** `POST /v1/chat/completions/metered`.
-  Actual Surplus token cost + 30% markup (rounded up to one USDC micro-unit)
-  + a published 0.001 USDC settlement fee. The agent authorizes **at most 0.003
-  USDC**, and only the final invoice is settled. No merchant credit deposit.
-- **Solana metered endpoint:** `POST /v1/chat/completions/metered/solana`.
-  Actual token cost + 30% markup + **0.002 USDC** settlement fee. CDP uses two
-  on-chain transactions: a one-request escrow deposit (at most 0.003 USDC), then
-  settlement and an automatic refund of the unused portion to the payer agent.
-  This does not create prepaid merchant/chat credit or a reusable channel.
-- **Example:** 0.0001 USDC model cost + 0.00003 markup costs **0.00113 USDC on Base** or **0.00213 USDC on Solana**, including the respective settlement fee.
-- **Cost source:** Surplus `usage.buyer_cost_micro`, so the provider's actual
-  input/output/cache pricing is reflected. Missing, invalid or over-ceiling cost
-  fails without asking the facilitator to settle; no estimated-cost fallback.
-- **Facilitator:** [Coinbase CDP](https://docs.cdp.coinbase.com/x402/seller/facilitator)
-  for `upto` on both networks. Base uses sponsored, bounded EIP-2612 approval and Permit2 settlement; Solana uses the canonical payment-channels program with sponsored fees and rent.
-  The published service fee also applies during CDP's promotional free allowance.
-  It is not a claim that CDP charges each particular promotional transaction.
-- **Legacy endpoint:** `POST /v1/chat/completions` remains PayAI `exact`, priced
-  at 0.003 USDC per answer on Base or Solana. The manual test page uses this route.
-- **Model:** `deepseek-v4.1-flash` via Surplus using the merchant's private API key.
-- **Free endpoints:** `GET /health` and `GET /v1/models` expose both pricing modes.
+- **Web Ask on Base and Solana:** actual Surplus token cost + 30% markup
+  (rounded up to one USDC micro-unit) + a published **0.001 USDC** settlement fee.
+  The maximum allowed charge is **0.003 USDC**. This is a limit, not a fixed price.
+- **Example:** 0.0001 USDC model cost + 0.00003 markup + 0.001 fee =
+  **0.00113 USDC**, on either network's web Ask path.
+- **Base:** `POST /v1/chat/completions/metered`, CDP `upto` with bounded
+  sponsored approval and actual-amount settlement. Its existing limiter funding
+  path is unchanged; that separate funding leg still uses the existing gas policy.
+- **Solana:** authenticated `POST /v1/chat/completions/quoted/solana/prepare`
+  prepares an answer and a measured invoice. `POST .../quoted/solana/:id`
+  requires one CDP `exact` payment for that invoice before releasing the answer.
+  The user's agent signs as the existing SPL delegate; USDC moves directly from
+  the owner's token account to the merchant. CDP supplies the network fee payer.
+  No agent USDC/SOL top-up, agent token account, escrow or refund is needed.
+- **Legacy Solana `upto`:** `/v1/chat/completions/metered/solana` remains available
+  with its original 0.002 USDC fee and two-step escrow/refund flow. The updated
+  web adapter does not use it.
+- **Legacy fixed-price API:** `/v1/chat/completions` remains PayAI `exact`,
+  0.003 USDC on either network. The manual MetaMask test page uses this route.
+- **Cost source:** Surplus `usage.buyer_cost_micro`, including its actual
+  input/output/cache pricing. Missing, invalid or over-ceiling cost is refused.
+- **Model:** `deepseek-v4.1-flash` via the merchant's private Surplus API key.
+- **Facilitator:** [Coinbase CDP](https://docs.cdp.coinbase.com/x402/seller/facilitator).
+  The published settlement service fee also applies during its free allowance;
+  it does not assert CDP invoices every individual transaction during that allowance.
 
 ## Automatic web-agent payments
 
-**Deployment status, October 3:** both metered merchant endpoints, gateway adapters,
-model selection and actual-spend ledgers are active. A real Base agent request
-settled **0.001055 USDC** for 833 tokens; the native-USDC receipt, usage record and
-allowance ledger agree. See [verification and transaction](CHECKS.md#october-3-first-verified-actual-usage-base-ask-payment).
-The receiver's canonical Solana USDC account now exists and was verified with
-1 USDC. A funded end-to-end Solana metered payment remains unverified.
+Select **DeepSeek V4.1 Flash · SingIt Ask** with an existing approved allowance.
+The account's own network agent pays automatically within its limits. There is
+no cross-network fallback or per-answer wallet confirmation. Existing Venice
+and Telegram selections remain independent.
 
-Select **DeepSeek V4.1 Flash · SingIt Ask** in a Base or Solana
-account with an existing approved allowance. The account's own network agent pays;
-there is no fallback across networks and no per-answer wallet confirmation.
-Solana `upto` requires the payer agent to own the escrow funds. The adapter reuses
-that agent's existing USDC, including previous refunds; if needed it pulls only
-the ceiling shortfall through the existing SPL delegate grant. The user's own
-agent pays that funding transaction and any token-account rent from its SOL.
-In **Allowance → Agent network fees**, the user explicitly signs a SOL transfer
-from their wallet to their agent (default 0.005 SOL; editable). There is no
-operator sponsorship or automatic gas top-up. An unpaid RPC check prices rent
-and the network fee before funding; insufficient SOL releases the Ask hold
-without sending anything. Refunds remain in the same
-user's agent wallet. No new shared payer or merchant credit balance is created.
-Existing Venice and Telegram selections stay independent.
+Solana users keep their USDC in their own wallet. They need SOL there for wallet
+operations they explicitly sign, such as approving/revoking the SPL allowance;
+ordinary Ask payments require no additional SOL funding. Existing agent SOL or
+USDC from earlier flows is preserved, but the new Ask path does not use it.
+The existing funding APIs remain for compatibility, without a funding prompt in
+Ask's allowance UI. Unresolved older payments still require reconciliation.
 
-The Solana allowance feature must be configured. The user pays approval/revoke
-fees in SOL and explicitly funds their agent's network-fee balance. Existing
-operator sponsor credentials are neither used by Ask funding nor used as a
-fallback for wallet operations. Solana network fees and initial token-account
-rent are separate from the published 0.002-USDC x402 settlement service fee.
-The user sees and confirms the SOL transfer in their own wallet. Unknown gas
-transfer outcomes prevent resubmission until reconciliation.
+The preparation route uses a dedicated server-only secret, never browser code.
+It does not expose the answer. Request IDs bind owner, agent and normalized input;
+a repeated preparation returns the same quote without invoking the model again.
+Only one pending quote per owner/agent is allowed. Quotes expire after five
+minutes, while uncertain settlements never expire or resubmit automatically.
+The merchant pays for inference before collecting payment on this private path:
+a failed/abandoned quote therefore leaves that model cost with the merchant.
+Do not expose the preparation secret to untrusted clients.
 
-**Rollout, October 3:** the operator activated the update at 11:25:35 UTC.
-All six deployed hashes match the tested files; gateway, web API and merchant
-health checks pass, and the live UI serves the gas-funding control. Existing
-wallet identities were preserved. No real user-funded Solana Ask payment has
-yet been verified.
+A private SQLite database records the generated answer, exact invoice and durable
+settlement claim before the facilitator is called. Concurrent/replayed requests
+cannot settle again. The buyer pins the merchant URL, native USDC mint, receiver,
+owner, delegate, price, fee payer and request memo. Both the buyer and gateway
+independently check the confirmed transaction's owner debit, merchant credit,
+agent authority and memo before counting the actual charge.
 
-The client pins the HTTPS merchant, native Base USDC, recipient, maximum and
-billing formula before signing. CDP advertises its settlement signer in the quote;
-that signer can vary. The signature's witness binds the recipient and ceiling.
-A sponsored Permit2 allowance is limited to the same 3000 micro-USDC ceiling.
-The returned invoice and actual on-chain USDC transfer are checked independently
-by the Node client and gateway. Solana additionally proves the canonical channel distribution, exact merchant payout and entire unused refund on chain. The ledger reserves the maximum, then atomically
-records the actual charge and releases the unused portion. The UI shows six
-fractional digits and exposes model cost, markup and settlement fee.
+The local allowance ledger reserves at most 0.003 USDC while a request runs,
+then records actual spend and releases the difference. This reservation does not
+move funds on Solana. Unknown payments keep their durable SQLite hold and a
+private checkpoint in `~/.sign402/ask-metered/`, also after restarts. Never clear
+these merely to retry; reconcile the merchant quote record, chain and ledger.
+Base retains its existing reservation TTL and durable Ask retry block.
 
-The signed request is submitted once. An uncertain payment leaves a private,
-non-secret checkpoint in `~/.sign402/ask-metered/` and blocks subsequent Ask
-payments for that account, including after restart. Base reservations retain the existing ledger TTL. Solana reserves are durable SQLite holds that also count against other Solana purchases until settlement or operator reconciliation; they have no automatic expiry. The durable Ask block does not expire automatically. An
-operator must reconcile the nonce/transaction, ledger and memory claim before
-clearing this block. Never remove it merely to retry a timed-out payment.
+**Deployment status, October 3:** the Base actual-usage payment was verified at
+0.001055 USDC for 833 tokens; see [CHECKS.md](CHECKS.md). The previous user-funded
+Solana implementation was activated at 11:25:35 UTC. This direct-payment update
+is tested and staged, pending operator activation with
+`python3 ~/.config/singit-ask/activate-direct-solana.py`. It saves private
+code/config/state backups, preserves wallet identities and checks all three
+services. Its manifest pins nine reviewed files to exact before/after hashes.
 
-The scripts in `deploy/activate-agent.py`, `deploy/activate-context.py` and
-`deploy/activate-metered-merchant.py` record the guarded rollout used on this VPS.
-They create private backups and verify wallet identities, but their manifests pin
-specific before/after hashes. They are historical rollout helpers, not idempotent
-commands for deploying the current tree: review and refresh the manifests against
-the target deployment before reusing them. Operator activation and the subsequent
-buyer-only extension fix have already been applied; see [CHECKS.md](CHECKS.md).
+Verification for this update: 43 Node tests and 294 isolated web tests passed on
+the VPS, including the real delegated transaction builder with simulated
+facilitator settlement. CDP's live `verify` accepted a delegated owner-USDC exact
+payment without submitting it. A real direct Solana settlement still needs the
+owner's funded chat test after activation. No test sends a payment.
+
+Historical activation scripts have version-specific manifests; refresh them
+against production before reusing them. Do not run old activation commands over
+this update.
 
 ## Manual MetaMask test
 
@@ -122,6 +120,9 @@ node --env-file=.env src/server.mjs
 | `SURPLUS_API_KEY` | Surplus buyer key (`inf_…`) with access to the configured model. Fund its workspace's deposited USDC balance; USDC in the linked wallet alone is not a prepaid balance. |
 | `SINGIT_ASK_PRICE_SOLANA`, `SINGIT_ASK_PRICE_BASE` | Legacy exact-route price per answer. Default: `$0.003` on both networks. |
 | `SINGIT_ASK_METERED` | Set `1` to enable the additional Base `upto` route. Requires `CDP_API_KEY_ID` and `CDP_API_KEY_SECRET` in the private service environment. Reuses the existing `cdp-x402-service` installation of `@coinbase/x402`; no dependency installation was performed for this change. |
+| `SINGIT_ASK_DIRECT_SOLANA` | Set `1` to enable the private direct Solana route with CDP metering. |
+| `SINGIT_ASK_QUOTE_TOKEN` | Dedicated server-only authentication secret, shared by merchant and gateway (at least 32 characters). |
+| `SINGIT_ASK_QUOTE_DB` | Private writable SQLite path for prepared answers and settlement claims. |
 | `SINGIT_ASK_METERED_SOLANA` | Set `1` alongside `SINGIT_ASK_METERED=1` to enable the Solana metered route. Uses the same existing CDP credentials and installed `@x402/svm` 2.28.0. |
 | `SINGIT_ASK_MODEL` | Upstream model. Default: `deepseek-v4.1-flash`. |
 | `SINGIT_ASK_PORT` | Loopback port. Default: `8140`. |

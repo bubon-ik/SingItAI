@@ -1,8 +1,7 @@
 """SingIt Ask: one x402 payment per answer, signed by the account's own network agent.
 
 Opt-in through the existing model picker. No prepaid chat credit, manual wallet
-signature or new wallet is involved. Solana reserves a ceiling for one request
-and verifies that all unused USDC is returned to the same agent.
+signature or new wallet is involved. Solana pays the measured cost directly from the owner account with its delegate.
 """
 import hashlib
 from pathlib import Path
@@ -35,10 +34,10 @@ def choose(server: Any, account: str) -> tuple[int, dict[str, Any]]:
 
 def listing(result: dict[str, Any], account: str) -> dict[str, Any]:
     if account.startswith(("wallet:", "solana:")):
-        fee = "0.002" if account.startswith("solana:") else "0.001"
+        fee = "0.001"
         result["models"].insert(0, {
             "id": MODEL, "label": LABEL, "provider": "SingIt Ask",
-            "blurb": f"Actual token cost + 30% + {fee} USDC settlement fee. Up to 0.003 per answer; on Solana the unused request reserve is refunded to your agent.",
+            "blurb": f"Actual token cost + 30% + {fee} USDC settlement fee. Up to 0.003 per answer; Solana charges your wallet directly, with no agent SOL top-up.",
             "billingMode": "actual_usage", "markupPercent": 30, "settlementFeeUsd": fee, "maxChargeUsd": "0.003", "tags": ["x402"],
         })
         result["categories"].insert(0, {"key": "x402", "label": "Pay per answer"})
@@ -58,7 +57,7 @@ def require_payment_ready(account: str) -> None:
 
 def usage(account: str = "") -> tuple[int, dict[str, Any]]:
     return 200, {"ok": True, "model": MODEL, "modelLabel": LABEL, "billingMode": "actual_usage",
-                 "maxChargeAtomic": PRICE, "markupPercent": 30, "settlementFeeAtomic": 2000 if account.startswith("solana:") else 1000, "creditAtomic": None, "topUps": []}
+                 "maxChargeAtomic": PRICE, "markupPercent": 30, "settlementFeeAtomic": 1000, "creditAtomic": None, "topUps": []}
 
 
 def chat(server: Any, gw: Any, account: str, raw_messages: Any, context: Any = None) -> tuple[int, dict[str, Any]]:
