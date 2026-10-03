@@ -236,3 +236,16 @@ journal remains for this account. This is a verified live Base metered payment;
 Solana's actual-usage path still has no verified funded end-to-end example here.
 Verification was read-only; the owner initiated the request. Changes remain
 uncommitted; no PR.
+
+## October 3: committed Ask integration
+
+Implementation: [0e5762b](https://github.com/bubon-ik/SingItAI/commit/0e5762bc328f6a94e0f24c17a6e2a8c40dcf7887)
+on `trezor-local-sidecar`. Includes Base and Solana actual-usage adapters, English
+operator test page, conversation-location continuity, provider-specific errors
+and the Base extension-echo fix. Verification: 33 Node tests locally and on the
+VPS, 295 isolated web tests, and 21 allowance/reservation tests passed. The owner's
+Base payment settled 0.001055 USDC and matches the receipt and ledger. Solana's
+receiver account is ready; a real funded metered Solana payment is still untested.
+The final model-picker price label correction is committed locally; this commit
+step did not redeploy that static asset. Earlier entries describe historical
+working-tree states; no PR was created for this integration.
