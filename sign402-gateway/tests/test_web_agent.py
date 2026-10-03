@@ -264,7 +264,7 @@ class AgentTests(unittest.TestCase):
         self.assertNotIn("В какой стране", message["text"])
         self.assertNotIn("which country", message["text"].lower())
 
-    def test_short_extractions_wait_15_seconds_answers_40(self):
+    def test_short_extractions_wait_6_seconds_answers_40(self):
         waits = []
 
         def opener(request, timeout):
@@ -274,7 +274,18 @@ class AgentTests(unittest.TestCase):
         for json_mode in (True, False):
             with self.assertRaises(wg.AgentUnavailable):
                 model([{"role": "user", "content": "hi"}], json_mode=json_mode)
-        self.assertEqual(waits, [15, 40])
+        self.assertEqual(waits, [6.0, 40])
+
+    def test_a_slow_extraction_is_given_up_on_at_its_deadline(self):
+        def opener(request, timeout):  # every read on time, the answer as a whole far too late
+            time.sleep(0.5)
+            return io.BytesIO(json.dumps({"choices": [{"message": {"content": "{}"}}]}).encode())
+        model = wg.ChatModel("key", "m", opener=opener)
+        model.JSON_DEADLINE = 0.1
+        started = time.monotonic()
+        with self.assertRaises(wg.AgentUnavailable):
+            model([{"role": "user", "content": "hungry in Prague"}], json_mode=True)
+        self.assertLess(time.monotonic() - started, 0.3)
 
     def test_the_model_answers_without_thinking_from_the_fastest_provider(self):
         sent = []

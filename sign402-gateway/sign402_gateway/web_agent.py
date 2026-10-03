@@ -425,8 +425,8 @@ class Jev:
     """
 
     # Seconds for the whole answer, first try and one retry. A socket timeout bounds each read, not the answer:
-    # on 3 October one reading took 12 s while every read stayed under it. Usually Jev answers in 1-3 s.
-    DEADLINES = (5.0, 4.0)
+    # on 3 October one reading took 12 s while every read stayed under it. Usually Jev answers in 0.3 s.
+    DEADLINES = (3.0, 3.0)
     _pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="jev")  # a late answer finishes here, unused
 
     def __init__(self, api_key: str, model: str = "jev-latest", opener: Callable = urllib.request.urlopen):
@@ -513,13 +513,28 @@ class Jev:
 class ChatModel:
     """OpenRouter chat completions, the same model family as Hermes. No tools."""
 
+    # A JSON extraction (a country, a plan) sits in front of the user's answer, and each one has a fallback
+    # without it; so it gets a deadline for the whole answer. Usually 0.5 s; on 3 October one took 30 s.
+    JSON_DEADLINE = 6.0
+    _pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="model")  # a late answer finishes here, unused
+
     def __init__(self, api_key: str, model: str, base_url: str = "https://openrouter.ai/api/v1",
                  opener: Callable = urllib.request.urlopen):
         self.api_key, self.model, self.base_url, self.opener = api_key, model, base_url.rstrip("/"), opener
 
     def __call__(self, messages: list[dict[str, str]], *, json_mode: bool = False, max_tokens: int = 700) -> str:
-        """A reply, or AgentUnavailable. JSON extractions (a country, a plan) wait 15 s, not 40: each one sits in
-        front of the user's answer, and without it the handler asks or falls back instead."""
+        """A reply, or AgentUnavailable: a JSON extraction within JSON_DEADLINE, an answer within 40 s a read."""
+        if not json_mode:
+            return self._complete(messages, False, max_tokens, 40)
+        started = time.monotonic()
+        try:
+            return self._pool.submit(self._complete, messages, True, max_tokens, self.JSON_DEADLINE).result(
+                timeout=self.JSON_DEADLINE)
+        except FutureTimeout:
+            logger.warning("web agent: the model did not answer in %.1fs (too slow)", time.monotonic() - started)
+            raise AgentUnavailable("model") from None
+
+    def _complete(self, messages: list[dict[str, str]], json_mode: bool, max_tokens: int, timeout: float) -> str:
         # No thinking: DeepSeek V4 Flash thinks by default, and spent the whole budget of a short extraction on it,
         # answering nothing (seen on 3 October: 120 of 120 tokens reasoning, empty content, ~10 s). The fastest
         # provider: these calls sit in front of the user's answer.
@@ -533,7 +548,7 @@ class ChatModel:
                      "HTTP-Referer": "https://app.singitai.app", "X-Title": "SingIt"})
         started = time.monotonic()
         try:
-            with self.opener(request, timeout=15 if json_mode else 40) as response:
+            with self.opener(request, timeout=timeout) as response:
                 reply = json.loads(response.read(1_000_000))
             return str(reply["choices"][0]["message"]["content"] or "").strip()
         except Exception as exc:
