@@ -465,4 +465,4 @@ Verification: 43 Node tests and 294 isolated web tests passed on the VPS without
 payments. Live CDP verify accepted the existing agent's delegated exact transfer;
 settle was never called. Nine-file deployment preflight passed. This update is
 staged, pending sudo activation and a real user-initiated Solana chat payment.
-Implementation commit link will be recorded after committing this change.
+Implementation: [d405ca0](https://github.com/bubon-ik/SingItAI/commit/d405ca0ccc4ff2291277ef5477517ff722fe346f).
