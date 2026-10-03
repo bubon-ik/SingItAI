@@ -56,8 +56,11 @@ rent are separate from the published 0.002-USDC x402 settlement service fee.
 The user sees and confirms the SOL transfer in their own wallet. Unknown gas
 transfer outcomes prevent resubmission until reconciliation.
 
-**Rollout:** this user-funded gas update is prepared and tested; activation still
-requires the operator's sudo authentication. It has not made a real payment.
+**Rollout, October 3:** the operator activated the update at 11:25:35 UTC.
+All six deployed hashes match the tested files; gateway, web API and merchant
+health checks pass, and the live UI serves the gas-funding control. Existing
+wallet identities were preserved. No real user-funded Solana Ask payment has
+yet been verified.
 
 The client pins the HTTPS merchant, native Base USDC, recipient, maximum and
 billing formula before signing. CDP advertises its settlement signer in the quote;

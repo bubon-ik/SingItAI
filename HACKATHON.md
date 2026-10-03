@@ -434,3 +434,10 @@ ordering of equal timestamps; it now selects the intended chat by ID. Six-file
 source-hash and unpaid-quote activation preflight passed. The update is staged,
 not active: the operator must run `activate-user-gas.py` with sudo. No new wallet
 or payment was created. Real user-funded Solana Ask settlement remains untested.
+
+Operator activation completed at 2026-10-03 11:25:35 UTC, with private rollback
+snapshot `20261003T112535Z-before-user-funded-solana` and preserved wallet
+identities. All six deployed source hashes match, gateway/web API are active,
+and three health/page checks return 200. The live JavaScript includes the
+Agent network fees control. This confirms deployment, not a funded Solana
+end-to-end payment; no payment was sent during verification.
