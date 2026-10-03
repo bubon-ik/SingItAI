@@ -276,6 +276,18 @@ class AgentTests(unittest.TestCase):
                 model([{"role": "user", "content": "hi"}], json_mode=json_mode)
         self.assertEqual(waits, [15, 40])
 
+    def test_the_model_answers_without_thinking_from_the_fastest_provider(self):
+        sent = []
+
+        def opener(request, timeout):
+            sent.append(json.loads(request.data))
+            return io.BytesIO(json.dumps({"choices": [{"message": {"content": '{"country": "CZ"}'}}]}).encode())
+        model = wg.ChatModel("key", "m", opener=opener)
+        self.assertEqual(model([{"role": "user", "content": "hungry in Prague"}], json_mode=True, max_tokens=120),
+                         '{"country": "CZ"}')
+        self.assertEqual(sent[0]["reasoning"], {"enabled": False})  # thinking took a short extraction's whole budget
+        self.assertEqual(sent[0]["provider"], {"sort": "latency"})
+
     def test_food_is_offered_as_gift_cards_for_food_in_that_country(self):
         self.hints = {"country": "CZ"}
         message = self.send("я хочу заказать еду в Чехии", "food")

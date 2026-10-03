@@ -520,7 +520,11 @@ class ChatModel:
     def __call__(self, messages: list[dict[str, str]], *, json_mode: bool = False, max_tokens: int = 700) -> str:
         """A reply, or AgentUnavailable. JSON extractions (a country, a plan) wait 15 s, not 40: each one sits in
         front of the user's answer, and without it the handler asks or falls back instead."""
-        body: dict[str, Any] = {"model": self.model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.4}
+        # No thinking: DeepSeek V4 Flash thinks by default, and spent the whole budget of a short extraction on it,
+        # answering nothing (seen on 3 October: 120 of 120 tokens reasoning, empty content, ~10 s). The fastest
+        # provider: these calls sit in front of the user's answer.
+        body: dict[str, Any] = {"model": self.model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.4,
+                                "reasoning": {"enabled": False}, "provider": {"sort": "latency"}}
         if json_mode:
             body["response_format"] = {"type": "json_object"}
         request = urllib.request.Request(
