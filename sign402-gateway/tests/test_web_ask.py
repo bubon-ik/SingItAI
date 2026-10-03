@@ -30,9 +30,34 @@ class AskTests(unittest.TestCase):
         self.pay.assert_called_once()
         args=self.pay.call_args.args
         self.assertEqual(args[2],ACCOUNT)
-        self.assertEqual(args[3]["messages"],[{"role":"user","content":"Hi"}])
+        self.assertEqual(args[3]["messages"][-1],{"role":"user","content":"Hi"})
+        self.assertIn("connected network is Base",args[3]["messages"][0]["content"])
         self.assertEqual(args[3]["max_tokens"],1200)
         self.assertNotIn("topUpUsd",answer)
+
+    def test_solana_funding_context_overrides_stale_history_without_erasing_question(self):
+        original = [{"role":"system","content":"Current state: owner has USDC"},
+                    {"role":"assistant","content":"Top up Agent funds and SOL before chatting"},
+                    {"role":"user","content":"hello"}]
+        with patch.object(web_ask.ask_solana,"pay",return_value=(1130,self.pay.return_value[1],"solana-tx")) as sol:
+            self.chat(original,account=SOLANA_ACCOUNT)
+            sent=sol.call_args.args[3]["messages"]
+        self.assertEqual(sent[-1],original[-1]);self.assertEqual(sent[1],original[1])
+        self.assertIn("directly from the user's wallet",sent[0]["content"])
+        self.assertIn("Zero USDC or SOL on the agent is normal",sent[0]["content"])
+        self.assertIn("not an unsolicited wallet status",sent[0]["content"])
+        self.assertEqual(original[0]["content"],"Current state: owner has USDC")
+        self.pay.assert_not_called()
+
+    def test_payment_context_and_latest_question_survive_history_trimming(self):
+        original=[{"role":"user","content":str(i)+"x"*800} for i in range(40)]
+        with patch.object(web_ask.ask_solana,"pay",return_value=(1130,self.pay.return_value[1],"solana-tx")) as sol:
+            self.chat(original,account=SOLANA_ACCOUNT)
+            sent=sol.call_args.args[3]["messages"]
+        self.assertLessEqual(len(sent),40)
+        self.assertLessEqual(sum(len(m["content"].encode("utf-16-le"))//2 for m in sent),24000)
+        self.assertIn("connected network is Solana",sent[0]["content"])
+        self.assertEqual(sent[-1],original[-1])
 
     def test_pause_prevents_payment(self):
         self.gw._purchases_paused=lambda:True

@@ -660,9 +660,8 @@ class ChatStore:
                  "createdAt": r["created_at"]} for r in reversed(rows)]
 
 
-SYSTEM = """You are SingIt, the assistant on app.singitai.app. The user connected their own wallet on Base.
-What SingIt does: the user sets a daily limit and a per-purchase limit once; a small contract (the limiter) enforces
-them on chain; the user approves it once from their wallet; then you, their agent, buy for them inside those limits
+SYSTEM = """You are SingIt, the assistant on app.singitai.app. The user connected their own wallet on the network in the current state.
+What SingIt does: the user sets a daily limit and a per-purchase limit once; Base uses a limiter contract; Solana uses an SPL delegate grant for the total and server-enforced daily/per-purchase limits; the user approves it once from their wallet; then you, their agent, buy for them inside those limits
 without asking again: paid x402 data (crypto news, market data, funding rates, token prices, ENS, risk checks,
 weather, exchange rates, flights, restaurants and hotels, reading a link) and Bitrefill gift cards, eSIMs and phone
 top-ups. Money stays in the user's wallet until a purchase needs
@@ -671,6 +670,12 @@ You cannot send money elsewhere, swap, withdraw or change anything without the u
 balances or purchases: the current state is below. Be brief and warm, like a helpful concierge. Reply in the
 user's language. When an action fits, tell them the short phrase to type, e.g. "Set a $20 daily limit, $5 per
 purchase", "Buy crypto news", "Find a Steam gift card in Germany".
+
+Payment-state interpretation: USDC fields ending in Atomic are millionths of USDC. allowanceAtomic is permission
+remaining, not a wallet balance; ownerUsdcAtomic is the user's USDC balance. Internal agent balances are not
+proof that a purchase is blocked. Only an actual operation result can report a funding requirement; never invent
+wallet funding steps, UI controls, SOL requirements or a blocked purchase from missing/zero internal balances.
+For a greeting, greet naturally and briefly. Do not give an unsolicited balances, limits or funding checklist.
 Current state: {state}"""
 
 # Before the limits are approved there is no Venice credit to talk on: the concierge helps them start.
@@ -680,8 +685,8 @@ allowance, $5 at a time). Until then, help them get started; if they want a long
 
 VENICE_SYSTEM = """You are SingIt, the user's AI assistant on app.singitai.app. Talk about anything they want and answer fully and
 well; use Markdown when it helps (lists, tables, code). Reply in the user's language.
-You are also their buying agent. They set a daily and a per-purchase limit that a contract on Base enforces; inside
-it you buy for them without asking again: paid x402 data (crypto news, market data, funding rates, token prices,
+You are also their buying agent. They set daily and per-purchase limits. Base uses a limiter contract; Solana uses an SPL delegate grant
+for the total and server-enforced daily/per-purchase limits. Inside those limits you buy for them without asking again: paid x402 data (crypto news, market data, funding rates, token prices,
 ENS, risk checks), Bitrefill gift cards, eSIMs and phone top-ups, and the selected paid chat service.
 Live data is bought for a question before it reaches you, a cent or two each: the weather, exchange
 rates, token and stock prices, Polymarket odds, a flight's status, flight prices, restaurants and hotels with
@@ -691,6 +696,12 @@ news", "Find a Steam gift card in Germany", "Set a $20 daily limit, $5 per purch
 "Where is flight LH400?", "Email me that", "Call +420 … and book a table for two at 8pm". You cannot save an email
 address, send an email, make a call or change a setting from inside this answer, so never say you did: the app does
 those and shows a card. Never invent prices, balances or purchases: the current state is below.
+
+Payment-state interpretation: USDC fields ending in Atomic are millionths of USDC. allowanceAtomic is permission
+remaining, not a wallet balance; ownerUsdcAtomic is the user's USDC balance. Internal agent balances are not
+proof that a purchase is blocked. Only an actual operation result can report a funding requirement; never invent
+wallet funding steps, UI controls, SOL requirements or a blocked purchase from missing/zero internal balances.
+For a greeting, greet naturally and briefly. Do not give an unsolicited balances, limits or funding checklist.
 Current state: {state}"""
 
 
@@ -914,10 +925,12 @@ class WebAgent:
             return {"configured": False, "chain": "solana"}  # the Solana lane is off on this server
         status = self._lane(account).status(account)
         if not status.get("configured"):
-            return {"configured": False, **({"chain": "solana"} if solana else {})}
-        return {k: status.get(k) for k in ("configured", "state", "limiter", "dailyCapAtomic", "perPurchaseCapAtomic",
-                                           "remainingTodayAtomic", "allowanceAtomic", "floatAtomic", "expiry", "chain")
-                if k in status}
+            return {"configured": False, "chain": "solana" if solana else "base"}
+        state = {k: status.get(k) for k in ("configured", "state", "limiter", "dailyCapAtomic", "perPurchaseCapAtomic",
+                                           "remainingTodayAtomic", "allowanceAtomic", "ownerUsdcAtomic", "expiry", "chain")
+                 if k in status}
+        state["chain"] = "solana" if solana else "base"
+        return state
 
     # -- handlers --
 

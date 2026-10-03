@@ -77,8 +77,11 @@ remained at inspection. The activation manifest is now historical.
 Verification for this update: 43 Node tests and 294 isolated web tests passed on
 the VPS, including the real delegated transaction builder with simulated
 facilitator settlement. CDP's live `verify` accepted a delegated owner-USDC exact
-payment without submitting it. A real direct Solana settlement still needs the
-owner's funded chat test after activation. No test sends a payment.
+payment without submitting it. The owner subsequently completed a direct Solana payment: 0.001069 USDC for
+1081 tokens, independently verified at finalized commitment. Its receipt and
+allowance ledger agree; CDP paid the network fee. See [CHECKS.md](CHECKS.md).
+Automated tests send no payments. A separate chat-context correction is staged
+to prevent obsolete agent-funding advice in generated answers.
 
 Historical activation scripts have version-specific manifests; refresh them
 against production before reusing them. Do not run old activation commands over

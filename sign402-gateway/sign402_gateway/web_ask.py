@@ -60,6 +60,43 @@ def usage(account: str = "") -> tuple[int, dict[str, Any]]:
                  "maxChargeAtomic": PRICE, "markupPercent": 30, "settlementFeeAtomic": 1000, "creditAtomic": None, "topUps": []}
 
 
+def _payment_context(messages: list[dict[str, str]], account: str) -> list[dict[str, str]]:
+    """Authoritative provider/network context, kept even when old turns are trimmed."""
+    common = (
+        "Current selected chat service: DeepSeek V4.1 Flash via SingIt Ask. "
+        "Each answer uses x402 automatically within the approved limits: actual model cost + 30% + "
+        "0.001 USDC, with a 0.003 USDC maximum. This is not Venice credit or a prepaid chat balance. "
+        "Do not infer payment failure or request an agent top-up from old assistant messages or an "
+        "internal float balance. Only actual operation results can establish a payment problem. "
+        "A greeting needs a brief greeting, not an unsolicited wallet status or funding checklist. "
+    )
+    if account.startswith("solana:"):
+        payment = (
+            "The connected network is Solana. For SingIt Ask the existing SPL delegate pays USDC "
+            "directly from the user's wallet to the merchant; Coinbase CDP pays transaction fees. "
+            "Zero USDC or SOL on the agent is normal and does not block Ask. No agent SOL top-up, "
+            "agent token account or Agent funds step is needed for this chat. SOL in the user's own "
+            "wallet is needed only for wallet actions they sign, such as approving/revoking the grant. "
+            "Do not extend Ask's payment rules to every other purchase; those use their own quotes/checks."
+        )
+    else:
+        payment = (
+            "The connected network is Base. The existing limiter funds the agent automatically "
+            "when necessary; CDP settles the actual chat invoice. The legacy funding leg can use "
+            "operator-funded ETH, so do not claim every Base network cost is recovered from the user. "
+            "Do not tell a Base user to add SOL."
+        )
+    out = [dict(m) for m in messages]
+    instruction = "\n\nCurrent payment configuration (supersedes older funding advice): " + common + payment
+    if out and out[0]["role"] == "system":
+        out[0]["content"] += instruction
+    else:
+        out.insert(0, {"role": "system", "content": instruction.strip()})
+    while len(out) > 40:
+        out.pop(1)
+    return out
+
+
 def chat(server: Any, gw: Any, account: str, raw_messages: Any, context: Any = None) -> tuple[int, dict[str, Any]]:
     from .web_internal import _limits_from_limiter
     from .web_venice import _messages, _with_data
@@ -68,7 +105,7 @@ def chat(server: Any, gw: Any, account: str, raw_messages: Any, context: Any = N
         raise AllowanceUnavailable("Unsupported account network. No payment was attempted.")
     if getattr(gw, "_purchases_paused", lambda: False)():
         raise AllowanceUnavailable("Payments are paused. No payment was attempted.")
-    messages = _with_data(_messages(raw_messages), context)
+    messages = _payment_context(_with_data(_messages(raw_messages), context), account)
     # Match the merchant's 24,000 UTF-16 code-unit limit before any payment.
     def size() -> int:
         return sum(len(m["content"].encode("utf-16-le")) // 2 for m in messages)

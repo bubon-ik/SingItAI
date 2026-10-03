@@ -70,6 +70,13 @@ class AgentTests(unittest.TestCase):
                                  rank=self.rank)
         self.agent.setup = Mock(return_value={"limiter": "0xNEW"})
 
+    def test_model_state_uses_owner_balance_not_internal_float(self):
+        self.allowance.status.return_value.update(ownerUsdcAtomic=4_875_000,floatAtomic=0)
+        state=self.agent._state(ACCOUNT)
+        self.assertEqual(state["ownerUsdcAtomic"],4_875_000)
+        self.assertNotIn("floatAtomic",state)
+        self.assertIn("allowanceAtomic is permission",wg.VENICE_SYSTEM)
+
     def rank(self, text, options):
         self.ranked = dict(options)
         if self.fit is None:

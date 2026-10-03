@@ -275,3 +275,34 @@ identities. All six deployed source hashes match, gateway/web API are active,
 and three health/page checks return 200. The live JavaScript includes the
 Agent network fees control. This confirms deployment, not a funded Solana
 end-to-end payment; no payment was sent during verification.
+
+
+## October 3: first verified direct Solana Ask payment
+
+The owner's `hello` settled successfully in finalized Solana slot 452930408 at
+2026-10-03T12:14:46Z. Transaction:
+[WDX88g28…T7nmd](https://solscan.io/tx/WDX88g28scLasw4BJVQj98KLhm4gn9wBJv5rRcSogy5F9kukaDZUAaf7NUJpvCE7M1a76MbRtepwxJBzo9T7nmd).
+
+Independent RPC inspection confirms one native-USDC transfer of 1069 atomic
+units directly from owner `BTXXtaRQfzd7BF6zADrMtqDeDhdiiP3t2WYXHz3hCCSK` to
+receiver `4an2sqamWWhny9mjLsMtGXCDXakeNtg6vSLq4QvhdmQu`, authorized by the existing
+agent `qSgKeem2rCAEqHRQZvMEmrpiQQNEQaCZCLtcUA8VgMc`. The owner's USDC balance
+changed from 4.875000 to 4.873931; the receiver gained exactly 0.001069 USDC.
+The advertised CDP fee payer paid 10001 lamports; neither owner nor agent paid
+that transaction's network fee.
+
+Usage: 546 input + 535 output = 1081 tokens. Provider cost 53 micro-USDC + rounded
+30% markup 16 + settlement service fee 1000 = **1069 micro-USDC (0.001069 USDC)**.
+The merchant receipt, independently validated transfer and allowance spend ledger
+agree. No metered hold or pending Solana Ask journal remained. Verification was
+read-only; the owner sent the paid question. The 0.003 ceiling was not charged.
+
+The answer incorrectly asked for agent USDC/SOL funding despite this successful
+payment. The model had received the internal zero float and an outdated
+Base-oriented system prompt without the new direct-payment rules. The follow-up
+fix supplies owner balance instead of internal float, identifies the actual
+network, distinguishes spending permission from balance and attaches provider-
+specific funding rules that override obsolete advice in earlier chat messages.
+Greetings should not trigger unsolicited wallet checklists. All 297 isolated web
+tests pass; the two-file source-hash preflight passes. This context correction is
+staged pending operator activation; it does not change the payment implementation.
