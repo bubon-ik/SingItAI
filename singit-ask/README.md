@@ -80,8 +80,9 @@ facilitator settlement. CDP's live `verify` accepted a delegated owner-USDC exac
 payment without submitting it. The owner subsequently completed a direct Solana payment: 0.001069 USDC for
 1081 tokens, independently verified at finalized commitment. Its receipt and
 allowance ledger agree; CDP paid the network fee. See [CHECKS.md](CHECKS.md).
-Automated tests send no payments. A separate chat-context correction is staged
-to prevent obsolete agent-funding advice in generated answers.
+Automated tests send no payments. The chat-context correction was activated at 12:20:36 UTC to prevent obsolete
+agent-funding advice in generated answers; both deployed source hashes and all
+three service health checks were verified.
 
 Historical activation scripts have version-specific manifests; refresh them
 against production before reusing them. Do not run old activation commands over

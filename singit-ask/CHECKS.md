@@ -308,3 +308,10 @@ tests pass; the two-file source-hash preflight passes. This context correction i
 staged pending operator activation; it does not change the payment implementation.
 
 Context correction: [1cd8e64](https://github.com/bubon-ik/SingItAI/commit/1cd8e646d59e7d358371eeebadfa232ccc250e60).
+
+The operator activated the context correction at 2026-10-03 12:20:36 UTC,
+with private rollback snapshot `20261003T122036Z-before-chat-payment-context`.
+Both deployed hashes match; gateway/web API are active and all three service
+health checks return 200. Existing wallet identities were preserved. Activation
+made no payment. This verifies the installed prompt correction; generated model
+wording is not guaranteed by deterministic regression tests.
