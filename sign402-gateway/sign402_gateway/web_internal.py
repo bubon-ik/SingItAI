@@ -175,14 +175,25 @@ def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict
                                            payload.get("language"))
 
     if action == "data-buy":  # live data for one chat answer, paid from the account's own limits
-        from . import web_data  # noqa: PLC0415
+        from . import web_data, web_ask  # noqa: PLC0415
+        if web_ask.selected(server, account):
+            web_ask.require_payment_ready(account)
         if not account.startswith(SOLANA_PREFIX):
             _limits_from_limiter(server, gw, account)
         return 200, web_data.buy(server, gw, account, payload.get("tool"), payload.get("params"))
 
     if action in ("venice-chat", "venice-models", "venice-model", "venice-usage", "venice-solana-topup"):
+        from . import web_ask
         from . import web_venice  # noqa: PLC0415 - Venice only loads when the chat is used
         solana = account.startswith(SOLANA_PREFIX)
+        if action == "venice-chat" and web_ask.selected(server, account):
+            try:
+                return web_ask.chat(server, gw, account, payload.get("messages"), context=payload.get("context"))
+            except (AllowanceError, ValueError) as exc:
+                return 409, {"ok": False, "error": "ask_refused", "provider": "SingIt Ask",
+                             "text": public_error(exc)}
+        if action == "venice-usage" and web_ask.selected(server, account):
+            return web_ask.usage(account)
         if action == "venice-solana-topup":
             return web_venice.topup_solana(server, account, payload.get("quoteId"), payload.get("approvalHash"),
                                            payload.get("amount"))

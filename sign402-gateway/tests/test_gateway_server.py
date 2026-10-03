@@ -8092,6 +8092,25 @@ class SpendReservationTests(unittest.TestCase):
             600_000,
         )
 
+    def test_actual_settlement_releases_only_the_unused_ceiling(self):
+        store = self.make_store()
+        held = self.reserve(store, 3000, daily_cap_atomic=4000)
+        self.assertIsNone(self.reserve(store, 2000, daily_cap_atomic=4000))
+        recorded = store.settle_reservation(held, tx_id="0xmetered", amount_atomic=1130)
+        self.assertEqual(recorded["amountAtomic"], 1130)
+        self.assertIsNotNone(self.reserve(store, 2000, daily_cap_atomic=4000))
+        self.assertIsNone(self.reserve(store, 1000, daily_cap_atomic=4000))
+
+    def test_actual_settlement_cannot_exceed_hold_or_silently_disappear(self):
+        store = self.make_store()
+        held = self.reserve(store, 3000, daily_cap_atomic=4000)
+        for amount in [-1, 3001, 1.5, True]:
+            with self.assertRaises(ValueError):
+                store.settle_reservation(held, amount_atomic=amount)
+        self.assertIsNone(self.reserve(store, 2000, daily_cap_atomic=4000))
+        with self.assertRaises(ValueError):
+            store.settle_reservation("missing", amount_atomic=1130)
+
     def test_settling_a_reservation_does_not_double_count_it(self):
         store = self.make_store()
 

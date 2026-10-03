@@ -1,0 +1,22 @@
+{
+  "sign402-gateway/sign402_gateway/web_agent.py": {
+    "before": "a908786d2444b3c68bd32cb618c2251ae2bf75701e7a399152388759666b344a",
+    "after": "78640f52af0f8a37068a4bfe375f12735cf8741311d5739d5ab8340592b3a5f7"
+  },
+  "sign402-gateway/sign402_gateway/web_internal.py": {
+    "before": "64f1566ff9a46a3bd7aa0ba704c2e65ecab6ef425d6de8cdbcc54997efc39035",
+    "after": "010fd98700ade8d25ab8b30fa8b56aac055949346d42775654da57df9331165e"
+  },
+  "sign402-gateway/sign402_gateway/web_ask.py": {
+    "before": "87a4e3274682621f002dc9d5351a5c35001e82cae670e2c1efca53778e184217",
+    "after": "f9438d87e91fd1af94a3483b263bec506d69999854b538d59a978ecba6b26f85"
+  },
+  "singit-ask/src/buyer-cli.mjs": {
+    "before": "fd9265a42336d2e069106412a8229a9d1b563382a5e6d5a07209bb661d459a42",
+    "after": "64799d64014270274f47aaea4fc5ad5a34bbd90265a5c3056b2c5d39a3c2e4b6"
+  },
+  "singit-ask/src/metered-buyer.mjs": {
+    "before": "05b2537d41b5b37ca4d1577cf147fd76dcd8cb22117d5e460c334d27c72707cf",
+    "after": "c5f73a78c4559f8fba2c9e1b0f1efc32f04e1f79ef5747ed3cc067d212fcc2bd"
+  }
+}

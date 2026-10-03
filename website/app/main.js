@@ -763,7 +763,7 @@ function renderModal() {
     modalEl.innerHTML = `<div class="overlay" data-action="dismiss"><div class="modal modal-wide bezel" role="dialog" aria-modal="true"
       aria-label="Choose a model"><div class="core">
       <div class="approval-head"><div class="avatar">${mark()}</div>
-        <div><strong>Choose a model</strong><span>Private on Venice · prices per 1M tokens, paid from your chat credit</span></div></div>
+        <div><strong>Choose a model</strong><span>SingIt Ask: token cost + fees, up to 0.003 USDC per answer · Venice: prices per 1M tokens</span></div></div>
       ${granted ? "" : `<p class="note">Your private chat starts once your limits are approved. Your choice is kept until then.</p>`}
       <input id="model-search" class="input" type="search" placeholder="Search ${state.models.models.length} models…"
         value="${esc(query)}" autocomplete="off" aria-label="Search models">
@@ -919,7 +919,7 @@ function renderMain() {
         <textarea id="composer" rows="1" placeholder="Message your agent…" aria-label="Message">${esc(draft)}</textarea>
         <div class="composer-bar">
           ${state.models ? `<button type="button" class="model-chip" data-action="open-models" aria-haspopup="dialog">
-            <span class="venice">Venice</span>${esc(state.models.chosenLabel)}<span class="caret">▾</span></button>` : "<span></span>"}
+            <span class="venice">${esc(state.models.provider || "Venice")}</span>${esc(state.models.chosenLabel)}<span class="caret">▾</span></button>` : "<span></span>"}
           <button class="send" type="submit" aria-label="Send" ${state.sending ? "disabled" : ""}>↑</button>
         </div>
       </form>
@@ -1177,7 +1177,8 @@ function renderCard(card, key) {
     const search = card.search, data = card.data, links = ((search && search.sources) || [])
       .filter((s) => /^https?:\/\//.test(s.url || ""))
       .map((s) => `<a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer nofollow">${esc(s.title || s.url.replace(/^https?:\/\//, "").split("/")[0])}</a>`);
-    return `<div class="msg-meta">${esc(card.model)} · ${Number(card.tokens || 0).toLocaleString("en-US")} tokens · $${esc(card.costUsd)}`
+    const billing = card.billing?.mode === "actual_usage" ? `Model cost: ${usd(card.billing.providerCostAtomic, 6)}; markup: ${usd(card.billing.markupAtomic, 6)}; settlement fee: ${usd(card.billing.settlementFeeAtomic, 6)}` : "";
+    return `<div class="msg-meta" title="${esc(billing)}">${esc(card.model)} · ${Number(card.tokens || 0).toLocaleString("en-US")} tokens · $${esc(card.costUsd)}`
       + (search ? ` · searched the web · $${esc(search.costUsd)}` : card.searchNote ? ` · ${esc(card.searchNote)}` : "")
       + (data ? ` · ${esc(data.name)} · $${esc(data.costUsd)}` : "")
       + `</div>` + (links.length ? `<div class="msg-sources">${links.join("")}</div>` : "") + (data ? dataLink(data) : "");
@@ -1288,17 +1289,17 @@ function renderUsage() {
       <p>Today, in UTC — the day your limiter and Venice count in.</p></div>
     ${u.failed ? `<p class="note warn">${esc(u.failed)}</p>` : ""}
     <div class="metrics">
-      ${metric("Chat credit", u.venice ? usd(u.venice.creditAtomic, Number(u.venice.creditAtomic) % 10000 ? 4 : 2) : "—", u.venice ? `on Venice · ${esc(u.venice.modelLabel)}` : "private chat is off")}
+      ${u.venice?.billingMode === "actual_usage" ? metric("Token billing", "Usage + 30%", `Plus ${usd(u.venice.settlementFeeAtomic, 3)} settlement fee · max 0.003 USDC per answer`) : metric("Chat credit", u.venice ? usd(u.venice.creditAtomic, Number(u.venice.creditAtomic) % 10000 ? 4 : 2) : "—", u.venice ? `on Venice · ${esc(u.venice.modelLabel)}` : "private chat is off")}
       ${metric("Spent today", spent === null ? "—" : usd(spent), a?.configured ? `of ${usd(a.dailyCapAtomic, 0)} daily limit` : "no limits yet")}
-      ${metric("Messages today", String(today.messages), `${Number(today.tokens).toLocaleString("en-US")} tokens · ${usd(today.costAtomic, 4)}`)}
+      ${metric("Messages today", String(today.messages), `${Number(today.tokens).toLocaleString("en-US")} tokens · ${usd(today.costAtomic, u.venice?.billingMode === "actual_usage" ? 6 : 4)}`)}
     </div>
     <div class="bezel" style="margin-top:18px"><div class="core">
       <h3>Today by model</h3>
-      <div class="usage-rows">${rows(today.models, (x) => `<div class="usage-row"><span>${esc(x.label)} <span class="faint">· ${x.messages} ${x.messages === 1 ? "message" : "messages"} · ${Number(x.tokens).toLocaleString("en-US")} tokens</span></span><span class="mono">${usd(x.costAtomic, 4)}</span></div>`, "No private chat messages today.")}</div>
+      <div class="usage-rows">${rows(today.models, (x) => `<div class="usage-row"><span>${esc(x.label)} <span class="faint">· ${x.messages} ${x.messages === 1 ? "message" : "messages"} · ${Number(x.tokens).toLocaleString("en-US")} tokens</span></span><span class="mono">${usd(x.costAtomic, u.venice?.billingMode === "actual_usage" ? 6 : 4)}</span></div>`, "No private chat messages today.")}</div>
       <h3 style="margin-top:22px">Chat credit top-ups</h3>
       <div class="usage-rows">${rows(u.venice?.topUps || [], (t) => `<div class="usage-row"><span>${esc(t.at ? new Date(t.at).toLocaleString() : "Top-up")}</span>
         <span class="mono">${esc(t.paid || "")} ${t.transactionUrl ? `<a href="${esc(t.transactionUrl)}" target="_blank" rel="noopener">↗</a>` : ""}</span></div>`,
-        "None yet. Your agent buys $5 of Venice credit from your allowance when the chat needs it.")}</div>
+        u.venice?.billingMode === "actual_usage" ? `SingIt Ask charges actual token usage + 30% + a ${usd(u.venice.settlementFeeAtomic, 3)} settlement fee through x402. On Solana, unused request reserves return to your agent. No chat top-up is needed.` : "None yet. Your agent buys $5 of Venice credit from your allowance when the chat needs it.")}</div>
     </div></div>`;
 }
 
@@ -1307,7 +1308,7 @@ function renderSettings() {
   return `
     <div class="page-head"><span class="eyebrow">Settings</span><h1>Your <em>agent</em>.</h1></div>
     <div class="bezel"><div class="core settings">
-      <div class="setting"><div><h3>Model</h3><p class="faint">The Venice model your private chat talks to.</p></div>
+      <div class="setting"><div><h3>Model</h3><p class="faint">Choose your chat model and payment method.</p></div>
         <button class="btn btn-ghost btn-sm" data-action="open-models">${esc(state.models?.chosenLabel || "Choose")}</button></div>
       <div class="setting"><div><h3>Reply language</h3><p class="faint">${esc(lang[2] || `Your agent always answers in ${lang[1]}.`)}</p></div>
         <select class="input select-inline" data-setting="reply-lang">${LANGUAGES.map(([c, l]) =>
@@ -1379,14 +1380,14 @@ function renderModelList() {
   return list.map((mdl) => `<button class="model-row ${mdl.id === state.models.chosen ? "chosen" : ""}" data-action="choose-model"
       data-id="${esc(mdl.id)}" role="option" aria-selected="${mdl.id === state.models.chosen}">
       <span class="model-main"><b>${esc(mdl.label)}</b>${mdl.blurb ? `<span>${esc(mdl.blurb)}</span>` : ""}</span>
-      <span class="model-price">${perMillion(mdl.inputUsdPerMTok)} in · ${perMillion(mdl.outputUsdPerMTok)} out</span>
+      <span class="model-price">${mdl.billingMode === "actual_usage" ? `Usage + ${esc(mdl.markupPercent)}% + ${esc(mdl.settlementFeeUsd)} USDC · max ${esc(mdl.maxChargeUsd)}` : `${perMillion(mdl.inputUsdPerMTok)} in · ${perMillion(mdl.outputUsdPerMTok)} out`}</span>
       <span class="model-check">${mdl.id === state.models.chosen ? "✓" : ""}</span></button>`).join("");
 }
 
 async function chooseModel(id) {
   try {
     const chosen = await api.chooseModel(id);
-    state.models = { ...state.models, chosen: chosen.chosen, chosenLabel: chosen.label };
+    state.models = { ...state.models, chosen: chosen.chosen, chosenLabel: chosen.label, provider: chosen.provider || "Venice" };
     state.modal = null;
     render();
     toast(`${chosen.label} answers from your next message.`);

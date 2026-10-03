@@ -1,0 +1,17 @@
+[Unit]
+Description=SingIt Ask (x402 model answers on loopback)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/apps/sign402/singit-ask
+EnvironmentFile=%h/.config/singit-ask/service.env
+ExecStart=%h/.hermes/node/bin/node src/server.mjs
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

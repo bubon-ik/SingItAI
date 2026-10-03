@@ -1,0 +1,34 @@
+{
+  "sign402-gateway/sign402_gateway/ask_metered.py": {
+    "before": null,
+    "after": "afc80ad9ecee695398df9a00f2c22758dc79d9e7a0d562469dfb7f12fd444cb6"
+  },
+  "sign402-gateway/sign402_gateway/ask_solana.py": {
+    "before": null,
+    "after": "94a1c0cd81ee022394a2c6ccd768b8e4e5b5c3c29a8600a6b51da1bf5d7317dd"
+  },
+  "sign402-gateway/sign402_gateway/web_ask.py": {
+    "before": "4732495edeb91cf6ad0bf348d0973256ac71d426c0be03311a0e054ff4bb9dd2",
+    "after": "87a4e3274682621f002dc9d5351a5c35001e82cae670e2c1efca53778e184217"
+  },
+  "sign402-gateway/sign402_gateway/web_internal.py": {
+    "before": "49aece5851951bc92eecf634ac2634abf58d34e0e31543273f9ab776c4d13e92",
+    "after": "64f1566ff9a46a3bd7aa0ba704c2e65ecab6ef425d6de8cdbcc54997efc39035"
+  },
+  "sign402-gateway/sign402_gateway/solana_allowance.py": {
+    "before": "9c62b78e37f20996d320b3647f1938b531bd4a0b7bd4c8f07d2bb7e46151be74",
+    "after": "1c67def0c4db817a698259f00adb5b6091ec0e34cbdef4a0fea0397f4913b13f"
+  },
+  "sign402-gateway/sign402_gateway/server.py": {
+    "before": "89b74bcc975e54198d4b165d90f5f46ba4b757024b74f7dfc616a36acc5c02ff",
+    "after": "b5ae5e7615cd9f5c318ad35ead117ffaeb8c001d42ad1f1ec2d114fdb201206b"
+  },
+  "sign402-gateway/sign402_gateway/web_agent.py": {
+    "before": "ab8c903782ac36dc8d7cc1c29c21ce2f501ca2593641c708f560956a10d5d1f4",
+    "after": "a908786d2444b3c68bd32cb618c2251ae2bf75701e7a399152388759666b344a"
+  },
+  "website/app/main.js": {
+    "before": "dca59a0bc94baf28471256d00495fabd62dd6a9b4d1dec4e2fcbf3969c342958",
+    "after": "0a494accf2cf71a5adb43aeefb2da1776117ad93418f0a1ad546702227c12dae"
+  }
+}

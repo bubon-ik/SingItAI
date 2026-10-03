@@ -133,7 +133,7 @@ class WebVeniceTests(unittest.TestCase):
         status, listing = web_venice.models(self.server, ACCOUNT)
         self.assertEqual((status, listing["chosen"], listing["chosenLabel"]),
                          (200, "venice-uncensored-1-2", "Venice Uncensored 1.2"))
-        prices = [m["outputUsdPerMTok"] for m in listing["models"]]
+        prices = [m["outputUsdPerMTok"] for m in listing["models"] if "outputUsdPerMTok" in m]
         self.assertEqual(prices, sorted(prices))  # cheapest first
         web_venice.choose_model(self.server, ACCOUNT, "grok-4-6")
         self.assertEqual(web_venice.models(self.server, ACCOUNT)[1]["chosenLabel"], "Grok 4.6")
@@ -143,6 +143,32 @@ class WebVeniceTests(unittest.TestCase):
         self.chat("hi")
         sent = next(body for method, url, body in self.venice.requests if url.endswith("/chat/completions"))
         self.assertEqual(sent["model"], "grok-4-6")
+
+    def test_selected_singit_ask_routes_chat_and_usage_without_venice_topups(self):
+        from sign402_gateway import web_ask
+        web_venice.choose_model(self.server, ACCOUNT, web_ask.MODEL)
+        messages = [{"role": "user", "content": "Hi"}]
+        with patch.object(web_internal, "_account", return_value=ACCOUNT), \
+             patch.object(web_ask, "chat", return_value=(200, {"ok": True, "costAtomic": 3000})) as ask, \
+             patch.object(web_venice, "chat") as venice:
+            status, result = web_internal.handle(self.server, "venice-chat", {"messages": messages})
+            self.assertEqual((status, result["costAtomic"]), (200, 3000))
+            self.assertEqual(ask.call_args.args[2:4], (ACCOUNT, messages))
+            self.assertEqual(web_internal.handle(self.server, "venice-usage", {})[1]["billingMode"], "actual_usage")
+            venice.assert_not_called()
+        self.pay.assert_not_called()
+
+        web_venice.choose_model(self.server, ACCOUNT, "grok-4-6")
+        self.assertFalse(web_ask.selected(self.server, ACCOUNT))
+
+    def test_existing_selection_still_routes_to_venice(self):
+        from sign402_gateway import web_ask
+        with patch.object(web_internal, "_account", return_value=ACCOUNT), \
+             patch.object(web_ask, "chat") as ask, \
+             patch.object(web_venice, "chat", return_value=(200, {"ok": True})) as venice:
+            self.assertEqual(web_internal.handle(self.server, "venice-chat", {"messages": []})[0], 200)
+            venice.assert_called_once()
+            ask.assert_not_called()
 
     def with_search(self):
         """The bot's web search switched on, Exa offering two Base legs, the bound one second."""

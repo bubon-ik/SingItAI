@@ -59,6 +59,9 @@ CREATE TABLE IF NOT EXISTS ops (
 CREATE TABLE IF NOT EXISTS spends (
     id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT NOT NULL, amount INTEGER NOT NULL, purpose TEXT NOT NULL,
     pull_tx TEXT, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS metered_holds (
+    hold_id TEXT PRIMARY KEY, account TEXT NOT NULL, amount INTEGER NOT NULL, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS metered_holds_by_account ON metered_holds(account);
 CREATE INDEX IF NOT EXISTS spends_by_day ON spends(account, created_at);
 """
 
@@ -136,7 +139,33 @@ class SolanaAllowanceStore:
         with self._db() as db:
             row = db.execute("SELECT COALESCE(SUM(amount), 0) FROM spends WHERE account = ? AND created_at >= ?",
                              (account, since)).fetchone()
-        return int(row[0])
+            held = db.execute("SELECT COALESCE(SUM(amount), 0) FROM metered_holds WHERE account = ?", (account,)).fetchone()
+        return int(row[0]) + int(held[0])
+
+    def reserve_metered(self, hold_id: str, account: str, ceiling: int, daily_cap: int, now: int) -> None:
+        """A durable ceiling counts alongside other Solana purchases until reconciled."""
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            spent = db.execute("SELECT COALESCE(SUM(amount), 0) FROM spends WHERE account = ? AND created_at >= ?",
+                               (account, now // DAY * DAY)).fetchone()[0]
+            held = db.execute("SELECT COALESCE(SUM(amount), 0) FROM metered_holds WHERE account = ?", (account,)).fetchone()[0]
+            if ceiling <= 0 or int(spent) + int(held) + ceiling > daily_cap:
+                raise AllowanceError("The request's maximum exceeds your remaining Solana daily limit. Nothing was paid.")
+            db.execute("INSERT INTO metered_holds VALUES (?, ?, ?, ?)", (hold_id, account, ceiling, now))
+
+    def release_metered(self, hold_id: str) -> None:
+        with self._db() as db:
+            db.execute("DELETE FROM metered_holds WHERE hold_id = ?", (hold_id,))
+
+    def settle_metered(self, hold_id: str, amount: int, tx: str, now: int) -> None:
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            held = db.execute("SELECT * FROM metered_holds WHERE hold_id = ?", (hold_id,)).fetchone()
+            if held is None or type(amount) is not int or not 0 <= amount <= held["amount"]:
+                raise AllowanceError("Metered settlement has no matching reservation. Do not retry payment.")
+            db.execute("INSERT INTO spends(account, amount, purpose, pull_tx, created_at) VALUES (?, ?, ?, ?, ?)",
+                       (held["account"], amount, "SingIt Ask · actual usage", tx, now))
+            db.execute("DELETE FROM metered_holds WHERE hold_id = ?", (hold_id,))
 
     def add_spend(self, account: str, amount: int, purpose: str, pull_tx: str | None, now: int) -> None:
         with self._db() as db:

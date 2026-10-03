@@ -5777,6 +5777,7 @@ class UserSpendLimitStore:
         reservation_id: str | None,
         *,
         tx_id: str = "",
+        amount_atomic: int | None = None,
         payment_intent: str | None = None,
         approval_id: str | None = None,
         tool_id: str | None = None,
@@ -5799,10 +5800,17 @@ class UserSpendLimitStore:
                 None,
             )
             if held is None:
+                if amount_atomic is not None:
+                    raise ValueError("Metered settlement has no live reservation; reconcile it before retrying")
                 # The hold expired mid-flight. Still record the spend, so a slow
                 # payment cannot settle without counting against the cap.
                 self._write_all_unlocked(data)
                 return None
+            charged = int(str(held.get("amountAtomic", "0")))
+            if amount_atomic is not None:
+                if type(amount_atomic) is not int or not 0 <= amount_atomic <= charged:
+                    raise ValueError("Actual settlement must fit the reserved ceiling")
+                charged = amount_atomic
             data["reservations"] = [
                 entry
                 for entry in reservations
@@ -5811,7 +5819,7 @@ class UserSpendLimitStore:
             record = {
                 "telegramUserId": str(held.get("telegramUserId")),
                 "day": str(held.get("day")),
-                "amountAtomic": int(str(held.get("amountAtomic", "0"))),
+                "amountAtomic": charged,
                 "asset": str(held.get("asset", "")),
                 "network": str(held.get("network", "")),
                 "txId": str(tx_id or ""),
@@ -7747,6 +7755,7 @@ def _settle_user_wallet_spend(
     *,
     payment: Any = None,
     claim_id: str | None = None,
+    actual_amount_atomic: int | None = None,
 ) -> None:
     """Convert this purchase's hold into a settled spend record, and remember it.
 
@@ -7758,6 +7767,7 @@ def _settle_user_wallet_spend(
     tx_id = str(event.get("txId") or "")
     server.user_spend_limit_store.settle_reservation(
         reservation_id,
+        **({"amount_atomic": actual_amount_atomic} if actual_amount_atomic is not None else {}),
         tx_id=tx_id,
         payment_intent=str(
             payment_requirements.get("paymentIntent") or event.get("paymentIntent") or ""

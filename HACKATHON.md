@@ -1,5 +1,11 @@
 # Crypto World's Fair 2026 — development record
 
+Current Ask status (October 3): deployed actual-usage billing and one verified
+Base payment of 0.001055 USDC. Solana recipient readiness is verified; a funded
+Solana metered payment remains unverified. Dated entries below preserve the
+state at each stage, including earlier deployment blockers that were resolved.
+
+
 ## Review links
 
 - [Original SingIt project](https://github.com/bubon-ik/SingItAI)
@@ -27,6 +33,49 @@ The imported baseline is `f39959059922b693f14c2a3e9bec97c87881e07b`, dated Septe
 The imported source already contains the Telegram/Hermes agent, managed Base wallets, gateway authentication, payment policies and approval channels, Bitrefill purchase flows, Base x402 tooling, and a Venice integration using Ethereum authentication. These are reused components, not new Solana capabilities. Their availability in a running deployment depends on configuration.
 
 ## Work recorded in this repository
+
+### October 2: SingIt Ask deployment and manual payment test
+
+The `trezor-local-sidecar` working tree contains the new, currently uncommitted
+[`singit-ask`](singit-ask/README.md) service. It exposes an OpenAI-compatible
+endpoint priced per answer through x402, using DeepSeek V4.1 Flash from Surplus.
+It is deployed as a separate VPS user service at `ask.singitai.app`.
+Fifteen local and VPS tests pass; public health and unpaid payment challenges
+are verified, and one real upstream model response succeeded. A MetaMask page
+lets the operator explicitly sign a single Base test payment. Customer payment
+settlement has not yet been verified, and the Solana recipient still needs its
+native USDC token account. [Evidence and remaining limits](singit-ask/CHECKS.md).
+This entry records working-tree/deployment state, not a published commit or PR.
+
+### October 2: actual-usage Ask billing (Base)
+
+The same uncommitted worktree now implements direct per-request `upto` settlement:
+actual Surplus token cost + 30% markup + 0.001 USDC settlement fee, within a 0.003
+USDC authorization ceiling. It uses CDP for Base and retains the legacy PayAI
+fixed-price route. This is Base infrastructure, not a new Solana capability.
+The new merchant endpoint is deployed and its public unpaid quote is verified.
+Gateway/UI integration and partial-spend accounting are staged, awaiting the
+operator's sudo activation; the running web agent still uses the fixed-price path.
+23 Node tests, 278 isolated VPS web tests and 11 reservation tests pass. No real
+metered payment has been made. Solana metered payments remain unavailable.
+[Implementation and exact limits](singit-ask/CHECKS.md).
+
+### October 2: Solana actual-usage Ask billing
+
+The uncommitted worktree extends the metered Ask service to Solana `upto`, using
+CDP and the canonical Solana payment-channels program. A single-question escrow
+reserves at most 0.003 USDC; actual token cost + 30% + 0.002 USDC is settled, with
+the unused portion returned to the same user's agent. The existing Solana SPL
+grant and agent funding sponsor are reused, with durable budget holds and no
+automatic retry of uncertain funding or payments. This extends the previously
+implemented Base path and preserves legacy exact endpoints.
+
+The Solana merchant route is deployed and its public unpaid quote is verified.
+31 Node tests, 287 isolated VPS web tests and 21 allowance/reservation tests pass.
+The gateway/UI update remains staged. The receiver's native USDC account is absent,
+protected Solana configuration needs sudo validation, and no real metered Solana
+payment has been made. No published commit or PR is claimed.
+[Evidence and activation prerequisites](singit-ask/CHECKS.md).
 
 | Date | Commit | Contribution | Evidence and limits |
 | --- | --- | --- | --- |
@@ -246,3 +295,110 @@ integration; a successful real call has not been verified. These fixes do not ad
 For each completed feature, add the date, commit or pull-request link, user-visible behavior, verification results and remaining limitations. Keep feature commits focused and push completed milestones regularly. Preserve published history and the baseline tag. Do not change timestamps or describe planned behavior as implemented.
 
 Record mainnet transaction links only after actual execution and add short demo recordings for completed agent flows. Do not publish private keys, auth tokens, payment payloads or redemption data. At submission, link a fixed final commit or release and its comparison with the baseline, and copy the prior-work disclosure into the submission form. Git history, public progress updates, tests and demos provide complementary evidence; commit dates alone do not establish when every line was developed.
+
+### October 2: uniform SingIt Ask price (uncommitted working tree)
+
+The owner chose a fixed 0.003 USDC per successful answer on both Base and Solana;
+usage-based billing and prepaid customer balances were not implemented. Updated
+service defaults, private local/VPS settings, docs and existing challenge tests.
+All 15 offline tests passed locally and on the VPS. After a private backup and
+service restart, public health returned 200 and an unsigned request returned
+402 with amount `3000` on both networks. No real customer payment was made.
+Solana recipient token-account readiness and real settlement remain unverified
+as recorded in `singit-ask/CHECKS.md`. This change has no commit or PR yet.
+
+### October 2: automatic Ask payments from the web agent (staged, not active)
+
+Added an opt-in SingIt Ask model for Base web accounts. The existing agent pays
+0.003 USDC through x402 from its approved allowance, using bound merchant terms
+and existing spending/settlement checks. The UI shows a per-answer price rather
+than token pricing or chat-credit top-ups. Existing Venice selections and linked
+Telegram models are preserved. Solana is explicitly unavailable for this new
+choice pending receiver readiness and delegated-payment verification.
+
+Verification: eight new adapter tests, two dispatch tests and existing web
+regressions passed (272 web tests in total across the isolated runs); frontend
+syntax and diff checks passed. The operator activation script checks reviewed
+file hashes before deployment and creates private backups. Production has not
+been activated: restarting its system services requires sudo authentication.
+No live customer payment was attempted. Changes remain uncommitted; no PR yet.
+
+### October 2: first real Ask payment through the Base web agent
+
+The owner activated the prepared integration and asked a question. All five
+production file hashes match the reviewed integration. The answer's usage row
+records SingIt Ask, 553 input tokens, 100 output tokens and 0.003 USDC; the
+account's settlement row points at the Ask endpoint. Independent Base RPC
+verification confirms the agent-to-merchant USDC transfer in
+[0x2b56b609…745eac](https://basescan.org/tx/0x2b56b609a130264de8434dcaa844e6d9cf210f503ead0266bd79f0bfe2745eac),
+block 52086557, status 1, at 17:34:21 UTC. Verification itself was read-only.
+The Base web integration is now active and has one verified real payment;
+Solana remains unavailable for this model. Changes remain uncommitted.
+
+### October 3: web chat location follow-ups and Ask failure reporting
+
+The owner reported a Prague coffee lookup returning other cities, followed by an
+unrelated eSIM catalog on a location correction. Live-data planning now carries
+the latest explicit user location across turns, excludes assistant/search text
+as a source of location, and keeps a location correction attached to the
+immediately preceding data lookup. Context is scoped to the conversation; a new
+explicit request keeps its own route. Only the extracted location is shared with
+the auxiliary planner, not the full private conversation.
+
+Ask errors retain their provider and settlement-review reason instead of being
+masked by the old Venice fallback message. A pending Ask payment blocks additional
+paid search data. Base buyer diagnostics record only controlled stage labels and
+HTTP status, never keys, signed payment payloads or provider response bodies.
+
+Verification: 295 isolated web tests and 32 Node tests passed without real payments.
+`activate-context.py --check-only` verified the five reviewed files and both unpaid
+quotes. Deployment requires the operator's sudo authentication; the prepared
+command creates private code/config/state backups and verifies wallet identities.
+One prior Base Ask authorization remains under read-only reconciliation; this is
+not evidence of a completed metered payment. Changes remain uncommitted; no PR.
+
+The owner subsequently ran the context activation successfully. All five live
+hashes match the reviewed patch; gateway and web API are active and all three
+health/page checks returned HTTP 200. The operator's private rollback snapshot is
+`20261003T092247Z-before-ask-context-fix`; wallet identity verification passed.
+This confirms deployment, not a successful new metered payment.
+
+The prior Base Ask attempt was subsequently reconciled as expired and unused at
+finalized block 52114913. Its non-secret checkpoint and journal were privately
+archived with the chain proof, and the affected account's Ask block was removed.
+No payment was retried. A verify-only CDP probe on an unfunded fixture reached the
+expected insufficient-funds check; a successful funded metered answer still
+requires the owner's next chat test.
+
+### October 3: Base metered buyer extension echo fix
+
+Reproduced the owner's repeated HTTP 402 failure using the real buyer, SDK signer
+and Express middleware in one offline test: the buyer discarded the merchant's
+extension description, causing `extension_echo_mismatch` before CDP verification.
+The client now preserves advertised extension metadata while adding its bounded
+signed permit. All 33 Node tests passed locally and on the VPS. Installed the
+single-file fix with a private code/config/state backup and wallet identity
+verification; the per-request buyer process needs no service restart.
+The second failed authorization was reconciled as expired and unused at finalized
+Base block 52115703 and unblocked. No live payment was sent by the repair; the
+next funded end-to-end test belongs to the owner. Uncommitted; no PR yet.
+
+
+### October 3: first verified actual-usage Base Ask payment
+
+The owner's new chat request completed on SingIt Ask. Independent Base RPC
+verification confirms transaction
+[0xe9b5af13…618e6ad](https://basescan.org/tx/0xe9b5af13f5070e882635db2ef85540a00515eea968fd93b2a513d5cf0618e6ad)
+succeeded in block 52116473 at 2026-10-03T10:11:33+00:00, with 77 confirmations at inspection.
+Its single native-USDC Transfer moved 1055 atomic units (0.001055 USDC) from the
+user's existing Base agent to their configured merchant receiver. Transaction
+gas was paid by a different facilitator address, not the user's agent.
+
+The returned usage records 498 prompt and 335 completion tokens. Billing is
+42 atomic units of provider cost + 13 of rounded 30% markup + 1000 of the
+published settlement fee = 1055. The chat usage and allowance settlement ledger
+agree with the chain. The 3000-unit cap was not charged. No unresolved Ask
+journal remains for this account. This is a verified live Base metered payment;
+Solana's actual-usage path still has no verified funded end-to-end example here.
+Verification was read-only; the owner initiated the request. Changes remain
+uncommitted; no PR.

@@ -244,10 +244,11 @@ def models(server: Any, account: str) -> tuple[int, dict[str, Any]]:
     if base is None:
         return 503, {"ok": False, "error": "chat_off", "text": "The private chat is off on this server."}
     catalogue = base._catalogue()
-    chosen = base.store.get_session(account).model or base.default_model
+    from . import web_ask
+    chosen = web_ask.MODEL if web_ask.selected(server, account) else (base.store.get_session(account).model or base.default_model)
     listed = catalogue.models()
     categories = [c for c in catalogue.categories() if c.key != "all"]
-    return 200, {
+    return 200, web_ask.listing({
         "ok": True, "chosen": chosen,
         "chosenLabel": next((m.label for m in listed if m.model_id == chosen), chosen),
         "categories": [{"key": c.key, "label": c.label} for c in categories],
@@ -255,15 +256,20 @@ def models(server: Any, account: str) -> tuple[int, dict[str, Any]]:
                     "inputUsdPerMTok": m.input_usd_per_mtok, "outputUsdPerMTok": m.output_usd_per_mtok,
                     "tags": [c.key for c in categories if catalogue._matches(m.model_id, c.key)]}
                    for m in listed[:300]],
-    }
+    }, account)
 
 
 def choose_model(server: Any, account: str, model_id: Any) -> tuple[int, dict[str, Any]]:
     """Talk to another model from the next message on. Moves no money."""
+    from . import web_ask
+    if model_id == web_ask.MODEL:
+        return web_ask.choose(server, account)
     base = getattr(server, "chat_service", None)
     if base is None:
         return 503, {"ok": False, "error": "chat_off", "text": "The private chat is off on this server."}
-    return 200, base.set_model(account, str(model_id or ""))  # UnknownModel is a ValueError: refused with its reason
+    result = base.set_model(account, str(model_id or ""))  # UnknownModel: refused before changing provider
+    base.store.set_model("ask-web:" + account, "")
+    return 200, result
 
 
 def _label(base: Any, model: str) -> str:
