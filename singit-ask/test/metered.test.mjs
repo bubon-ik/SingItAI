@@ -5,11 +5,14 @@ import { createApp } from '../src/app.mjs';
 import { BASE, ASSET, PAY_TO, TERMS, METERED_ROUTE, billUsage } from '../src/pricing.mjs';
 import { ENDPOINT, selectOffer, payMetered, validateTransfer } from '../src/metered-buyer.mjs';
 const CDP_SIGNER = '0x2A89407a98A0732b7fD578c4E156B7166540EB5A';
+// CDP also supports Solana upto, which the public route offers next to Base.
+const SOLANA_UPTO = {x402Version:2,scheme:'upto',network:'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
+  extra:{feePayer:'Hc3sdEAsCGQcpgfivywog9uwtk8gUBUZgsxdME1EJy88',receiverAuthorizer:'9dpHxn3XFZMZv59vE5MKxhfwGUCCgkcCUzYZLpdEm7ox'}};
 const encode = v => Buffer.from(JSON.stringify(v)).toString('base64');
 const decode = v => JSON.parse(Buffer.from(v, 'base64').toString());
 const account = privateKeyToAccount('0x' + '11'.repeat(32)); // Public unfunded test fixture.
 const offer = () => ({ x402Version:2, resource:{url:ENDPOINT}, extensions:{eip2612GasSponsoring:{info:{version:'1'}}}, accepts:[{
-  scheme:'upto', network:BASE, amount:'3000', asset:ASSET, payTo:PAY_TO, maxTimeoutSeconds:300,
+  scheme:'upto', network:BASE, amount:'3000', asset:ASSET, payTo:PAY_TO, maxTimeoutSeconds:120,
   extra:{name:'USD Coin',version:'2',assetTransferMethod:'permit2',facilitatorAddress:CDP_SIGNER,billing:TERMS},
 }] });
 const usage={prompt_tokens:50,completion_tokens:10,buyer_cost_micro:100};
@@ -63,10 +66,10 @@ test('receipt must prove actual native USDC transfer from this agent',()=>{
 });
 for(const cost of [100,undefined,2000]) test(`merchant settles actual usage only, cost=${cost}`,async t=>{
   const settled=[];
-  const facilitator={getSupported:async()=>({kinds:[{x402Version:2,scheme:'exact',network:BASE},{x402Version:2,scheme:'exact',network:'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',extra:{feePayer:'4an2sqamWWhny9mjLsMtGXCDXakeNtg6vSLq4QvhdmQu'}},{x402Version:2,scheme:'upto',network:BASE,extra:{facilitatorAddress:CDP_SIGNER}}],extensions:['eip2612GasSponsoring'],signers:{}}),
+  const facilitator={getSupported:async()=>({kinds:[{x402Version:2,scheme:'exact',network:BASE},{x402Version:2,scheme:'exact',network:'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',extra:{feePayer:'4an2sqamWWhny9mjLsMtGXCDXakeNtg6vSLq4QvhdmQu'}},{x402Version:2,scheme:'upto',network:BASE,extra:{facilitatorAddress:CDP_SIGNER}},SOLANA_UPTO],extensions:['eip2612GasSponsoring'],signers:{}}),
     verify:async()=>({isValid:true,payer:account.address}),settle:async(_p,r)=>{settled.push(r.amount);return{success:true,network:BASE,transaction:tx,payer:account.address};}};
-  const app=createApp({payToBase:PAY_TO,payToSolana:'4an2sqamWWhny9mjLsMtGXCDXakeNtg6vSLq4QvhdmQu',priceBase:'$0.003',priceSolana:'$0.003',model:'test'},
-    {facilitatorClient:facilitator,meteredFacilitatorClient:facilitator,upstream:async()=>({content:'Hello',finishReason:'stop',usage:{buyer_cost_micro:cost}}),log:()=>{}});
+  const app=createApp({payToBase:PAY_TO,payToSolana:'4an2sqamWWhny9mjLsMtGXCDXakeNtg6vSLq4QvhdmQu',model:'test'},
+    {facilitatorClient:facilitator,upstream:async()=>({content:'Hello',finishReason:'stop',usage:{buyer_cost_micro:cost}}),log:()=>{}});
   const listener=await new Promise(resolve=>{const l=app.listen(0,'127.0.0.1',()=>resolve(l));});t.after(()=>listener.close());
   const url=`http://127.0.0.1:${listener.address().port}${METERED_ROUTE}`;
   const send=headers=>fetch(url,{method:'POST',headers:{'Content-Type':'application/json',...headers},body:JSON.stringify({messages:[{role:'user',content:'Hi'}]})});
@@ -92,15 +95,15 @@ test('real buyer passes the real merchant extension-echo validation before CDP v
   const facilitator={getSupported:async()=>({kinds:[
     {x402Version:2,scheme:'exact',network:BASE},
     {x402Version:2,scheme:'exact',network:'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',extra:{feePayer:'4an2sqamWWhny9mjLsMtGXCDXakeNtg6vSLq4QvhdmQu'}},
-    {x402Version:2,scheme:'upto',network:BASE,extra:{facilitatorAddress:CDP_SIGNER}}
+    {x402Version:2,scheme:'upto',network:BASE,extra:{facilitatorAddress:CDP_SIGNER}},SOLANA_UPTO
   ],extensions:['eip2612GasSponsoring'],signers:{}}),
   verify:async(p)=>{verifies++;assert.equal(p.extensions.eip2612GasSponsoring.info.version,'1');
     assert.equal(p.extensions.eip2612GasSponsoring.info.amount,'3000');
     assert.equal(typeof p.extensions.eip2612GasSponsoring.info.description,'string');
     return{isValid:true,payer:account.address};},
   settle:async()=>{settles++;return{success:true,network:BASE,transaction:tx,payer:account.address};}};
-  const app=createApp({payToBase:PAY_TO,payToSolana:'4an2sqamWWhny9mjLsMtGXCDXakeNtg6vSLq4QvhdmQu',priceBase:'$0.003',priceSolana:'$0.003',model:'test'},
-    {facilitatorClient:facilitator,meteredFacilitatorClient:facilitator,upstream:async()=>({content:'Hello',finishReason:'stop',usage}),log:()=>{}});
+  const app=createApp({payToBase:PAY_TO,payToSolana:'4an2sqamWWhny9mjLsMtGXCDXakeNtg6vSLq4QvhdmQu',model:'test'},
+    {facilitatorClient:facilitator,upstream:async()=>({content:'Hello',finishReason:'stop',usage}),log:()=>{}});
   const listener=await new Promise(resolve=>{const l=app.listen(0,'127.0.0.1',()=>resolve(l));});t.after(()=>listener.close());
   let submissions=0;
   const result=await payMetered({signer:{...account,readContract:async()=>0n},body:{messages:[{role:'user',content:'Hello'}]},

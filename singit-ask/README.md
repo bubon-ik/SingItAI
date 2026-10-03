@@ -1,32 +1,33 @@
 # SingIt Ask
 
-OpenAI-compatible model answers with USDC payments over x402.
+OpenAI-compatible model answers with USDC payments over x402, settled by
+[Coinbase CDP](https://docs.cdp.coinbase.com/x402/seller/facilitator). Every answer is paid for
+what it actually cost; nothing is charged without an answer.
 
-- **Web Ask on Base and Solana:** actual Surplus token cost + 30% markup
-  (rounded up to one USDC micro-unit) + a published **0.001 USDC** settlement fee.
-  The maximum allowed charge is **0.003 USDC**. This is a limit, not a fixed price.
-- **Example:** 0.0001 USDC model cost + 0.00003 markup + 0.001 fee =
-  **0.00113 USDC**, on either network's web Ask path.
-- **Base:** `POST /v1/chat/completions/metered`, CDP `upto` with bounded
-  sponsored approval and actual-amount settlement. Its existing limiter funding
-  path is unchanged; that separate funding leg still uses the existing gas policy.
-- **Solana:** authenticated `POST /v1/chat/completions/quoted/solana/prepare`
+- **Price:** actual Surplus token cost + 30% markup (rounded up to one USDC micro-unit)
+  + the network's settlement fee: **0.001 USDC on Base**, **0.002 USDC on Solana**
+  for public x402 agents (its `upto` escrow takes two CDP transactions), **0.001 USDC**
+  on the web agent's direct Solana path. The most any answer can cost is **0.003 USDC**:
+  a ceiling, not a price.
+- **Example:** a short answer, 0.0001 USDC model cost + 0.00003 markup + 0.001 fee =
+  **0.00113 USDC** on Base.
+- **Public API:** `POST /v1/chat/completions`. Any x402 agent pays with `upto`: on Base
+  a bounded, gas-sponsored Permit2 signature; on Solana a 0.003 USDC escrow from which
+  CDP settles the actual amount and refunds the rest. Listed for discovery (Bazaar).
+- **Web agent, Base:** `POST /v1/chat/completions/metered`, the same Base `upto` offer
+  at an address the gateway's buyer pins. Its limiter funding path is unchanged;
+  that separate funding leg still uses the existing gas policy.
+- **Web agent, Solana:** authenticated `POST /v1/chat/completions/quoted/solana/prepare`
   prepares an answer and a measured invoice. `POST .../quoted/solana/:id`
   requires one CDP `exact` payment for that invoice before releasing the answer.
   The user's agent signs as the existing SPL delegate; USDC moves directly from
   the owner's token account to the merchant. CDP supplies the network fee payer.
   No agent USDC/SOL top-up, agent token account, escrow or refund is needed.
-- **Legacy Solana `upto`:** `/v1/chat/completions/metered/solana` (0.002 USDC fee,
-  two-step escrow/refund) is off in production. Nothing uses it; `SINGIT_ASK_METERED_SOLANA=1`
-  turns it back on.
-- **Legacy fixed-price API:** `/v1/chat/completions` remains PayAI `exact`,
-  0.003 USDC on either network. The manual MetaMask test page uses this route.
 - **Cost source:** Surplus `usage.buyer_cost_micro`, including its actual
-  input/output/cache pricing. Missing, invalid or over-ceiling cost is refused.
+  input/output/cache pricing. Missing, invalid or over-ceiling cost is refused, uncharged.
 - **Model:** `deepseek-v4.1-flash` via the merchant's private Surplus API key.
-- **Facilitator:** [Coinbase CDP](https://docs.cdp.coinbase.com/x402/seller/facilitator).
-  The published settlement service fee also applies during its free allowance;
-  it does not assert CDP invoices every individual transaction during that allowance.
+- **Settlement fee:** charged consistently, also while CDP's free allowance lasts;
+  it does not assert that CDP invoices every individual transaction during that allowance.
 
 ## Automatic web-agent payments
 
@@ -102,27 +103,6 @@ Historical activation scripts have version-specific manifests; refresh them
 against production before reusing them. Do not run old activation commands over
 this update.
 
-## Manual MetaMask test
-
-Open `https://ask.singitai.app/test/?payer=YOUR_BASE_ADDRESS` in a browser with
-MetaMask. The page connects the selected account, checks a fresh quote, and asks
-the user to explicitly sign one payment of **0.003 native USDC on Base** to
-`0xC23d1Dc0f5fCe1abfFB051e06cB93f0329968B4e`. It sends a fixed 32-token test
-request to the model. Connecting alone does not sign or pay.
-
-The test pins the recipient, token, network and amount, refuses changed terms,
-and uses EIP-3009 `TransferWithAuthorization`, checked against the installed
-`@x402/evm` SDK in offline tests. The signature expires after at most five minutes.
-There is no automatic retry. After a signed request leaves the browser, the
-page records only a submitted flag in session storage and prevents another
-attempt in that tab; payment signatures remain in memory only. On an uncertain
-result, check settlement before trying another payment. A successful response
-shows the model answer and a BaseScan transaction link.
-
-This is a one-request operator test, not a conversational chat UI. The normal
-API still accepts x402 clients on both configured networks. The Solana receiver
-must have its native USDC associated token account before real Solana payments.
-
 ## Run
 
 ```bash
@@ -137,12 +117,10 @@ node --env-file=.env src/server.mjs
 | `SINGIT_ASK_PAY_TO_SOLANA` | Wallet that receives Solana payments. Its USDC token account must already exist. |
 | `SINGIT_ASK_PAY_TO_BASE` | Address that receives Base payments. |
 | `SURPLUS_API_KEY` | Surplus buyer key (`inf_…`) with access to the configured model. Fund its workspace's deposited USDC balance; USDC in the linked wallet alone is not a prepaid balance. |
-| `SINGIT_ASK_PRICE_SOLANA`, `SINGIT_ASK_PRICE_BASE` | Legacy exact-route price per answer. Default: `$0.003` on both networks. |
-| `SINGIT_ASK_METERED` | Set `1` to enable the additional Base `upto` route. Requires `CDP_API_KEY_ID` and `CDP_API_KEY_SECRET` in the private service environment. Reuses the existing `cdp-x402-service` installation of `@coinbase/x402`; no dependency installation was performed for this change. |
+| `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET` | Coinbase CDP facilitator credentials, required. The service reuses the `cdp-x402-service` installation of `@coinbase/x402`. |
 | `SINGIT_ASK_DIRECT_SOLANA` | Set `1` to enable the private direct Solana route with CDP metering. |
 | `SINGIT_ASK_QUOTE_TOKEN` | Dedicated server-only authentication secret, shared by merchant and gateway (at least 32 characters). |
 | `SINGIT_ASK_QUOTE_DB` | Private writable SQLite path for prepared answers and settlement claims. |
-| `SINGIT_ASK_METERED_SOLANA` | Set `1` alongside `SINGIT_ASK_METERED=1` to enable the Solana metered route. Uses the same existing CDP credentials and installed `@x402/svm` 2.28.0. |
 | `SINGIT_ASK_MODEL` | Upstream model. Default: `deepseek-v4.1-flash`. |
 | `SINGIT_ASK_PORT` | Loopback port. Default: `8140`. |
 
@@ -185,10 +163,12 @@ curl -i https://ask.singitai.app/v1/chat/completions \
   -d '{"messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
 ```
 
-The second request must return `402` and `PAYMENT-REQUIRED`, advertising USDC
-amount `3000` on both Solana and Base with the configured recipient addresses
-and the public HTTPS resource URL. It does not call the model or pay anything.
-Real signed payment and settlement require a separately approved live test.
+The second request must return `402` and `PAYMENT-REQUIRED`, advertising two `upto`
+offers with a 3000 micro-USDC ceiling and their billing terms (fee 2000 on Solana,
+1000 on Base), the configured recipient addresses and the public HTTPS resource URL.
+It does not call the model or pay anything. Real signed payment and settlement
+require a separately approved live test; `src/solana-buyer-cli.mjs` and
+`src/buyer-cli.mjs` are buyers for that.
 
 Stop or roll back only this service with `systemctl --user disable --now singit-ask`.
 Keep its private configuration out of Git, command output and published logs.

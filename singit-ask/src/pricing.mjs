@@ -8,7 +8,6 @@ export const TERMS = Object.freeze({ version: 1, mode: "actual_usage", markupBps
   settlementFeeAtomic: "1000", maxChargeAtomic: "3000" });
 
 export const SOLANA = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
-export const SOLANA_ROUTE = `${METERED_ROUTE}/solana`;
 export const SOLANA_ASSET = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 export const SOLANA_PAY_TO = "4an2sqamWWhny9mjLsMtGXCDXakeNtg6vSLq4QvhdmQu";
 export const SOLANA_TERMS = Object.freeze({ ...TERMS, settlementFeeAtomic: "2000" });

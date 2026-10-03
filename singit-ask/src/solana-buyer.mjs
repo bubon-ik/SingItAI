@@ -1,8 +1,9 @@
 import { UptoSvmScheme } from '@x402/svm/upto/client';
 import { address, isAddress, getBase58Encoder } from '@solana/kit';
 import { findAssociatedTokenPda, TOKEN_PROGRAM_ADDRESS } from '@solana-program/token';
-import { SOLANA, SOLANA_ASSET, SOLANA_PAY_TO, SOLANA_ROUTE, SOLANA_TERMS, billUsage } from './pricing.mjs';
-export const ENDPOINT=`https://ask.singitai.app${SOLANA_ROUTE}`;
+import { SOLANA, SOLANA_ASSET, SOLANA_PAY_TO, SOLANA_TERMS, billUsage } from './pricing.mjs';
+// An x402 buyer for the public route's Solana offer: also the operator's live check of it.
+export const ENDPOINT='https://ask.singitai.app/v1/chat/completions';
 export const CHANNEL_PROGRAM='CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX';
 const decode=v=>JSON.parse(Buffer.from(v,'base64').toString());
 export async function ata(owner) {

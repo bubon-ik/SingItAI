@@ -1,38 +1,41 @@
-// SingIt Ask against a fake facilitator and a fake model: who is charged, when, and for what.
+// SingIt Ask against a fake CDP facilitator and a fake model: who is charged, when, and for what.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { request as httpRequest } from "node:http";
 import { BASE, SOLANA, ROUTE, LIMITS, RequestError, UpstreamError, readRequest, askSurplus, createApp } from "../src/app.mjs";
+import { SOLANA_TERMS, TERMS } from "../src/pricing.mjs";
 
 const SOLANA_PAY_TO = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin";
 const BASE_PAY_TO = "0x1111111111111111111111111111111111111111";
+const PAYER = "0x2222222222222222222222222222222222222222";
 const CONFIG = {
   payToSolana: SOLANA_PAY_TO, payToBase: BASE_PAY_TO, surplusKey: "inf_test", surplusUrl: "https://surplus.test",
-  model: "deepseek-v4.1-flash", priceSolana: "$0.003", priceBase: "$0.003",
+  model: "deepseek-v4.1-flash",
 };
 
 function fakeFacilitator() {
-  const calls = { verify: 0, settle: 0 };
+  const calls = { verify: 0, settle: [] };
   return {
     calls,
     async getSupported() {
       return {
         kinds: [
-          { x402Version: 2, scheme: "exact", network: BASE },
-          { x402Version: 2, scheme: "exact", network: SOLANA, extra: { feePayer: "2wKupLR9q6wXYppw8Gr2NvWxKBUqm4PPJKkQfoxHDBg4" } },
+          { x402Version: 2, scheme: "upto", network: BASE, extra: { facilitatorAddress: "0x" + "3".repeat(40) } },
+          { x402Version: 2, scheme: "upto", network: SOLANA, extra: {
+            feePayer: "Hc3sdEAsCGQcpgfivywog9uwtk8gUBUZgsxdME1EJy88", receiverAuthorizer: "9dpHxn3XFZMZv59vE5MKxhfwGUCCgkcCUzYZLpdEm7ox" } },
         ],
-        extensions: ["bazaar"],
+        extensions: ["bazaar", "eip2612GasSponsoring"],
         signers: {},
       };
     },
-    async verify(payload) {
+    async verify() {
       calls.verify += 1;
-      return { isValid: true, payer: payload.payload?.from ?? "payer" };
+      return { isValid: true, payer: PAYER };
     },
     async settle(_payload, requirements) {
-      calls.settle += 1;
-      return { success: true, transaction: "tx-1", network: requirements.network, payer: "payer" };
+      calls.settle.push(requirements.amount);
+      return { success: true, transaction: "0x" + "a".repeat(64), network: requirements.network, payer: PAYER };
     },
   };
 }
@@ -42,7 +45,7 @@ async function serve(t, { upstream } = {}) {
   const asked = [];
   const answer = upstream ?? (async (_config, messages, maxTokens) => {
     asked.push({ messages, maxTokens });
-    return { content: "Try Caffè Propaganda.", finishReason: "stop", usage: { total_tokens: 42 } };
+    return { content: "Try Caffè Propaganda.", finishReason: "stop", usage: { total_tokens: 42, buyer_cost_micro: 100 } };
   });
   const app = createApp(CONFIG, { facilitatorClient: facilitator, upstream: answer, log: () => {} });
   const listener = await new Promise((resolve) => { const l = app.listen(0, "127.0.0.1", () => resolve(l)); });
@@ -62,16 +65,11 @@ function decode(header) {
   return JSON.parse(Buffer.from(header, "base64").toString("utf8"));
 }
 
-// A payment that the fake facilitator accepts, for whichever of the offered requirements is given.
-function signature(required, accepted) {
-  const payload = {
-    x402Version: 2,
-    resource: required.resource,
-    accepted,
-    payload: { from: "payer", signature: "0xsigned" },
-    extensions: required.extensions,
-  };
-  return Buffer.from(JSON.stringify(payload)).toString("base64");
+// A Base payment the fake facilitator accepts, echoing the merchant's extensions as a real buyer does.
+function baseSignature(required) {
+  const accepted = required.accepts.find((a) => a.network === BASE);
+  return Buffer.from(JSON.stringify({ x402Version: 2, resource: required.resource, accepted,
+    payload: { signature: "0xsigned" }, extensions: required.extensions })).toString("base64");
 }
 
 async function offer(url) {
@@ -80,20 +78,24 @@ async function offer(url) {
   return decode(unpaid.headers.get("payment-required"));
 }
 
-test("an unpaid question is asked to pay on Solana or Base, and the model is not asked", async (t) => {
+test("an unpaid question is offered actual-usage payment on Solana and Base over CDP", async (t) => {
   const { url, facilitator, asked } = await serve(t);
   const required = await offer(url);
   const solana = required.accepts.find((a) => a.network === SOLANA);
   const base = required.accepts.find((a) => a.network === BASE);
-  assert.equal(solana.scheme, "exact");
+  assert.deepEqual(required.accepts.map((a) => a.scheme), ["upto", "upto"]);
   assert.equal(solana.amount, "3000");
   assert.equal(solana.payTo, SOLANA_PAY_TO);
-  assert.ok(solana.extra?.feePayer, "Solana payers need the facilitator's fee payer");
+  assert.deepEqual(solana.extra.billing, SOLANA_TERMS);
+  assert.ok(solana.extra.feePayer, "Solana payers need CDP's fee payer");
   assert.equal(base.amount, "3000");
   assert.equal(base.payTo, BASE_PAY_TO);
+  assert.equal(base.maxTimeoutSeconds, 120);
+  assert.deepEqual(base.extra.billing, TERMS);
   assert.ok(required.extensions?.bazaar, "listed for discovery");
+  assert.ok(required.extensions?.eip2612GasSponsoring, "Base payers need no gas");
   assert.equal(asked.length, 0);
-  assert.equal(facilitator.calls.settle, 0);
+  assert.equal(facilitator.calls.verify, 0);
 });
 
 test("the payment resource keeps the public HTTPS URL behind the local tunnel", async (t) => {
@@ -110,66 +112,56 @@ test("the payment resource keeps the public HTTPS URL behind the local tunnel", 
   assert.equal(decode(response.headers["payment-required"]).resource.url,
                "https://ask.singitai.app/v1/chat/completions");
   assert.equal(asked.length, 0);
-  assert.equal(facilitator.calls.settle, 0);
-});
-
-for (const network of [SOLANA, BASE]) {
-  test(`a paid question on ${network} gets the answer and is charged once`, async (t) => {
-    const { url, facilitator, asked } = await serve(t);
-    const required = await offer(url);
-    const accepted = required.accepts.find((a) => a.network === network);
-    const response = await post(url, QUESTION, { "PAYMENT-SIGNATURE": signature(required, accepted) });
-    assert.equal(response.status, 200);
-    const body = await response.json();
-    assert.equal(body.choices[0].message.content, "Try Caffè Propaganda.");
-    assert.equal(body.model, "singit-ask");
-    assert.equal(asked.length, 1);
-    assert.equal(asked[0].maxTokens, 300);
-    assert.equal(facilitator.calls.settle, 1);
-    assert.equal(decode(response.headers.get("payment-response")).network, network);
-  });
-}
-
-test("a model that does not answer costs the payer nothing", async (t) => {
-  const { url, facilitator } = await serve(t, { upstream: async () => { throw new UpstreamError("model answered HTTP 503"); } });
-  const required = await offer(url);
-  const response = await post(url, QUESTION, { "PAYMENT-SIGNATURE": signature(required, required.accepts[0]) });
-  assert.equal(response.status, 502);
-  assert.match((await response.json()).error.message, /not charged/);
-  assert.equal(facilitator.calls.settle, 0);
-});
-
-test("a malformed question is refused without a charge", async (t) => {
-  const { url, facilitator, asked } = await serve(t);
-  const required = await offer(url);
-  const response = await post(url, { messages: [{ role: "tool", content: "x" }] },
-                              { "PAYMENT-SIGNATURE": signature(required, required.accepts[0]) });
-  assert.equal(response.status, 400);
-  assert.equal(asked.length, 0);
-  assert.equal(facilitator.calls.settle, 0);
-});
-
-test("health and the model list are free", async (t) => {
-  const { url, facilitator } = await serve(t);
-  const health = await fetch(`${url}/health`);
-  assert.equal(health.status, 200);
-  assert.equal((await health.json()).ok, true);
-  const models = await fetch(`${url}/v1/models`);
-  assert.equal(models.status, 200);
-  assert.equal((await models.json()).data[0].id, "singit-ask");
   assert.equal(facilitator.calls.verify, 0);
 });
 
-test("the MetaMask test page is free and cannot expose local configuration", async (t) => {
+test("a paid question on Base gets the answer and is charged its actual cost once", async (t) => {
   const { url, facilitator, asked } = await serve(t);
-  const page = await fetch(`${url}/test/`);
-  assert.equal(page.status, 200);
-  assert.equal(page.headers.get("cache-control"), "no-store");
-  assert.match(await page.text(), /MetaMask/);
-  assert.equal((await fetch(`${url}/test/payment.mjs`)).status, 200);
-  assert.equal((await fetch(`${url}/test/.env`)).status, 404);
-  assert.equal((await fetch(`${url}/test/src/server.mjs`)).status, 404);
+  const response = await post(url, QUESTION, { "PAYMENT-SIGNATURE": baseSignature(await offer(url)) });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.choices[0].message.content, "Try Caffè Propaganda.");
+  assert.equal(body.model, "singit-ask");
+  assert.equal(body.billing.totalAtomic, "1130"); // 100 model + 30 markup + 1000 Base settlement fee
+  assert.equal(asked[0].maxTokens, 300);
+  assert.deepEqual(facilitator.calls.settle, ["1130"]);
+  assert.equal(decode(response.headers.get("payment-response")).network, BASE);
+});
+
+for (const [name, upstream] of [
+  ["a model that does not answer", async () => { throw new UpstreamError("model answered HTTP 503"); }],
+  ["a model that reports no cost", async () => ({ content: "Hi", finishReason: "stop", usage: { total_tokens: 3 } })],
+  ["an answer over the ceiling", async () => ({ content: "Hi", finishReason: "stop", usage: { buyer_cost_micro: 2000 } })],
+]) {
+  test(`${name} costs the payer nothing`, async (t) => {
+    const { url, facilitator } = await serve(t, { upstream });
+    const response = await post(url, QUESTION, { "PAYMENT-SIGNATURE": baseSignature(await offer(url)) });
+    assert.equal(response.status, 502);
+    assert.match((await response.json()).error.message, /not charged/);
+    assert.deepEqual(facilitator.calls.settle, []);
+  });
+}
+
+test("a malformed question is refused before any payment is asked for", async (t) => {
+  const { url, facilitator, asked } = await serve(t);
+  const response = await post(url, { messages: [{ role: "tool", content: "x" }] });
+  assert.equal(response.status, 400);
+  assert.equal(response.headers.get("payment-required"), null);
   assert.equal(asked.length, 0);
+  assert.equal(facilitator.calls.verify, 0);
+});
+
+test("health and the model list are free, and the old test page is gone", async (t) => {
+  const { url, facilitator } = await serve(t);
+  const health = await (await fetch(`${url}/health`)).json();
+  assert.equal(health.ok, true);
+  assert.equal(health.facilitator, "coinbase-cdp");
+  assert.deepEqual(health.pricing, { [SOLANA]: SOLANA_TERMS, [BASE]: TERMS });
+  const models = await fetch(`${url}/v1/models`);
+  assert.equal(models.status, 200);
+  assert.equal((await models.json()).data[0].id, "singit-ask");
+  assert.equal((await fetch(`${url}/test/`)).status, 404);
+  assert.equal((await fetch(`${url}/v1/chat/completions/metered/solana`, { method: "POST" })).status, 404);
   assert.equal(facilitator.calls.verify, 0);
 });
 

@@ -2,8 +2,8 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createKeyPairSignerFromPrivateKeyBytes} from '@solana/kit';
 import {TOKEN_PROGRAM_ADDRESS} from '@solana-program/token';
-import {createApp} from '../src/app.mjs';
-import {BASE,SOLANA,SOLANA_ROUTE,SOLANA_TERMS,SOLANA_ASSET,SOLANA_PAY_TO,billUsage} from '../src/pricing.mjs';
+import {createApp,ROUTE} from '../src/app.mjs';
+import {BASE,SOLANA,SOLANA_TERMS,SOLANA_ASSET,SOLANA_PAY_TO,billUsage} from '../src/pricing.mjs';
 import {ENDPOINT,CHANNEL_PROGRAM,ata,selectSolanaOffer,paySolana,validateSolanaSettlement} from '../src/solana-buyer.mjs';
 const feePayer='Hc3sdEAsCGQcpgfivywog9uwtk8gUBUZgsxdME1EJy88',authorizer='9dpHxn3XFZMZv59vE5MKxhfwGUCCgkcCUzYZLpdEm7ox';
 const encode=v=>Buffer.from(JSON.stringify(v)).toString('base64');
@@ -68,18 +68,19 @@ test('lost paid response is not retried',async()=>{
     fetchImpl:async()=>{calls++;if(calls===1)return new Response('',{status:402,headers:{'payment-required':encode(offer())}});throw new Error('timeout');}}));
   assert.equal(calls,2);assert.equal(submitted,true);
 });
-for(const fail of [false,true])test(`merchant deposits before model and ${fail?'refunds on error':'settles actual usage'}`,async t=>{
+for(const fail of [false,true])test(`public route: Solana deposits before the model and ${fail?'refunds on error':'settles actual usage'}`,async t=>{
   const settles=[];
   const facilitator={getSupported:async()=>({kinds:[{x402Version:2,scheme:'exact',network:BASE},{x402Version:2,scheme:'upto',network:BASE,extra:{facilitatorAddress:'0x'+'1'.repeat(40)}},
     {x402Version:2,scheme:'exact',network:SOLANA,extra:{feePayer}},{x402Version:2,scheme:'upto',network:SOLANA,extra:{feePayer,receiverAuthorizer:authorizer}}],extensions:[],signers:{}}),
     verify:async()=>({isValid:true,payer:signer.address}),settle:async(p,r)=>{settles.push({type:p.payload.type,amount:r.amount});return{success:true,network:SOLANA,payer:signer.address,transaction:sig,amount:r.amount};}};
-  const app=createApp({payToBase:'0x'+'1'.repeat(40),payToSolana:SOLANA_PAY_TO,priceBase:'$0.003',priceSolana:'$0.003',meteredSolana:true},
-    {facilitatorClient:facilitator,meteredFacilitatorClient:facilitator,log:()=>{},upstream:async()=>{
+  const app=createApp({payToBase:'0x'+'1'.repeat(40),payToSolana:SOLANA_PAY_TO},
+    {facilitatorClient:facilitator,log:()=>{},upstream:async()=>{
       assert.deepEqual(settles,[{type:'deposit',amount:'3000'}]);if(fail)throw new Error('failed');return{content:'Hello',usage:{buyer_cost_micro:100}};}});
   const listener=await new Promise(resolve=>{const l=app.listen(0,'127.0.0.1',()=>resolve(l));});t.after(()=>listener.close());
-  const send=h=>fetch(`http://127.0.0.1:${listener.address().port}${SOLANA_ROUTE}`,{method:'POST',headers:{'Content-Type':'application/json',...h},body:JSON.stringify({messages:[{role:'user',content:'Hi'}]})});
+  const send=h=>fetch(`http://127.0.0.1:${listener.address().port}${ROUTE}`,{method:'POST',headers:{'Content-Type':'application/json',...h},body:JSON.stringify({messages:[{role:'user',content:'Hi'}]})});
   const first=await send({});assert.equal(first.status,402);const q=decode(first.headers.get('payment-required'));
   const p={from:signer.address,channelId:authorizer,maxAmount:'3000',deposit:'3000',nonce:'1',openSlot:'123',openTransaction:'mock',expiresAt:Math.floor(Date.now()/1000)+300,validAfter:Math.floor(Date.now()/1000),authorizedSigner:authorizer};
-  const response=await send({'PAYMENT-SIGNATURE':encode({x402Version:2,resource:q.resource,accepted:q.accepts[0],payload:p})});
+  const accepted=q.accepts.find(a=>a.network===SOLANA);assert.equal(accepted.scheme,'upto');assert.deepEqual(accepted.extra.billing,SOLANA_TERMS);
+  const response=await send({'PAYMENT-SIGNATURE':encode({x402Version:2,resource:q.resource,accepted,payload:p})});
   assert.equal(response.status,fail?502:200);assert.equal(decode(response.headers.get('payment-response')).amount,fail?'0':'2130');assert.deepEqual(settles,[{type:'deposit',amount:'3000'},{type:'claim',amount:fail?'0':'2130'}]);
 });

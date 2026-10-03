@@ -1,4 +1,5 @@
-// SingIt Ask: one answer from a language model, paid per answer over x402 in USDC on Solana or Base.
+// SingIt Ask: one answer from a language model, paid over x402 in USDC on Solana or Base for what it
+// actually cost: model tokens + 30% + the network's settlement fee, up to 0.003 USDC. Coinbase CDP settles.
 //
 // The payer is charged only when the answer came back: @x402/express holds the response, and a
 // handler that answers 400 or above is never settled (checked in its source, 2.28). So a model
@@ -8,21 +9,17 @@
 // with this service's own key; the payer never sees or needs it.
 
 import express from "express";
-import { fileURLToPath } from "node:url";
-import { paymentMiddleware, x402ResourceServer } from "@x402/express";
-import { ExactEvmScheme } from "@x402/evm/exact/server";
-import { ExactSvmScheme } from "@x402/svm/exact/server";
-import { bazaarResourceServerExtension, declareDiscoveryExtension } from "@x402/extensions/bazaar";
-import { addMeteredRoute } from "./metered.mjs";
-import { addSolanaMeteredRoute } from "./solana-metered.mjs";
+import { declareEip2612GasSponsoringExtension } from "@x402/extensions";
+import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
+import { addUsageRoute, baseOffer, solanaOffer } from "./metered.mjs";
 import { addSolanaQuotedRoute } from "./solana-quoted.mjs";
-import { DIRECT_TERMS, QUOTED_ROUTE, TERMS, METERED_ROUTE, SOLANA_TERMS, SOLANA_ROUTE } from "./pricing.mjs";
+import { DIRECT_TERMS, QUOTED_ROUTE, TERMS, METERED_ROUTE, SOLANA_TERMS } from "./pricing.mjs";
 
 export const BASE = "eip155:8453";
 export const SOLANA = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
 export const ROUTE = "/v1/chat/completions";
 
-// What one paid answer may ask for: the fixed price covers the model at these sizes with room to spare.
+// What one paid answer may ask for: at these sizes the model's cost stays under the 0.003 USDC ceiling.
 export const LIMITS = { messages: 40, chars: 24_000, maxTokens: 1_200, defaultTokens: 800, timeoutMs: 45_000 };
 const ROLES = new Set(["system", "user", "assistant"]);
 
@@ -86,104 +83,53 @@ const EXAMPLE = {
   },
 };
 
-export function createApp(config, { facilitatorClient, meteredFacilitatorClient, upstream = askSurplus, fetchImpl = fetch, log = console.error }) {
-  const server = new x402ResourceServer(facilitatorClient)
-    .register(BASE, new ExactEvmScheme())
-    .register(SOLANA, new ExactSvmScheme())
-    .registerExtension(bazaarResourceServerExtension);
-
+export function createApp(config, { facilitatorClient, upstream = askSurplus, fetchImpl = fetch, log = console.error }) {
   const app = express();
   app.disable("x-powered-by");
   // cloudflared connects over loopback and supplies the public HTTPS scheme.
   app.set("trust proxy", "loopback");
   app.use(express.json({ limit: "128kb" })); // unreadable JSON is refused before any payment is asked
-  app.use("/test", express.static(fileURLToPath(new URL("../public/", import.meta.url)), {
-    dotfiles: "deny",
-    setHeaders(res) {
-      res.setHeader("Cache-Control", "no-store");
-      res.setHeader("X-Content-Type-Options", "nosniff");
-      res.setHeader("Referrer-Policy", "no-referrer");
-    },
-  }));
 
+  const pricing = { [SOLANA]: SOLANA_TERMS, [BASE]: TERMS };
   app.get("/health", (_req, res) => {
-    res.json({ ok: true, service: "singit-ask", model: config.model,
-               ...(config.directSolana ? { directSolana: {endpoint: QUOTED_ROUTE, ...DIRECT_TERMS} } : {}),
-               price: { [SOLANA]: config.priceSolana, [BASE]: config.priceBase },
-               ...(meteredFacilitatorClient ? { metered: TERMS } : {}),
-               ...(meteredFacilitatorClient && config.meteredSolana ? { meteredSolana: SOLANA_TERMS } : {}) });
+    res.json({ ok: true, service: "singit-ask", model: config.model, facilitator: "coinbase-cdp", pricing,
+               metered: TERMS, ...(config.directSolana ? { directSolana: { endpoint: QUOTED_ROUTE, ...DIRECT_TERMS } } : {}) });
   });
   app.get("/v1/models", (_req, res) => {
-    res.json({ object: "list", data: [{ id: "singit-ask", object: "model", owned_by: "singit",
-                                         upstream: config.model, ...(config.directSolana ? {directSolana: {endpoint: QUOTED_ROUTE, ...DIRECT_TERMS}} : {}), ...(meteredFacilitatorClient && config.meteredSolana ? { meteredSolana: { endpoint: SOLANA_ROUTE, network: SOLANA, ...SOLANA_TERMS } } : {}), ...(meteredFacilitatorClient ? { metered: { endpoint: METERED_ROUTE, network: BASE, ...TERMS } } : {}), price_per_answer: { solana: config.priceSolana, base: config.priceBase } }] });
+    res.json({ object: "list", data: [{ id: "singit-ask", object: "model", owned_by: "singit", upstream: config.model,
+                                         endpoint: ROUTE, pricing }] });
   });
 
-  if (meteredFacilitatorClient) addMeteredRoute(app, config, {
-    facilitatorClient: meteredFacilitatorClient, readRequest, upstream, fetchImpl, log,
-  });
-
-  if (meteredFacilitatorClient && config.meteredSolana) addSolanaMeteredRoute(app, config, {
-    facilitatorClient: meteredFacilitatorClient, readRequest, upstream, fetchImpl, log,
-  });
-
-  if (config.directSolana) {
-    if (!meteredFacilitatorClient) throw new Error("CDP facilitator is required for direct Solana");
-    addSolanaQuotedRoute(app, config, {facilitatorClient: meteredFacilitatorClient, readRequest, upstream, fetchImpl});
-  }
-
-  app.use(paymentMiddleware({
-    [`POST ${ROUTE}`]: {
-      accepts: [
-        { scheme: "exact", price: config.priceSolana, network: SOLANA, payTo: config.payToSolana },
-        { scheme: "exact", price: config.priceBase, network: BASE, payTo: config.payToBase },
-      ],
-      description: `SingIt Ask: one answer from ${config.model}, OpenAI-compatible. Paid per answer; charged only when the answer came back.`,
-      mimeType: "application/json",
-      serviceName: "SingIt Ask",
-      tags: ["llm", "chat", "openai-compatible", "solana", "base", "singit"],
-      extensions: {
-        ...declareDiscoveryExtension({
-          bodyType: "json",
-          input: EXAMPLE.input,
-          inputSchema: {
-            properties: {
-              messages: { type: "array", items: { type: "object" } },
-              max_tokens: { type: "integer", maximum: LIMITS.maxTokens },
-            },
-            required: ["messages"],
+  const route = { facilitatorClient, config, readRequest, upstream, fetchImpl, log };
+  // Public: any x402 agent pays on Solana or Base for actual usage. Listed for discovery.
+  addUsageRoute(app, ROUTE, [solanaOffer(config), baseOffer(config)], {
+    description: `SingIt Ask: one answer from ${config.model}, OpenAI-compatible. Pays actual token cost + 30% `
+                 + "+ settlement fee (0.002 USDC on Solana, 0.001 on Base), at most 0.003 USDC; nothing without an answer.",
+    serviceName: "SingIt Ask",
+    tags: ["llm", "chat", "openai-compatible", "solana", "base", "singit"],
+    extensions: {
+      ...declareEip2612GasSponsoringExtension(),
+      ...declareDiscoveryExtension({
+        bodyType: "json",
+        input: EXAMPLE.input,
+        inputSchema: {
+          properties: {
+            messages: { type: "array", items: { type: "object" } },
+            max_tokens: { type: "integer", maximum: LIMITS.maxTokens },
           },
-          output: { example: EXAMPLE.output },
-        }),
-      },
+          required: ["messages"],
+        },
+        output: { example: EXAMPLE.output },
+      }),
     },
-  }, server));
-
-  app.post(ROUTE, async (req, res) => {
-    const started = Date.now();
-    let request;
-    try {
-      request = readRequest(req.body);
-    } catch (error) {
-      return res.status(error.status ?? 400).json({ error: { message: error.message, type: "invalid_request_error" } });
-    }
-    try {
-      const answer = await upstream(config, request.messages, request.maxTokens, fetchImpl);
-      log(`singit-ask: answered in ${Date.now() - started} ms (${answer.usage?.total_tokens ?? "?"} tokens)`);
-      return res.json({
-        id: `singit-ask-${started}`,
-        object: "chat.completion",
-        created: Math.floor(started / 1000),
-        model: "singit-ask",
-        choices: [{ index: 0, message: { role: "assistant", content: answer.content }, finish_reason: answer.finishReason }],
-        usage: answer.usage,
-      });
-    } catch (error) {
-      // 502: the middleware does not settle, so the payer keeps their money.
-      log(`singit-ask: no answer after ${Date.now() - started} ms: ${error.message}`);
-      return res.status(502).json({ error: { message: "The model did not answer. You were not charged; try again.",
-                                             type: "upstream_error" } });
-    }
-  });
+  }, route);
+  // The web agent's Base payments, pinned to this address by the gateway's buyer.
+  addUsageRoute(app, METERED_ROUTE, [baseOffer(config)], {
+    description: "SingIt Ask: actual model cost + 30% markup + 0.001 USDC settlement fee. Authorize at most 0.003 USDC.",
+    extensions: declareEip2612GasSponsoringExtension(),
+  }, route);
+  // The web agent's Solana payments: measured privately, then paid directly from the owner's delegated USDC.
+  if (config.directSolana) addSolanaQuotedRoute(app, config, { facilitatorClient, readRequest, upstream, fetchImpl });
 
   return app;
 }
