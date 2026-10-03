@@ -27,7 +27,10 @@ export class QuoteStore {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.db.prepare("UPDATE quotes SET status='expired',answer=NULL WHERE status IN ('preparing','quoted') AND expires<?").run(now);
-      if(this.db.prepare("SELECT 1 FROM quotes WHERE owner=? AND agent=? AND status IN ('preparing','quoted','settling','unresolved')").get(owner,agent))throw new Error('pending');
+      // The gateway sends one request per account at a time, so an older unpaid quote is abandoned.
+      // Unresolved settlements stay as records; the gateway proves them on chain before asking again.
+      if(this.db.prepare("SELECT 1 FROM quotes WHERE owner=? AND agent=? AND status='settling' AND expires>=?").get(owner,agent,now))throw new Error('pending');
+      this.db.prepare("UPDATE quotes SET status='expired',answer=NULL WHERE owner=? AND agent=? AND status IN ('preparing','quoted')").run(owner,agent);
       this.db.prepare("INSERT INTO quotes(id,owner,agent,hash,status,created,expires) VALUES(?,?,?,?,'preparing',?,?)").run(id,owner,agent,hash,now,now+300);
       this.db.exec('COMMIT');
     }catch(e){this.db.exec('ROLLBACK');throw e;}
@@ -88,6 +91,7 @@ export function addSolanaQuotedRoute(app,config,{facilitatorClient,readRequest,u
     const row=store.get(req.params.id);
     if(!row)return res.status(404).json({error:'not_found'});
     if(row.status==='paid')return res.status(409).json({error:'already_paid'});
+    if(row.status==='settling'||row.status==='unresolved')return res.status(409).json({error:'already_submitted'});
     if(row.status!=='quoted'||row.expires<now())return res.status(409).json({error:'quote_unavailable'});
     const quote=JSON.parse(row.offer),required=quote.accepts[0];
     const header=req.get('payment-signature');
@@ -98,9 +102,12 @@ export function addSolanaQuotedRoute(app,config,{facilitatorClient,readRequest,u
       return res.status(400).json({error:'terms_changed'});
     // Claim durably before any facilitator call; restart/concurrent requests never resettle.
     if(!store.claim(row.id,now()))return res.status(409).json({error:'already_submitted'});
+    // Verification never submits anything: whatever it answers, this quote was not settled.
+    let verified;
+    try{verified=await facilitatorClient.verify(payload,required);}
+    catch{store.fail(row.id);return res.status(502).json({error:'verification_unavailable'});}
+    if(!verified.isValid||verified.payer!==row.agent){store.fail(row.id);return res.status(402).json({error:'verification_refused'});}
     try {
-      const verified=await facilitatorClient.verify(payload,required);
-      if(!verified.isValid||verified.payer!==row.agent){store.fail(row.id);return res.status(402).json({error:'verification_refused'});}
       const receipt=await facilitatorClient.settle(payload,required);
       if(receipt.success!==true||receipt.network!==SOLANA||receipt.payer!==row.agent||!/^([1-9A-HJ-NP-Za-km-z]){80,90}$/.test(receipt.transaction??''))throw new Error('unresolved');
       store.paid(row.id,{...receipt,amount:required.amount});

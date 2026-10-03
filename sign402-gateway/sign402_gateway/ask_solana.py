@@ -11,9 +11,10 @@ from pathlib import Path
 import secrets
 import shutil
 import subprocess
+import time
 
 from .agent_allowance import AllowanceError, AllowanceUnavailable
-from .ask_metered import _journal_dir, _save
+from .ask_metered import _journal_dir, _read, _save
 
 CAP, FEE, MARKUP_BPS = 3000, 1000, 3000
 PAY_TO = "4an2sqamWWhny9mjLsMtGXCDXakeNtg6vSLq4QvhdmQu"
@@ -58,6 +59,67 @@ def _invoice(result, agent):
     return amount, data
 
 
+def _archive(root, journal, checkpoint, proof):
+    """Keep the settled-up files with their proof, out of the way of the next request."""
+    folder = root / "reconciled" / f"{int(time.time())}-{secrets.token_hex(4)}"
+    folder.mkdir(parents=True, mode=0o700)
+    for path in (journal, checkpoint):
+        if path.exists():
+            os.replace(path, folder / path.name)
+    _save(folder / "proof.json", proof)
+
+
+def _recover(lane, account, journal, checkpoint):
+    """Settle up a previous request that ended without an answer, from the chain alone.
+
+    No checkpoint means the payment was never handed to the merchant, so its hold is released.
+    With one, the chain decides: paid counts the actual charge, a blockhash that can no longer
+    land releases the hold, and anything else keeps the block until the chain can tell.
+    """
+    root = journal.parent
+    state = _read(journal)
+    hold = state.get("holdId")
+    if not checkpoint.exists():
+        if hold:
+            lane.store.release_metered(hold)
+        _archive(root, journal, checkpoint, {"outcome": "not_submitted"})
+        return
+    saved = _read(checkpoint)
+    owner, agent = lane.owner(account), saved.get("payer")
+    proof = _run(lane, reconcile={"owner": owner, "agent": agent, "amount": saved.get("amountAtomic"),
+        "memo": saved.get("memo"), "feePayer": saved.get("feePayer"),
+        "lastValidBlockHeight": saved.get("lastValidBlockHeight")})
+    outcome = proof.get("state") if proof.get("ok") is True else None
+    if (outcome == "paid" and hold and saved.get("owner") == owner
+            and saved.get("memo") == "singit-ask:" + str(state.get("requestId"))
+            and str(saved.get("amountAtomic", "")).isdigit() and int(saved["amountAtomic"]) <= CAP):
+        lane.store.settle_metered(hold, int(saved["amountAtomic"]), proof["transaction"], int(lane.now()))
+    elif outcome == "unpaid":
+        if hold:
+            lane.store.release_metered(hold)
+    elif outcome == "pending":
+        raise AllowanceError("The previous Ask payment is still confirming on Solana. Try again in a minute; "
+                             "nothing new was paid.")
+    else:
+        raise AllowanceError("A previous Solana Ask payment needs review. No new payment was sent.")
+    _archive(root, journal, checkpoint, {"outcome": outcome, "transaction": proof.get("transaction")})
+
+
+def recover(server, account):
+    """Unblock the account if its previous Ask payment can be settled up; raise while it cannot."""
+    lane = getattr(server, "solana_allowance", None)
+    root = _journal_dir()
+    name = hashlib.sha256(account.encode()).hexdigest() + "-solana"
+    journal, checkpoint = root / (name + ".json"), root / (name + ".submitted")
+    if lane is None or not (journal.exists() or checkpoint.exists()):
+        return
+    fd = os.open(root / (name + ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "w") as lock, lane._spend_lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if journal.exists() or checkpoint.exists():
+            _recover(lane, account, journal, checkpoint)
+
+
 def pay(server, gw, account, body):
     if not account.startswith("solana:"):
         raise AllowanceUnavailable("A Solana account is required. No Base fallback is available.")
@@ -74,7 +136,7 @@ def pay(server, gw, account, body):
     with os.fdopen(fd, "w") as lock, lane._spend_lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if journal.exists() or checkpoint.exists():
-            raise AllowanceError("A previous Solana Ask payment needs review. No new payment was sent.")
+            _recover(lane, account, journal, checkpoint)
         now = int(lane.now())
         limits = lane.store.limits(account)
         if limits is None:
@@ -104,6 +166,10 @@ def pay(server, gw, account, body):
                 key = None
             if not checkpoint.exists():
                 raise AllowanceUnavailable("The answer or payment could not be prepared. No payment was submitted.")
+            if result.get("settled") is False and result.get("submitted") is True:
+                # The merchant refused before asking for settlement: nothing was or will be charged.
+                checkpoint.unlink()
+                raise AllowanceUnavailable("The payment was refused before settlement. Nothing was charged; ask again.")
             amount, data = _invoice(result, agent)
             saved = json.loads(checkpoint.read_text())
             if (saved.get("requestId") != state["requestId"] or saved.get("payer") != agent

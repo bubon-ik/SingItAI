@@ -16,9 +16,9 @@ OpenAI-compatible model answers with USDC payments over x402.
   The user's agent signs as the existing SPL delegate; USDC moves directly from
   the owner's token account to the merchant. CDP supplies the network fee payer.
   No agent USDC/SOL top-up, agent token account, escrow or refund is needed.
-- **Legacy Solana `upto`:** `/v1/chat/completions/metered/solana` remains available
-  with its original 0.002 USDC fee and two-step escrow/refund flow. The updated
-  web adapter does not use it.
+- **Legacy Solana `upto`:** `/v1/chat/completions/metered/solana` (0.002 USDC fee,
+  two-step escrow/refund) is off in production. Nothing uses it; `SINGIT_ASK_METERED_SOLANA=1`
+  turns it back on.
 - **Legacy fixed-price API:** `/v1/chat/completions` remains PayAI `exact`,
   0.003 USDC on either network. The manual MetaMask test page uses this route.
 - **Cost source:** Surplus `usage.buyer_cost_micro`, including its actual
@@ -45,25 +45,39 @@ Ask's allowance UI. Unresolved older payments still require reconciliation.
 The preparation route uses a dedicated server-only secret, never browser code.
 It does not expose the answer. Request IDs bind owner, agent and normalized input;
 a repeated preparation returns the same quote without invoking the model again.
-Only one pending quote per owner/agent is allowed. Quotes expire after five
-minutes, while uncertain settlements never expire or resubmit automatically.
+Only one live quote per owner/agent exists: a new preparation replaces an unpaid
+one, which can then no longer be paid. Quotes expire after five minutes. A
+settlement is never resubmitted; an uncertain one stays as `unresolved` for review.
 The merchant pays for inference before collecting payment on this private path:
 a failed/abandoned quote therefore leaves that model cost with the merchant.
 Do not expose the preparation secret to untrusted clients.
 
 A private SQLite database records the generated answer, exact invoice and durable
-settlement claim before the facilitator is called. Concurrent/replayed requests
-cannot settle again. The buyer pins the merchant URL, native USDC mint, receiver,
+settlement claim before settlement is requested. Concurrent/replayed requests
+cannot settle again. A failed or unreachable verification marks the quote `failed`:
+verification submits nothing. The buyer pins the merchant URL, native USDC mint, receiver,
 owner, delegate, price, fee payer and request memo. Both the buyer and gateway
 independently check the confirmed transaction's owner debit, merchant credit,
 agent authority and memo before counting the actual charge.
 
 The local allowance ledger reserves at most 0.003 USDC while a request runs,
 then records actual spend and releases the difference. This reservation does not
-move funds on Solana. Unknown payments keep their durable SQLite hold and a
-private checkpoint in `~/.sign402/ask-metered/`, also after restarts. Never clear
-these merely to retry; reconcile the merchant quote record, chain and ledger.
-Base retains its existing reservation TTL and durable Ask retry block.
+move funds on Solana. A payment without a confirmed answer keeps its hold and a
+private checkpoint in `~/.sign402/ask-metered/`, also after restarts, and blocks
+further Ask and search payments for that account until the chain settles it up.
+The next request does that automatically, and moves the files with their proof
+to `reconciled/`:
+
+- **No checkpoint:** no signature reached the merchant, so the hold is released.
+- **Merchant refusal before settlement** (verification refused or unavailable, changed
+  terms, replaced quote): the hold is released at once.
+- **Solana:** the owner's USDC account is searched for the request memo at finalized
+  commitment. A verified transfer is counted at its actual amount. Once the
+  transaction's blockhash is past its last valid height without one, it is released.
+  Until then, the user is asked to try again in a minute.
+- **Base:** Permit2 decides. A nonce still unused after its deadline (120 s after
+  signing) can never be spent, so the reservation is released. A used nonce means
+  the payment went through without an answer: that one stays blocked for review.
 
 **Deployment status, October 3:** the Base actual-usage payment was verified at
 0.001055 USDC for 833 tokens; see [CHECKS.md](CHECKS.md). The previous user-funded

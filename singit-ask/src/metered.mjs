@@ -11,7 +11,8 @@ export function addMeteredRoute(app, config, { facilitatorClient, readRequest, u
   });
   app.use(paymentMiddleware({
     [`POST ${METERED_ROUTE}`]: {
-      accepts: [{ scheme: "upto", network: BASE, payTo: config.payToBase, maxTimeoutSeconds: 300,
+      // 120 s covers the model and settlement; after it, a lost answer's signature is provably unusable.
+      accepts: [{ scheme: "upto", network: BASE, payTo: config.payToBase, maxTimeoutSeconds: 120,
         price: { asset: ASSET, amount: TERMS.maxChargeAtomic,
           extra: { name: "USD Coin", version: "2", billing: TERMS } } }],
       description: "SingIt Ask: actual model cost + 30% markup + 0.001 USDC settlement fee. Authorize at most 0.003 USDC.",

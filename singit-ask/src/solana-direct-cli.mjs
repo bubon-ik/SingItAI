@@ -3,13 +3,15 @@ import path from 'node:path';
 import {getBase58Encoder} from '@solana/kit';
 import {SolanaChain} from '../../solana-x402-service/src/chain.mjs';
 import {walletFromBytes} from '../../solana-x402-service/src/wallet.mjs';
-import {payDirect,validateDirectTransfer} from './solana-direct-buyer.mjs';
+import {payDirect,validateDirectTransfer,reconcileDirect,PaymentRefused} from './solana-direct-buyer.mjs';
 let submitted=false;
 try {
  const input=JSON.parse(fs.readFileSync(0,'utf8'));
  const rpcUrl=input.rpcUrl||'https://api.mainnet-beta.solana.com';
  const rpc=async(method,params)=>{const r=await fetch(rpcUrl,{method:'POST',signal:AbortSignal.timeout(20000),headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});const d=await r.json();if(!r.ok||d.error)throw new Error('RPC failed');return d.result;};
- if(input.verify){
+ if(input.reconcile){
+  console.log(JSON.stringify({ok:true,...await reconcileDirect(input.reconcile,rpc)}));
+ }else if(input.verify){
   const tx=await rpc('getTransaction',[input.verify.signature,{encoding:'jsonParsed',commitment:'confirmed',maxSupportedTransactionVersion:0}]);
   await validateDirectTransfer(tx,input.verify);console.log(JSON.stringify({ok:true,verified:true}));
  }else{
@@ -21,4 +23,9 @@ try {
   }});
   console.log(JSON.stringify(result));
  }
-}catch{console.log(JSON.stringify({ok:false,submitted,error:submitted?'payment_unresolved':'payment_not_submitted'}));process.exitCode=1;}
+}catch(error){
+ // settled:false only on the merchant's own refusal before settlement; anything else stays unresolved.
+ const refused=submitted&&error instanceof PaymentRefused;
+ console.log(JSON.stringify({ok:false,submitted,...(refused?{settled:false}:{}),
+  error:refused?'payment_refused':submitted?'payment_unresolved':'payment_not_submitted'}));process.exitCode=1;
+}

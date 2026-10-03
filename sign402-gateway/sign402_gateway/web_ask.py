@@ -3,8 +3,6 @@
 Opt-in through the existing model picker. No prepaid chat credit, manual wallet
 signature or new wallet is involved. Solana pays the measured cost directly from the owner account with its delegate.
 """
-import hashlib
-from pathlib import Path
 from typing import Any
 
 from .agent_allowance import AllowanceError, AllowanceUnavailable
@@ -47,12 +45,15 @@ def listing(result: dict[str, Any], account: str) -> dict[str, Any]:
     return result
 
 
-def require_payment_ready(account: str) -> None:
-    """Do not buy more search data while the selected answer model is blocked."""
-    root = Path.home() / ".sign402" / "ask-metered"
-    name = hashlib.sha256(account.encode()).hexdigest() + ("-solana" if account.startswith("solana:") else "")
-    if any((root / (name + suffix)).exists() for suffix in (".json", ".submitted")):
-        raise AllowanceError("A previous Ask payment needs settlement review. No new search or chat payment was sent.")
+def require_payment_ready(server: Any, gw: Any, account: str) -> None:
+    """Do not buy more search data while the selected answer model is blocked.
+
+    A previous payment that the chain can settle up is settled up first, so it blocks only while it cannot.
+    """
+    if account.startswith("solana:"):
+        ask_solana.recover(server, account)
+    elif account.startswith("wallet:"):
+        ask_metered.recover(server, gw, account)
 
 
 def usage(account: str = "") -> tuple[int, dict[str, Any]]:

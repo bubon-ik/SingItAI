@@ -71,7 +71,9 @@ export class SolanaChain {
     const tx = getTransactionDecoder().decode(Buffer.from(getBase64EncodedWireTransaction(signed), 'base64'));
     if (!tx.signatures[wallet.address] || tx.signatures[requirement.extra.feePayer] !== null) throw new ClientError('INVALID_SIGNATURE_LAYOUT', 'Unexpected payment signature layout.');
     const partial = { x402Version: 2, payload: { transaction: getBase64EncodedWireTransaction(signed) } };
-    return { payload: { ...partial, accepted: requirement, resource }, messageHash: messageHash(tx.messageBytes) };
+    // The blockhash lifetime proves later whether a lost submission can still land.
+    return { payload: { ...partial, accepted: requirement, resource }, messageHash: messageHash(tx.messageBytes),
+      lastValidBlockHeight: String(latest.lastValidBlockHeight) };
   }
 
   async build(requirement, resource, wallet) {

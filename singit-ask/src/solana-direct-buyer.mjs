@@ -4,6 +4,10 @@ import {isAddress} from '@solana/kit';
 import {TOKEN_PROGRAM_ADDRESS} from '@solana-program/token';
 import {ata,requireReceiver} from './solana-buyer.mjs';
 const decode=s=>JSON.parse(Buffer.from(s,'base64').toString());
+// Merchant answers that end a request before it asks for settlement: nothing was or will be charged.
+const REFUSED=new Set(['400:invalid_payment','400:terms_changed','401:unauthorized','402:verification_refused',
+  '404:not_found','409:quote_unavailable','502:verification_unavailable']);
+export class PaymentRefused extends Error {}
 export function validateDirectQuote(quote,{requestId,owner,agent}) {
   const r=quote?.accepts?.[0],bill=billUsage(quote?.usage,DIRECT_TERMS);
   if(quote?.x402Version!==2||quote.quoteId!==requestId||quote.owner!==owner||quote.agent!==agent||quote.accepts?.length!==1
@@ -39,9 +43,13 @@ export async function payDirect({body,owner,wallet,requestId,token,chain,rpc,bef
   const accepted=validateDirectQuote(quote,{requestId,owner,agent:wallet.address});
   const built=await chain.buildDelegated(accepted,quote.resource,wallet,owner);
   await beforeSubmit({requestId,owner,payer:wallet.address,amountAtomic:accepted.amount,feePayer:accepted.extra.feePayer,
-    memo:accepted.extra.memo,expiresAt:quote.expiresAt});
+    memo:accepted.extra.memo,expiresAt:quote.expiresAt,lastValidBlockHeight:built.lastValidBlockHeight});
   const response=await send(quote.resource.url,{}, {'PAYMENT-SIGNATURE':Buffer.from(JSON.stringify(built.payload)).toString('base64')});
-  if(!response.ok)throw new Error('Submitted payment unresolved');
+  if(!response.ok){
+    const refusal=await response.json().catch(()=>null);
+    if(REFUSED.has(`${response.status}:${refusal?.error}`))throw new PaymentRefused('Payment refused before settlement');
+    throw new Error('Submitted payment unresolved');
+  }
   const receipt=decode(response.headers.get('payment-response'));
   const answer=await response.json(),bill=billUsage(answer.usage,DIRECT_TERMS);
   if(receipt.success!==true||receipt.network!==SOLANA||receipt.payer!==wallet.address||receipt.amount!==accepted.amount
@@ -54,4 +62,21 @@ export async function payDirect({body,owner,wallet,requestId,token,chain,rpc,bef
   }
   await validateDirectTransfer(tx,{signature:receipt.transaction,owner,agent:wallet.address,amount:accepted.amount,memo:accepted.extra.memo,feePayer:accepted.extra.feePayer});
   return {ok:true,payer:wallet.address,owner,amountAtomic:accepted.amount,transaction:receipt.transaction,body:answer};
+}
+
+// Where a submitted payment stands, from the chain alone: 'paid' (with its transaction), 'unpaid' once its
+// blockhash can no longer land, or 'pending'. The finalized height is read first, and the listing must be
+// answered at that slot or later: past the last valid height, every block that could hold it is listed.
+export async function reconcileDirect({owner,agent,amount,memo,feePayer,lastValidBlockHeight},rpc) {
+  if(!/^[0-9]+$/.test(lastValidBlockHeight??'')||!memo)throw new Error('Checkpoint cannot be proven');
+  const epoch=await rpc('getEpochInfo',[{commitment:'finalized'}]);
+  const height=BigInt(epoch.blockHeight);
+  const listed=await rpc('getSignaturesForAddress',[await ata(owner),{limit:1000,commitment:'finalized',minContextSlot:epoch.absoluteSlot}]);
+  for(const entry of listed??[]){
+    if(entry.err!==null||!String(entry.memo??'').split('; ').some(m=>m.replace(/^\[\d+\] /,'')===memo))continue;
+    const tx=await rpc('getTransaction',[entry.signature,{encoding:'jsonParsed',commitment:'finalized',maxSupportedTransactionVersion:0}]);
+    await validateDirectTransfer(tx,{signature:entry.signature,owner,agent,amount,memo,feePayer});
+    return {state:'paid',transaction:entry.signature};
+  }
+  return {state:height>BigInt(lastValidBlockHeight)?'unpaid':'pending'};
 }

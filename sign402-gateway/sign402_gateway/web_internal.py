@@ -177,7 +177,7 @@ def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict
     if action == "data-buy":  # live data for one chat answer, paid from the account's own limits
         from . import web_data, web_ask  # noqa: PLC0415
         if web_ask.selected(server, account):
-            web_ask.require_payment_ready(account)
+            web_ask.require_payment_ready(server, gw, account)
         if not account.startswith(SOLANA_PREFIX):
             _limits_from_limiter(server, gw, account)
         return 200, web_data.buy(server, gw, account, payload.get("tool"), payload.get("params"))

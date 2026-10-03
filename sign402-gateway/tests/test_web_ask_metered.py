@@ -29,7 +29,13 @@ class MeteredTests(unittest.TestCase):
         self.service=Mock();self.service._spend_lock=threading.Lock()
         self.service.lane_for.return_value={'per_purchase_cap':3000}
         self.service.agent_key.return_value=(AGENT,'test-key-not-real')
-        self.service.evm.call.return_value=receipt();self.service.store.counted_settlements.return_value=set()
+        self.nonce_word=0
+        self.chain={'eth_getTransactionReceipt':receipt(),'eth_getBlockByNumber':{'number':'0x10','timestamp':hex(2000)}}
+        def call(method,params):
+            if method=='eth_call':
+                self.nonce_read=params;return '0x'+format(self.nonce_word,'064x')
+            return self.chain[method]
+        self.service.evm.call.side_effect=call;self.service.store.counted_settlements.return_value=set()
         self.server=SimpleNamespace(allowance=self.service,spending_policy=None)
         self.gw=Mock();self.gw._reserve_user_wallet_spend.return_value=('reservation',None,'claim')
         self.buyer=Mock(side_effect=self.success)
@@ -62,8 +68,41 @@ class MeteredTests(unittest.TestCase):
         self.buyer.assert_called_once()
         state=json.loads(next(self.root.glob('*.json')).read_text());self.assertEqual(state['reservationId'],'reservation')
         self.assertNotIn('test-key-not-real',json.dumps(state))
+    def lose_answer(self,deadline='1000'):
+        def lost(key,body,checkpoint):
+            checkpoint.write_text(json.dumps({'payer':AGENT,'nonce':str(2**200+513),'deadline':deadline,'ceilingAtomic':'3000'}))
+            return {'ok':False,'submitted':True}
+        self.buyer.side_effect=lost
+        with self.assertRaises(AllowanceError):self.pay()
+        self.gw._release_user_wallet_spend.assert_not_called();self.buyer.side_effect=self.success
+    def test_lost_answer_with_dead_unused_permit_is_released_and_next_question_paid(self):
+        self.lose_answer()
+        amount,_,_=self.pay();self.assertEqual(amount,1130)
+        self.gw._release_user_wallet_spend.assert_called_once_with(self.server,'reservation')
+        read,block=self.nonce_read
+        self.assertEqual(read['to'],m.PERMIT2);self.assertTrue(read['data'].endswith(format((2**200+513)>>8,'064x')))
+        self.assertEqual(block,'0x10')
+        proof=json.loads(next(self.root.glob('reconciled/*/proof.json')).read_text());self.assertEqual(proof['outcome'],'unpaid')
+    def test_lost_answer_with_used_permit_stays_for_review(self):
+        self.lose_answer();self.nonce_word=1<<(513&0xFF)
+        with self.assertRaisesRegex(AllowanceError,'went through'):m.recover(self.server,self.gw,ACCOUNT)
+        self.gw._release_user_wallet_spend.assert_not_called();self.assertEqual(self.buyer.call_count,1)
+    def test_lost_answer_before_its_deadline_waits(self):
+        self.lose_answer(deadline='5000')
+        with self.assertRaisesRegex(AllowanceError,'still being checked'):self.pay()
+        self.gw._release_user_wallet_spend.assert_not_called();self.assertEqual(self.buyer.call_count,1)
+    def test_unreadable_checkpoint_stays_for_review(self):
+        self.lose_answer();next(self.root.glob('*.submitted')).write_text('not json')
+        with self.assertRaisesRegex(AllowanceError,'needs settlement review'):self.pay()
+        self.gw._release_user_wallet_spend.assert_not_called()
+    def test_crash_before_signature_releases_reservation(self):
+        journal=self.root/(m.hashlib.sha256(ACCOUNT.encode()).hexdigest()+'.json')
+        journal.write_text(json.dumps({'account':ACCOUNT,'reservationId':'old-reservation','claimId':'old-claim'}))
+        m.recover(self.server,self.gw,ACCOUNT)
+        self.gw._release_user_wallet_spend.assert_called_once_with(self.server,'old-reservation')
+        self.assertFalse(journal.exists())
     def test_wrong_onchain_amount_stays_unresolved_and_never_enters_ledger(self):
-        self.service.evm.call.return_value=receipt(3000)
+        self.chain['eth_getTransactionReceipt']=receipt(3000)
         with self.assertRaises(AllowanceError):self.pay()
         self.gw._settle_user_wallet_spend.assert_not_called();self.gw._release_user_wallet_spend.assert_not_called()
     def test_fee_tampering_is_rejected(self):

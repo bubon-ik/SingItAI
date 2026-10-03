@@ -35,9 +35,21 @@ class SolanaAskTests(unittest.TestCase):
             p.start();self.addCleanup(p.stop)
     def run_helper(self,lane,**p):
         if p.get('verify'):return {'ok':True,'verified':True}
+        if p.get('reconcile'):
+            self.reconciled=p['reconcile'];return self.chain_says
         Path(p['checkpoint']).write_text(json.dumps({'payer':AGENT,'owner':'owner','requestId':p['requestId'],
-            'amountAtomic':'1130','memo':'singit-ask:'+p['requestId'],'feePayer':'facilitator'}))
+            'amountAtomic':'1130','memo':'singit-ask:'+p['requestId'],'feePayer':'facilitator','lastValidBlockHeight':'500'}))
         return paid()
+    chain_says={'ok':False}
+    def lose_answer(self):
+        def lost(lane,**p):
+            if p.get('reconcile'):return self.run_helper(lane,**p)
+            self.run_helper(lane,**p);return {'ok':False,'submitted':True}
+        self.helper.side_effect=lost
+        with self.assertRaises(AllowanceError):self.pay()
+        self.assertEqual(self.lane.store.spent_since(ACCOUNT,0),3000)
+        self.helper.side_effect=self.run_helper
+    def payments(self):return [c for c in self.helper.call_args_list if 'checkpoint' in c.kwargs]
     def pay(self):return m.pay(self.server,Mock(),ACCOUNT,{'messages':[]})
     def test_direct_owner_payment_works_without_agent_usdc_or_sol(self):
         amount,_,tx=self.pay();self.assertEqual((amount,tx),(1130,'solana-tx'))
@@ -50,13 +62,14 @@ class SolanaAskTests(unittest.TestCase):
         self.assertEqual(self.lane.store.spent_since(ACCOUNT,0),0);self.assertFalse(list(self.root.glob('*.json')))
     def test_uncertain_payment_survives_restart_and_counts_against_other_purchases(self):
         def lost(lane,**p):
+            if p.get('reconcile'):return {'ok':False}  # an unreadable checkpoint proves nothing
             Path(p['checkpoint']).write_text('{}');return {'ok':False}
         self.helper.side_effect=lost
         with self.assertRaises(AllowanceError):self.pay()
         reopened=SolanaAllowanceStore(self.root/'allowance.db');self.assertEqual(reopened.spent_since(ACCOUNT,0),3000)
-        calls=self.helper.call_count
         with self.assertRaisesRegex(AllowanceError,'previous Solana'):self.pay()
-        self.assertEqual(self.helper.call_count,calls)
+        self.assertEqual(len(self.payments()),1)
+        self.assertEqual(reopened.spent_since(ACCOUNT,0),3000)
     def test_wrong_invoice_keeps_hold(self):
         def wrong(lane,**p):
             output=self.run_helper(lane,**p)
@@ -81,6 +94,35 @@ class SolanaAskTests(unittest.TestCase):
         with self.assertRaises(AllowanceError):self.pay()
         self.assertEqual(self.lane.store.spent_since(ACCOUNT,0),3000)
         state=json.loads(next(self.root.glob('*.json')).read_text());self.assertEqual(state['txId'],'solana-tx')
+    def test_merchant_refusal_before_settlement_frees_the_account_at_once(self):
+        def refused(lane,**p):
+            self.run_helper(lane,**p);return {'ok':False,'submitted':True,'settled':False}
+        self.helper.side_effect=refused
+        with self.assertRaisesRegex(AllowanceUnavailable,'Nothing was charged'):self.pay()
+        self.assertEqual(self.lane.store.spent_since(ACCOUNT,0),0);self.assertFalse(list(self.root.glob('*.json')))
+        self.helper.side_effect=self.run_helper
+        self.assertEqual(self.pay()[0],1130)
+    def test_lost_answer_whose_blockhash_died_unpaid_is_released_and_next_question_paid(self):
+        self.lose_answer();self.chain_says={'ok':True,'state':'unpaid'}
+        self.assertEqual(self.pay()[0],1130)
+        self.assertEqual(self.lane.store.spent_since(ACCOUNT,0),1130)
+        self.assertEqual(self.reconciled['lastValidBlockHeight'],'500');self.assertEqual(self.reconciled['owner'],'owner')
+        proof=json.loads(next(self.root.glob('reconciled/*/proof.json')).read_text());self.assertEqual(proof['outcome'],'unpaid')
+    def test_lost_answer_found_paid_on_chain_counts_its_actual_charge(self):
+        self.lose_answer();self.chain_says={'ok':True,'state':'paid','transaction':'found-tx'}
+        m.recover(self.server,ACCOUNT)
+        self.assertEqual(self.lane.store.spent_since(ACCOUNT,0),1130)
+        self.assertFalse(list(self.root.glob('*.json')));self.assertFalse(list(self.root.glob('*.submitted')))
+    def test_lost_answer_still_confirming_keeps_the_block(self):
+        self.lose_answer();self.chain_says={'ok':True,'state':'pending'}
+        with self.assertRaisesRegex(AllowanceError,'still confirming'):m.recover(self.server,ACCOUNT)
+        with self.assertRaisesRegex(AllowanceError,'still confirming'):self.pay()
+        self.assertEqual(len(self.payments()),1);self.assertEqual(self.lane.store.spent_since(ACCOUNT,0),3000)
+    def test_crash_before_submission_releases_the_hold(self):
+        journal=self.root/(m.hashlib.sha256(ACCOUNT.encode()).hexdigest()+'-solana.json')
+        self.lane.store.reserve_metered('ask-crashed',ACCOUNT,3000,10000,NOW)
+        journal.write_text(json.dumps({'account':ACCOUNT,'holdId':'ask-crashed','requestId':'r'}))
+        self.assertEqual(self.pay()[0],1130);self.assertEqual(self.lane.store.spent_since(ACCOUNT,0),1130)
     def test_revoked_grant_or_daily_limit_prevents_payment(self):
         self.lane.chain_state.return_value['owner']['delegatedToAgent']='0'
         with self.assertRaises(AllowanceError):self.pay()

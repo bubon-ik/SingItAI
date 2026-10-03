@@ -15,13 +15,14 @@ import shutil
 import subprocess
 import time
 
-from .agent_allowance import AllowanceError, AllowanceUnavailable, USDC, TRANSFER_TOPIC
+from .agent_allowance import AllowanceError, AllowanceUnavailable, USDC, TRANSFER_TOPIC, encode_call
 
 URL = "https://ask.singitai.app/v1/chat/completions/metered"
 PAY_TO = "0xC23d1Dc0f5fCe1abfFB051e06cB93f0329968B4e"
 CAP = 3000
 FEE = 1000
 MARKUP_BPS = 3000
+PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
 
 
 def _save(path, value):
@@ -37,6 +38,15 @@ def _save(path, value):
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _read(path):
+    """A journal or checkpoint, or {} when missing or unreadable: an empty one proves nothing."""
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _journal_dir():
@@ -98,6 +108,74 @@ def _validate_result(service, result, agent, account):
     return amount, data, tx.lower(), index
 
 
+def _archive(root, journal, checkpoint, proof):
+    """Keep the settled-up files with their proof, out of the way of the next request."""
+    folder = root / "reconciled" / f"{int(time.time())}-{secrets.token_hex(4)}"
+    folder.mkdir(parents=True, mode=0o700)
+    for path in (journal, checkpoint):
+        if path.exists():
+            os.replace(path, folder / path.name)
+    _save(folder / "proof.json", proof)
+
+
+def _release(server, gw, state):
+    gw._release_user_wallet_spend(server, state.get("reservationId"))
+    if state.get("claimId") and server.spending_policy is not None:
+        server.spending_policy.memory.release_claim(state["claimId"])
+
+
+def _recover(server, gw, journal, checkpoint):
+    """Settle up a previous request that ended without an answer, from the chain alone.
+
+    No checkpoint means no signature reached the merchant, so the reservation is released.
+    With one, Permit2 decides: a nonce still unused after its deadline can never be spent, so the
+    reservation is released too. A used nonce means the payment went through: that stays for review.
+    """
+    root = journal.parent
+    state = _read(journal)
+    if not checkpoint.exists():
+        _release(server, gw, state)
+        _archive(root, journal, checkpoint, {"outcome": "not_submitted"})
+        return
+    saved = _read(checkpoint)
+    payer, nonce, deadline = saved.get("payer"), str(saved.get("nonce", "")), str(saved.get("deadline", ""))
+    if not (isinstance(payer, str) and len(payer) == 42 and nonce.isdigit() and deadline.isdigit()):
+        raise AllowanceError("A previous Ask payment needs settlement review. It was not repeated; "
+                             "contact support before sending another question.")
+    evm = server.allowance.evm
+    block = evm.call("eth_getBlockByNumber", ["latest", False]) or {}
+    # The nonce is read at that same block: a lagging node answers for it or fails, never for an older one.
+    word = evm.call("eth_call", [{"to": PERMIT2, "data": encode_call("nonceBitmap(address,uint256)", payer,
+                                                                     int(nonce) >> 8)}, block.get("number")])
+    if not (isinstance(word, str) and len(word) == 66 and isinstance(block.get("timestamp"), str)):
+        raise AllowanceError("Base did not answer the payment check. Try again shortly; nothing new was paid.")
+    used = bool(int(word, 16) >> (int(nonce) & 0xFF) & 1)
+    expired = int(block["timestamp"], 16) > int(deadline)
+    if used:
+        raise AllowanceError("A previous Ask payment went through without an answer and needs review. "
+                             "No new payment was sent.")
+    if not expired:
+        raise AllowanceError("The previous Ask payment is still being checked. Try again in two minutes; "
+                             "nothing new was paid.")
+    _release(server, gw, state)
+    _archive(root, journal, checkpoint, {"outcome": "unpaid", "block": block.get("number"),
+                                         "timestamp": block.get("timestamp"), "deadline": deadline, "used": used})
+
+
+def recover(server, gw, account):
+    """Unblock the account if its previous Ask payment can be settled up; raise while it cannot."""
+    root = _journal_dir()
+    name = hashlib.sha256(account.encode()).hexdigest()
+    journal, checkpoint = root / (name + ".json"), root / (name + ".submitted")
+    if not (journal.exists() or checkpoint.exists()):
+        return
+    lock_fd = os.open(root / (name + ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(lock_fd, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if journal.exists() or checkpoint.exists():
+            _recover(server, gw, journal, checkpoint)
+
+
 def pay(server, gw, account, body):
     service = server.allowance
     active = service.lane_for(account)
@@ -112,7 +190,7 @@ def pay(server, gw, account, body):
     with os.fdopen(lock_fd, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if journal.exists() or checkpoint.exists():
-            raise AllowanceError("A previous Ask payment needs settlement review. It was not repeated; contact support before sending another question.")
+            _recover(server, gw, journal, checkpoint)
         requirements = {"scheme": "upto", "network": "base-mainnet", "x402Network": "eip155:8453",
             "asset": USDC, "amountAtomic": str(CAP), "receiver": PAY_TO, "resource": URL,
             "paymentIntent": "ask-" + secrets.token_hex(16)}

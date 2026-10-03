@@ -9,7 +9,7 @@ import {TOKEN_PROGRAM_ADDRESS} from '@solana-program/token';
 import {addSolanaQuotedRoute,QuoteStore} from '../src/solana-quoted.mjs';
 import {QUOTED_ROUTE,QUOTED_URL,SOLANA,SOLANA_ASSET,SOLANA_PAY_TO} from '../src/pricing.mjs';
 import {readRequest} from '../src/app.mjs';
-import {payDirect,validateDirectQuote,validateDirectTransfer} from '../src/solana-direct-buyer.mjs';
+import {payDirect,validateDirectQuote,validateDirectTransfer,reconcileDirect,PaymentRefused} from '../src/solana-direct-buyer.mjs';
 import {ata} from '../src/solana-buyer.mjs';
 import {SolanaChain} from '../../solana-x402-service/src/chain.mjs';
 const signer=await createKeyPairSignerFromPrivateKeyBytes(new Uint8Array(32).fill(21));
@@ -22,7 +22,7 @@ const decode=x=>JSON.parse(Buffer.from(x,'base64').toString());
 async function serve(t,opts={}) {
   const counts={model:0,verify:0,settle:0};
   const facilitator={getSupported:async()=>({kinds:[{x402Version:2,scheme:'exact',network:SOLANA,extra:{feePayer}}]}),
-    verify:async()=>{counts.verify++;return {isValid:true,payer:agent};},
+    verify:async()=>{counts.verify++;if(opts.failVerify)throw new Error('facilitator offline');return {isValid:true,payer:agent};},
     settle:async()=>{counts.settle++;if(opts.failSettlement)throw new Error('lost receipt');return {success:true,network:SOLANA,payer:agent,transaction:signature};}};
   const app=express();app.use(express.json());
   const store=new QuoteStore(opts.db??':memory:');t.after(()=>store.close());
@@ -64,13 +64,28 @@ test('single durable claim prevents concurrent settlement and response replay',a
  const good=responses.find(r=>r.status===200);assert.equal((await good.json()).choices[0].message.content,'Hello');
  assert.equal(s.store.get(requestId).status,'paid');assert.equal((await s.send('/'+requestId,{},payment(q))).status,409);
 });
-test('settlement uncertainty survives reopened DB and blocks another quote',async t=>{
+test('settlement uncertainty survives a reopened DB and is never settled again',async t=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'ask-quotes-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
  const db=path.join(dir,'quotes.db'),s=await serve(t,{db,failSettlement:true}),q=await prepare(s);
  assert.equal((await s.send('/'+requestId,{},payment(q))).status,503);
- const reopen=new QuoteStore(db);assert.equal(reopen.get(requestId).status,'unresolved');
- assert.throws(()=>reopen.create('2'.repeat(32),owner,agent,'hash',Math.floor(Date.now()/1000)+10000));reopen.close();
+ const reopen=new QuoteStore(db);assert.equal(reopen.get(requestId).status,'unresolved');reopen.close();
  assert.equal((await s.send('/'+requestId,{},payment(q))).status,409);assert.equal(s.counts.settle,1);
+ // The gateway proves the outcome on chain before it asks again; the record stays for review.
+ assert.equal((await s.send('/prepare',{...question,requestId:'2'.repeat(32)})).status,200);
+ assert.equal(s.store.get(requestId).status,'unresolved');
+});
+test('a facilitator that cannot verify leaves the quote unpaid and the account free',async t=>{
+ const s=await serve(t,{failVerify:true}),q=await prepare(s);
+ const r=await s.send('/'+requestId,{},payment(q));
+ assert.equal(r.status,502);assert.equal((await r.json()).error,'verification_unavailable');
+ assert.equal(s.counts.settle,0);assert.equal(s.store.get(requestId).status,'failed');
+ assert.equal((await s.send('/prepare',{...question,requestId:'2'.repeat(32)})).status,200);
+});
+test('a new request replaces an abandoned unpaid quote, which can no longer be paid',async t=>{
+ const s=await serve(t),q=await prepare(s);
+ assert.equal((await s.send('/prepare',{...question,requestId:'2'.repeat(32)})).status,200);
+ const old=await s.send('/'+requestId,{},payment(q));
+ assert.equal(old.status,409);assert.equal((await old.json()).error,'quote_unavailable');assert.equal(s.counts.verify,0);
 });
 test('altered recipient, price, owner, memo or fee payer is refused',async t=>{
  const s=await serve(t),q=await prepare(s);validateDirectQuote(q,{requestId,owner,agent});
@@ -97,7 +112,7 @@ test('real delegated builder and merchant pay once with zero agent SOL and no fu
  rpc:async method=>{if(method==='getAccountInfo')return {value:{owner:TOKEN_PROGRAM_ADDRESS,data:{parsed:{info:{mint:SOLANA_ASSET,owner:SOLANA_PAY_TO,state:'initialized'}}}}};return receiptTx();},
  fetchImpl:async(url,init)=>{posts++;if(posts===2){assert.ok(cp);assert.equal(cp.amountAtomic,'1130');const payload=decode(init.headers['PAYMENT-SIGNATURE']);assert.ok(payload.payload.transaction);}
  return fetch(url.replace('https://ask.singitai.app',s.url),init);}});
- assert.equal(result.amountAtomic,'1130');assert.equal(posts,2);assert.equal(s.counts.settle,1);assert.equal(result.owner,owner);
+ assert.equal(result.amountAtomic,'1130');assert.equal(posts,2);assert.equal(cp.lastValidBlockHeight,'999999');assert.equal(s.counts.settle,1);assert.equal(result.owner,owner);
 });
 test('lost paid response is submitted only once and leaves checkpoint',async t=>{
  const s=await serve(t);let cp,calls=0;
@@ -112,13 +127,47 @@ test('over-ceiling model usage is never offered or settled',async t=>{
  const s=await serve(t,{cost:2000});assert.equal((await s.send('/prepare',question)).status,502);
  assert.equal(s.counts.verify,0);assert.equal(s.counts.settle,0);
 });
-test('expired unpaid quotes cannot be claimed; unsettled claims never expire',()=>{
+test('expired unpaid quotes cannot be claimed; a settlement in flight holds the account',()=>{
  const store=new QuoteStore(':memory:');
  try {
   store.create(requestId,owner,agent,'hash',1000);store.ready(requestId,{}, {},1000);
   assert.equal(store.claim(requestId,1301),false);
   store.create('2'.repeat(32),owner,agent,'hash2',1301);store.ready('2'.repeat(32),{}, {},1301);
   assert.equal(store.claim('2'.repeat(32),1302),true);
-  assert.throws(()=>store.create('3'.repeat(32),owner,agent,'hash3',99999));
+  assert.throws(()=>store.create('3'.repeat(32),owner,agent,'hash3',1400));
+  store.create('3'.repeat(32),owner,agent,'hash3',99999);
+  assert.equal(store.get('2'.repeat(32)).status,'settling');
  } finally {store.close();}
+});
+async function paidThrough(s,reply){
+ return payDirect({owner,wallet:{address:agent},requestId,token,body:question,beforeSubmit:async()=>{},
+  chain:{buildDelegated:async()=>({payload:{},lastValidBlockHeight:'500'})},
+  rpc:async()=>({value:{owner:TOKEN_PROGRAM_ADDRESS,data:{parsed:{info:{mint:SOLANA_ASSET,owner:SOLANA_PAY_TO,state:'initialized'}}}}}),
+  fetchImpl:async(url,init)=>url.endsWith('/prepare')?fetch(url.replace('https://ask.singitai.app',s.url),init):reply()});
+}
+test('only the merchant\'s own refusals before settlement count as unpaid',async t=>{
+ const s=await serve(t);
+ for(const [status,error] of [[402,'verification_refused'],[502,'verification_unavailable'],[409,'quote_unavailable'],[400,'terms_changed']]){
+  await assert.rejects(paidThrough(s,async()=>Response.json({error},{status})),PaymentRefused);
+ }
+ // A second submission of a quote already being settled is not a refusal.
+ const q=await prepare(s);s.store.claim(requestId,Math.floor(Date.now()/1000));
+ const again=await s.send('/'+requestId,{},payment(q));assert.equal(again.status,409);assert.equal((await again.json()).error,'already_submitted');
+ for(const reply of [async()=>Response.json({error:'payment_unresolved'},{status:503}),async()=>Response.json({error:'already_submitted'},{status:409}),
+  async()=>new Response('{}',{status:402}),async()=>new Response('bad gateway',{status:502}),async()=>{throw new Error('lost');}]){
+  await assert.rejects(paidThrough(s,reply),e=>!(e instanceof PaymentRefused));
+ }
+});
+test('the chain settles up a lost payment: paid, unpaid once its blockhash is dead, or pending',async()=>{
+ const memo=`singit-ask:${requestId}`,cp={owner,agent,amount:'1130',memo,feePayer,lastValidBlockHeight:'500'};
+ const asked=[];
+ const chain=(height,listed)=>async(method,params)=>{asked.push([method,params]);
+  return method==='getEpochInfo'?{blockHeight:height,absoluteSlot:height+70}:method==='getSignaturesForAddress'?listed:receiptTx();};
+ assert.deepEqual(await reconcileDirect(cp,chain(600,[{signature,err:null,memo:`[45] ${memo}`}])),{state:'paid',transaction:signature});
+ assert.deepEqual(await reconcileDirect(cp,chain(600,[{signature,err:null,memo:'[5] other'},{signature,err:{},memo}])),{state:'unpaid'});
+ assert.deepEqual(await reconcileDirect(cp,chain(500,[])),{state:'pending'});
+ await assert.rejects(reconcileDirect({...cp,lastValidBlockHeight:undefined},chain(600,[])));
+ await assert.rejects(reconcileDirect({...cp,amount:'3000'},chain(600,[{signature,err:null,memo}])));
+ const listing=asked.find(([m])=>m==='getSignaturesForAddress')[1];
+ assert.equal(listing[0],await ata(owner));assert.equal(listing[1].minContextSlot,670);assert.equal(listing[1].commitment,'finalized');
 });
