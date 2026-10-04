@@ -80,7 +80,7 @@ class AskTests(unittest.TestCase):
         self.pay.assert_not_called()
         web_ask.choose(self.server,SOLANA_ACCOUNT)
         self.assertTrue(web_ask.selected(self.server,SOLANA_ACCOUNT))
-        self.assertFalse(web_ask.selected(self.server,ACCOUNT))
+        self.assertTrue(web_ask.selected(self.server,ACCOUNT))  # nothing chosen: SingIt Ask by default
         self.assertEqual(web_ask.usage(SOLANA_ACCOUNT)[1]["settlementFeeAtomic"],1000)
 
     def test_model_choice_is_per_account_and_moves_no_money(self):
@@ -90,8 +90,19 @@ class AskTests(unittest.TestCase):
         self.assertEqual((status,result["chosen"]),(200,web_ask.MODEL))
         self.assertTrue(web_ask.selected(self.server,ACCOUNT))
         self.assertEqual(self.server.chat_service.store.get_session(ACCOUNT).model,"existing-venice-model")
-        self.assertFalse(web_ask.selected(self.server,ACCOUNT+"2"));self.pay.assert_not_called()
+        self.server.chat_service.store.set_model(ACCOUNT+"2","existing-venice-model")  # another account chose Venice
+        self.assertFalse(web_ask.selected(self.server,ACCOUNT+"2"));self.assertTrue(web_ask.selected(self.server,ACCOUNT))
+        self.pay.assert_not_called()
         self.assertEqual(web_ask.usage()[1]["billingMode"],"actual_usage")
+
+    def test_singit_ask_is_the_default_and_venice_the_private_mode_once_chosen(self):
+        self.assertTrue(web_ask.selected(self.server,ACCOUNT))  # a new account: nothing chosen anywhere
+        web_venice.choose_model(self.server,ACCOUNT,web_ask.MODEL)
+        self.assertTrue(web_ask.selected(self.server,ACCOUNT))
+        self.server.chat_service.store.set_model("ask-web:"+ACCOUNT,"")  # what choosing a Venice model leaves here
+        self.server.chat_service.store.set_model(ACCOUNT,"existing-venice-model")
+        self.assertFalse(web_ask.selected(self.server,ACCOUNT))
+        self.assertFalse(web_ask.selected(self.server,"telegram:123"))  # the web chat's adapter only
 
     def test_picker_discloses_markup_fee_and_ceiling(self):
         result=web_ask.listing({"models":[],"categories":[],"chosen":"existing"},ACCOUNT)

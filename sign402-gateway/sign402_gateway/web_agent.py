@@ -721,8 +721,9 @@ Current state: {state}"""
 
 # Before the limits are approved there is no Venice credit to talk on: the concierge helps them start.
 NOT_YET_PRIVATE = """
-Their private chat runs on Venice AI and opens once their limits are approved (Venice credit is bought from the
-allowance, $5 at a time). Until then, help them get started; if they want a long conversation, tell them this."""
+Their full chat opens once their limits are approved: then each answer is paid from the allowance by actual use,
+about $0.001 (SingIt Ask). A private mode on Venice AI, behind the lock next to the model, uses Venice credit bought
+$5 at a time. Until then, help them get started; if they want a long conversation, tell them this."""
 
 VENICE_SYSTEM = """You are SingIt, the user's AI assistant on app.singitai.app. Talk about anything they want and answer fully and
 well; use Markdown when it helps (lists, tables, code). Reply in the user's language.

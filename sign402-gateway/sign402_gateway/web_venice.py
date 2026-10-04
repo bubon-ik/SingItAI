@@ -248,9 +248,11 @@ def models(server: Any, account: str) -> tuple[int, dict[str, Any]]:
     chosen = web_ask.MODEL if web_ask.selected(server, account) else (base.store.get_session(account).model or base.default_model)
     listed = catalogue.models()
     categories = [c for c in catalogue.categories() if c.key != "all"]
+    private = base.store.get_session(account).model or base.default_model  # what the lock switches to
     return 200, web_ask.listing({
         "ok": True, "chosen": chosen,
         "chosenLabel": next((m.label for m in listed if m.model_id == chosen), chosen),
+        "privateModel": private, "privateLabel": next((m.label for m in listed if m.model_id == private), private),
         "categories": [{"key": c.key, "label": c.label} for c in categories],
         "models": [{"id": m.model_id, "label": m.label, "blurb": m.blurb,
                     "inputUsdPerMTok": m.input_usd_per_mtok, "outputUsdPerMTok": m.output_usd_per_mtok,

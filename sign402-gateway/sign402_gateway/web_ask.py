@@ -15,8 +15,13 @@ PRICE = ask_metered.CAP
 
 
 def selected(server: Any, account: str) -> bool:
+    """SingIt Ask answers unless the account chose a Venice model: the private mode, behind the lock."""
     base = getattr(server, "chat_service", None)
-    return base is not None and base.store.get_session("ask-web:" + account).model == MODEL
+    if base is None or not account.startswith(("wallet:", "solana:")):
+        return False
+    chosen = base.store.get_session("ask-web:" + account).model
+    # Choosing Venice records its model and clears this one; nothing chosen yet is SingIt Ask.
+    return chosen == MODEL or (not chosen and not base.store.get_session(account).model)
 
 
 def choose(server: Any, account: str) -> tuple[int, dict[str, Any]]:

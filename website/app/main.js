@@ -771,7 +771,7 @@ function renderModal() {
       aria-label="Choose a model"><div class="core">
       <div class="approval-head"><div class="avatar">${mark()}</div>
         <div><strong>Choose a model</strong><span>SingIt Ask: token cost + fees, up to 0.003 USDC per answer · Venice: prices per 1M tokens</span></div></div>
-      ${granted ? "" : `<p class="note">Your private chat starts once your limits are approved. Your choice is kept until then.</p>`}
+      ${granted ? "" : `<p class="note">Your chat starts once your limits are approved. Your choice is kept until then.</p>`}
       <input id="model-search" class="input" type="search" placeholder="Search ${state.models.models.length} models…"
         value="${esc(query)}" autocomplete="off" aria-label="Search models">
       <div class="model-cats">
@@ -925,8 +925,9 @@ function renderMain() {
       <form class="composer" data-form="send">
         <textarea id="composer" rows="1" placeholder="Message your agent…" aria-label="Message">${esc(draft)}</textarea>
         <div class="composer-bar">
-          ${state.models ? `<button type="button" class="model-chip" data-action="open-models" aria-haspopup="dialog">
-            <span class="venice">${esc(state.models.provider || "Venice")}</span>${esc(state.models.chosenLabel)}<span class="caret">▾</span></button>` : "<span></span>"}
+          ${state.models ? `<div class="model-tools"><button type="button" class="model-chip" data-action="open-models" aria-haspopup="dialog">
+            <span class="venice">${esc(state.models.provider || "Venice")}</span>${esc(state.models.chosenLabel)}<span class="caret">▾</span></button>
+            ${privateToggle()}</div>` : "<span></span>"}
           <button class="send" type="submit" aria-label="Send" ${state.sending ? "disabled" : ""}>↑</button>
         </div>
       </form>
@@ -1372,6 +1373,28 @@ function drawQr(text) {
   }).catch(() => { const el = $("#funds-qr"); if (el) el.textContent = "QR unavailable — copy the address."; });
 }
 
+// SingIt Ask answers by default, paid per answer. The lock switches to the private chat on Venice and back.
+const hasAsk = () => (state.models?.models || []).some((mdl) => mdl.id === "singit-ask");
+const isPrivate = () => hasAsk() && state.models.chosen !== "singit-ask";
+
+function privateToggle() {
+  if (!hasAsk() || !state.models.privateModel) return "";
+  const on = isPrivate();
+  const lock = on ? '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>'
+                  : '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-1.9"/>';
+  return `<button type="button" class="private-chip ${on ? "on" : ""}" data-action="toggle-private" aria-pressed="${on}"
+    title="${on ? `Private chat on Venice (${esc(state.models.chosenLabel)}). Tap to go back to SingIt Ask.`
+               : "Private chat on Venice: uses Venice credit, bought $5 at a time from your limits."}">
+    <svg viewBox="0 0 24 24" aria-hidden="true">${lock}</svg>Private</button>`;
+}
+
+async function togglePrivate() {
+  const toPrivate = !isPrivate();
+  await chooseModel(toPrivate ? state.models.privateModel : "singit-ask",
+    toPrivate ? "Private mode: Venice answers from your next message. It uses Venice credit, bought $5 at a time from your limits."
+              : "SingIt Ask answers from your next message, paid per answer.");
+}
+
 async function loadModels() {
   try { state.models = await api.models(); } catch { state.models = null; }  // no Venice: no picker
 }
@@ -1391,13 +1414,14 @@ function renderModelList() {
       <span class="model-check">${mdl.id === state.models.chosen ? "✓" : ""}</span></button>`).join("");
 }
 
-async function chooseModel(id) {
+async function chooseModel(id, note) {
   try {
     const chosen = await api.chooseModel(id);
-    state.models = { ...state.models, chosen: chosen.chosen, chosenLabel: chosen.label, provider: chosen.provider || "Venice" };
+    state.models = { ...state.models, chosen: chosen.chosen, chosenLabel: chosen.label, provider: chosen.provider || "Venice",
+                     ...(chosen.chosen !== "singit-ask" ? { privateModel: chosen.chosen, privateLabel: chosen.label } : {}) };
     state.modal = null;
     render();
-    toast(`${chosen.label} answers from your next message.`);
+    toast(note || `${chosen.label} answers from your next message.`);
   } catch (error) {
     toast(explain(error), true);
   }
@@ -1632,6 +1656,7 @@ const actions = {
     $("#model-list").innerHTML = renderModelList();
   },
   "choose-model": (el) => chooseModel(el.dataset.id),
+  "toggle-private": () => togglePrivate(),
   "toggle-archived": () => { state.showArchived = !state.showArchived; render(); },
   "chat-pin": (el) => {
     const c = state.chats.find((x) => x.id === el.dataset.id);

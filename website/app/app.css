@@ -447,6 +447,13 @@ body.in-app .nav-wrap, body.in-app .shell { display: none; }
 .model-chip .venice { font: 500 10.5px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent);
   border: 1px solid rgba(62, 207, 142, 0.35); border-radius: 6px; padding: 1px 5px; }
 .model-chip .caret { font-size: 10px; opacity: 0.7; }
+.model-tools { display: flex; align-items: center; gap: 4px; min-width: 0; max-width: 78%; }
+.model-tools .model-chip { max-width: none; min-width: 0; }
+.private-chip { display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 5px 9px; border-radius: 999px;
+  border: 1px solid var(--hairline); background: none; color: var(--text-faint); font: 500 12px var(--sans); cursor: pointer; }
+.private-chip svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.private-chip:hover { color: var(--text); }
+.private-chip.on { color: var(--text); border-color: rgba(62, 207, 142, 0.5); background: rgba(62, 207, 142, 0.12); }
 .modal-wide { max-width: 620px; }
 #model-search { width: 100%; margin-top: 16px; }
 .model-cats { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }

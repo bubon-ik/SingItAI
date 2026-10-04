@@ -132,11 +132,13 @@ class WebVeniceTests(unittest.TestCase):
     def test_the_account_picks_its_model_from_venices_list(self):
         status, listing = web_venice.models(self.server, ACCOUNT)
         self.assertEqual((status, listing["chosen"], listing["chosenLabel"]),
-                         (200, "venice-uncensored-1-2", "Venice Uncensored 1.2"))
+                         (200, "singit-ask", "DeepSeek V4.1 Flash · SingIt Ask"))  # the default
+        self.assertEqual((listing["privateModel"], listing["privateLabel"]), ("venice-uncensored-1-2", "Venice Uncensored 1.2"))
         prices = [m["outputUsdPerMTok"] for m in listing["models"] if "outputUsdPerMTok" in m]
         self.assertEqual(prices, sorted(prices))  # cheapest first
         web_venice.choose_model(self.server, ACCOUNT, "grok-4-6")
         self.assertEqual(web_venice.models(self.server, ACCOUNT)[1]["chosenLabel"], "Grok 4.6")
+        self.assertEqual(web_venice.models(self.server, ACCOUNT)[1]["privateModel"], "grok-4-6")  # the lock returns here
         with self.assertRaises(UnknownModel):
             web_venice.choose_model(self.server, ACCOUNT, "gpt-9-imaginary")
         self.venice.balance = 3_000_000
@@ -163,12 +165,22 @@ class WebVeniceTests(unittest.TestCase):
 
     def test_existing_selection_still_routes_to_venice(self):
         from sign402_gateway import web_ask
+        web_venice.choose_model(self.server, ACCOUNT, "grok-4-6")  # the private mode, chosen
         with patch.object(web_internal, "_account", return_value=ACCOUNT), \
              patch.object(web_ask, "chat") as ask, \
              patch.object(web_venice, "chat", return_value=(200, {"ok": True})) as venice:
             self.assertEqual(web_internal.handle(self.server, "venice-chat", {"messages": []})[0], 200)
             venice.assert_called_once()
             ask.assert_not_called()
+
+    def test_a_new_account_talks_to_singit_ask(self):
+        from sign402_gateway import web_ask
+        with patch.object(web_internal, "_account", return_value=ACCOUNT), \
+             patch.object(web_ask, "chat", return_value=(200, {"ok": True})) as ask, \
+             patch.object(web_venice, "chat") as venice:
+            self.assertEqual(web_internal.handle(self.server, "venice-chat", {"messages": []})[0], 200)
+            ask.assert_called_once()
+            venice.assert_not_called()
 
     def with_search(self):
         """The bot's web search switched on, Exa offering two Base legs, the bound one second."""
