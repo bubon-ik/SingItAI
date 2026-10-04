@@ -1,5 +1,6 @@
 """Live data for the web chat: bought per question from the account's limits, on Base or Solana."""
 import json
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from sign402_gateway import goplausible, web_agent as wg, web_data, web_internal, web_venice
-from sign402_gateway.agent_allowance import AllowanceError
+from sign402_gateway.agent_allowance import AllowanceError, AllowanceUnavailable
 from sign402_gateway.server import _validate_base_usdc_x402_requirement
 
 BASE_ACCOUNT = "wallet:0x1111111111111111111111111111111111111111"
@@ -123,6 +124,35 @@ class SolanaDataTests(unittest.TestCase):
         self.assertIn("https://berlin.example/coffee", got["digest"])
         hotels = web_data.TOOLS["places"].request({"query": "Prague", "kind": "hotels"})[2]["query"]
         self.assertEqual(hotels, "hotels Prague")
+
+    def test_a_stalled_payment_request_is_asked_once_more_and_never_waited_for_long(self):
+        # 4 October: Exa's first payment request took 40 s, the next 0.4 s.
+        asked = []
+        def stall_then_answer(url, request_body=None):
+            asked.append(url)
+            if len(asked) == 1:
+                time.sleep(0.5)
+            return offer(web_data.TOOLS["places"], amount="7000")
+        self.gw.fetch_x402_payment_required = stall_then_answer
+        with patch.object(web_data, "OFFER_DEADLINES", (0.1, 0.3)):
+            started = time.monotonic()
+            web_data.buy(self.server, self.gw, SOLANA_ACCOUNT, "places", {"query": "Prague"})
+            self.assertLess(time.monotonic() - started, 0.4)
+        self.assertEqual(len(asked), 2)
+        self.assertEqual([op for op, _ in self.calls], ["data-pay"])  # the payment itself is never repeated
+
+        self.calls.clear()
+        self.gw.fetch_x402_payment_required = lambda url, request_body=None: time.sleep(0.5)
+        with patch.object(web_data, "OFFER_DEADLINES", (0.1, 0.1)), self.assertRaisesRegex(AllowanceError, "did not answer"):
+            web_data.buy(self.server, self.gw, SOLANA_ACCOUNT, "places", {"query": "Prague"})
+        self.assertEqual(self.calls, [])
+
+    def test_without_limits_nothing_is_read_or_paid(self):
+        self.server.solana_allowance.store.limits.return_value = None
+        with self.assertRaisesRegex(AllowanceUnavailable, "Set your limits"):
+            web_data.buy(self.server, self.gw, SOLANA_ACCOUNT, "places", {"query": "Prague"})
+        self.assertEqual((self.calls, self.spent), ([], []))
+        self.server.solana_allowance.status.assert_not_called()  # the wallet is read once, in spend()
 
     def test_an_unbound_solana_address_pays_nothing(self):
         self.gw.fetch_x402_payment_required = lambda url, request_body=None: offer(

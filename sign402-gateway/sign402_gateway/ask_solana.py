@@ -12,12 +12,75 @@ import secrets
 import shutil
 import subprocess
 import time
+import urllib.request
 
 from .agent_allowance import AllowanceError, AllowanceUnavailable
 from .ask_metered import _journal_dir, _read, _save
 
 CAP, FEE, MARKUP_BPS = 3000, 1000, 3000
 PAY_TO = "4an2sqamWWhny9mjLsMtGXCDXakeNtg6vSLq4QvhdmQu"
+USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+
+def _transaction(rpc_url, signature):
+    """The confirmed transaction, parsed, or None while the node does not show it yet."""
+    request = urllib.request.Request(rpc_url, data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "getTransaction",
+        "params": [signature, {"encoding": "jsonParsed", "commitment": "confirmed",
+                               "maxSupportedTransactionVersion": 0}]}).encode(), headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.loads(response.read(2_000_000)).get("result")
+
+
+def _verified(tx, *, signature, owner, agent, amount, memo, fee_payer):
+    """The payment the chain shows is this request's, in this code, apart from the buyer's own check in Node: one
+    USDC transfer of exactly `amount` from the owner's account to the merchant's, signed by the agent as delegate,
+    fees paid by CDP, with this request's memo."""
+    if not isinstance(tx, dict) or (tx.get("meta") or {}).get("err") is not None or "meta" not in tx:
+        return False
+    message = tx.get("transaction", {}).get("message", {})
+    keys = message.get("accountKeys") or []
+    if signature not in (tx.get("transaction", {}).get("signatures") or []) or not keys:
+        return False
+    pubkeys = [k.get("pubkey") if isinstance(k, dict) else k for k in keys]
+    if pubkeys[0] != fee_payer or fee_payer in (owner, agent):
+        return False
+    if not any(isinstance(k, dict) and k.get("pubkey") == agent and k.get("signer") is True for k in keys):
+        return False
+    meta = tx["meta"]
+    holders = {}  # token account -> its owner, for USDC accounts only
+    def balances(name):
+        found = {}
+        for b in meta.get(name) or []:
+            if b.get("mint") != USDC or (b.get("uiTokenAmount") or {}).get("decimals") != 6:
+                continue
+            account = pubkeys[b["accountIndex"]]
+            holders[account] = b.get("owner")
+            found[b.get("owner")] = int(b["uiTokenAmount"]["amount"])
+        return found
+    before, after = balances("preTokenBalances"), balances("postTokenBalances")
+    if (before.get(owner, 0) - after.get(owner, 0) != amount or after.get(PAY_TO, 0) - before.get(PAY_TO, 0) != amount
+            or owner not in before or PAY_TO not in after):
+        return False
+    instructions = message.get("instructions") or []
+    transfers = [i for i in instructions if i.get("program") == "spl-token"
+                 and (i.get("parsed") or {}).get("type") == "transferChecked"
+                 and (info := i["parsed"].get("info") or {}).get("authority") == agent and info.get("mint") == USDC
+                 and str((info.get("tokenAmount") or {}).get("amount")) == str(amount)
+                 and holders.get(info.get("source")) == owner and holders.get(info.get("destination")) == PAY_TO]
+    memos = [i for i in instructions if i.get("program") == "spl-memo" and i.get("parsed") == memo]
+    return len(transfers) == 1 and len(memos) == 1
+
+
+def _confirmed(lane, **payment):
+    for _ in range(5):  # the buyer already waited for it; a lagging node may need a moment
+        try:
+            tx = _transaction(lane.bridge.rpc, payment["signature"])
+        except (OSError, ValueError):
+            tx = None
+        if tx is not None:
+            return _verified(tx, **payment)
+        time.sleep(1)
+    return False
 
 
 def _run(lane, **payload):
@@ -181,9 +244,8 @@ def pay(server, gw, account, body):
             # Preserve receipt identifiers before the independent chain read, for reconciliation.
             state.update(txId=tx, amountAtomic=amount)
             _save(journal, state)
-            verified = _run(lane, verify={"signature": tx, "owner": owner, "agent": agent,
-                "amount": str(amount), "memo": saved["memo"], "feePayer": saved["feePayer"]})
-            if verified.get("verified") is not True:
+            if not _confirmed(lane, signature=tx, owner=owner, agent=agent, amount=amount, memo=saved["memo"],
+                              fee_payer=saved["feePayer"]):
                 raise AllowanceError("The Solana settlement is not confirmed. No automatic retry was made.")
             lane.store.settle_metered(hold, amount, tx, int(lane.now()))
             complete = True

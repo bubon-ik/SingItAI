@@ -216,6 +216,7 @@ class SolanaAllowanceService:
     def _call(self, account: str, operation: str, *, fee_payer: bool = False, **payload: Any) -> dict[str, Any]:
         from .solana_chat import SolanaChatError
         agent, key = self.agent_key(account)
+        started = time.monotonic()
         try:
             return self.bridge.run(account, agent, key, operation,
                                    fee_payer_key=self.fee_payer_key() if fee_payer and self.fee_payer_key else None, **payload)
@@ -223,6 +224,7 @@ class SolanaAllowanceService:
             raise AllowanceError(str(exc.text)) from None  # already a sentence for the user
         finally:
             key = None
+            logger.info("solana allowance: %s took %.1fs", operation, time.monotonic() - started)
 
     # -- reads --
 

@@ -30,7 +30,9 @@ class SolanaAskTests(unittest.TestCase):
             chain_state=Mock(return_value={'owner':{'delegatedToAgent':'9000','amount':'10000'},'agent':{'usdcAtomic':'0','solLamports':'0'}}))
         self.server=SimpleNamespace(solana_allowance=self.lane)
         self.helper=Mock(side_effect=self.run_helper)
+        self.confirmed=Mock(return_value=True)
         for p in [patch.object(m,'_journal_dir',return_value=self.root),patch.object(m,'_run',self.helper),
+                  patch.object(m,'_confirmed',self.confirmed),
                   patch.dict(m.os.environ,{'SINGIT_ASK_QUOTE_TOKEN':'test-only-token-'*3})]:
             p.start();self.addCleanup(p.stop)
     def run_helper(self,lane,**p):
@@ -53,6 +55,10 @@ class SolanaAskTests(unittest.TestCase):
     def pay(self):return m.pay(self.server,Mock(),ACCOUNT,{'messages':[]})
     def test_direct_owner_payment_works_without_agent_usdc_or_sol(self):
         amount,_,tx=self.pay();self.assertEqual((amount,tx),(1130,'solana-tx'))
+        # The chain is checked here, in Python, not by a second Node process.
+        self.assertFalse([c for c in self.helper.call_args_list if 'verify' in c.kwargs])
+        self.assertEqual(self.confirmed.call_args.kwargs,{'signature':'solana-tx','owner':'owner','agent':AGENT,
+            'amount':1130,'memo':self.confirmed.call_args.kwargs['memo'],'fee_payer':'facilitator'})
         self.lane._call.assert_not_called();self.assertEqual(self.lane.store.spent_since(ACCOUNT,0),1130)
         self.assertFalse(list(self.root.glob('*.submitted')))
         self.assertEqual(self.helper.call_args_list[0].kwargs['owner'],'owner')
@@ -88,9 +94,7 @@ class SolanaAskTests(unittest.TestCase):
         with self.assertRaises(AllowanceError):self.pay()
         self.assertEqual(self.lane.store.spent_since(ACCOUNT,0),3000)
     def test_unverified_transfer_retains_receipt_for_review(self):
-        def wrong(lane,**p):
-            return {'ok':False} if p.get('verify') else self.run_helper(lane,**p)
-        self.helper.side_effect=wrong
+        self.confirmed.return_value=False
         with self.assertRaises(AllowanceError):self.pay()
         self.assertEqual(self.lane.store.spent_since(ACCOUNT,0),3000)
         state=json.loads(next(self.root.glob('*.json')).read_text());self.assertEqual(state['txId'],'solana-tx')
@@ -141,4 +145,46 @@ class SolanaAskTests(unittest.TestCase):
         with self.assertRaises(AllowanceError):store.reserve_metered('second',ACCOUNT,3000,4000,NOW)
         with self.assertRaises(AllowanceError):store.settle_metered('hold',2130,'tx',NOW)
 
-if __name__=='__main__':unittest.main()
+
+
+OWNER, PAYER, FEE = 'Owner1111', 'Agent2222', 'Cdp3333'
+OWNER_ATA, MERCHANT_ATA = 'OwnerUsdc', 'MerchantUsdc'
+
+
+def chain_tx(amount=1130, memo='singit-ask:abc', err=None):
+    keys = [{'pubkey': FEE, 'signer': True}, {'pubkey': PAYER, 'signer': True},
+            {'pubkey': OWNER_ATA, 'signer': False}, {'pubkey': MERCHANT_ATA, 'signer': False}]
+    def bal(i, owner, n): return {'accountIndex': i, 'mint': m.USDC, 'owner': owner,
+                                  'uiTokenAmount': {'amount': str(n), 'decimals': 6}}
+    return {'meta': {'err': err, 'preTokenBalances': [bal(2, OWNER, 5000), bal(3, m.PAY_TO, 0)],
+                     'postTokenBalances': [bal(2, OWNER, 5000 - amount), bal(3, m.PAY_TO, amount)]},
+            'transaction': {'signatures': ['sig'], 'message': {'accountKeys': keys, 'instructions': [
+                {'program': 'spl-token', 'parsed': {'type': 'transferChecked', 'info': {
+                    'source': OWNER_ATA, 'destination': MERCHANT_ATA, 'authority': PAYER, 'mint': m.USDC,
+                    'tokenAmount': {'amount': '1130'}}}},
+                {'program': 'spl-memo', 'parsed': memo}]}}}
+
+
+class ChainCheckTests(unittest.TestCase):
+    ARGS = dict(signature='sig', owner=OWNER, agent=PAYER, amount=1130, memo='singit-ask:abc', fee_payer=FEE)
+
+    def test_the_payment_is_this_requests_and_nothing_else(self):
+        self.assertTrue(m._verified(chain_tx(), **self.ARGS))
+        for change in ({'amount': 1131}, {'memo': 'singit-ask:other'}, {'owner': PAYER}, {'agent': OWNER},
+                       {'fee_payer': OWNER}, {'signature': 'other'}):
+            self.assertFalse(m._verified(chain_tx(), **{**self.ARGS, **change}), change)
+        self.assertFalse(m._verified(chain_tx(err={'InstructionError': [0, 'x']}), **self.ARGS))
+        self.assertFalse(m._verified(chain_tx(amount=1000), **self.ARGS))  # moved less than the transfer says
+        self.assertFalse(m._verified(None, **self.ARGS))
+
+    def test_a_lagging_node_is_asked_again_and_a_missing_payment_is_not_confirmed(self):
+        lane = SimpleNamespace(bridge=SimpleNamespace(rpc='https://rpc.test'))
+        with patch.object(m, '_transaction', side_effect=[None, chain_tx()]), patch.object(m.time, 'sleep'):
+            self.assertTrue(m._confirmed(lane, **self.ARGS))
+        with patch.object(m, '_transaction', return_value=None), patch.object(m.time, 'sleep') as slept:
+            self.assertFalse(m._confirmed(lane, **self.ARGS))
+        self.assertEqual(slept.call_count, 5)
+
+
+if __name__ == '__main__':
+    unittest.main()

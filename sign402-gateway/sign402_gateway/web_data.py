@@ -22,14 +22,19 @@ untrusted data for the answer; it is never stored.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
+import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .agent_allowance import AllowanceError, AllowanceUnavailable
 from .web_accounts import SOLANA_PREFIX
+
+logger = logging.getLogger(__name__)
 
 BASE = "eip155:8453"
 SOLANA = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
@@ -183,9 +188,27 @@ def network_of(account: str) -> str:
     return SOLANA if str(account).startswith(SOLANA_PREFIX) else BASE
 
 
+# Seconds for the seller's unpaid payment request, and once more. On 4 October Exa's answered after 40 s, then 20 s,
+# then 0.4 s, while connections took milliseconds: a stall that asking again gets past. Asking costs nothing.
+OFFER_DEADLINES = (6.0, 6.0)
+_asking = ThreadPoolExecutor(max_workers=8, thread_name_prefix="offer")  # a late answer finishes here, unused
+
+
+def _payment_request(gw: Any, tool: DataTool, method: str, url: str, body: Any) -> dict[str, Any]:
+    for attempt, deadline in enumerate(OFFER_DEADLINES, 1):
+        started = time.monotonic()
+        asked = _asking.submit(gw.fetch_x402_payment_required, url, request_body=body if method == "POST" else None)
+        try:
+            return asked.result(timeout=deadline)
+        except FutureTimeout:
+            logger.warning("web data: %s did not ask for payment in %.1fs, try %d", tool.name, time.monotonic() - started,
+                           attempt)
+    raise AllowanceError(f"{tool.name} did not answer. Nothing was paid.")
+
+
 def _offer(gw: Any, tool: DataTool, network: str, method: str, url: str, body: Any) -> dict[str, Any]:
     """The seller's payment request for this call, reduced to the one leg we pay: our network, USDC, the bound address."""
-    payload = gw.fetch_x402_payment_required(url, request_body=body if method == "POST" else None)
+    payload = _payment_request(gw, tool, method, url, body)
     asset = BASE_USDC if network == BASE else SOLANA_USDC
     legs = [a for a in payload.get("accepts") or [] if isinstance(a, dict) and a.get("scheme", "exact") == "exact"
             and str(a.get("network")) == network and str(a.get("asset") or "").lower() == asset.lower()]
@@ -231,13 +254,19 @@ def _pay_solana(server: Any, account: str, tool: DataTool, gw: Any, method: str,
     lane = getattr(server, "solana_allowance", None)
     if lane is None:
         raise AllowanceUnavailable("Solana payments are not set up on this server.")
-    if lane.status(account).get("state") != "granted":
+    # spend() reads the wallet fresh and checks the limits, their expiry and the approval: no status() read first,
+    # which cost a Node process of its own.
+    if lane.store.limits(account) is None:
         raise AllowanceUnavailable("Set your limits and approve them from your wallet first.")
+    started = time.monotonic()
     amount = int(_offer(gw, tool, SOLANA, method, url, body)["accepts"][0]["amount"])
+    asked = time.monotonic()
     owner = lane.owner(account)
     paid = lane.spend(account, amount, tool.name, lambda: lane._call(
         account, "data-pay", callId="data-" + secrets.token_urlsafe(12), url=url, method=method, body=body,
         payTo=tool.pay_to[SOLANA], maxAmount=str(amount), owner=owner))
+    logger.info("web data: %s on Solana: price %.1fs, wallet check and paid request %.1fs", tool.name, asked - started,
+                time.monotonic() - asked)
     if paid.get("state") not in ("accepted", "confirmed"):
         raise AllowanceError(f"{tool.name} did not answer. It was not repeated.")
     return amount, paid.get("data"), str(paid.get("transaction") or "")
