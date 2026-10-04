@@ -21,6 +21,10 @@ export const ROUTE = "/v1/chat/completions";
 
 // What one paid answer may ask for: at these sizes the model's cost stays under the 0.003 USDC ceiling.
 export const LIMITS = { messages: 40, chars: 24_000, maxTokens: 1_200, defaultTokens: 800, timeoutMs: 45_000 };
+// Thinking is switched off, but a seller may not obey, and thinking shares the token budget with the
+// answer: on 4 October one spent 931 of 1200 tokens thinking and the answer stopped mid-word. The answer keeps
+// its whole budget; the most thinking can add stays far under the ceiling (about 0.0001 USDC).
+export const THINKING_HEADROOM = 1_000;
 const ROLES = new Set(["system", "user", "assistant"]);
 
 export class RequestError extends Error {
@@ -61,7 +65,11 @@ export async function askSurplus(config, messages, maxTokens, fetchImpl = fetch)
     response = await fetchImpl(`${config.surplusUrl}/v1/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.surplusKey}` },
-      body: JSON.stringify({ model: config.model, messages, max_tokens: maxTokens, temperature: 0.4 }),
+      // No thinking, from the fastest seller within twice the cheapest price. Measured on 4 October: the cheapest
+      // seller ignored `thinking: disabled` and answered a travel question in 21-24 s; with these, 2.5-2.7 s, three
+      // of three, at the same cost. Surplus documents both: docs/reference/reasoning, docs/marketplace/routing-controls.
+      body: JSON.stringify({ model: config.model, messages, max_tokens: maxTokens + THINKING_HEADROOM, temperature: 0.4,
+                             reasoning_effort: "none", si_route: { objective: "latency", price_tolerance_pct: 100 } }),
       signal: AbortSignal.timeout(LIMITS.timeoutMs),
     });
   } catch (error) {

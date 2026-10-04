@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { request as httpRequest } from "node:http";
-import { BASE, SOLANA, ROUTE, LIMITS, RequestError, UpstreamError, readRequest, askSurplus, createApp } from "../src/app.mjs";
+import { BASE, SOLANA, ROUTE, LIMITS, THINKING_HEADROOM, RequestError, UpstreamError, readRequest, askSurplus, createApp } from "../src/app.mjs";
 import { SOLANA_TERMS, TERMS } from "../src/pricing.mjs";
 
 const SOLANA_PAY_TO = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin";
@@ -190,6 +190,10 @@ test("askSurplus sends the key and model, and turns every failure into an Upstre
   assert.equal(sent.url, "https://surplus.test/v1/chat/completions");
   assert.equal(sent.init.headers.Authorization, "Bearer inf_test");
   assert.equal(JSON.parse(sent.init.body).model, "deepseek-v4.1-flash");
+  // Thinking off, and room for it where a seller thinks anyway, so the answer is never cut short.
+  assert.equal(JSON.parse(sent.init.body).reasoning_effort, "none");
+  assert.deepEqual(JSON.parse(sent.init.body).si_route, { objective: "latency", price_tolerance_pct: 100 });
+  assert.equal(JSON.parse(sent.init.body).max_tokens, 300 + THINKING_HEADROOM);
 
   const failing = [
     async () => { throw new TypeError("fetch failed"); },
