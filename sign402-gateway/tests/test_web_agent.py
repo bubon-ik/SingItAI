@@ -521,6 +521,12 @@ class JevTests(unittest.TestCase):
             return io.BytesIO(json.dumps({"answers": {"intent": answer}}).encode())
         return open_, calls
 
+    def test_a_network_failure_names_its_cause(self):
+        import socket, urllib.error
+        self.assertEqual(wg._failure(urllib.error.URLError(socket.gaierror(-3, "Temporary failure"))), "URLError: gaierror")
+        self.assertEqual(wg._failure(urllib.error.URLError(TimeoutError())), "URLError: TimeoutError")
+        self.assertEqual(wg._failure(ValueError("x")), "ValueError")
+
     def test_a_slow_answer_is_given_up_on_and_asked_once_more(self):
         opener, calls = self.slow_then([0.5, 0.0])
         jev = wg.Jev("key", opener=opener)

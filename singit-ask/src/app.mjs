@@ -137,7 +137,7 @@ export function createApp(config, { facilitatorClient, upstream = askSurplus, fe
     extensions: declareEip2612GasSponsoringExtension(),
   }, route);
   // The web agent's Solana payments: measured privately, then paid directly from the owner's delegated USDC.
-  if (config.directSolana) addSolanaQuotedRoute(app, config, { facilitatorClient, readRequest, upstream, fetchImpl });
+  if (config.directSolana) addSolanaQuotedRoute(app, config, { facilitatorClient, readRequest, upstream, fetchImpl, log });
 
   return app;
 }

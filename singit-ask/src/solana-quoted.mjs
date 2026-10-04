@@ -44,7 +44,7 @@ export class QuoteStore {
   paid(id,receipt){this.db.prepare("UPDATE quotes SET status='paid',receipt=?,signature=? WHERE id=? AND status='settling'").run(JSON.stringify(receipt),receipt.transaction,id);}
   close(){this.db.close();}
 }
-export function addSolanaQuotedRoute(app,config,{facilitatorClient,readRequest,upstream,fetchImpl,store,now=()=>Math.floor(Date.now()/1000)}) {
+export function addSolanaQuotedRoute(app,config,{facilitatorClient,readRequest,upstream,fetchImpl,store,now=()=>Math.floor(Date.now()/1000),log=()=>{}}) {
   if(typeof config.quoteToken!=='string'||config.quoteToken.length<32)throw new Error('Private quote token required');
   store??=new QuoteStore(config.quoteDb);
   const authorized=req=>{
@@ -74,7 +74,9 @@ export function addSolanaQuotedRoute(app,config,{facilitatorClient,readRequest,u
       const supported=await facilitatorClient.getSupported();
       const kind=supported.kinds.find(x=>x.x402Version===2&&x.scheme==='exact'&&x.network===SOLANA);
       if(!isAddress(kind?.extra?.feePayer??'')||[owner,agent].includes(kind.extra.feePayer))throw new Error('no_sponsor');
+      const asked=Date.now();
       const answer=await upstream(config,input.messages,input.maxTokens,fetchImpl);
+      log(`singit-ask Solana: model answered in ${Date.now()-asked} ms`);
       const billing=billUsage(answer.usage,DIRECT_TERMS);
       const requirement=await new ExactSvmScheme().enhancePaymentRequirements({scheme:'exact',network:SOLANA,
         asset:SOLANA_ASSET,amount:billing.totalAtomic,payTo:SOLANA_PAY_TO,maxTimeoutSeconds:300,
@@ -108,7 +110,9 @@ export function addSolanaQuotedRoute(app,config,{facilitatorClient,readRequest,u
     catch{store.fail(row.id);return res.status(502).json({error:'verification_unavailable'});}
     if(!verified.isValid||verified.payer!==row.agent){store.fail(row.id);return res.status(402).json({error:'verification_refused'});}
     try {
+      const settling=Date.now();
       const receipt=await facilitatorClient.settle(payload,required);
+      log(`singit-ask Solana: settled in ${Date.now()-settling} ms`);
       if(receipt.success!==true||receipt.network!==SOLANA||receipt.payer!==row.agent||!/^([1-9A-HJ-NP-Za-km-z]){80,90}$/.test(receipt.transaction??''))throw new Error('unresolved');
       store.paid(row.id,{...receipt,amount:required.amount});
       return res.set('PAYMENT-RESPONSE',encode({...receipt,amount:required.amount})).json(JSON.parse(row.answer));

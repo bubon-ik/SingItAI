@@ -310,6 +310,10 @@ def plan_data(text: str, model: Callable | None, today: str, history: list[dict[
         params.pop("date")  # a past date is a misreading, not a flight search
     if tool == "flight_status" and "flight" not in params and found:
         params["flight"] = found.group(1) + found.group(2)
+    if tool == "places" and "query" not in params and (searched := fallback()):
+        # The planner chose a web search but named nothing usable to search (seen on 4 October from one provider,
+        # for "Что посмотреть в Праге за один вечер?"): the question itself is what to search, never "what and where?".
+        params["query"] = searched[1]["query"]
     if tool == "places" and location and params.get("query") and location.casefold() not in params["query"].casefold():
         # Keep the location even if a planner drops it or the 80-character limit truncates the query.
         params["query"] = web_search_plan(f"{location}: {text}")[1]["query"]
@@ -416,6 +420,12 @@ def tool_for(text: str) -> str | None:
     return None
 
 
+def _failure(exc: BaseException) -> str:
+    """What went wrong, without the message: a URLError names its cause (gaierror is DNS, TimeoutError a connect)."""
+    reason = getattr(exc, "reason", None)
+    return f"{type(exc).__name__}: {type(reason).__name__}" if isinstance(reason, BaseException) else type(exc).__name__
+
+
 class Jev:
     """TypeSafe's Jev: typed choices about the user's own message. It picks; it never writes.
 
@@ -446,7 +456,7 @@ class Jev:
             try:
                 answers = self._pool.submit(self._post, payload, deadline).result(timeout=deadline)
             except Exception as exc:
-                reason = "too slow" if isinstance(exc, FutureTimeout) else type(exc).__name__
+                reason = "too slow" if isinstance(exc, FutureTimeout) else _failure(exc)
                 logger.warning("web agent: Jev did not answer in %.1fs, try %d (%s)", time.monotonic() - started,
                                attempt, reason)
                 continue
@@ -552,7 +562,7 @@ class ChatModel:
                 reply = json.loads(response.read(1_000_000))
             return str(reply["choices"][0]["message"]["content"] or "").strip()
         except Exception as exc:
-            logger.warning("web agent: the model did not answer in %.1fs (%s)", time.monotonic() - started, type(exc).__name__)
+            logger.warning("web agent: the model did not answer in %.1fs (%s)", time.monotonic() - started, _failure(exc))
             raise AgentUnavailable("model") from None
 
 

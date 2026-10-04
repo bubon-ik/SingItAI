@@ -158,6 +158,15 @@ class PlanTests(unittest.TestCase):
                          ("places", {"query": "What about good coffee near the Colosseum"}, ""))
         self.assertEqual(wg.plan_data("dobrá káva v Praze", self.model({"tool": "shell"}), self.TODAY)[0], "places")
 
+    def test_a_web_search_without_a_usable_query_searches_the_question(self):
+        # Seen on 4 October: places, but nothing to search, and the agent asked "where and what?" about Prague.
+        for reply in ({"tool": "places", "place": "Prague", "kind": "attractions"},
+                      {"tool": "places", "query": "<what to see>", "kind": "attractions"}):
+            self.assertEqual(wg.plan_data("Что посмотреть в Праге за один вечер?", self.model(reply), self.TODAY),
+                             ("places", {"place": "Prague", "kind": "attractions", "query": "Что посмотреть в Праге за один вечер"}
+                              if "place" in reply else {"kind": "attractions", "query": "Что посмотреть в Праге за один вечер"}, ""))
+        self.assertEqual(wg.plan_data("???", self.model({"tool": "places"}), self.TODAY), ("places", {}, "query"))
+
 
 GRANTED = {"configured": True, "state": "granted", "limiter": "0xLIM", "dailyCapAtomic": 20_000_000,
            "perPurchaseCapAtomic": 5_000_000, "remainingTodayAtomic": 20_000_000, "chain": "solana"}
