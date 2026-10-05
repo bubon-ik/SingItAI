@@ -484,8 +484,13 @@ class WebHandler(BaseHTTPRequestHandler):
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            # The page closed or reloaded before its answer came: no one is left to tell, and nothing failed here.
+            self.close_connection = True
+            logger.info("web api: %s: the page left before its answer", self.path.partition("?")[0])
 
     def do_OPTIONS(self) -> None:
         origin = self.headers.get("Origin")

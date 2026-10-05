@@ -394,14 +394,17 @@ class BitrefillX402:
         return body if status == 200 else None
 
     def _wait_delivery(self, token: str, invoice_id: str) -> bool:
-        deadline = self.now() + DELIVERY_WAIT_SECONDS
+        from .solana_bitrefill import _poll_wait  # the same pace: often at first, when most codes arrive
+        paid_at = self.now()
+        deadline = paid_at + DELIVERY_WAIT_SECONDS
         while True:
             body = self._status(token, invoice_id)
             if _find(body, "delivery_status") == "all_delivered":
+                logger.info("bitrefill: code delivered %.1fs after payment", self.now() - paid_at)
                 return True
             if self.now() >= deadline:
                 return False
-            self.sleep(5)
+            self.sleep(_poll_wait(self.now() - paid_at))
 
     def redemption(self, user_id: str, invoice_id: str) -> Any:
         """The code for one delivered order, or None. Returned to the caller only."""

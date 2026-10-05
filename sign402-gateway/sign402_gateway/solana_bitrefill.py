@@ -19,6 +19,7 @@ buy is still exactly the product and value they picked, at a price checked again
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from decimal import Decimal, InvalidOperation
@@ -27,9 +28,19 @@ from typing import Any
 from .agent_allowance import AllowanceError, AllowanceUnavailable
 from .allowance_bitrefill import usage_instructions
 
+logger = logging.getLogger(__name__)
+
 PAY_URL = "https://api.bitrefill.com/x402/invoice/pay"
 PRICE_SLACK = Decimal("1.02")        # the invoice may round up a little from the quote, never more
 DELIVERY_WAIT_SECONDS = 90
+# How often to ask whether the code is ready: often at first, when most codes arrive (a few seconds after the
+# payment), then less. Asking every 6 s made a code that was ready in 9 s wait until 12 s.
+DELIVERY_POLL_SECONDS = (1.5, 20, 5)  # every 1.5 s for the first 20 s, then every 5 s
+
+
+def _poll_wait(waited: float) -> float:
+    fast, during, slow = DELIVERY_POLL_SECONDS
+    return fast if waited < during else slow
 DONE = {"complete", "completed", "delivered", "all_delivered"}
 
 
@@ -85,9 +96,16 @@ def packages(server: Any, slug: Any) -> dict[str, Any]:
 def buy(server: Any, account: str, slug: Any, package: Any, *, sleep: Any = time.sleep,
         now: Any = time.time) -> dict[str, Any]:
     client, lane = _client(server), _lane(server)
-    status = lane.status(account)
-    if status.get("state") != "granted":
+    started = time.monotonic()
+    # The limits from the ledger. The wallet itself (approval, balance) is read once, fresh, by spend() below:
+    # status() read it too, a Node process of its own, before anything was even priced.
+    limits = lane.store.limits(account)
+    if limits is None:
         raise AllowanceUnavailable("Set your limits and approve them from your wallet first.")
+    today = int(lane.now())
+    if limits["expiry"] <= today:
+        raise AllowanceError("Your Solana allowance has expired. Set new limits to continue. Nothing was bought.")
+    remaining = max(0, limits["daily_cap"] - lane.store.spent_since(account, today // 86_400 * 86_400))
     buyer = email(server, account)
     if not buyer:
         raise NeedsEmail("Bitrefill needs an email for your purchases once (it also sends your codes there).")
@@ -95,7 +113,7 @@ def buy(server: Any, account: str, slug: Any, package: Any, *, sleep: Any = time
     if quote.get("requiredRecipientFields"):
         raise AllowanceError("This product is delivered to a phone or account; only products delivered as a code can be bought here.")
     price = _atomic(quote["priceUsd"])
-    if price > int(status["perPurchaseCapAtomic"]) or price > int(status["remainingTodayAtomic"]):
+    if price > int(limits["per_purchase_cap"]) or price > remaining:
         raise AllowanceError(f"{quote['priceUsd']} USDC does not fit your limits today. Nothing was bought.")
 
     invoice = client._normalize_invoice(client._call_tool("buy-products", {
@@ -111,12 +129,15 @@ def buy(server: Any, account: str, slug: Any, package: Any, *, sleep: Any = time
     if amount > math.ceil(price * PRICE_SLACK):
         raise AllowanceError("Bitrefill's invoice is above the price you were shown. Nothing was paid.")
 
+    priced = time.monotonic()
     owner = lane.owner(account)
     paid = lane.spend(account, amount, f"Bitrefill {quote['name']} {quote['packageValue']}", lambda: lane._call(
         account, "bitrefill-invoice-pay", url=PAY_URL, invoiceId=invoice_id, maxAmount=str(amount), owner=owner))
 
+    paying_done = time.monotonic()
     delivered, order = False, {}
-    deadline = now() + DELIVERY_WAIT_SECONDS
+    paid_at = now()
+    deadline = paid_at + DELIVERY_WAIT_SECONDS
     while now() < deadline:
         current = client.invoice_status(invoice_id=invoice_id, invoice_access_token=token)
         if client._invoice_status(current) in {"blocked", "denied", "payment_error"}:
@@ -125,7 +146,9 @@ def buy(server: Any, account: str, slug: Any, package: Any, *, sleep: Any = time
         if client._invoice_status(current) in DONE or (orders and str(orders[0].get("status")).lower() == "delivered"):
             delivered, order = True, orders[0] if orders else {}
             break
-        sleep(6)
+        sleep(_poll_wait(now() - paid_at))
+    logger.info("solana bitrefill: price and order %.1fs, wallet check and payment %.1fs, code %s after %.1fs",
+                priced - started, paying_done - priced, "delivered" if delivered else "not yet", time.monotonic() - paying_done)
     how_to_use = usage_instructions(order.get("redemption_info") or order.get("redemptionInfo")) if delivered else ""
 
     name = quote["name"]

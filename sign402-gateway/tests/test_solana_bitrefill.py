@@ -83,6 +83,29 @@ class SolanaBitrefillTests(unittest.TestCase):
     def buy(self):
         return sb.buy(self.server, ACCOUNT, "alza-czech-republic", "200", sleep=lambda s: None)
 
+    def test_the_wallet_is_read_once_and_the_code_asked_for_often_at_first(self):
+        self.emails[ACCOUNT] = "me@example.com"
+        self.bridge.calls.clear()
+        self.lane._seen.clear()
+        answers = iter(["pending", "pending", "pending", "complete"])
+        ready = self.mcp.invoice_status
+        def status(**kw):
+            if next(answers, "complete") == "pending":  # paid, the code not ready yet
+                return {"invoice_id": kw["invoice_id"], "invoice_status": "pending", "orders": [{"status": "processing"}]}
+            return ready(**kw)
+        self.mcp.invoice_status = status
+        clock, waits = [1000.0], []
+        def sleep(seconds):
+            waits.append(seconds)
+            clock[0] += seconds
+        result = sb.buy(self.server, ACCOUNT, "alza-czech-republic", "200", sleep=sleep, now=lambda: clock[0])
+        self.assertTrue(result["delivered"])
+        self.assertEqual(waits, [1.5, 1.5, 1.5])  # a code ready after 4.5 s is seen then, not at 6 or 12 s
+        reads = [c[0] for c in self.bridge.calls if c[0] == "allowance-state"]
+        self.assertEqual(len(reads), 1)  # in spend(); no status() read before the order
+        self.assertEqual(sb._poll_wait(19.9), 1.5)
+        self.assertEqual(sb._poll_wait(20.0), 5)
+
     def test_without_an_email_nothing_is_ordered(self):
         with self.assertRaises(sb.NeedsEmail):
             self.buy()

@@ -5,6 +5,8 @@ import unittest
 import unittest.mock
 import urllib.error
 import urllib.request
+from types import SimpleNamespace
+from unittest.mock import Mock
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -345,6 +347,20 @@ class WalletChain(DeviceLaneEvm):
 
 def tx_hash(n):
     return "0x" + format(n, "064x")
+
+
+class DepartedPageTests(unittest.TestCase):
+    def test_a_page_that_left_before_its_answer_is_one_log_line_not_a_500(self):
+        handler = wa.WebHandler.__new__(wa.WebHandler)
+        handler.headers, handler.path, handler.request_version = {}, "/web/v1/chat/models?x=1", "HTTP/1.1"
+        handler.server = SimpleNamespace(cors_origin="https://app.example")
+        handler.send_response = handler.send_header = lambda *a: None
+        handler.end_headers = Mock(side_effect=BrokenPipeError())
+        with self.assertLogs("sign402_gateway.web_api", "INFO") as logs:
+            handler._send(200, {"ok": True})
+        self.assertTrue(handler.close_connection)
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("/web/v1/chat/models: the page left", logs.output[0])
 
 
 class WalletLaneTests(unittest.TestCase):
