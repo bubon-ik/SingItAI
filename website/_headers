@@ -1,0 +1,9 @@
+# The landing's CSS and JS keep their names between deploys, so a browser has to
+# check for a new copy on every visit; when nothing changed the answer is a cheap 304.
+# Without this Cloudflare lets browsers reuse them for 4 hours, and a fresh
+# index.html can arrive with the previous release's stylesheet.
+/*.css
+  Cache-Control: public, max-age=0, must-revalidate
+
+/*.js
+  Cache-Control: public, max-age=0, must-revalidate
