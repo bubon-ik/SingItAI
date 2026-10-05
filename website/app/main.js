@@ -532,7 +532,7 @@ function renderAllowance() {
       ${renderStale(a)}
 
       ${blocked ? renderSetup("Create a new limiter") : `
-      <div class="grid-2">
+      <div>
         <div class="bezel ${a.state === "granted" ? "" : "glow"}"><div class="core stack">
           <div><h2>${a.state === "granted" ? "Change the allowance" : "Allow it to spend"}</h2>
             <p>The total your agent may take through the limiter, still at most ${usdc(a.dailyCapAtomic)} a day.
@@ -542,7 +542,6 @@ function renderAllowance() {
           ${methodSwitch()}
           <button class="btn btn-primary has-orb" data-action="grant">Approve from my wallet${orb}</button>
         </div></div>
-        ${renderTelegram()}
       </div>`}
 
       ${renderActivity(a)}
@@ -1257,7 +1256,6 @@ function renderAccountMenu() {
       + item("go", "purchases", "Purchases", "", 'data-view="purchases"')
       + item("go", "settings", "Settings", "", 'data-view="settings"')
       + item("account-menu-language", "language", "Language", `<kbd>${esc(LANGUAGES.find(([c]) => c === state.replyLang)?.[1] || "Auto")} ›</kbd>`)
-      + item("go", "telegram", "Telegram", "", 'data-view="telegram"')
       + (canInstall() ? item("install-app", "install", "Install app") : "")
       + item("get-help", "help", "Get help", "<kbd>↗</kbd>")
       + `<hr>` + item("sign-out", "signout", "Sign out");
@@ -1324,8 +1322,6 @@ function renderSettings() {
       ${notificationSetting()}
       <div class="setting"><div><h3>Allowance</h3><p class="faint">Your limits, approvals and emergency stop.</p></div>
         <button class="btn btn-ghost btn-sm" data-action="go" data-view="allowance">Open</button></div>
-      <div class="setting"><div><h3>Telegram</h3><p class="faint">${state.session.telegramLinked ? "Linked to the SingIt bot." : "Use the same agent from the SingIt bot."}</p></div>
-        <button class="btn btn-ghost btn-sm" data-action="go" data-view="telegram">${state.session.telegramLinked ? "Manage" : "Link"}</button></div>
       <div class="setting"><div><h3>Wallet</h3><p class="faint mono">${esc(state.session.address)}</p></div>
         <button class="btn btn-ghost btn-sm" data-action="sign-out">Sign out</button></div>
     </div></div>`;
