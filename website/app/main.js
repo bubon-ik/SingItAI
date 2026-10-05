@@ -933,8 +933,12 @@ function renderMain() {
       <p class="composer-hint">Inside your limits your agent buys without asking. Approvals and revokes always need your wallet.</p>
     </div>`;
   autosize($("#composer"));
+  // A rebuilt chat starts at the top; it jumps to the latest message instead of gliding there (the chat
+  // scrolls smoothly otherwise, and that glide showed on every re-render of a long chat).
   const pane = $("#chat");
+  pane.style.scrollBehavior = "auto";
   pane.scrollTop = pane.scrollHeight;
+  pane.style.scrollBehavior = "";
 }
 
 function autosize(el) {
@@ -1739,8 +1743,9 @@ const actions = {
     render();
     if (state.view === "settings") loadPush().then(() => { if (state.view === "settings") render(); });
   },
-  "open-menu": () => { state.menuOpen = true; render(); },
-  "close-menu": () => { state.menuOpen = false; render(); },
+  // Only the drawer changes: rebuilding the chat would scroll it from the top again behind the drawer.
+  "open-menu": () => { state.menuOpen = true; renderSidebar(); },
+  "close-menu": () => { state.menuOpen = false; renderSidebar(); },
   "sign-out": signOut,
   "fund-agent-gas": () => walletOperation("fund-gas", { amount: $("#agent-gas-sol").value.trim() }),
   suggest: (el) => sendMessage(el.dataset.text),
@@ -1929,7 +1934,7 @@ function swipeableSidebar() {
     drag = null;
     if (!decided) return;
     app.classList.remove("menu-dragging");
-    if (Math.abs(dx) > sidebar.offsetWidth * 0.3) { state.menuOpen = opening; render(); }
+    if (Math.abs(dx) > sidebar.offsetWidth * 0.3) { state.menuOpen = opening; renderSidebar(); }
     // In the same frame as the class change, so the drawer slides on from where the finger left it.
     sidebar.style.transition = "";
     sidebar.style.transform = "";
