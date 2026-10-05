@@ -1902,6 +1902,9 @@ function swipeableSidebar() {
   }, { passive: true });
   document.addEventListener("touchmove", (event) => {
     if (!drag) return;
+    // From the 24px edge strip the gesture belongs to the drawer from its first move: iOS ignores a cancel
+    // that comes after it has started scrolling the chat.
+    if (drag.opening) event.preventDefault();
     const touch = event.touches[0];
     const dx = touch.clientX - drag.x;
     const dy = touch.clientY - drag.y;
@@ -1913,10 +1916,13 @@ function swipeableSidebar() {
       sidebar.style.transition = "none";
       app.classList.add("menu-dragging");
     }
+    // The finger now moves the drawer, not the page: without this the chat behind it scrolled along
+    // with the up-and-down part of the swipe.
+    event.preventDefault();
     drag.dx = dx;
     const width = sidebar.offsetWidth;
     sidebar.style.transform = `translateX(${drag.opening ? Math.min(0, dx - width) : Math.min(0, dx)}px)`;
-  }, { passive: true });
+  }, { passive: false });
   const end = () => {
     if (!drag) return;
     const { decided, dx, opening } = drag;
