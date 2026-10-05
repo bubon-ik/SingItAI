@@ -1336,9 +1336,39 @@ function setReplyLang(code) {
   writePref("singit.replyLang", code);
 }
 
+// What a purchase is doing while the page waits, as the gateway marks it (purchase_progress.py).
+function progressLabel(stage) {
+  const chain = state.session?.chain === "solana" ? "Solana" : "Base";
+  return { ordering: "Ordering at Bitrefill", paying: `Payment sent · confirming on ${chain}`,
+           paid: "Paid ✓ · getting your code" }[stage] || "Thinking";
+}
+
 function thinkingText() {
   const seconds = state.thinkingSince ? Math.max(0, Math.round((Date.now() - state.thinkingSince) / 1000)) : 0;
-  return `Thinking · ${seconds}s`;
+  return `${progressLabel(state.purchaseStage)} · ${seconds}s`;
+}
+
+// A purchase names an attempt; its stage is asked every second until the answer comes.
+function newAttempt() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function watchPurchase(attempt) {
+  let stopped = false;
+  const ask = async () => {
+    if (stopped) return;
+    try {
+      const { stage } = await api.progress(attempt);
+      if (!stopped && stage !== "working") {
+        state.purchaseStage = stage;
+        const el = $("#thinking");
+        if (el) el.textContent = thinkingText();
+      }
+    } catch { /* the answer itself still comes; the stage is only shown */ }
+    if (!stopped) setTimeout(ask, 1000);
+  };
+  setTimeout(ask, 700);
+  return () => { stopped = true; state.purchaseStage = null; };
 }
 
 let thinkingTimer = null;
@@ -1465,6 +1495,7 @@ async function cardAction(action, callKey = null) {
   if (callKey) state.done[callKey] = "pending";
   state.sending = true;
   startThinking();
+  const unwatch = action.progress ? watchPurchase(action.progress) : () => {};
   render();
   try {
     const reply = await api.act(state.chatId, action);
@@ -1476,6 +1507,7 @@ async function cardAction(action, callKey = null) {
     if (callKey) state.done[callKey] = "unknown";
     toast(explain(error), true);
   } finally {
+    unwatch();
     stopThinking();
     state.sending = false;
     render();
@@ -1742,7 +1774,8 @@ const actions = {
     // The value chosen next to this button: the same product may be on an older card further up the chat.
     const pkg = el.closest(".product")?.querySelector(`[data-package="${CSS.escape(el.dataset.slug)}"]`)?.value.trim();
     if (!pkg) { toast("Enter the card value first.", true); return; }
-    cardAction({ type: "buy_giftcard", slug: el.dataset.slug, package: pkg, name: el.dataset.name, lang: el.dataset.lang });
+    cardAction({ type: "buy_giftcard", slug: el.dataset.slug, package: pkg, name: el.dataset.name, lang: el.dataset.lang,
+                 progress: newAttempt() });
   },
   dismiss: () => { state.modal = null; render(); },
   "dismiss-button": () => { state.modal = null; render(); },

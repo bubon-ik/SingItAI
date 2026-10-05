@@ -264,6 +264,14 @@ class AgentTests(unittest.TestCase):
         self.assertNotIn("В какой стране", message["text"])
         self.assertNotIn("which country", message["text"].lower())
 
+    def test_a_purchase_hands_the_pages_attempt_to_the_shop(self):
+        chat = self.agent.message(ACCOUNT, None, "hello")["chatId"]
+        self.agent.action(ACCOUNT, chat, {"type": "buy_giftcard", "slug": "steam-germany", "package": "5",
+                                          "name": "Steam", "lang": "en", "progress": "e" * 32})
+        bodies = {action: body for action, _, body in self.shop.calls}
+        self.assertEqual(bodies["bitrefill-quote"]["progress"], "e" * 32)
+        self.assertEqual(bodies["bitrefill-buy"]["progress"], "e" * 32)
+
     def test_short_extractions_wait_6_seconds_answers_40(self):
         waits = []
 

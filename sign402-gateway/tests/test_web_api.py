@@ -186,6 +186,15 @@ class WebApiTests(unittest.TestCase):
         token = headers["Set-Cookie"].split(";")[0].split("=", 1)[1]
         return token, body["csrfToken"], body
 
+    def test_the_page_asks_a_purchases_stage_on_its_own_limit(self):
+        token, _, _ = self.sign_in()
+        asked = []
+        self.api.shop = lambda action, account, body: asked.append((action, body)) or (200, {"ok": True, "stage": "paying"})
+        for _ in range(100):  # every second for a long purchase; the shop's 60 an hour would refuse
+            status, reply, _ = self.call("GET", "/shop/progress", {"id": "d" * 32}, token=token)
+        self.assertEqual((status, reply), (200, {"ok": True, "stage": "paying"}))
+        self.assertEqual(asked[0], ("purchase-progress", {"id": "d" * 32}))
+
     def test_sign_in_sets_a_strict_http_only_cookie(self):
         _, _, body = self.sign_in()
         _, issued, _ = self.call("POST", "/auth/nonce", {"address": self.user.address})

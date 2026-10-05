@@ -167,6 +167,7 @@ class WebApi:
         self.prepare_by_account = RateLimit(20, 3600)
         self.permit_by_account = RateLimit(6, 86400)
         self.shop_by_account = RateLimit(60, 3600)
+        self.progress_by_account = RateLimit(900, 3600)  # a purchase's stage, asked every second while it runs
         self.chat_by_account = RateLimit(60, 3600)
         self.agent = None  # web_agent.WebAgent, when the chat is on
         self.solana = None  # solana_allowance.SolanaAllowanceService, when the Solana lane is on
@@ -222,6 +223,12 @@ class WebApi:
             return self._chats(method, path, account, body)
         if method == "GET" and path == "/usage":
             return 200, self._usage(account), {}
+        if method == "GET" and path == "/shop/progress":
+            if self.shop is None:
+                raise WebError(503, "shop_unavailable", "The shop is not enabled on this server.")
+            self.progress_by_account.hit(account)
+            status, reply = self.shop("purchase-progress", account, {"id": str(body.get("id") or "")[:64]})
+            return status, {"ok": True, "stage": str(reply.get("stage") or "working")}, {}
         if (method, path) in SHOP_ROUTES:
             if self.shop is None:
                 raise WebError(503, "shop_unavailable", "The shop is not enabled on this server.")

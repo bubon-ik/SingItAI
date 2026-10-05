@@ -347,6 +347,8 @@ class BitrefillX402:
         if amount > ceiling_atomic:
             raise AllowanceError("The order costs more than the price you confirmed. Nothing was paid.")
 
+        from . import purchase_progress
+        purchase_progress.mark("paying")
         paid = self.allowance.pay_x402(
             user_id, pay_url, {"amountAtomic": str(amount), "receiver": pay_to, "asset": USDC},
             self.x402_client, method="POST", request_body=pay_body,
@@ -359,6 +361,7 @@ class BitrefillX402:
                 )
             raise AllowanceError(f"Order {invoice_id} was not paid (HTTP {paid['status']}). Nothing was charged.")
 
+        purchase_progress.mark("paid")
         delivered = self._wait_delivery(token, invoice_id)
         how_to_use = self._how_to_use(user_id, invoice_id, slug) if delivered else ""
         name = f"{quoted['name']} {quoted['package']} {quoted.get('packageCurrency') or ''}".strip()

@@ -26,6 +26,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .agent_allowance import AllowanceError, AllowanceUnavailable
+from . import purchase_progress
 from .allowance_bitrefill import usage_instructions
 
 logger = logging.getLogger(__name__)
@@ -131,9 +132,11 @@ def buy(server: Any, account: str, slug: Any, package: Any, *, sleep: Any = time
 
     priced = time.monotonic()
     owner = lane.owner(account)
+    purchase_progress.mark("paying")
     paid = lane.spend(account, amount, f"Bitrefill {quote['name']} {quote['packageValue']}", lambda: lane._call(
         account, "bitrefill-invoice-pay", url=PAY_URL, invoiceId=invoice_id, maxAmount=str(amount), owner=owner))
 
+    purchase_progress.mark("paid")
     paying_done = time.monotonic()
     delivered, order = False, {}
     paid_at = now()

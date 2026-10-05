@@ -106,6 +106,20 @@ class SolanaBitrefillTests(unittest.TestCase):
         self.assertEqual(sb._poll_wait(19.9), 1.5)
         self.assertEqual(sb._poll_wait(20.0), 5)
 
+    def test_a_tracked_purchase_marks_payment_sent_then_paid(self):
+        from sign402_gateway import purchase_progress as pp
+        self.emails[ACCOUNT] = "me@example.com"
+        seen = []
+        real = self.lane.spend
+        def spend(*a, **kw):  # while paying, the page reads "payment sent"
+            seen.append(pp.stage_of(ACCOUNT, "c" * 32))
+            return real(*a, **kw)
+        self.lane.spend = spend
+        with pp.tracking(ACCOUNT, "c" * 32):
+            self.buy()
+        self.assertEqual(seen, ["paying"])
+        self.assertEqual(pp.stage_of(ACCOUNT, "c" * 32), "paid")
+
     def test_without_an_email_nothing_is_ordered(self):
         with self.assertRaises(sb.NeedsEmail):
             self.buy()
@@ -190,3 +204,15 @@ class SolanaInternalRoutesTests(SolanaBitrefillTests):
         web_internal.handle(self.server, "buyer-email-set", {"account": ACCOUNT, "email": "me@example.com"})
         self.assertTrue(web_internal.handle(self.server, "buyer-email", {"account": ACCOUNT})[1]["hasEmail"])
         self.server.allowance.lane_for.assert_not_called()  # the Base lane is never asked
+
+    def test_the_page_follows_a_purchase_through_the_gateway(self):
+        from sign402_gateway import web_internal
+        self.server.allowance = Mock()
+        self.server.web_accounts = SimpleNamespace(account=lambda account: {"account_id": account})
+        self.emails[ACCOUNT] = "me@example.com"
+        ask = lambda attempt, account=ACCOUNT: web_internal.handle(self.server, "purchase-progress", {"account": account, "id": attempt})[1]["stage"]
+        self.assertEqual(ask("f" * 32), "working")
+        status, _ = web_internal.handle(self.server, "bitrefill-solana-buy", {"account": ACCOUNT, "productId": "alza-czech-republic",
+                                                                             "package": "200", "progress": "f" * 32})
+        self.assertEqual(status, 200)
+        self.assertEqual(ask("f" * 32), "paid")

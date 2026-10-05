@@ -67,6 +67,7 @@ export const api = {
   say: (chatId, text, lang) => call("POST", "/chats/message", { chatId, text, ...(lang ? { lang } : {}) }),
   usage: () => call("GET", "/usage"),
   act: (chatId, action) => call("POST", "/chats/action", { chatId, action }),
+  progress: (attempt) => call("GET", `/shop/progress?id=${encodeURIComponent(attempt)}`),
   models: () => call("GET", "/chat/models"),
   chooseModel: (model) => call("POST", "/chat/model", { model }),
   updateChat: (chatId, changes) => call("POST", "/chats/update", { chatId, ...changes }),

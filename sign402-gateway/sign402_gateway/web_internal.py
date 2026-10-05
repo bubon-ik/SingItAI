@@ -70,7 +70,7 @@ class ToolQuotes:
 
 
 # What a Solana account may do before the Solana allowance exists: look, never pay.
-SOLANA_READ_ONLY = {"tools", "catalog-search", "purchases", "purchase-reveal", "venice-models", "venice-model",
+SOLANA_READ_ONLY = {"tools", "catalog-search", "purchases", "purchase-reveal", "purchase-progress", "venice-models", "venice-model",
                     "venice-usage", "bitrefill-packages", "buyer-email", "buyer-email-set",
                     # these pay, and only through the account's own Solana allowance:
                     "venice-chat", "venice-solana-topup", "bitrefill-solana-buy", "data-buy",
@@ -126,7 +126,21 @@ def _usd(atomic: int) -> str:
     return f"{Decimal(atomic) / Decimal(1_000_000):.6f}".rstrip("0").rstrip(".")  # .6f: never strip a whole number
 
 
+# Purchases the page waits on: it names an attempt and asks for its stage meanwhile (purchase_progress).
+TRACKED = ("bitrefill-quote", "bitrefill-buy", "bitrefill-solana-buy")
+
+
 def handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    from . import purchase_progress
+    if action == "purchase-progress":
+        return 200, {"ok": True, "stage": purchase_progress.stage_of(_account(server, payload, action), payload.get("id"))}
+    if action in TRACKED and payload.get("progress"):
+        with purchase_progress.tracking(_account(server, payload, action), payload.get("progress")):
+            return _handle(server, action, payload)
+    return _handle(server, action, payload)
+
+
+def _handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     from . import server as gw  # the gateway's purchase helpers; imported here to avoid a cycle
 
     account = _account(server, payload, action)
