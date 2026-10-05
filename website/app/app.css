@@ -268,7 +268,7 @@ pre.result { white-space: pre-wrap; word-break: break-word; font: 13px/1.6 var(-
    ====================================================================== */
 body.in-app { overflow: hidden; }
 body.in-app .nav-wrap, body.in-app .shell { display: none; }
-.app { display: grid; grid-template-columns: 272px minmax(0, 1fr); height: 100dvh; }
+.app { display: grid; grid-template-columns: 272px minmax(0, 1fr); height: var(--visible-height, 100dvh); }
 .app[hidden] { display: none !important; }
 
 .sidebar { display: flex; flex-direction: column; gap: 12px; padding: 16px 12px; min-height: 0;
@@ -341,7 +341,7 @@ body.in-app .nav-wrap, body.in-app .shell { display: none; }
 /* ---------- chat ---------- */
 .chat { flex: 1; min-height: 0; overflow-y: auto; scroll-behavior: smooth; }
 .chat-inner { max-width: 780px; margin: 0 auto; padding: 36px 24px 24px; display: flex; flex-direction: column; gap: 24px; }
-.empty { min-height: calc(100dvh - 220px); display: flex; flex-direction: column; justify-content: center; align-items: flex-start;
+.empty { min-height: calc(var(--visible-height, 100dvh) - 220px); display: flex; flex-direction: column; justify-content: center; align-items: flex-start;
   gap: 12px; max-width: 640px; margin: 0 auto; width: 100%; }
 .empty .avatar { width: 52px; height: 52px; border-radius: var(--r-wash); background: var(--paper); border: 1px solid var(--hairline); }
 .empty h1 { font-size: clamp(2rem, 3.6vw, 2.75rem); line-height: 1.05; margin-top: 8px; }
