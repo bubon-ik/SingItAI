@@ -502,11 +502,18 @@ body.in-app .nav-wrap, body.in-app .shell { display: none; }
     transition: transform 0.35s var(--ease); }
   .app.menu-open .sidebar { transform: none; }
   .app.menu-open .scrim { display: block; position: fixed; inset: 0; z-index: 44; background: rgba(12, 10, 8, 0.35); }
-  .topbar { display: flex; }
-  .chat-inner { padding: 22px 16px 16px; }
+  /* No strip across the top of a phone: the menu and new-chat buttons float over the chat, which fades
+     out beneath them instead of being cut by a bar. The chat's title is in the drawer already. */
+  .topbar { display: flex; position: absolute; top: 0; left: 0; right: 0; z-index: 5;
+    padding: calc(8px + env(safe-area-inset-top)) 12px 20px; border-bottom: none; backdrop-filter: none;
+    -webkit-backdrop-filter: none; background: linear-gradient(var(--bone) 55%, rgba(244, 242, 240, 0));
+    pointer-events: none; }
+  .topbar .icon-btn { pointer-events: auto; width: 36px; height: 36px; border-color: var(--hairline); }
+  #top-title { display: none; }
+  .chat-inner { padding: calc(60px + env(safe-area-inset-top)) 16px 16px; }
   .composer-wrap { padding: 8px 12px 12px; }
   .suggestions { grid-template-columns: 1fr; }
-  .pane-inner { padding: 24px 16px 48px; }
+  .pane-inner { padding: calc(60px + env(safe-area-inset-top)) 16px 48px; }
   .card .fields { grid-template-columns: 1fr 1fr 1fr; }
 }
 
