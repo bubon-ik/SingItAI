@@ -881,8 +881,8 @@ function renderSidebar() {
   renderChatMenu();
   const a = state.allowance;
   const amountLine = a?.configured
-    ? `<div class="label">Can spend today</div><div class="amt">${amount(spendableToday(a))}<small>USDC</small></div>
-       <div style="margin-top:8px">${statusPill(a.state)}</div>
+    ? `<div class="spread"><div><div class="label">Can spend today</div>
+         <div class="amt">${amount(spendableToday(a))}<small>USDC</small></div></div>${statusPill(a.state)}</div>
        ${(a.staleLimiters || []).length ? `<div class="faint" style="color:var(--danger);margin-top:8px">⚠ Old limiter to revoke</div>` : ""}`
     : `<div class="label">Allowance</div><div style="margin-top:4px;font-size:14px;color:var(--text-soft)">${
         a?.supported === false ? "Solana · limits coming" : "No limits yet"}</div>`;
@@ -1884,6 +1884,88 @@ const isIos = () => /iPhone|iPad|iPod/.test(navigator.userAgent)
   || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);  // iPadOS asks for the desktop site
 const canInstall = () => !isStandalone() && (Boolean(installPrompt) || isIos());
 
+// Phones: the chat list is a drawer that follows the finger (Material's modal navigation drawer). A swipe
+// toward the left edge closes it; in the installed app, a swipe from the left edge opens it. In Safari that
+// edge belongs to Back, so there only the menu button opens it.
+function swipeableSidebar() {
+  const sidebar = $(".sidebar");
+  const app = $("#app");
+  const narrow = () => window.matchMedia("(max-width: 860px)").matches;
+  let drag = null;
+  document.addEventListener("touchstart", (event) => {
+    if (!narrow() || app.hidden || state.modal || event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    const opening = !state.menuOpen;
+    if (opening && (touch.clientX > 24 || (isIos() && !isStandalone()))) return;
+    if (!opening && !event.target.closest(".sidebar, .scrim")) return;
+    drag = { x: touch.clientX, y: touch.clientY, dx: 0, opening, decided: false };
+  }, { passive: true });
+  document.addEventListener("touchmove", (event) => {
+    if (!drag) return;
+    const touch = event.touches[0];
+    const dx = touch.clientX - drag.x;
+    const dy = touch.clientY - drag.y;
+    if (!drag.decided) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      // Up and down scrolls the list; only a sideways move the right way drags the drawer.
+      if (Math.abs(dy) > Math.abs(dx) || (drag.opening ? dx < 0 : dx > 0)) { drag = null; return; }
+      drag.decided = true;
+      sidebar.style.transition = "none";
+      app.classList.add("menu-dragging");
+    }
+    drag.dx = dx;
+    const width = sidebar.offsetWidth;
+    sidebar.style.transform = `translateX(${drag.opening ? Math.min(0, dx - width) : Math.min(0, dx)}px)`;
+  }, { passive: true });
+  const end = () => {
+    if (!drag) return;
+    const { decided, dx, opening } = drag;
+    drag = null;
+    if (!decided) return;
+    app.classList.remove("menu-dragging");
+    if (Math.abs(dx) > sidebar.offsetWidth * 0.3) { state.menuOpen = opening; render(); }
+    // In the same frame as the class change, so the drawer slides on from where the finger left it.
+    sidebar.style.transition = "";
+    sidebar.style.transform = "";
+  };
+  document.addEventListener("touchend", end);
+  document.addEventListener("touchcancel", end);
+}
+
+// Phones: a long press on a chat opens its menu, so the rows need no "⋯" each.
+function longPressChatMenu() {
+  const list = $("#side-chats");
+  let timer = null;
+  let fired = false;
+  let start = null;
+  const cancel = () => { clearTimeout(timer); timer = null; };
+  list.addEventListener("touchstart", (event) => {
+    const row = event.target.closest("[data-chat-row]");
+    if (!row || event.target.closest(".row-more")) return;
+    fired = false;
+    start = { x: event.touches[0].clientX, y: event.touches[0].clientY };
+    timer = setTimeout(() => {
+      const button = row.querySelector(".row-more");
+      if (!button) return;
+      fired = true;
+      navigator.vibrate?.(10);
+      openChatMenu(button);
+    }, 500);
+  }, { passive: true });
+  list.addEventListener("touchmove", (event) => {
+    if (start && Math.hypot(event.touches[0].clientX - start.x, event.touches[0].clientY - start.y) > 10) cancel();
+  }, { passive: true });
+  list.addEventListener("touchend", cancel);
+  list.addEventListener("touchcancel", cancel);
+  // The tap that ends a long press does not also open the chat.
+  list.addEventListener("click", (event) => {
+    if (!fired) return;
+    fired = false;
+    event.stopPropagation();
+    event.preventDefault();
+  }, true);
+}
+
 function registerServiceWorker() {
   if (!("serviceWorker" in navigator)) return;
   navigator.serviceWorker.register("sw.js", { scope: "./" }).catch(() => { /* the page works without it */ });
@@ -2011,6 +2093,8 @@ async function start() {
   watchForNewPage();
   registerServiceWorker();
   fitToVisibleHeight();
+  swipeableSidebar();
+  longPressChatMenu();
   discover(() => { if (state.modal?.type === "wallets") renderModal(); });
   if (appKitConfigured()) watchAppKit(setWallet).catch((error) => toast(explain(error), true));
   if (csrf()) {
