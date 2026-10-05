@@ -1889,6 +1889,21 @@ function registerServiceWorker() {
   navigator.serviceWorker.register("sw.js", { scope: "./" }).catch(() => { /* the page works without it */ });
 }
 
+// On a phone the keyboard covers the bottom of the page instead of shrinking it (iPhone, and the installed
+// app there), so the message box sat under it and only the top of the chat showed. The app takes the height
+// that is actually visible above the keyboard (app.css: --visible-height) and stays scrolled to the top.
+function fitToVisibleHeight() {
+  const view = window.visualViewport;
+  if (!view) return;
+  const fit = () => {
+    document.documentElement.style.setProperty("--visible-height", `${Math.round(view.height)}px`);
+    if (document.body.classList.contains("in-app") && window.scrollY) window.scrollTo(0, 0);
+  };
+  view.addEventListener("resize", fit);
+  view.addEventListener("scroll", fit);
+  fit();
+}
+
 // -- notifications (sw.js shows them; web_push.py sends them) --
 
 const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
@@ -1995,6 +2010,7 @@ async function start() {
   if (await reloadIfStale()) return;
   watchForNewPage();
   registerServiceWorker();
+  fitToVisibleHeight();
   discover(() => { if (state.modal?.type === "wallets") renderModal(); });
   if (appKitConfigured()) watchAppKit(setWallet).catch((error) => toast(explain(error), true));
   if (csrf()) {
