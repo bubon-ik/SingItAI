@@ -489,6 +489,11 @@ body.in-app .nav-wrap, body.in-app .shell { display: none; }
     touch-action: pan-y; gap: 10px; }
   .icon-btn.side-close { display: grid; }
   .app.menu-dragging .scrim { display: block; position: fixed; inset: 0; z-index: 44; background: rgba(12, 10, 8, 0.2); }
+  /* While the drawer is open or being dragged the chat behind it stays still, and the drawer's own list
+     does not hand its scroll on when it reaches an end. */
+  .app.menu-open .chat, .app.menu-dragging .chat, .app.menu-open .pane, .app.menu-dragging .pane { overflow: hidden; }
+  .app.menu-open .scrim { touch-action: none; }
+  .side-chats { overscroll-behavior: contain; }
   .side-allowance { padding: 10px 12px; }
   .side-allowance .amt { font-size: 20px; }
   .side-funds { padding: 6px 10px; font-size: 12px; }
