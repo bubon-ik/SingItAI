@@ -462,6 +462,7 @@ def versioned(text: str, version: str) -> str:
 
 class WebHandler(BaseHTTPRequestHandler):
     server_version = "SingItWeb/1"
+    head_only = False  # a HEAD request: the same status and headers as GET, and no body
 
     def log_message(self, fmt: str, *args: Any) -> None:  # no request lines with cookies or tokens
         logger.debug("web %s", fmt % args)
@@ -493,7 +494,8 @@ class WebHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         try:
             self.end_headers()
-            self.wfile.write(data)
+            if not self.head_only:
+                self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError):
             # The page closed or reloaded before its answer came: no one is left to tell, and nothing failed here.
             self.close_connection = True
@@ -521,6 +523,19 @@ class WebHandler(BaseHTTPRequestHandler):
             self._static()
             return
         self._dispatch("GET")
+
+    def do_HEAD(self) -> None:
+        """The page answers HEAD as GET without a body; an API route is never run for one.
+
+        Reown's wallet kit sends HEAD for the page to read its Cross-Origin-Opener-Policy.
+        Without this the standard library answered 501, once per check, into the console.
+        """
+        self.head_only = True
+        if not self.path.startswith(PREFIX + "/") and self.server.static_root is not None:
+            self._static()
+            return
+        self._send(405, {"ok": False, "error": "method_not_allowed", "message": "Use GET or POST."},
+                   {"Allow": "GET, POST"})
 
     def _static(self) -> None:
         """The page itself (website/app and its assets), so page and API share one origin."""
@@ -551,7 +566,8 @@ class WebHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        if not self.head_only:
+            self.wfile.write(data)
 
     def do_POST(self) -> None:
         self._dispatch("POST")

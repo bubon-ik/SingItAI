@@ -702,11 +702,11 @@ class StaticPageTests(unittest.TestCase):
         self.addCleanup(self.server.shutdown)
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
 
-    def get(self, path, headers=None):
+    def get(self, path, headers=None, method="GET"):
         import http.client
 
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=5)
-        connection.request("GET", path, headers=headers or {})
+        connection.request(method, path, headers=headers or {})
         response = connection.getresponse()
         body = response.read()
         connection.close()
@@ -721,6 +721,23 @@ class StaticPageTests(unittest.TestCase):
         self.assertEqual(self.get("/assets/favicon.svg")[0], 200)
         status, headers, _ = self.get("/")
         self.assertEqual((status, headers["Location"]), (302, "/app/"))
+
+    def test_head_answers_like_get_without_a_body(self):
+        status, headers, body = self.get("/app/", method="HEAD")
+        _, get_headers, get_body = self.get("/app/")
+        self.assertEqual((status, body), (200, b""))
+        self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
+        self.assertEqual(headers["X-Frame-Options"], "DENY")
+        self.assertEqual(headers["Content-Length"], str(len(get_body)))
+        self.assertEqual(headers["Content-Length"], get_headers["Content-Length"])
+        status, _, body = self.get("/nope", method="HEAD")
+        self.assertEqual((status, body), (404, b""))
+
+    def test_head_never_runs_an_api_route(self):
+        status, headers, body = self.get("/web/v1/session", method="HEAD")
+        self.assertEqual((status, body), (405, b""))
+        self.assertEqual(headers["Allow"], "GET, POST")
+        self.api.handle.assert_not_called()
 
     def test_the_app_manifest_is_served_as_one(self):
         (Path(self.tmp.name) / "website" / "app" / "manifest.webmanifest").write_text('{"name": "SingIt"}')
