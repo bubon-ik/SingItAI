@@ -46,6 +46,13 @@ _BUYER_EMAIL_PATH = "/agent/buyer-email"
 # The gateway writes this one for the buyer, so it travels to chat unchanged;
 # only the command that fixes it is added here, where the commands are defined.
 _SPEND_LIMIT_PREFIX = "Raise your spending limit to continue."
+# The Trezor allowance lane (docs/trezor-allowance-v1.md). Every answer the
+# gateway gives on it, refusals included, carries telegramText written for the
+# user; unexpected failures there are already replaced by a fixed sentence.
+_ALLOWANCE_PATH_PREFIX = "/agent/allowance/"
+_ALLOWANCE_ACTIONS = frozenset({
+    "status", "setup", "grant", "revoke", "pause", "bitrefill-search", "bitrefill-quote", "bitrefill-buy", "link",
+})
 _SPEND_LIMIT_HINT = (
     "Send /limits to see your current limits, or "
     "/set_limits <max per transaction> <daily cap> to raise them."
@@ -76,6 +83,15 @@ _CHAT_OPERATION_PATHS = {
     "end": "/agent/chat/end",
     "approve-policy": "/agent/chat/approve-policy",
     "models": "/agent/chat/models",
+    "network": "/agent/chat/network",
+    "quote": "/agent/chat/quote",
+    "pay": "/agent/chat/pay",
+    "payment": "/agent/chat/payment",
+    "search": "/agent/chat/search",
+    "search-prepare": "/agent/chat/search-prepare",
+    "search-approve": "/agent/chat/search-approve",
+    "search-disable": "/agent/chat/search-disable",
+    "search-payment": "/agent/chat/search-payment",
 }
 _MAX_RESPONSE_BYTES = 64 * 1024
 _NOT_CONFIGURED = "Wallet service is not configured. Please contact the operator."
@@ -150,13 +166,20 @@ class GatewayClient:
         operation: str,
         identity: TelegramIdentity,
         *,
+        chain: str = "base",
         user_access_token: str | None = None,
     ) -> str:
         path = _OPERATION_PATHS.get(operation)
         if path is None:
             raise GatewayClientError(_UNSUPPORTED)
 
+        if not isinstance(chain, str) or chain not in {"base", "solana"}:
+            raise GatewayClientError("Unsupported wallet network. Use base or solana.")
+        if chain == "solana" and operation not in {"wallet", "create-wallet", "balance"}:
+            raise GatewayClientError("This operation is not enabled on Solana yet.")
         payload = {"telegramUserId": identity.user_id}
+        if chain != "base":
+            payload["chain"] = chain
         if identity.username:
             payload["telegramUsername"] = identity.username
         result = self._post(
@@ -165,12 +188,23 @@ class GatewayClient:
             token=self.api_token,
             operation=operation,
             user_token=user_access_token,
+            timeout=15.0 if chain == "solana" else self.timeout,
         )
 
         telegram_text = result.get("telegramText")
         if not isinstance(telegram_text, str) or not telegram_text.strip():
             raise GatewayClientError(_INVALID_RESPONSE)
         return telegram_text.strip()
+
+    def purchases(self, identity: TelegramIdentity, *, purchase_id: str = "",
+                  offset: int = 0, reveal: bool = False,
+                  user_access_token: str | None = None) -> dict[str, Any]:
+        payload = {"telegramUserId": identity.user_id, "offset": offset}
+        if purchase_id:
+            payload.update(purchaseId=purchase_id, reveal=reveal)
+        return self._post("/agent/purchases", payload, token=self.api_token,
+                          operation="purchases", user_token=user_access_token,
+                          timeout=self.purchase_timeout if reveal else self.timeout)
 
     def execute_imessage(
         self,
@@ -196,9 +230,13 @@ class GatewayClient:
             operation=operation,
         )
 
-    def create_wallet(self, identity: TelegramIdentity) -> dict[str, Any]:
+    def create_wallet(self, identity: TelegramIdentity, *, chain: str = "base") -> dict[str, Any]:
         """Create/return the user's wallet, exposing the per-user access token."""
+        if not isinstance(chain, str) or chain not in {"base", "solana"}:
+            raise GatewayClientError("Unsupported wallet network. Use base or solana.")
         payload = {"telegramUserId": identity.user_id}
+        if chain != "base":
+            payload["chain"] = chain
         if identity.username:
             payload["telegramUsername"] = identity.username
         return self._post(
@@ -462,6 +500,35 @@ class GatewayClient:
             raise GatewayClientError(_INVALID_RESPONSE)
         return telegram_text.strip()
 
+    def execute_allowance(
+        self,
+        action: str,
+        identity: TelegramIdentity,
+        *,
+        payload: Mapping[str, Any] | None = None,
+        user_access_token: str | None = None,
+    ) -> dict[str, Any]:
+        """One call on the Trezor allowance lane; the gateway's JSON, telegramText included."""
+        if action not in _ALLOWANCE_ACTIONS:
+            raise GatewayClientError(_REQUEST_FAILED)
+        user_token = str(user_access_token or "").strip()
+        if not user_token:
+            raise GatewayClientError(_AUTH_FAILED)
+        body = {"telegramUserId": identity.user_id, **dict(payload or {})}
+        result = self._post(
+            _ALLOWANCE_PATH_PREFIX + action,
+            body,
+            token=self.api_token,
+            operation=f"allowance-{action}",
+            # Setting up deploys a contract and buying waits for delivery.
+            timeout=max(self.timeout, 180.0),
+            user_token=user_token,
+        )
+        telegram_text = result.get("telegramText")
+        if not isinstance(telegram_text, str) or not telegram_text.strip():
+            raise GatewayClientError(_INVALID_RESPONSE)
+        return result
+
     def execute_llm(
         self,
         operation: str,
@@ -515,7 +582,8 @@ class GatewayClient:
             body,
             token=self.api_token,
             operation=f"chat-{operation}",
-            timeout=self.purchase_timeout,
+            # A Solana turn may include decision, x402 settlement and final answer.
+            timeout=max(self.purchase_timeout, 600.0) if operation == 'message' and body.get('chain') == 'solana' else self.purchase_timeout,
             user_token=user_token,
         )
 
@@ -643,7 +711,8 @@ class GatewayClient:
         is_llm = operation.startswith("llm-")
         is_imessage = operation in _IMESSAGE_OPERATION_PATHS
         is_paid_tool = operation == "buy-tool"
-        if not is_bitrefill and not is_llm and not is_imessage and not is_paid_tool:
+        is_allowance = operation.startswith("allowance-")
+        if not is_bitrefill and not is_llm and not is_imessage and not is_paid_tool and not is_allowance:
             return None
         try:
             body = exc.read(self.max_response_bytes + 1)
@@ -657,11 +726,14 @@ class GatewayClient:
             return None
         if not isinstance(payload, dict):
             return None
+        if is_allowance:
+            text = payload.get("telegramText")
+            return text.strip() if isinstance(text, str) and text.strip() else None
         if is_paid_tool:
             # These are deliberate policy/approval outcomes with text written
             # for the buyer. Unexpected exceptions still use the fixed error;
             # never forward a signer's stderr or an upstream response body.
-            if payload.get("decision") in {"blocked_by_memory", "rejected_by_imessage"}:
+            if payload.get("decision") in {"blocked_by_memory", "rejected_by_imessage", "refused_by_allowance"}:
                 text = payload.get("telegramText")
                 if isinstance(text, str) and text.strip():
                     return text.strip()

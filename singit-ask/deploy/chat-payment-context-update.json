@@ -1,0 +1,10 @@
+{
+  "sign402-gateway/sign402_gateway/web_agent.py": {
+    "before": "78640f52af0f8a37068a4bfe375f12735cf8741311d5739d5ab8340592b3a5f7",
+    "after": "3c6dd0dfc49af52127537f4114b421342590de7110732d4a4e0c90b96b803c42"
+  },
+  "sign402-gateway/sign402_gateway/web_ask.py": {
+    "before": "05b11d9ed592f2e6234e3c4d18a436c1bd8c9a8bdb835347618e6b2818377fd2",
+    "after": "469dba506c52ee30049d14908e01c4f7fafacc8b078af1db7b9fa6a02f3a1cec"
+  }
+}

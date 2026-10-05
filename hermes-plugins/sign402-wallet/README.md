@@ -1,12 +1,15 @@
-# Sign402 Wallet Hermes Plugin
+# SingIt Wallet Hermes Plugin
 
 This Hermes plugin exposes deterministic managed-wallet commands in
 Telegram:
 
 ```text
 /start
-/wallet
-/balance
+/wallet [base|solana]
+/balance [base|solana]
+/deposit [base|solana]
+/purchases
+/settings
 /connect_imessage
 /connect_whatsapp
 /limits
@@ -20,6 +23,30 @@ The commands do not call the configured LLM. The plugin binds each request
 to `MessageEvent.source.user_id`, lets Hermes apply its normal Telegram
 authorization, and then calls the protected Sign402 Gateway on localhost.
 Raw command arguments cannot select another Telegram user.
+
+## Native Telegram interface
+
+Home offers Shop, Wallet, Purchases and Settings, plus Chat when enabled.
+Contextual inline buttons name products, amounts and payment tokens. A review
+step precedes the existing approval/purchase flow. History shows receipts and
+keeps redemption codes hidden until requested; code messages remain in chat.
+The main menu uses a persistent Telegram keyboard. No Mini App is required.
+
+[Interface behavior, storage migration and verification](../../docs/telegram-ui-checks.md).
+
+## Solana wallets
+
+`/wallet` opens the Base/Solana network selector. `/wallet solana` ensures a
+managed Solana mainnet wallet exists and shows its balance; `/deposit solana`
+shows the address. `/balance solana` shows SOL and native USDC. `/balance` and
+`/deposit` default to Base. Selecting Solana does not change later commands' network.
+
+Keys are encrypted with `SIGN402_WALLET_MASTER_KEY` in the gateway's wallet
+store. Configure `SIGN402_SOLANA_RPC_URL` on the gateway for mainnet balance
+reads. This stage supports wallet creation and balances only: Solana payments,
+withdrawals, spending policies and Venice chat routing are not enabled yet.
+The USDC balance includes all owned native-USDC accounts; the future payment
+adapter must separately check its source associated token account.
 
 ## Server Configuration
 
@@ -76,6 +103,13 @@ cannot send the bearer token to a remote host.
 ordinary Telegram text that is not a Sign402 command or wizard response and
 returns the Sign402 menu instead of letting the message fall through to the
 general Hermes LLM chat.
+
+Optional [natural-language routing](../../docs/natural-language-assistant.md)
+uses TypeSafe to send ordinary requests to existing shopping and read-only
+wallet workflows before this menu fallback. It is disabled by default and
+does not require a user's Venice setup. Direct delivery/booking requests offer
+gift cards only as an explicitly accepted alternative; they do not claim to
+place the underlying order.
 
 `SIGN402_TELEGRAM_ALLOWED_USERS=*` opens only the Sign402 plugin to every
 Telegram user. Keep `TELEGRAM_ALLOWED_USERS` restricted to the operator and do

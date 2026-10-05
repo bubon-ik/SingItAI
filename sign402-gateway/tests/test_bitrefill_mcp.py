@@ -1096,6 +1096,7 @@ class BitrefillMcpCatalogTests(unittest.TestCase):
                 "packageId": "steam-usa<&>50",
                 "value": "50",
                 "priceUsd": "54.06",
+                "displayPriceUsd": "54.06",
             },
         )
 
@@ -1253,6 +1254,7 @@ class BitrefillMcpCatalogTests(unittest.TestCase):
                 "packageId": "steam-usa<&>50",
                 "value": "50",
                 "priceUsd": "50.25",
+                "displayPriceUsd": "",
             },
         )
         self.assertEqual(

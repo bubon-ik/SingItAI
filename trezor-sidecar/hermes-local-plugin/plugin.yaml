@@ -1,0 +1,25 @@
+name: sign402-trezor-local
+kind: standalone
+version: 0.1.0
+description: Separate opt-in commands for one local Trezor purchase proof
+provides_hooks:
+  - pre_gateway_dispatch
+requires_env:
+  - name: SIGN402_TREZOR_LOCAL_AGENT_ENABLED
+    description: Literal 1 enables the separate local plugin
+    password: false
+  - name: SIGN402_TREZOR_LOCAL_AGENT_USER_ID
+    description: One numeric Telegram user ID allowed to use the local proof
+    password: false
+  - name: SIGN402_TREZOR_LOCAL_PURCHASES_ENABLED
+    description: Literal 1 separately enables live Bitrefill purchase commands
+    password: false
+  - name: SIGN402_TREZOR_POC_ENABLED
+    description: Literal 1 is the independent Trezor proof gate
+    password: false
+  - name: SIGN402_TREZOR_POC_MAX_USD
+    description: Positive maximum USD amount for the isolated proof
+    password: false
+  - name: SIGN402_TREZOR_SIDECAR_TOKEN
+    description: Independent bearer token for the loopback-only Trezor sidecar
+    password: true

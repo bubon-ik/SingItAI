@@ -1,0 +1,693 @@
+# Allowance lane on the web — design, v1
+
+Status: draft, 25 September 2026. Builds on [trezor-allowance-v1.md](trezor-allowance-v1.md);
+everything verified there on Base mainnet (T4, T6, T7, T8) is kept.
+
+## Goal
+
+Anyone opens the SingIt web page, connects the wallet they already use —
+Rabby, MetaMask or Phantom, with or without a Trezor or Ledger behind it — sets
+limits, and signs **once**. From then on the agent buys (x402 tools, Bitrefill)
+from the web page or the Telegram bot without asking the wallet again, inside
+those limits. Money stays in the user's wallet until a purchase needs it.
+Revoking is one more signature.
+
+Nothing is installed on the user's computer. The tunnel, sidecar and companion
+remain an option for owners who want the limiter checked on their own machine
+before their device shows anything (see "Two signing paths").
+
+## What stays and what changes
+
+| Part | v1 (owner only, Telegram) | Web v1 (everyone) |
+| --- | --- | --- |
+| Limiter contract | `AgentAllowance`, one per user, deployed by us | unchanged |
+| Agent key, x402 payments, Bitrefill x402, float, watcher | as verified on mainnet | unchanged |
+| Who is an owner | `SIGN402_ALLOWANCE_OWNERS` in the server env | anyone who proves an address with Sign-In with Ethereum |
+| How the owner signs the grant | broker → tunnel → companion → sidecar → Trezor Suite | the page hands the transaction to the connected wallet |
+| Revoke | same device path | the same, from the wallet; also works from revoke.cash or any wallet without us |
+| Where purchases start | bot | bot and web page, one account |
+
+## Two signing paths
+
+1. **Wallet (default).** The page builds `approve(limiter, amount)` — or a
+   gasless `permit`, below — and the user's wallet shows and signs it. The
+   wallet, and the hardware device behind it if any, displays the spender and
+   amount. The limiter address comes from our server.
+2. **Companion (optional, advanced).** The v1 path. The owner's own machine
+   checks that the spender is the tested limiter owned by this address before
+   the device shows anything, so even a compromised server cannot substitute a
+   different spender. Needs the macOS launch agents
+   (`trezor-sidecar/macos/install-launch-agents.sh`) and, for other users, a
+   packaged app and an HTTPS broker endpoint instead of SSH. Not in web v1.
+
+## Accounts and identity
+
+- **Sign-In with Ethereum (EIP-4361).** The server issues a nonce (single use,
+  5 minutes); the wallet signs the message; the server checks it and opens a
+  session bound to that address. Domain and URI are the page's own; chain id
+  8453. Session: HttpOnly, Secure, SameSite=Strict cookie, 12 hours, rotated on
+  sign-in.
+- **One account, several identities.** An account holds one owner address and,
+  optionally, a Telegram id. Web-only accounts get the user id `wallet:0x…`
+  (checksummed); the existing Telegram accounts keep theirs.
+- **Linking Telegram.** Signed in on the web, the user presses "Link Telegram";
+  the page shows a one-time code (6 digits, 10 minutes); the user sends
+  `/link <code>` to the bot. The bot account and the address become one
+  account; watcher notices go to Telegram from then on.
+- **Changing the owner address** means a new limiter: the address is
+  immutable in the contract. The old one keeps its allowance until revoked, and
+  the page says so (as `/allowance_setup` already does).
+- **Smart-contract wallets** (Coinbase Smart Wallet, Safe) need ERC-1271 /
+  ERC-6492 signature checks and send approvals through their own batching. Not
+  in v1; the page refuses them with a clear message.
+
+## Flows
+
+### 1. Connect and sign in
+
+Two transports, one flow: browser extensions found by EIP-6963 (Rabby,
+MetaMask, Phantom on desktop) and **WalletConnect** (QR code or deep link, for
+mobile wallets). Use a kit that offers both behind one "Connect" button — Reown
+AppKit, RainbowKit or ConnectKit on wagmi + viem; WalletConnect needs a
+`projectId` from Reown Cloud. The backend does not know or care which
+transport was used: it receives the same SIWE signature, transaction hash or
+permit signature and checks them against the chain. `SIGN402_WEB_DOMAIN` must be
+the page's host, or wallets (WalletConnect's domain verification especially)
+flag the sign-in as suspicious. If the wallet is not on Base, ask it to switch
+(`wallet_switchEthereumChain`, 8453). Phantom is used in its EVM mode. Then SIWE.
+
+### 2. Limits and the limiter
+
+The user picks a daily cap, a per-purchase cap and a lifetime (presets:
+$5/$1/30 days, $20/$5/30 days, $100/$10/90 days; custom within the server's
+ceilings). The page explains in one line that nothing leaves the wallet yet.
+
+"Create my limiter" deploys `AgentAllowance(USDC, owner, agent, guardian,
+caps, expiry)` from the user's agent key, gas paid by our gas funder — the v1
+`setup`, unchanged: code checked against the tested artifact, every immutable
+read back, source published to Sourcify. The page shows the limiter with a
+Blockscout link and the caps read from the contract, not from our database.
+
+### 3. Grant: approve or permit
+
+The page offers the amount (default: one day's cap; ceiling from the server)
+and one of two ways, chosen by what the wallet holds:
+
+**a. `approve` (the user has ETH on Base).** The server returns the exact
+transaction; the page sends it with `eth_sendTransaction`:
+
+```json
+{ "from": "<owner>", "to": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  "data": "0x095ea7b3<limiter><amount>", "value": "0x0", "chainId": "0x2105" }
+```
+
+Rabby and MetaMask show it as "approve / spending cap: N USDC to 0x…". The
+page then reports the transaction hash; the server verifies it (below).
+
+**b. `permit` (no ETH needed).** USDC on Base supports EIP-2612 (checked on
+chain: name "USD Coin", version "2", domain separator
+`0x02fa7265…834f`). The page asks the wallet for `eth_signTypedData_v4`:
+
+```json
+{ "domain": { "name": "USD Coin", "version": "2", "chainId": 8453,
+              "verifyingContract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" },
+  "primaryType": "Permit",
+  "message": { "owner": "<owner>", "spender": "<limiter>", "value": "<amount>",
+               "nonce": "<USDC.nonces(owner)>", "deadline": "<now + 15 min>" } }
+```
+
+The server submits `permit(...)` from the gas funder and the allowance appears
+without the user paying gas. Wallets warn about permits because they are a
+common phishing vector; the page says, before asking, exactly what the wallet
+will show and why. Hardware wallets display the typed fields (owner, spender,
+value, deadline). Default is `approve` when the wallet holds at least 0.00005
+ETH on Base, otherwise `permit`.
+
+### 4. Purchases
+
+Unchanged from v1 and the same for the web page and the bot: the gateway picks
+the lane, the limiter funds the agent (float refill or exact), the agent pays
+by x402, settlement is read from the chain. The web shop calls the same
+Bitrefill quote → confirm → buy sequence; the confirmation screen shows
+product, denomination, price, network and recipient before anything is paid.
+
+### 5. Revoke and pause
+
+- **Revoke:** `approve(limiter, 0)` from the wallet, or `permit` with value 0
+  (gasless). When it is mined and nothing stays granted, the agent's float goes
+  back to the owner (as in v1, 254cef8).
+- **Pause:** permanent; the owner can call `pause()` from the wallet, and the
+  guardian (our watcher) pauses on the v1 anomalies. After a pause, "create a
+  new limiter" is the only way forward.
+- The page always links to the limiter on revoke.cash, so users know they can
+  revoke without us.
+
+## API
+
+Base path `/web/v1`, JSON, session cookie from SIWE, CSRF header
+`X-SingIt-CSRF` on every POST. Public through the reverse proxy with TLS; CORS
+only for the page's origin. Amounts are strings of USDC atomic units (6
+decimals); every response that changes something carries `state`.
+
+| Method and path | Body | Returns |
+| --- | --- | --- |
+| `POST /auth/nonce` | `{address}` | `{nonce, message, expiresAt}` — the exact EIP-4361 text to sign; `smart_wallet_unsupported` for contract wallets |
+| `POST /auth/verify` | `{message, signature}` | session cookie, `{account, address, csrfToken, expiresAt, telegramLinked}` |
+| `POST /auth/logout` | — | clears the cookie |
+| `GET /session` | — | `{account, address, telegramLinked}` |
+| `GET /allowance` | — | `configured`, and with a limiter: `limiter, owner, agent, guardian, dailyCapAtomic, perPurchaseCapAtomic, expiry, paused, allowanceAtomic, remainingTodayAtomic, floatAtomic, ownerUsdcAtomic, ownerEthWei, source, state, operations[], alerts[]`; `state` is `waiting_for_grant`, `granted`, `paused` or `expired` |
+| `POST /allowance/setup` | `{dailyCap, perPurchaseCap, days}` | the new limiter as above, `created` |
+| `POST /allowance/grant/prepare` | `{amount, method: "approve" \| "permit"}` | `{operation, kind, method, state, limiter, amountAtomic, expiresAt, walletShows}` and `tx` (approve) or `typedData` (permit) |
+| `POST /allowance/grant/submit` | `{operation, txHash}` (approve) or `{operation, signature}` (permit) | the operation |
+| `POST /allowance/revoke/prepare` | `{method, limiter?}` | as grant, amount 0 |
+| `POST /allowance/revoke/submit` | as grant | the operation |
+| `GET /allowance/operations/{id}` | — | `{operation, kind, method, state, limiter, amountAtomic, txHash, detail, createdAt, updatedAt}`; poll every 2 s |
+| `POST /allowance/pause` | — | the limiter, paused for good by our guardian (the panic button; no wallet needed) |
+| `POST /link/telegram` | — | `{code, expiresAt, text}`: send `/link <code>` to the bot within 10 minutes |
+| `POST /link/telegram/remove` | — | `{telegramLinked: false}` |
+| `GET /shop/tools` | — | `{tools: [{id, name, description, source, resourceUrl, inputSchema}]}` |
+| `POST /shop/tools/quote` | `{tool, …template fields}` | `{quoteId, tool, priceAtomic, priceUsd, payTo, network, resourceUrl, expiresAt, text}`, 10 minutes |
+| `POST /shop/tools/buy` | `{quoteId}` | the purchase: `ok`, `text`, `txId`, the tool's result |
+| `POST /shop/bitrefill/search` | `{query, country?, kind?}` | `{products, text}` |
+| `POST /shop/bitrefill/quote` | `{productId, package}` | `{quoteId, name, package, priceUsd, priceAtomic, expiresAt, text}` — show product, denomination, price, network and recipient before buying |
+| `POST /shop/bitrefill/buy` | `{quoteId}` | `{invoiceId, delivered, text}` (no code) |
+| `GET /purchases?offset=` | — | `{purchases, hasNext}`, 20 at a time, no codes |
+| `POST /purchases/reveal` | `{purchaseId}` | a Bitrefill code, shown once |
+
+Errors are `{ok: false, error, message}` (or `text` from the shop) with 400
+(refused, and the reason says why), 401 (sign in / CSRF), 403 (not enabled), 404,
+413, 415 (JSON only), 429 (rate limited) or 503 (shop or deployment budget).
+Every POST needs `Content-Type: application/json` and, once signed in,
+`X-SingIt-CSRF: <csrfToken>`; send cookies (`credentials: "include"`).
+
+Operation states: `PREPARED → SUBMITTED → DONE | FAILED | EXPIRED`. The server
+moves them on by reading the chain, not by trusting the page, and a new
+prepare first moves the open ones on (the T8 lesson, 2ba7762).
+
+## Running it
+
+`scripts/enable-web-page.sh <beta addresses>` on the VPS: it writes the
+`SIGN402_WEB_*` settings (domain `app.singitai.app`, the beta allowlist, the
+internal token, `SIGN402_WEB_STATIC_DIR` pointing at `website/`), starts
+`sign402-web-api` on `127.0.0.1:8130` and checks it. The web API serves the page
+too (`/app/`, `/assets/`; `/` redirects to `/app/`; nothing else of the disk),
+so page and API share one origin: the SameSite=Strict cookie works and no CORS
+is involved.
+
+Nothing opens on the host. The page goes public through the existing Cloudflare
+Tunnel, as `decide.singitai.app` does (docs/decide-public-endpoint.md): one
+Public Hostname, `app.singitai.app` → `http://127.0.0.1:8130`. Only the web API
+listens there, and it answers only `/app/`, `/assets/` and `/web/v1/*`. It
+takes the client address from `Cf-Connecting-Ip` (or `X-Forwarded-For`) only
+when the connection comes from this host. Optional settings:
+`SIGN402_WEB_MIN_OWNER_USDC` (1), `SIGN402_WEB_MAX_LIMITERS_PER_30_DAYS` (3),
+`SIGN402_WEB_MAX_DEPLOYS_PER_DAY` (50), `SIGN402_WEB_DB` (`~/.sign402/web.db`).
+
+## Chat
+
+The signed-in page is a chat, laid out like Claude: a sidebar (new chat, the
+history, what the agent can spend today, purchases, Telegram, the account) and
+the conversation. It works the way the Telegram bot does
+(`sign402_gateway/web_agent.py`):
+
+- **Jev** (TypeSafe, `jev-latest`, the bot's `TYPESAFE_API_KEY`) reads each
+  message in one call, as the bot's router does: the intent (set limits, grant,
+  revoke, status, purchases, paid data, gift card, eSIM, top-up, food, goods,
+  travel, link Telegram, conversation), the country (ISO code, only when named)
+  and the kind of shop. Without a key or when it does not answer, the intent
+  comes from keywords.
+- **Catalog research** (gateway action `catalog-search`, the bot's Bitrefill MCP
+  catalog): a brand is searched by name within its product type (gift card,
+  eSIM, phone top-up) and country; without a brand, the country's shops of that
+  kind are listed; an eSIM is looked for by its country or region, never the
+  word "eSIM". Food, goods and travel cannot be bought directly, so gift cards
+  that pay for them in that country are offered. Jev then ranks the candidates
+  against the user's words (a `choice` over the products) and drops what plainly
+  does not fit. Cards show each product's real options (values, eSIM plans) with
+  today's price from the allowance lane. A product is bought straight from the
+  message only when the message asked to buy a named value and Jev was sure of
+  the product (or it was the only one). When the catalog is off, Bitrefill's own
+  search by words is used.
+- **Code acts** on the intent. Limits named in the message ("$20 a day, $5 per
+  purchase") create the limiter at once; a daily limit alone is proposed on a
+  card to confirm. Grants and revokes are cards the page hands to the wallet.
+  Paid data (crypto news, market data, ENS…) is bought at once, and gift cards,
+  eSIMs and top-ups are searched and shown, then bought by the card's button or
+  at once when the message named the product, the amount and asked to buy —
+  inside the user's limits, without asking again: the user chose that. At most
+  one purchase follows a message, and every purchase goes through the shop,
+  spending memory and the limiter.
+- **Conversation runs on Venice** once the allowance is approved, like the bot's
+  private chat (`sign402_gateway/web_venice.py`, gateway action `venice-chat`).
+  Venice meters a prepaid balance held by the limiter's agent address, which
+  signs Venice in (SIWX). When the balance runs out, the agent buys Venice credit
+  over x402 ($5, Venice's fixed top-up) from the limiter, through the same caps,
+  spending memory, rate limit and purchase history as any other purchase; the
+  reply shows "credit topped up", and Purchases lists it. A per-purchase limit
+  under the top-up refuses it with the reason, nothing paid. The chat's Venice
+  policy mirrors the limiter (daily cap, expiry). Needs `SIGN402_AI_CHAT_ENABLED`
+  on the gateway, as for the bot.
+- **The web, when the answer needs it** (Exa `/search` over x402, the bot's own
+  search: `sign402_gateway/web_search.py`, on where `SIGN402_AI_SEARCH_ENABLED`
+  is). The last user message is read the bot's way: a question about now
+  ("today", "latest", "who won") is searched at once; an ambiguous one lets
+  Venice ask for it with `NEED_WEB: <query>`; small talk never is. One search per
+  message at most, 20 an account a day (the chat store's counter, shared with the
+  bot), at most $0.02 a call. The pages go into the last user message for Venice
+  and never into history; under the answer one line says "searched the web · $0.007"
+  with links to the pages read. A search that fails or does not fit the limits
+  never fails the message: Venice answers from memory and says so.
+  - *Base*: paid from the limiter like any purchase (limits, spending memory,
+    the agent key), to the Exa address bound in `SIGN402_AI_SEARCH_MERCHANT_PAYTO`;
+    Exa offers two Base legs and the bound one is taken wherever it sits. It is
+    counted against the limits but kept out of the Purchases list, where twenty
+    searches a day would push out gift cards whose codes were not yet shown.
+  - *Solana*: the agent pays Exa straight from the owner's USDC account as their
+    delegate (`solana-x402-service/src/exa.mjs` with `owner`), Exa's fee payer
+    paying the fee, within the Solana limits (`lane.spend`), only to Exa's Solana
+    address (`SIGN402_AI_SEARCH_SOLANA_PAYTO`, default the one its 402 names). An
+    unclear payment is never retried; the bridge refuses the next search until it
+    is resolved.
+  - Jev sends "buy crypto news" to the paid feed and any other question about
+    current events to the chat, which searches.
+- **Live data, bought per question** (`sign402_gateway/web_data.py`, gateway action `data-buy`). Jev's
+  `live_data` intent, or a link or flight number in the message, picks one read-only source; the concierge model
+  fills its fields as JSON, each checked by pattern (a city, a ticker, `LH400`, IATA codes, a future date), and a
+  missing one is asked for. The data is bought from the limits, then handed to Venice with the question as untrusted
+  data; under the answer, "FlightAware · $0.010" and a link. When Venice cannot answer after the data is paid for —
+  most often because its credit needs a $5 top-up that the limits or the wallet cannot cover — the concierge model
+  answers from the data instead, and the reply says so (with Add funds when money is what is missing). Only that
+  question and its data go to it, never the rest of the private chat; without bought data, Venice's refusal stays
+  the reply. Sources, picked from Coinbase's Agentic Market and
+  PayAI's Bazaar for being used and read-only (September 29, 2026):
+
+  | Source | Seller | Price | |
+  |---|---|---|---|
+  | Weather, exchange rates, token details, stocks and indices, Polymarket, crypto news, funding rates | Otto AI | $0.001–0.003 | |
+  | Read a link (`/contents`) | Exa | $0.001 | |
+  | A flight's status | FlightAware via stabletravel.dev | $0.01 | |
+  | Flight prices between cities (booking happens on the airline's page) | Google Flights via stabletravel.dev | $0.02 | |
+  | Restaurants, cafés, hotels, things to do: five web pages with their text, linked in the answer | Exa `/search` | $0.007 | Tripadvisor via paysponge until 1 October: it took payment and answered 403 |
+
+  Every seller is bound to its Base and Solana address as its 402 named it, with a price ceiling; another address
+  or a higher price is refused before anything is paid. Base pays from the limiter (spending memory, limits;
+  kept out of Purchases like searches). Solana pays from the owner's account as delegate within the Solana limits,
+  through the bridge's `data-pay` (`solana-x402-service/src/resource.mjs`), which checks the host list, the bound
+  address and the ceiling again and makes one attempt per request. Crypto news and funding rates now work from a
+  Solana wallet too; Hyperliquid data, ENS and risk checks stay on Base. Calls, email and bookings are not here:
+  they act on other people, not only on the user's money.
+- **Actions on the user's behalf, one press each** (`sign402_gateway/web_actions.py`, gateway actions
+  `email-address`, `email-address-set`, `email-send`, `call-start`, `call-status`). They reach other people or
+  inboxes, so the limits alone never trigger them: the agent drafts, the card shows the exact recipient, text and
+  price, and only the press on it sends. One draft, one press.
+  - *Email to yourself* (StableEmail, $0.02, Base or Solana): "email me that" drafts plain text from the chat
+    (the concierge model, or the last answer without Markdown); only to the address the account saved (asked once),
+    from relay@stableemail.dev, replies to the user; never a code; ten a day.
+  - *A phone call to a business* (StablePhone, $0.54, Base only): "call the restaurant +1 202 555 0123 and book a table for two at
+    8pm". The number must be one the user typed; the task is theirs, in the callee's language. The AI says it is
+    an AI calling for a customer, is not recorded, lasts at most three minutes, never agrees to pay or shares
+    details; three a day. "Check result" reads the summary and transcript signed in as the paying agent (SIWX).
+    StablePhone currently accepts only `+1` followed by ten digits, per its
+    [API schema](https://stablephone.dev/openapi.json). Other country codes, including `+420`, are rejected
+    before a call card or payment; saved older drafts are also checked by the gateway. A button press shows
+    a pending request, and only a returned call ID confirms that the call started. An error or missing
+    confirmation does not show a success checkmark or automatically retry the call.
+    Not on Solana yet: which wallet StablePhone counts as the payer of a delegated payment is unverified.
+  - *The calling pilot, Europe first* (`sign402_gateway/bland_calls.py`, step A of the SingIt Call plan: a
+    closed pilot before a separate x402 service that sells AI phone calls for USDC on Base or Solana): a number that is not `+1` goes to our own Bland account
+    when `SIGN402_CALLS_BLAND_ENABLED=1`, `SIGN402_BLAND_API_KEY` is set and the number is on
+    `SIGN402_CALLS_ALLOWED_NUMBERS` (the owner's test numbers). No charge to the user: the minutes come from our
+    Bland credit while the real price is measured, so it works from Base and Solana wallets alike. Czech (`cs`),
+    German and English openings disclose the AI; not recorded; three minutes; voicemail hangs up; Bland's `retry`
+    is never sent. The order is written (`SIGN402_CALLS_DB`, default `~/.sign402/calls.db`, number kept as a hash
+    and last four digits, no task) before Bland is asked; a lost answer is not repeated and blocks the next call
+    for ten minutes; three a day. Bland calls abroad from its own numbers once the account holds at least $5 of
+    purchased credit; with our Twilio (Bland BYOT: `SIGN402_BLAND_ENCRYPTED_KEY`, `SIGN402_BLAND_FROM`) calls go out
+    from that number and the destination must be enabled in Twilio's Geo Permissions.
+- **The model is theirs to choose** from Venice's own list (every chat model with
+  a published price, cheapest first, filtered by Venice's capability tags): the
+  chip under the message box, `GET /chat/models` and `POST /chat/model {model}`.
+  Choosing moves no money; the next message uses it.
+- **The concierge model** (OpenRouter, the bot's `OPENROUTER_API_KEY`,
+  `SIGN402_WEB_AGENT_MODEL`) answers before the allowance is approved, or when
+  Venice chat is off, and turns a shopping sentence into search words, a country
+  and an amount (JSON, validated).
+- **Money lives on the Usage page, not in the chat.** Under a Venice answer one
+  quiet line says the model, tokens and cost (Venice's own counts); while the
+  agent works, "Thinking · Ns". The wallet chip at the bottom of the sidebar opens
+  the account menu (Usage, Purchases, Settings, Language, Telegram, Get help,
+  Sign out). Usage (`GET /usage`) shows the chat credit, what the allowance spent
+  today of its limit, today's answers per model, and each $5 credit top-up with
+  its transaction. The reply language (Auto, English, Russian) is kept in the
+  browser and sent with each message.
+- No model has tools or can trigger a payment, and none sees purchase results or
+  codes: only the text of past messages is sent. Answers render a Markdown subset.
+- Routes: `GET /chats`, `GET /chats/{id}`, `POST /chats/message {chatId?, text}`,
+  `POST /chats/action {chatId, action}` for card buttons, `POST /chats/update {chatId, title?, pinned?, archived?}`
+  (rename, pin, archive; a new message unarchives), `POST /chats/delete`. `GET /chats` lists pinned chats first
+  and flags archived ones.
+  The page's own scripts and styles are served with `?v=<hash of the page>`, so a
+  cache in front of it (Cloudflare's browser TTL) never mixes an old file with a new one.
+  Sixty messages an hour per account. Chats are stored per account in `web.db`.
+
+## What the server verifies
+
+Before `prepare`:
+- the session's address is the limiter's `owner` on chain;
+- the limiter runs the tested code (immutables masked), is neither paused nor
+  expired, and its `agent` and `guardian` are ours for this account;
+- the amount is within the grant ceiling.
+
+On `submit` with a transaction hash:
+- the transaction is from the owner, to USDC, with exactly the prepared
+  `approve(limiter, amount)` calldata, on chain 8453;
+- the receipt succeeded; the allowance reads back (waiting out a lagging node
+  only while fresh).
+
+On `submit` with a permit signature:
+- it recovers to the owner over exactly the prepared typed data, the nonce is
+  current and the deadline in the future;
+- only then the gas funder sends `permit`; then as above.
+
+A hash or signature for anything else is refused and never broadcast.
+
+## What the user sees
+
+Screens, in order: Connect → Sign in → Limits → Create limiter → Grant →
+Dashboard. The dashboard shows: allowance left, spent today of the daily cap,
+the agent's float, recent spends with transaction links, watcher alerts, and
+the actions Grant more / Revoke / Pause / Link Telegram / Shop.
+
+Rules for the copy:
+- Addresses are shown the way wallets show them, `0x4F35…a46B`, with the full
+  address one tap away, so the user can match the wallet prompt.
+- Before every wallet prompt, one sentence saying what the wallet will show:
+  "Your wallet will ask you to approve up to 10 USDC for 0x4F35…a46B."
+- Every limit is shown as read from the contract, with its Blockscout link.
+- Never show redemption codes except on explicit "Reveal", once, as in v1.
+
+Errors the page must name: wrong network; not enough USDC for the grant (allowed
+but explained); no ETH for approve (offer permit); rejected in the wallet;
+reverted on chain; limiter paused or expired (offer a new one); prepare expired;
+rate limited.
+
+## Security model
+
+What changes from v1: in the wallet path **the spender address comes from our
+server**. A compromised server could hand the page a malicious spender. Limits
+on that:
+- the wallet shows the spender; the page shows the same short address with a
+  link to its verified code and read-only values (owner, agent, caps) on
+  Blockscout — a user who checks sees a mismatch;
+- grants are small by default (one day's cap) and capped server-side;
+- the watcher's rule 1 (a spend to anyone but the agent pauses at once) runs
+  against every limiter;
+- the page bundle is served with Subresource Integrity and a strict CSP; a
+  later step is an IPFS-pinned build whose hash is published;
+- the companion path stays available for owners who want the local check.
+
+Unchanged from v1: the user's keys never touch our server; the limiter caps
+what any compromise of the agent key or the server can take per day and per
+purchase; revoke works without us.
+
+## Cost and abuse
+
+Each account costs us gas: one limiter deployment (≈0.00001 ETH today), agent
+gas top-ups, and a permit submission per gasless grant or revoke. Limits:
+- one active limiter per address; a new one only after the old is revoked,
+  paused or expired, at most three per address per 30 days;
+- setup requires at least 1 USDC at the owner address (a cheap sybil filter);
+- per-IP and per-address rate limits on `auth` and `setup`;
+- a global daily deployment budget with an alert when it is reached;
+- the watcher gets its own RPC without the 10-block `eth_getLogs` limit.
+
+## Data model
+
+New tables beside the v1 `allowance.db`:
+- `accounts(account_id, owner_address, telegram_user_id NULL, created_at)`;
+- `auth_nonces(nonce, address, expires_at, used_at)`;
+- `sessions(session_hash, account_id, address, expires_at)` — the cookie holds
+  the token, the table only its hash;
+- `link_codes(code_hash, account_id, expires_at, used_at)`.
+
+`operations` gains `method` (`device` | `approve` | `permit`) and
+`prepared` (the permit nonce and deadline). `SIGN402_ALLOWANCE_OWNERS` stays as an allowlist during the
+rollout and is removed at general availability.
+
+## Rollout
+
+1. Backend: SIWE, accounts, sessions, status and setup for web accounts,
+   behind `SIGN402_WEB_ENABLED` and an address allowlist.
+2. `approve` prepare/submit with server-side verification.
+3. `permit` for grant and revoke.
+4. Web shop (x402 tools, Bitrefill) on the web account.
+5. Link Telegram.
+6. The page (owner's design), then a private beta, then general availability
+   with the abuse limits on.
+
+**Step 1 is built** (`sign402_gateway/web_accounts.py`, `web_api.py`): SIWE
+nonce → verify → session cookie + CSRF token, logout, `GET /session`,
+`GET /allowance`, `POST /allowance/setup` with the USDC minimum, the 30-day
+limiter cap and rate limits. Web accounts are owners through
+`AllowanceService.owner_lookup`, so the watcher, `lane_for` and later purchases
+see them like the env allowlist. Rehearsed over HTTP on a Base mainnet fork: a
+fresh wallet signed in, created a limiter whose `owner`, `agent` and caps read
+back on chain, and the deployed code matched the tested artifact; setup without
+the CSRF header, a wallet outside the beta and a logged-out cookie were refused.
+Run it with `python -m sign402_gateway.web_api` behind a TLS reverse proxy that
+forwards `/web/v1` to `127.0.0.1:8130`. Messages from the lane still name the
+Trezor and bot commands; step 2 makes them neutral for the web.
+
+**Step 2 is built** (`AllowanceService.prepare_wallet`, `submit_wallet`,
+`operation`; routes `grant|revoke/prepare`, `grant|revoke/submit`,
+`GET /allowance/operations/{id}`). Prepare checks the limiter on chain (not
+paused or expired, tested code, every immutable) and returns the exact approve;
+a newer prepare replaces an unsubmitted one, anything already submitted blocks.
+Submit takes only a transaction hash. The server then reads the transaction
+from Base and counts it only if it is from the owner, to USDC, on Base, with no
+value, an `approve` of this limiter, an amount in (0, grant ceiling] for a grant
+(the amount the wallet actually signed is recorded, so a user who lowers the cap
+in Rabby or MetaMask is respected) or exactly 0 for a revoke, mined no earlier
+than the request, and not already counted for another request. A revoke that
+closes the lane returns the agent's float, as in v1. `operations` gained the
+states PREPARED, SUBMITTED and EXPIRED and a `method` column; an existing v1
+table is rebuilt with every row kept (checked against the production schema).
+Rehearsed on a Base mainnet fork with real signed transactions: grant 3 USDC →
+DONE, allowance 3 on chain; an approve to another spender → FAILED, not counted;
+revoke → DONE, allowance 0.
+
+**Step 3 is built** (`method: "permit"` on prepare; `{operation, signature}` on
+submit). Prepare reads `USDC.nonces(owner)` and returns EIP-2612 typed data with
+a 15-minute deadline. Submit recovers the signer over exactly that typed data
+(it must be the owner), checks the nonce is still current and the deadline in
+the future, and only then sends `permit(owner, limiter, value, deadline, v, r,
+s)` from the gas funder. If someone else submits the same signed permit first,
+ours reverts but the allowance already reads what the owner signed, and that
+counts as done. Permits cost us gas, so each account may submit six a day.
+Rehearsed on a Base mainnet fork against the real USDC contract: permit grant
+2 USDC → allowance 2, permit revoke → 0, the user's ETH untouched.
+
+**Steps 4 and 5 are built.** The shop runs in the gateway
+(`sign402_gateway/web_internal.py`) behind `/internal/web/*`, which answers only
+loopback callers presenting `SIGN402_WEB_INTERNAL_TOKEN`; the web API forwards
+`/shop/*` and `/purchases` there as the signed-in account (the page cannot name
+another). A web account pays only from its own limiter. Tools are bought by
+quote → buy: the quote fixes price and recipient, and a seller asking more, or
+asking to be paid elsewhere, at buy time is refused with nothing paid. The
+page's "Buy" on a quote is the human approval spending memory may ask for
+(Bitrefill too), so no iMessage is involved; memory blocks, rate limits and the
+purchase pause still apply. A web account's gateway spending limits are set
+from its limiter's caps (under the operator's hard ceilings), because the page
+has no `/set_limits` and a second set of limits the user never chose would
+refuse what their limiter allows. History and the one-time code reveal are per
+account. Linking: `POST /link/telegram` returns a 6-digit code (10 minutes, a
+new one kills the old), `/link <code>` in the bot joins the chat to the account
+(5 tries per 10 minutes), after which the bot's allowance commands, purchases
+and `/limits` use the web account's limiter and agent, the chat keeps its own
+purchase history, and watcher notices go to the chat. Smart-contract wallets
+are refused at sign-in (EIP-7702 accounts are not), and at most
+`SIGN402_WEB_MAX_DEPLOYS_PER_DAY` (50) limiters are deployed for everyone per day.
+
+**The backend is complete** (steps 1–5 and the deployment): the whole chain —
+sign-in over HTTP, a quote, a purchase forwarded by the web API to the gateway
+over HTTP and paid from the account's lane — runs in one end-to-end test, and
+a live quote from Otto's crypto-news endpoint read price and recipient
+correctly. What remains is step 6: the page itself (the owner's design), a
+domain for `SIGN402_WEB_DOMAIN`, the reverse proxy, then a mainnet check with a
+real wallet recorded as T9.
+
+Each step with unit tests and a mainnet check recorded in
+[trezor-allowance-checks.md](trezor-allowance-checks.md), as T4–T8 were.
+
+## Open questions
+
+- Default grant: one day's cap, or the whole lifetime budget? Smaller is safer,
+  larger means fewer signatures.
+- Should the web page also allow `increaseAllowance`-style top-ups, or always a
+  fresh approve of the new total?
+- Service fee on Bitrefill x402 orders, still not collected (open since v1).
+- Phantom's EVM support on Base is assumed; test it before promising it.
+- Solana users (Phantom's default chain) need a different lane; out of scope.
+
+## Solana wallets
+
+Any wallet signs in: an EVM wallet with Sign-In with Ethereum on Base, or a
+Solana wallet (Phantom, Solflare, Backpack, or any through Reown AppKit's Solana
+adapter, including email wallets) with Sign In With Solana (CAIP-122 text,
+`Chain ID: mainnet`), verified as an ed25519 signature over exactly the issued
+message. A Solana account is `solana:<base58 address>`; the beta allowlist
+compares Solana addresses case-sensitively. The session carries `chain`.
+
+A Solana account has the same lane as a Base one, through the same routes
+(`sign402_gateway/solana_allowance.py`, the Node side in
+`solana-x402-service/src/allowance.mjs`):
+
+- **Limits** (daily, per purchase, days) are set the same way and kept by the
+  server; there is no contract to deploy.
+- **One approval from the wallet**: an SPL `ApproveChecked` on the owner's own
+  USDC account, the account's agent key as delegate, for a total. The chain
+  enforces that total; one `Revoke` ends it at once. The server prepares the
+  transaction, the wallet signs it (`@solana/web3.js` on the page), and the
+  server sends it only if it is exactly the prepared message. The owner pays its
+  tiny fee from their own SOL; a wallet with no SOL at all falls back to our fee
+  payer, when one is configured.
+- **A purchase** is paid over x402 straight from the owner's account, the agent
+  signing as the approved delegate, within the per-purchase and daily limits and
+  the expiry (checked here) and the approved total (checked by the chain); it is
+  counted against the day once the merchant accepts it. The merchant's facilitator
+  pays that network fee. x402's own facilitator accepts such a payment: it checks
+  the signer, mint, recipient and amount, not whose account it is
+  (`solana-x402-service/test/delegated.test.mjs`). Nothing costs us gas.
+- **Venice** runs on it: the agent's Solana address signs Venice in; without
+  credit, the reply is a card with Venice's exact quote, and confirming it pulls,
+  pays and answers (the Solana x402 service never pays a quote nobody approved).
+  Usage shows the credit and each top-up.
+- **Bitrefill** (gift cards, eSIMs, top-ups delivered as a code) works from
+  Solana too, by the path Bitrefill documents and this project verified live on
+  September 18 (docs/bitrefill-solana-checks.md): an MCP guest invoice with
+  `payment_method: usdc_solana`, paid over Bitrefill's x402 route
+  (`/x402/invoice/pay`, the Solana USDC option, sponsored by Bitrefill's fee
+  payer) straight from the owner's account, the agent as delegate
+  (`solana_bitrefill.py`, `solana-x402-service/src/invoice.mjs`). The invoice may not exceed the quote by
+  more than 2%; one payment attempt per invoice. Guest invoices need the buyer's
+  email: the agent asks for it once in the chat, stores it encrypted
+  (`BuyerEmailStore`), and finishes the purchase. The code is shown once, on
+  request, from the purchase record's encrypted invoice token.
+- Paid x402 data (crypto news, market data, ENS…) is sold on Base only; from
+  Solana the agent says so.
+
+Turned on with `SIGN402_SOLANA_ALLOWANCE_ENABLED=1`. `SIGN402_SOLANA_FEE_PAYER_KEY`
+(Fernet-encrypted, made by `python -m sign402_gateway.solana_allowance new-fee-payer`;
+the deploy script makes one) is optional: fund it only to serve wallets with no SOL.
+
+## Sign in with email or a social account
+
+No wallet is needed to start: the AppKit modal offers email, Google, Apple, X
+and Discord, which create a Reown embedded wallet for the user (a plain account,
+`defaultAccountTypes: {eip155: "eoa"}`; a smart account would sign through its
+contract, which v1 refuses). From there it is the same flow as any wallet: Sign-In
+with Ethereum, limits, one approval. A new embedded wallet has no ETH, so the page
+approves the allowance with an EIP-2612 permit signature (no gas) instead of an
+`approve` transaction. Signing in follows the connection the user asked for
+without a second click. Funding it is the "Add funds" window (account menu; the sidebar when the wallet
+holds under 1 USDC; a card on the agent's reply when a purchase or a new limiter
+is short of USDC): the address with a QR code and a copy button, the balance, a
+warning to send only USDC on Base, and, for a wallet connected through AppKit,
+"Buy USDC with a card" (Reown's onramp partners; they may ask for ID and charge a
+fee). The money lands in the user's own wallet, never with us.
+
+
+## Installing as an app
+
+The page is a Progressive Web App: it can be added to a phone's Home Screen or
+installed on a desktop, and then opens full screen from its own icon, with no App
+Store. It is the same page and the same account; nothing about limits or signing
+changes.
+
+- `website/app/manifest.webmanifest`: name, colours, `display: standalone`,
+  scope and start URL `/app/`. The web API serves it as
+  `application/manifest+json`.
+- `website/assets/icons/`: `app-icon.svg` (the mark on the app's black, inside the
+  maskable safe zone) and the PNGs rendered from it: 512 and 192 for the
+  manifest, 180 for `apple-touch-icon`.
+- `website/app/sw.js`: a service worker that caches nothing. It makes the page
+  installable and, when a page load fails for lack of network, answers with a
+  short "You are offline" page instead of the browser's error. API calls, scripts
+  and wallet traffic are not intercepted. Caching is left to the page's own
+  versioning (`?v=…`, `reloadIfStale`); a second cache would let an old page
+  outlive a deploy.
+- Installing: Chrome and Edge offer their own prompt, which the page holds back
+  and shows from "Install app" in the account menu. Safari has no prompt, so on
+  iPhone and iPad the same item explains Share → Add to Home Screen. The item is
+  hidden once the page runs installed.
+
+Checked in headless Chrome against the local web server: the manifest parses
+without errors, Chrome reports no installability errors, the service worker
+controls the page after a reload, and with the server stopped a reload shows the
+offline page. The iPhone menu and instructions were checked with an iPhone user
+agent, and on 30 September the owner installed the deployed page on an iPhone
+and signed in from the installed app.
+
+## Notifications
+
+The installed page can show the allowance watcher's notices as system
+notifications: an alert when the limiter is paused, or when money left the agent
+without a matching purchase. They go to every device where the owner turned
+notifications on, beside the linked Telegram chat, not instead of it.
+
+- **Turning on.** Settings → Notifications → Turn on. The page asks for
+  permission, subscribes through its service worker (`pushManager.subscribe`, with
+  our VAPID public key from `GET /push/key`) and sends the subscription to
+  `POST /push/subscribe`. "Test" sends one notification (`POST /push/test`); "Turn
+  off" and signing out remove this device (`POST /push/unsubscribe`). Each start
+  sends the current subscription again, so a subscription the browser replaced, or
+  a device now signed in to another account, stays correct.
+- **iPhone and iPad** deliver notifications only to the installed app (iOS 16.4 or
+  later): in Safari the row says so and offers Install.
+- **Sending** (`sign402_gateway/web_push.py`): each message is encrypted to the
+  device's keys (RFC 8291, aes128gcm) and signed with our VAPID key (RFC 8292);
+  Apple, Google, Mozilla and Microsoft carry it without being able to read it. No
+  new dependency: `cryptography` does both. A device that the push service reports
+  as gone (404 or 410) is forgotten. At most ten devices per account.
+- **Only known push services.** The server POSTs to the endpoint URL the browser
+  chose, so it accepts only the push services' own hosts (`fcm.googleapis.com`,
+  `*.push.apple.com`, `updates.push.services.mozilla.com`,
+  `*.notify.windows.com`), over https on port 443. Any other URL is refused before
+  it is stored: otherwise a signed-in user could make the server call any host.
+  Endpoints are capabilities and are never logged, only their host.
+- **Storage.** `push_subscriptions` in the web database (`SIGN402_WEB_DB`): the
+  endpoint, the device's two public keys, the account, the time.
+- **Who is notified.** The watcher's user is a web account (`wallet:0x…`) or a
+  Telegram id; a Telegram id reaches the devices of the web account it is linked
+  to. An alarm (a paused limiter) is sent with `Urgency: high`.
+
+| Method and path | Body | Returns |
+| --- | --- | --- |
+| `GET /push/key` | — | `{enabled: false}`, or `{enabled: true, publicKey, devices}` |
+| `POST /push/subscribe` | `{subscription}` (the browser's `toJSON()`) | `{subscribed: true, devices}`; `push_unsupported` for another host or unreadable keys |
+| `POST /push/unsubscribe` | `{endpoint}` | `{subscribed: false}`; only this account's own device |
+| `POST /push/test` | — | `{sent}`; `push_failed` when no device took it |
+
+Turning it on for a server: generate a key once and add it to
+`/etc/sign402-gateway.env`, which both the web API and the watcher read, then
+restart `sign402-web-api` and `sign402-allowance-watcher`. The key is a secret; a
+new key invalidates every existing subscription, so devices must turn
+notifications on again.
+
+```bash
+sign402-gateway/.venv/bin/python -m sign402_gateway.web_push generate
+```
+
+`SIGN402_WEB_PUSH_SUBJECT` (a `mailto:` or `https://` address push services may
+contact) defaults to `SIGN402_WEB_URI`. Without the key, `GET /push/key` answers
+`enabled: false`, the Settings row is hidden, and the watcher uses Telegram alone,
+as before.
+
+Checked: the RFC 8291 test vector byte for byte; unit tests for decryption by the
+subscribing side, the VAPID signature, the host allowlist, device limits, the
+routes and the watcher's fan-out. End to end in headless Chrome against a local
+server: Turn on subscribed through Google's real push service, Test was encrypted
+and accepted by FCM, and the service worker showed the notification; Turn off
+removed it. Not yet checked on an iPhone or with a real watcher alert. Purchases
+and phone calls do not notify yet: a call's result is read by the open page, and a
+server-side poll would be needed to notify a closed app.

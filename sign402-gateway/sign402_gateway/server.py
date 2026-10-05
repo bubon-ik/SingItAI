@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -16,7 +17,7 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Mapping
-from urllib.parse import parse_qs, quote
+from urllib.parse import parse_qs, quote, urlparse
 import urllib.request
 
 
@@ -115,9 +116,31 @@ from .diagnostics import (
 )
 from .decide import decide as decide_payment, journal as read_decision_journal
 from .keyring import install_master_key
+from .agent_allowance import AllowanceError, AllowanceUnavailable, build_allowance_service_from_env
+
+from .allowance_bitrefill import PAY_TO as BITREFILL_X402_PAY_TO, BitrefillX402
+from . import web_internal
+from .web_accounts import DEFAULT_WEB_DB, WEB_DB_ENV, WebAccountStore
+
+WEB_INTERNAL_PREFIX = "/internal/web/"
+WEB_INTERNAL_TOKEN_ENV = "SIGN402_WEB_INTERNAL_TOKEN"
+
+ALLOWANCE_PATHS = (
+    "/agent/allowance/setup",
+    "/agent/allowance/status",
+    "/agent/allowance/grant",
+    "/agent/allowance/revoke",
+    "/agent/allowance/pause",
+    "/agent/allowance/bitrefill-search",
+    "/agent/allowance/bitrefill-quote",
+    "/agent/allowance/bitrefill-buy",
+    "/agent/allowance/link",
+)
+ALLOWANCE_QUOTE_SECONDS = 600
 from .numeric import format_decimal
 from .goplausible import fetch_x402_paid_resource, fetch_x402_payment_required, normalize_x402_payment_required
 from .real_rate_pricing import RealRateSingitPricer
+from .purchase_history import UserPurchaseStore, purchase_id
 from .secure_state import (
     SensitiveStateCipher,
     SensitiveStateConfigurationError,
@@ -125,6 +148,7 @@ from .secure_state import (
     atomic_write_private_json,
 )
 from .user_emails import BuyerEmailStore, mask_email
+from .solana_chat import build_solana_chat
 from .venice_chat import (
     ChatError,
     UnknownModel,
@@ -139,6 +163,7 @@ from .web_search import (
     EXA_SEARCH_URL,
     build_web_search_from_env,
 )
+from .solana_wallets import validate_wallet_chain
 from .user_wallets import (
     BASE_NATIVE_ETH_ASSET_ID,
     DEFAULT_USER_WALLET_STORE_PATH,
@@ -468,6 +493,11 @@ PAID_TOOL_ALIASES = {
 }
 
 
+def _wallet_chain_kwargs(payload: dict) -> dict:
+    chain = validate_wallet_chain(payload.get("chain", "base"))
+    return {"chain": chain} if chain != "base" else {}
+
+
 class Sign402GatewayHandler(BaseHTTPRequestHandler):
     server_version = "Sign402Gateway/0.1"
 
@@ -487,6 +517,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 "/agent/create-wallet",
                 "/agent/wallet-balance",
                 "/agent/last-purchase",
+                "/agent/purchases",
                 "/agent/spending-limits",
                 "/agent/withdraw/tokens",
                 "/agent/withdraw",
@@ -510,8 +541,19 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                         "/agent/chat/end",
                         "/agent/chat/approve-policy",
                         "/agent/chat/models",
+                        "/agent/chat/network",
+                        "/agent/chat/quote",
+                        "/agent/chat/pay",
+                        "/agent/chat/payment",
+                        "/agent/chat/search",
+                        "/agent/chat/search-prepare",
+                        "/agent/chat/search-approve",
+                        "/agent/chat/search-disable",
+                        "/agent/chat/search-payment",
                     ]
                 )
+            if getattr(self.server, "allowance", None) is not None:
+                endpoints.extend(ALLOWANCE_PATHS)
             if _test_endpoints_enabled():
                 endpoints.append("/agent/test-imessage-approval")
             if _legacy_payment_executor_enabled():
@@ -563,6 +605,9 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             return
         if declared_length > MAX_REQUEST_BODY_BYTES:
             self._send_json({"error": "request_body_too_large"}, status=413)
+            return
+        if path.startswith(WEB_INTERNAL_PREFIX):
+            self._handle_internal_web(path)
             return
         if path in FUND_MOVING_POST_PATHS and self._reject_if_purchases_paused():
             return
@@ -633,6 +678,15 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             "/agent/chat/end",
             "/agent/chat/approve-policy",
             "/agent/chat/models",
+            "/agent/chat/network",
+            "/agent/chat/quote",
+            "/agent/chat/pay",
+            "/agent/chat/payment",
+            "/agent/chat/search",
+            "/agent/chat/search-prepare",
+            "/agent/chat/search-approve",
+            "/agent/chat/search-disable",
+            "/agent/chat/search-payment",
         ):
             self._handle_agent_chat(path)
             return
@@ -645,11 +699,17 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         if path == "/agent/wallet-balance":
             self._handle_agent_wallet_balance()
             return
+        if path == "/agent/purchases":
+            self._handle_agent_purchases()
+            return
         if path == "/agent/last-purchase":
             self._handle_agent_last_purchase()
             return
         if path == "/agent/spending-limits":
             self._handle_agent_spending_limits()
+            return
+        if path in ALLOWANCE_PATHS:
+            self._handle_agent_allowance(path)
             return
         if path == "/agent/buyer-email":
             self._handle_agent_buyer_email()
@@ -820,6 +880,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             result = self.server.user_wallet_service.create_wallet(
                 telegram_user_id=telegram_user_id,
                 telegram_username=str(payload.get("telegramUsername", "") or ""),
+                **_wallet_chain_kwargs(payload),
             )
             self._send_json(_without_private_key_material(result), status=200)
         except WalletApiTokenNotConfiguredError as exc:
@@ -835,7 +896,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             result = self.server.user_wallet_service.wallet_status(
-                _require_authenticated_user(self, payload)
+                _require_authenticated_user(self, payload), **_wallet_chain_kwargs(payload)
             )
             status = 200 if bool(result.get("ok")) else 404
             self._send_json(_without_private_key_material(result), status=status)
@@ -852,7 +913,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             result = self.server.user_wallet_service.wallet_balance(
-                _require_authenticated_user(self, payload)
+                _require_authenticated_user(self, payload), **_wallet_chain_kwargs(payload)
             )
             status = 200 if bool(result.get("ok")) else 404
             self._send_json(_without_private_key_material(result), status=status)
@@ -881,6 +942,27 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             telegram_user_id = _require_authenticated_user(self, payload)
+            solana = vars(self.server).get("solana_chat_service")
+            chain = solana.store.chain(telegram_user_id) if solana else "base"
+            requested_chain = payload.get("chain")
+            if path == "/agent/chat/network":
+                if not solana or requested_chain not in {"base", "solana"} or (requested_chain == "solana" and solana.enabled is False):
+                    self._send_json({"ok": False, "telegramText": "This AI network is unavailable."}, status=200)
+                    return
+                chain = solana.store.chain(telegram_user_id, requested_chain)
+                path = "/agent/chat/start"
+            elif requested_chain is not None and requested_chain != chain:
+                self._send_json({"ok": False, "state": "NETWORK_CHANGED", "telegramText": "AI network changed. Open /chat and review the current settings."}, status=200)
+                return
+            if chain == "solana" and solana.enabled is False:
+                self._send_json({"ok": False, "state": "NETWORK_UNAVAILABLE", "telegramText": "Solana AI is temporarily disabled. Choose Base explicitly in /chat_network base to switch."}, status=200)
+                return
+            if chain == "solana":
+                self._send_json(solana.handle(path, telegram_user_id, payload), status=200)
+                return
+            if path in {"/agent/chat/quote", "/agent/chat/pay", "/agent/chat/payment"} or path.startswith("/agent/chat/search"):
+                self._send_json({"ok": False, "telegramText": "Select Solana in AI settings for this operation."}, status=200)
+                return
             chat_service = getattr(self.server, "chat_service", None)
             if chat_service is None:
                 self._send_json(
@@ -889,7 +971,10 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/agent/chat/start":
-                self._send_json(chat_service.start(telegram_user_id), status=200)
+                status = chat_service.start(telegram_user_id)
+                if solana:
+                    status.update(chain="base", availableChains=["base"] if solana.enabled is False else ["base", "solana"])
+                self._send_json(status, status=200)
                 return
             if path == "/agent/chat/end":
                 self._send_json(chat_service.end(telegram_user_id), status=200)
@@ -1078,6 +1163,39 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             # message is safe to return.
             self._send_json({"ok": False, "telegramText": str(exc)}, status=400)
 
+    def _handle_agent_purchases(self) -> None:
+        try:
+            payload = self._read_json()
+            user_id = _require_authenticated_user(self, payload)
+            store = self.server.user_event_store
+            record_id = str(payload.get("purchaseId") or "")
+            summaries = store.summaries(user_id)
+            if record_id:
+                item = next((item for item in summaries if item["id"] == record_id), None)
+                if item is None:
+                    self._send_json({"ok": False, "telegramText": "Purchase not found."}, status=404)
+                    return
+                if payload.get("reveal") is True:
+                    store.preflight_write()
+                    event = store.read(user_id, record_id)
+                    result = _last_bitrefill_purchase_response(self.server, event, user_id)
+                    if result is None:
+                        result = {"ok": True, "telegramText": "This purchase has no gift card code."}
+                    self._send_json(result)
+                else:
+                    self._send_json({"ok": True, "purchase": item})
+                return
+            offset = max(0, int(payload.get("offset") or 0))
+            self._send_json({"ok": True, "purchases": summaries[offset:offset + 6],
+                             "hasNext": len(summaries) > offset + 6})
+        except WalletApiTokenNotConfiguredError:
+            self._send_json({"ok": False, "telegramText": "Wallet service is not configured."}, status=503)
+        except WalletApiAuthError:
+            self._send_json({"ok": False, "telegramText": "Wallet authentication failed."}, status=401)
+        except Exception as exc:
+            logger.warning("Purchase history request failed error=%s", type(exc).__name__)
+            self._send_json({"ok": False, "telegramText": "Purchase history is temporarily unavailable."}, status=503)
+
     def _handle_agent_last_purchase(self) -> None:
         try:
             payload = self._read_json()
@@ -1130,6 +1248,97 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=400)
 
+    def _handle_agent_allowance(self, path: str) -> None:
+        """The Trezor allowance lane (docs/trezor-allowance-v1.md): off unless enabled."""
+        service = getattr(self.server, "allowance", None)
+        if service is None:
+            self._send_json({"ok": False, "error": "allowance-disabled"}, status=404)
+            return
+        try:
+            payload = self._read_json()
+            telegram_user_id = _require_authenticated_user(self, payload)
+            action = path.rsplit("/", 1)[1]
+            lane_user = _allowance_user(self.server, telegram_user_id)
+            if action == "link":
+                result = _link_telegram(self.server, telegram_user_id, payload.get("code"))
+            elif action == "setup":
+                result = service.setup(
+                    lane_user,
+                    payload.get("dailyCap"),
+                    payload.get("perPurchaseCap"),
+                    payload.get("days"),
+                )
+            elif action == "grant":
+                result = service.grant(lane_user, payload.get("amount"))
+            elif action == "revoke":
+                result = service.revoke(lane_user, payload.get("limiter"))
+            elif action == "pause":
+                result = service.pause(lane_user)
+            elif action.startswith("bitrefill-"):
+                result = _allowance_bitrefill_action(self.server, telegram_user_id, action, payload)
+            else:
+                result = service.status(lane_user)
+            self._send_json({"ok": True, **result})
+        except WalletApiTokenNotConfiguredError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=503)
+        except WalletApiAuthError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+        except SpendingBlocked as exc:
+            self._send_json(
+                {"ok": False, "decision": "blocked_by_memory", "rule": exc.decision.rule,
+                 "telegramText": exc.decision.reason, "evidence": exc.decision.evidence},
+                status=400,
+            )
+        except RateLimitExceededError as exc:
+            self._send_json({"ok": False, "error": "rate-limited", "telegramText": str(exc)}, status=429)
+        except AllowanceUnavailable as exc:
+            # 400, not 403: the plugin reads 401/403 as its own credentials failing.
+            self._send_json({"ok": False, "error": "allowance-not-enabled", "telegramText": str(exc)}, status=400)
+        except AllowanceError as exc:
+            self._send_json({"ok": False, "error": "allowance-refused", "telegramText": str(exc)}, status=400)
+        except ValueError as exc:
+            # The gateway's own checks (spending limits, a malformed request)
+            # raise ValueError with a sentence meant for the user.
+            self._send_json({"ok": False, "error": "refused", "telegramText": str(exc)}, status=400)
+        except Exception:
+            logger.exception("allowance: %s failed", path)
+            self._send_json(
+                {"ok": False, "error": "allowance-failed",
+                 "telegramText": "The Trezor allowance request failed. Nothing was signed; try again later."},
+                status=500,
+            )
+
+    def _handle_internal_web(self, path: str) -> None:
+        """The web API's calls (sign402_gateway.web_internal), loopback only, on their own token."""
+        expected = str(os.environ.get(WEB_INTERNAL_TOKEN_ENV, "") or "")
+        given = str(self.headers.get("X-SingIt-Internal", "") or "")
+        if (len(expected) < 32 or not hmac.compare_digest(given.encode(), expected.encode())
+                or not ipaddress.ip_address(self.client_address[0]).is_loopback):
+            self._send_json({"ok": False, "error": "forbidden"}, status=403)
+            return
+        action = path[len(WEB_INTERNAL_PREFIX):]
+        if action in ("tool-buy", "bitrefill-buy", "venice-solana-topup") and self._reject_if_purchases_paused():
+            return
+        try:
+            status, body = web_internal.handle(self.server, action, self._read_json())
+            self._send_json(body, status=status)
+        except SpendingBlocked as exc:
+            self._send_json({"ok": False, "error": "blocked_by_memory", "rule": exc.decision.rule,
+                             "text": exc.decision.reason}, status=400)
+        except RateLimitExceededError as exc:
+            self._send_json({"ok": False, "error": "rate_limited", "text": str(exc)}, status=429)
+        except AllowanceUnavailable as exc:
+            self._send_json({"ok": False, "error": "not_enabled", "text": str(exc)}, status=403)
+        except (AllowanceError, ValueError) as exc:
+            text = web_internal.public_error(exc)
+            if text != str(exc).strip()[:500]:  # a stack from the signer or a seller: the whole of it for us only
+                logger.warning("web internal: %s refused: %s", action, str(exc)[:4000])
+            self._send_json({"ok": False, "error": "refused", "text": text}, status=400)
+        except Exception:
+            logger.exception("web internal: %s failed", action)
+            self._send_json({"ok": False, "error": "internal", "text": "The purchase failed on our side. "
+                             "If you were charged, it shows in your purchase history."}, status=500)
+
     def _handle_agent_spending_limits(self) -> None:
         try:
             payload = self._read_json()
@@ -1162,12 +1371,21 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                 **limits,
                 **_bitrefill_live_limit_settings(),
             }
+            telegram_text = _spending_limits_telegram_text(limits, updated=updated)
+            allowance = getattr(self.server, "allowance", None)
+            lane_user = _allowance_user(self.server, telegram_user_id)
+            if allowance is not None and allowance.store.active_limiter(lane_user) is not None:
+                # The limiter's caps are enforced on chain; show them from the chain.
+                try:
+                    telegram_text += "\n\n" + allowance.status(lane_user)["telegramText"]
+                except Exception:
+                    logger.warning("allowance: status for /limits failed", exc_info=True)
             self._send_json(
                 {
                     "ok": True,
                     "updated": updated,
                     "limits": limits,
-                    "telegramText": _spending_limits_telegram_text(limits, updated=updated),
+                    "telegramText": telegram_text,
                 }
             )
         except WalletApiTokenNotConfiguredError as exc:
@@ -1705,10 +1923,16 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
         settled = False
         try:
             user_id = _require_authenticated_user(
-                self, {"telegramUserId": telegram_user_id}
+                self, {**payload, "telegramUserId": telegram_user_id}
             )
+            # The Trezor allowance lane is decided first: a user on it is paid for
+            # from their agent key or refused, never silently from a custodial
+            # wallet, and never asked to approve a purchase it cannot fund.
+            allowance = getattr(self.server, "allowance", None)
+            lane_user = _allowance_user(self.server, user_id)
+            allowance_lane = allowance.lane_for(lane_user) if allowance is not None else None
             ledger = getattr(self.server, "ledger_payments", None)
-            if ledger is not None and user_id == ledger.config.owner:
+            if allowance_lane is None and ledger is not None and user_id == ledger.config.owner:
                 _enforce_user_purchase_rate(user_id)
                 intent = {
                     "tool": tool,
@@ -1785,19 +2009,32 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                     "rule": decision.rule,
                 }
 
-            private_key = self.server.user_wallet_service.decrypt_private_key_for_future_signing(
-                user_id
-            )
-            kwargs: dict[str, Any] = {
-                "private_key": private_key,
-                "approval": approval,
-                "payment_requirements": payment_requirements,
-            }
-            if payment_context:
-                kwargs["payment_context"] = payment_context
-            if request_body is not None:
-                kwargs["request_body"] = request_body
-            result = self.server.user_x402_buyer(resource_url, **kwargs)
+            if allowance_lane is not None:
+                paid = allowance.pay_x402(
+                    lane_user,
+                    resource_url,
+                    payment_requirements,
+                    self.server.user_x402_buyer.base_payment_client,
+                    method="POST" if request_body is not None else "GET",
+                    request_body=request_body,
+                )
+                result = _allowance_x402_event(
+                    resource_url, approval, payment_requirements, payment_context, paid
+                )
+            else:
+                private_key = self.server.user_wallet_service.decrypt_private_key_for_future_signing(
+                    user_id
+                )
+                kwargs: dict[str, Any] = {
+                    "private_key": private_key,
+                    "approval": approval,
+                    "payment_requirements": payment_requirements,
+                }
+                if payment_context:
+                    kwargs["payment_context"] = payment_context
+                if request_body is not None:
+                    kwargs["request_body"] = request_body
+                result = self.server.user_x402_buyer(resource_url, **kwargs)
             enriched = _tool_result(tool, result, resource_url)
             enriched["decision"] = result.get("decision", "approved_and_executed")
             enriched["ok"] = bool(result.get("ok", False))
@@ -1825,6 +2062,16 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
                     "telegramText": str(exc),
                 },
                 status=getattr(exc, "status", 400),
+            )
+        except AllowanceError as exc:
+            self._send_json(
+                {
+                    "decision": "refused_by_allowance",
+                    "ok": False,
+                    "error": str(exc),
+                    "telegramText": str(exc),
+                },
+                status=400,
             )
         except SpendingBlocked as exc:
             self._send_json(
@@ -3104,6 +3351,31 @@ def build_server(
     # handle per request.
     server.spending_policy = build_spending_policy_from_env()
     server.ledger_payments = build_ledger_payments(server, ledger_config)
+    # A misconfigured allowance lane is logged and left off, not fatal: the
+    # gateway's other purchases must keep working while it is being set up.
+    try:
+        server.allowance = build_allowance_service_from_env(user_wallet_service.master_key)
+    except (ValueError, OSError) as exc:
+        logger.error("allowance lane disabled: %s", exc)
+        server.allowance = None
+    try:
+        from .solana_allowance import build_solana_allowance_from_env
+        # The same lane for web accounts signed in with a Solana wallet (an SPL approval).
+        server.solana_allowance = build_solana_allowance_from_env(user_wallet_service.master_key)
+    except (ValueError, OSError) as exc:
+        logger.error("solana allowance lane disabled: %s", exc)
+        server.solana_allowance = None
+    server.allowance_bitrefill = (
+        BitrefillX402(server.allowance, user_x402_buyer.base_payment_client)
+        if server.allowance is not None else None
+    )
+    # The web page's accounts (docs/allowance-web-v1.md): linked Telegram users
+    # share their web account's limiter; the web API buys through /internal/web/.
+    server.web_accounts = (
+        WebAccountStore(Path(str(os.environ.get(WEB_DB_ENV, "") or DEFAULT_WEB_DB)).expanduser())
+        if server.allowance is not None and os.environ.get("SIGN402_WEB_ENABLED") == "1" else None
+    )
+    server.web_tool_quotes = web_internal.ToolQuotes()
     # Its own memory, on purpose. See build_decide_policy_from_env.
     server.decide_policy = build_decide_policy_from_env()
     # Decisions for purchases in flight, keyed by reservation id. The Bitrefill
@@ -3136,6 +3408,7 @@ def build_server(
     )
     server.chat_service = None
     server.chat_policy_service = None
+    server.solana_chat_service = None
     server.payto_watcher = None
     if _ai_chat_enabled():
         # Only built when the flag is on: with it unset the server has no chat
@@ -3193,6 +3466,12 @@ def build_server(
                 store=server.chat_service.store,
                 bound_pay_to=server.chat_service.client.config.bound_pay_to,
             )
+        # Keep network preferences even while Solana is disabled: turning off
+        # a capability must never silently send a Solana user's payment on Base.
+        server.solana_chat_service = build_solana_chat(
+            wallets=user_wallet_service, approvals=imessage_approval_service,
+            base_chat=server.chat_service, purchases_paused=_purchases_paused,
+        )
     return server
 
 
@@ -5053,6 +5332,60 @@ class UserWalletTransferToCdpFundingRunner:
         }
 
 
+def _allowance_x402_event(
+    resource_url: str,
+    approval: dict[str, Any],
+    payment_requirements: dict[str, Any],
+    payment_context: dict[str, str] | None,
+    paid: dict[str, Any],
+) -> dict[str, Any]:
+    """The purchase event for a payment made on the Trezor allowance lane.
+
+    Same shape and wording as a managed-wallet purchase, so the spend ledger and
+    the bot treat it alike; the transaction is the settlement read from the chain.
+    """
+    status, settlement = paid["status"], paid["settlementTx"]
+    if not paid["delivered"] and settlement:
+        logger.error("allowance: %s charged in %s but answered HTTP %s", resource_url, settlement, status)
+        raise ValueError(
+            f"The seller took the payment ({settlement}) but did not deliver (HTTP {status}). "
+            "Keep this transaction to claim it back."
+        )
+    if not paid["delivered"]:
+        raise ValueError(f"The seller refused the request (HTTP {status}); nothing was charged.")
+    if not settlement:
+        raise ValueError("The seller answered, but no payment settled on chain; it is not recorded as paid.")
+    resource_result = paid["resourceResult"]
+    text = _user_wallet_x402_telegram_text(
+        payment_requirements=payment_requirements,
+        tx_id=settlement,
+        resource_result=resource_result,
+        payment_context=payment_context,
+    )
+    return {
+        "decision": "approved_and_executed",
+        "ok": True,
+        "mode": "official_x402_base_allowance",
+        "resourceUrl": resource_url,
+        "approvalId": approval.get("approvalId"),
+        "txId": settlement,
+        "payer": paid["payer"],
+        "limiter": paid["limiter"],
+        "funding": paid["funding"],
+        "fundingTx": paid["fundingTx"],
+        "paymentIntent": payment_requirements.get("paymentIntent"),
+        "amountAtomic": payment_requirements["amountAtomic"],
+        "asset": payment_requirements["asset"],
+        "network": payment_requirements["network"],
+        "x402Network": payment_requirements.get("x402Network"),
+        "receiver": payment_requirements["receiver"],
+        "paymentRequirements": payment_requirements,
+        "resourceResult": resource_result,
+        "result": "official_x402_resource_access_granted",
+        "telegramText": text + f"\nPaid from your Trezor allowance ({paid['funding']}).",
+    }
+
+
 class UserWalletX402Buyer:
     def __init__(
         self,
@@ -5151,115 +5484,6 @@ class LatestEventStore:
             )
             temp_path.replace(self.path)
             return event
-
-
-class UserPurchaseStore:
-    """Per-user latest purchase, kept OUT of the public global event store.
-
-    Purchases made from a user's managed wallet carry their telegram id, wallet
-    address and payment details. The global LatestEventStore is served
-    unauthenticated by /events/latest (the demo dashboard), so per-user
-    purchases are persisted here instead, keyed by telegram user id, and read
-    back only through the token-gated /agent/last-purchase.
-    """
-
-    def __init__(
-        self,
-        path: Path,
-        *,
-        cipher: SensitiveStateCipher | None = None,
-    ) -> None:
-        self.path = path
-        self.lock = threading.Lock()
-        self.cipher = cipher
-
-    def _read_all_unlocked(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return {}
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
-        return payload if isinstance(payload, dict) else {}
-
-    @staticmethod
-    def _assert_no_legacy_tokens(data: dict[str, Any]) -> None:
-        if any(
-            isinstance(item, dict) and "fulfillmentToken" in item
-            for item in data.values()
-        ):
-            raise SensitiveStateError(
-                "legacy plaintext fulfillment tokens must be migrated "
-                "before updating user purchase state"
-            )
-
-    def _persisted_event(self, event: dict[str, Any]) -> dict[str, Any]:
-        persisted = dict(event)
-        persisted.pop("encryptedFulfillmentToken", None)
-        if "fulfillmentToken" in persisted:
-            if self.cipher is None:
-                raise SensitiveStateConfigurationError(
-                    "SIGN402_WALLET_MASTER_KEY is required "
-                    "to persist fulfillment tokens"
-                )
-            token = str(persisted.pop("fulfillmentToken"))
-            persisted["encryptedFulfillmentToken"] = self.cipher.encrypt_text(token)
-        return persisted
-
-    def preflight_write(self) -> None:
-        with self.lock:
-            if self.cipher is None:
-                raise SensitiveStateConfigurationError(
-                    "SIGN402_WALLET_MASTER_KEY is required "
-                    "to persist user purchase state"
-                )
-            self._assert_no_legacy_tokens(self._read_all_unlocked())
-
-    def write(
-        self,
-        telegram_user_id: str,
-        event: dict[str, Any],
-    ) -> dict[str, Any]:
-        key = str(telegram_user_id)
-        with self.lock:
-            data = self._read_all_unlocked()
-            data[key] = self._persisted_event(event)
-            self._assert_no_legacy_tokens(data)
-            atomic_write_private_json(self.path, data)
-            return event
-
-    def read(self, telegram_user_id: str) -> dict[str, Any] | None:
-        with self.lock:
-            value = self._read_all_unlocked().get(str(telegram_user_id))
-            if not isinstance(value, dict):
-                return None
-            event = dict(value)
-            if "encryptedFulfillmentToken" in event:
-                encrypted = event.pop("encryptedFulfillmentToken")
-                if self.cipher is None:
-                    raise SensitiveStateConfigurationError(
-                        "SIGN402_WALLET_MASTER_KEY is required "
-                        "to read encrypted fulfillment tokens"
-                    )
-                event.pop("fulfillmentToken", None)
-                event["fulfillmentToken"] = self.cipher.decrypt_text(str(encrypted))
-            return event
-
-    def clear_fulfillment_token(self, telegram_user_id: str) -> None:
-        key = str(telegram_user_id)
-        with self.lock:
-            data = self._read_all_unlocked()
-            event = data.get(key)
-            if not isinstance(event, dict):
-                return
-            if (
-                "fulfillmentToken" not in event
-                and "encryptedFulfillmentToken" not in event
-            ):
-                return
-            cleaned = dict(event)
-            cleaned.pop("fulfillmentToken", None)
-            cleaned.pop("encryptedFulfillmentToken", None)
-            data[key] = cleaned
-            self._assert_no_legacy_tokens(data)
-            atomic_write_private_json(self.path, data)
 
 
 class UserSpendLimitStore:
@@ -5553,6 +5777,7 @@ class UserSpendLimitStore:
         reservation_id: str | None,
         *,
         tx_id: str = "",
+        amount_atomic: int | None = None,
         payment_intent: str | None = None,
         approval_id: str | None = None,
         tool_id: str | None = None,
@@ -5575,10 +5800,17 @@ class UserSpendLimitStore:
                 None,
             )
             if held is None:
+                if amount_atomic is not None:
+                    raise ValueError("Metered settlement has no live reservation; reconcile it before retrying")
                 # The hold expired mid-flight. Still record the spend, so a slow
                 # payment cannot settle without counting against the cap.
                 self._write_all_unlocked(data)
                 return None
+            charged = int(str(held.get("amountAtomic", "0")))
+            if amount_atomic is not None:
+                if type(amount_atomic) is not int or not 0 <= amount_atomic <= charged:
+                    raise ValueError("Actual settlement must fit the reserved ceiling")
+                charged = amount_atomic
             data["reservations"] = [
                 entry
                 for entry in reservations
@@ -5587,7 +5819,7 @@ class UserSpendLimitStore:
             record = {
                 "telegramUserId": str(held.get("telegramUserId")),
                 "day": str(held.get("day")),
-                "amountAtomic": int(str(held.get("amountAtomic", "0"))),
+                "amountAtomic": charged,
                 "asset": str(held.get("asset", "")),
                 "network": str(held.get("network", "")),
                 "txId": str(tx_id or ""),
@@ -5971,6 +6203,23 @@ def _require_authenticated_user(
     if not token:
         raise WalletApiAuthError("per-user access token is required")
     user_id = _authenticated_user_id(handler, payload)
+    if "chain" in payload:
+        chain = validate_wallet_chain(payload["chain"])
+        # Explicit Solana requests must not execute a legacy Base operation.
+        # Extend this allowlist only when that operation has a Solana adapter.
+        if chain == "solana" and urlparse(handler.path).path not in {
+            "/agent/wallet", "/agent/wallet-balance",
+            "/agent/chat/start", "/agent/chat/end", "/agent/chat/models",
+            "/agent/chat/network", "/agent/chat/approve-policy",
+            "/agent/chat/message", "/agent/chat/quote", "/agent/chat/pay",
+            "/agent/chat/payment",
+            "/agent/chat/search",
+            "/agent/chat/search-prepare",
+            "/agent/chat/search-approve",
+            "/agent/chat/search-disable",
+            "/agent/chat/search-payment",
+        }:
+            raise ValueError("This operation is not enabled on Solana yet.")
     _enforce_user_request_rate(user_id)
     return user_id
 
@@ -7506,6 +7755,7 @@ def _settle_user_wallet_spend(
     *,
     payment: Any = None,
     claim_id: str | None = None,
+    actual_amount_atomic: int | None = None,
 ) -> None:
     """Convert this purchase's hold into a settled spend record, and remember it.
 
@@ -7517,6 +7767,7 @@ def _settle_user_wallet_spend(
     tx_id = str(event.get("txId") or "")
     server.user_spend_limit_store.settle_reservation(
         reservation_id,
+        **({"amount_atomic": actual_amount_atomic} if actual_amount_atomic is not None else {}),
         tx_id=tx_id,
         payment_intent=str(
             payment_requirements.get("paymentIntent") or event.get("paymentIntent") or ""
@@ -7556,6 +7807,16 @@ def _record_bankr_llm_spend(
 BITREFILL_MERCHANT = "bitrefill"
 """Merchant identity for every Bitrefill order, however it is funded."""
 
+BITREFILL_X402_MERCHANT = "bitrefill:x402"
+"""Bitrefill's x402 API, the Trezor allowance lane's route (AGENTS.md exception).
+
+Its own identity in spending memory: it pays Bitrefill's published x402
+address, never the settlement address the other routes pay, so under the
+shared name every order would read as payout drift. The payout-drift rule
+still guards it against its own history, and allowance_bitrefill pins the
+address before any payment.
+"""
+
 BITREFILL_NO_COUNTERPARTY = "bitrefill:no-onchain-counterparty"
 """Stand-in for a Bitrefill path that moves no money to a fixed address.
 
@@ -7582,7 +7843,7 @@ def _bitrefill_settlement_address() -> str:
 
 
 def _bitrefill_spend_requirement(
-    price_usd: Any, *, pay_to: str | None = None
+    price_usd: Any, *, pay_to: str | None = None, merchant: str = BITREFILL_MERCHANT
 ) -> dict[str, Any]:
     """Represent a Bitrefill purchase's USD value as a USDC spend requirement.
 
@@ -7599,8 +7860,8 @@ def _bitrefill_spend_requirement(
         "asset": BASE_USDC_MAINNET,
         "network": "base-mainnet",
         "payTo": pay_to or _bitrefill_settlement_address(),
-        "merchant": BITREFILL_MERCHANT,
-        "resource": BITREFILL_MERCHANT,
+        "merchant": merchant,
+        "resource": merchant,
     }
 
 
@@ -7935,11 +8196,168 @@ def _without_fulfillment_token(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _allowance_user(server: Any, user_id: str) -> str:
+    """Whose limiter and agent key serve this user: their linked web account's, else their own."""
+    accounts = getattr(server, "web_accounts", None)
+    if accounts is None:
+        return str(user_id)
+    return accounts.account_for_telegram(str(user_id)) or str(user_id)
+
+
+def _link_telegram(server: Any, telegram_user_id: str, code: Any) -> dict[str, Any]:
+    """/link <code>: this Telegram account joins the web account that showed the code."""
+    accounts = getattr(server, "web_accounts", None)
+    if accounts is None:
+        raise AllowanceUnavailable("The web page is not enabled on this server.")
+    if not _USER_RATE_LIMITER.allow("web-link", str(telegram_user_id), limit=5, window_seconds=600.0):
+        raise RateLimitExceededError("Too many attempts. Wait ten minutes and get a new code.")
+    previous = _allowance_user(server, telegram_user_id)
+    account = accounts.link_telegram(str(code or ""), str(telegram_user_id), int(time.time()))
+    if account is None:
+        raise AllowanceError("That code is wrong or expired. Get a new one on the web page.")
+    owner = accounts.account(account)["owner_address"]
+    text = (f"Linked. This chat now uses the allowance of {owner}: the web page and the bot share one limiter, "
+            "and the watcher's notices come here.")
+    old = server.allowance.store.active_limiter(previous) if previous != account else None
+    if old is not None:
+        text += (f"\nThe limiter {old['limiter_address']} set up from this chat is no longer used here. "
+                 "If it still holds an allowance, revoke it from that wallet (or on revoke.cash).")
+    return {"account": account, "owner": owner, "telegramText": text}
+
+
+def _allowance_bitrefill_action(
+    server: Any, user_id: str, action: str, payload: dict[str, Any], *, web_confirmed: bool = False
+) -> dict[str, Any]:
+    """Bitrefill on the allowance lane: search, quote, and a confirmed buy.
+
+    `user_id` is who asks (limits, memory and history are theirs); the lane —
+    limiter, agent key, Bitrefill sign-in — is their linked web account's when
+    they have one. `web_confirmed`: the web page's "Buy" is the human approval.
+    """
+    service, bitrefill = server.allowance, getattr(server, "allowance_bitrefill", None)
+    if bitrefill is None:
+        raise AllowanceUnavailable("Bitrefill is not set up on the allowance lane.")
+    lane_user = _allowance_user(server, user_id)
+    if service.lane_for(lane_user) is None:
+        raise AllowanceUnavailable("The allowance is not set up for this account.")
+    if action == "bitrefill-search":
+        products = bitrefill.search(lane_user, str(payload.get("query") or ""),
+                                    kind=str(payload.get("kind") or "gift-cards"),
+                                    country=str(payload.get("country") or ""))
+        lines = [f"{p['name']} — {p['slug']}" for p in products[:10]] or ["Nothing found."]
+        return {"products": products, "telegramText": "\n".join(lines)}
+    if action == "bitrefill-packages":
+        return bitrefill.packages(lane_user, str(payload.get("productId") or ""))
+    if action == "bitrefill-quote":
+        quote = bitrefill.quote(lane_user, str(payload.get("productId") or ""), str(payload.get("package") or ""))
+        now = int(time.time())
+        quote_id = "aq_" + secrets.token_urlsafe(12)
+        service.store.save_bitrefill_quote({
+            "quote_id": quote_id, "user_id": user_id, "slug": quote["slug"], "package": quote["package"],
+            "name": quote["name"], "price_atomic": quote["priceAtomic"], "created_at": now,
+            "expires_at": now + ALLOWANCE_QUOTE_SECONDS,
+        })
+        name = f"{quote['name']} {quote['package']} {quote.get('packageCurrency') or ''}".strip()
+        return {
+            **quote, "quoteId": quote_id, "expiresAt": now + ALLOWANCE_QUOTE_SECONDS,
+            "telegramText": (
+                f"{name}: {quote['priceUsd']} USDC on Base, paid from your allowance.\n"
+                "Delivered as a code; not refundable once delivered. Confirm to buy (valid 10 minutes)."
+            ),
+        }
+    return _allowance_bitrefill_buy(server, user_id, str(payload.get("quoteId") or ""), web_confirmed=web_confirmed)
+
+
+def _allowance_bitrefill_buy(server: Any, user_id: str, quote_id: str, *, web_confirmed: bool = False) -> dict[str, Any]:
+    """A confirmed Bitrefill order, with the same limits, memory and approval as any purchase."""
+    service, bitrefill = server.allowance, server.allowance_bitrefill
+    quote = service.store.take_bitrefill_quote(user_id, quote_id, int(time.time()))
+    _enforce_user_purchase_rate(user_id)
+    server.user_event_store.preflight_write()
+    requirement = _bitrefill_spend_requirement(
+        Decimal(quote["price_atomic"]) / Decimal(1_000_000), pay_to=BITREFILL_X402_PAY_TO,
+        merchant=BITREFILL_X402_MERCHANT,
+    )
+    reservation_id, claim_id, settled = None, None, False
+    try:
+        reservation_id, decision, claim_id = _reserve_user_wallet_spend(
+            server, user_id, requirement, claim_scope=quote_id
+        )
+        payment = _payment_from_requirements(requirement, owner=user_id)
+        if (decision is None or decision.needs_human) and web_confirmed:
+            pass  # the user confirmed this quote on the web page
+        elif decision is None or decision.needs_human:
+            approval = server.imessage_approval_service.request_purchase_approval(
+                telegram_user_id=user_id,
+                tool_name=f"Bitrefill {quote['name']} {quote['package']}",
+                resource_url=BITREFILL_X402_MERCHANT,
+                payment_requirements=requirement,
+                payment_context={"productName": quote["name"]},
+            )
+            if not approval.get("ok") or approval.get("status") != "approved":
+                if server.spending_policy is not None:
+                    server.spending_policy.memory.remember_rejection(payment, reason="declined in iMessage")
+                return {"ok": False, "decision": "rejected_by_imessage",
+                        "telegramText": approval.get("telegramText", "Purchase was not approved in iMessage.")}
+        result = bitrefill.buy(_allowance_user(server, user_id), quote["slug"], quote["package"], quote["price_atomic"])
+        _settle_user_wallet_spend(
+            server, reservation_id, {"id": "bitrefill"}, BITREFILL_X402_MERCHANT, requirement,
+            result, payment=payment, claim_id=claim_id,
+        )
+        settled = True
+        server.user_event_store.write(user_id, result)
+        from .purchase_history import purchase_id as _purchase_id
+        return {**result, "purchaseId": _purchase_id(result)}  # the chat's receipt opens its code by this
+    finally:
+        if not settled:
+            _release_user_wallet_spend(server, reservation_id)
+            if claim_id and server.spending_policy is not None:
+                server.spending_policy.memory.release_claim(claim_id)
+
+
+def _allowance_bitrefill_reveal(server: Any, event: dict[str, Any], user_id: str) -> dict[str, Any]:
+    """Show the code of the last allowance-lane Bitrefill order, once. Nothing is stored."""
+    invoice_id = str(event.get("invoiceId") or "")
+    name = str(event.get("productName") or "Your Bitrefill order")
+    bitrefill, service = getattr(server, "allowance_bitrefill", None), getattr(server, "allowance", None)
+    if bitrefill is None or service is None:
+        return {"ok": False, "telegramText": "The Trezor allowance lane is not available right now."}
+    if not service.store.reveal_once(user_id, invoice_id, int(time.time())):
+        return {"ok": True, "telegramText": (
+            f"{name} was already delivered. For security its code is shown once — check where you saved it."),
+            "invoiceId": invoice_id}
+    try:
+        codes = bitrefill.redemption(_allowance_user(server, user_id), invoice_id)
+    except Exception:
+        service.store.unreveal(invoice_id)
+        raise
+    if codes is None:
+        service.store.unreveal(invoice_id)
+        return {"ok": True, "telegramText": f"{name} is still being delivered. Try /last_purchase again in a minute.",
+                "invoiceId": invoice_id}
+    lines = [f"{name} — your code. Store it safely, do not share it, redeem it soon:"]
+    for item in codes if isinstance(codes, list) else [codes]:
+        if isinstance(item, dict):
+            lines.extend(f"{key}: {value}" for key, value in item.items() if value not in (None, "", {}))
+        else:
+            lines.append(str(item))
+    from .allowance_bitrefill import redemption_fields
+    first = next((i for i in (codes if isinstance(codes, list) else [codes]) if isinstance(i, dict)), {})
+    return {"ok": True, "telegramText": "\n".join(lines), "invoiceId": invoice_id, "fields": redemption_fields(codes),
+            "howToUse": " ".join(str(first[k]) for k in ("instructions", "redemption_instructions", "how_to_redeem")
+                                 if isinstance(first.get(k), str))}
+
+
 def _last_bitrefill_purchase_response(
     server: Any,
     event: dict[str, Any],
     telegram_user_id: str,
 ) -> dict[str, Any] | None:
+    if event.get("mode") == "bitrefill_x402_allowance":
+        return _allowance_bitrefill_reveal(server, event, telegram_user_id)
+    if event.get("mode") == "bitrefill_mcp_solana":
+        from .solana_bitrefill import reveal as _solana_reveal
+        return _solana_reveal(server, event, telegram_user_id)
     quote_id = str(event.get("quoteId", "") or "").strip()
     if not quote_id or "bitrefill" not in event:
         return None
@@ -7987,7 +8405,7 @@ def _last_bitrefill_purchase_response(
         "status": order.get("status"),
     }
     if has_redemption and has_reveal_text:
-        server.user_event_store.clear_fulfillment_token(telegram_user_id)
+        server.user_event_store.clear_fulfillment_token(telegram_user_id, purchase_id(event))
     return response
 
 

@@ -1,0 +1,359 @@
+# Local Trezor purchase proof
+
+This is an isolated proof for one operator and one Trezor. It runs beside the
+working sign402 services; it is not imported, started, or routed by the
+production gateway, Hermes, iMessage, or WhatsApp flows. The sidecar listens
+only on `127.0.0.1:8111`, uses its own SQLite file, and has no private-key input.
+Trezor remains the signer for the fixed Base account at `m/44'/60'/0'/0/0`.
+
+The automated checks use fakes only. They do not contact Trezor Suite,
+Bitrefill, Base RPC, or a hardware wallet and do not create an invoice or
+broadcast a transaction.
+
+## One-time local setup
+
+From the repository root, create a virtual environment dedicated to this
+proof. Do not reuse a production environment:
+
+```bash
+cd trezor-sidecar
+python3 -m venv .venv
+.venv/bin/python -m pip install -e . -e ../sign402-gateway
+```
+
+In Trezor Suite Desktop, follow the official
+[Suite Desktop MCP instructions](https://docs.trezor.io/trezor-suite/packages/suite-desktop/mcp.html),
+enable MCP, and copy its local bearer token. The sidecar uses the fixed local
+endpoint `http://127.0.0.1:21340/mcp`; do not expose that endpoint to the
+network.
+
+Create private configuration files outside this repository before inserting
+any real values:
+
+```bash
+mkdir -p "$HOME/.config/sign402-trezor-poc"
+cp .env.sidecar.example "$HOME/.config/sign402-trezor-poc/sidecar.env"
+cp .env.runner.example "$HOME/.config/sign402-trezor-poc/runner.env"
+chmod 600 "$HOME/.config/sign402-trezor-poc/sidecar.env"
+chmod 600 "$HOME/.config/sign402-trezor-poc/runner.env"
+```
+
+Edit those two private copies, never the tracked examples. Generate an
+independent random sidecar token and put the same value in both private files.
+Put the Trezor Suite MCP token and a private HTTPS Base RPC URL only in
+`sidecar.env`. Keep the Bitrefill operator key only in `runner.env`. Set
+`SIGN402_TREZOR_POC_ENABLED=1` in each private file only while running this
+proof. Keep `SIGN402_TREZOR_POC_MAX_USD=1.00` for the first manual test.
+
+In the private `sidecar.env`, replace the example state-path placeholder with
+this exact line:
+
+```bash
+SIGN402_TREZOR_STATE_PATH=${HOME}/.sign402-trezor-poc/state.db
+```
+
+Do not choose another location. Sourcing the private env expands `${HOME}` to
+the current operator's home directory, producing the same
+`~/.sign402-trezor-poc/state.db` path fixed in the runner. The directory and
+database are proof-only and remain outside the repository and all production
+state locations.
+
+Never paste tokens, recipient data, payment links, redemption values, or eSIM
+activation data into a command, log, issue, chat, or repository file.
+
+## Safe local proof (no purchase)
+
+These steps pair the displayed Base address and approve a reserved test intent.
+The reserved intent cannot be converted into a payment. Neither command creates
+a Bitrefill client, invoice, payment, or redemption value.
+
+Terminal 1 — start only the isolated loopback sidecar:
+
+```bash
+cd trezor-sidecar
+set -a
+source "$HOME/.config/sign402-trezor-poc/sidecar.env"
+set +a
+.venv/bin/sign402-trezor-sidecar
+```
+
+Terminal 2 — load only the runner configuration, then pair. Confirm on the
+Trezor that the displayed address is the dedicated account you intend to use:
+
+```bash
+cd trezor-sidecar
+set -a
+source "$HOME/.config/sign402-trezor-poc/runner.env"
+set +a
+.venv/bin/sign402-trezor-poc pair
+```
+
+Still in Terminal 2, perform the non-spendable typed-intent signature test:
+
+```bash
+.venv/bin/sign402-trezor-poc intent-test
+```
+
+Stop the sidecar with `Ctrl-C` when finished and return both private env files
+to `SIGN402_TREZOR_POC_ENABLED=0`. This procedure does not require or authorize
+restarting, reconfiguring, or stopping any production process.
+
+## Operator-only live purchase
+
+> [!WARNING]
+> **PRODUCTION SERVICES MUST NOT BE RESTARTED, STOPPED, OR RECONFIGURED.**
+> This is a real Base Mainnet USDC payment and may be non-refundable. Use only
+> a dedicated low-balance account and a deliberately selected low-value item.
+> The live command must display the exact purchase summary before device approval.
+> Abort with `Ctrl-C` if the product, package/denomination, quoted
+> total, maximum USDC, Base Mainnet network, recipient fields, or expiration is
+> not exactly what the operator chose.
+
+Do not run this section until every automated sidecar, production gateway, and
+Hermes regression test has passed unchanged, the safe proof above succeeds,
+and the operator has separately decided to spend real funds. Do not use a
+production user, production database, production wallet, or a production
+message conversation for this proof.
+
+1. Fund only the paired dedicated account with slightly more than the selected
+   amount in Base USDC and enough Base ETH for gas. Keep the configured cap at
+   `1.00` USD for the first test.
+2. In Terminal 1, start the isolated sidecar exactly as in the safe procedure.
+3. In Terminal 2, load the private runner env exactly as above. Ensure its
+   Bitrefill key belongs to the test operator and is not shared with production.
+4. Run one explicitly selected catalog item:
+
+   ```bash
+   .venv/bin/sign402-trezor-poc buy \
+     --product-id REPLACE_WITH_PRODUCT_ID \
+     --package-id REPLACE_WITH_PACKAGE_ID \
+     --country REPLACE_WITH_COUNTRY_CODE
+   ```
+
+5. Enter requested recipient fields only at the hidden prompts. Read the exact
+   purchase summary. Continue only if every field matches the intended purchase.
+   The first Trezor approval binds that summary; the later Trezor transaction
+   screen must also show the exact Base USDC transfer. Reject either device
+   prompt on any mismatch.
+6. Treat any returned redemption or activation value as bearer value. Save it
+   only in the operator's intended secure destination; it is printed once and
+   is never written to the proof database.
+7. Stop the sidecar, set both private env files back to
+   `SIGN402_TREZOR_POC_ENABLED=0`, and retain only the non-secret purchase record
+   (invoice ID, product slug, amount, `usdc_base`, and timestamp).
+
+Failures are fail-closed. After the command may have created an invoice or
+started a payment, **never rerun `buy` after any timeout, generic failure,
+ambiguous broadcast, or reconciliation warning**. A retry could create a
+second invoice. Inspect the existing invoice, the dedicated Base address, and
+`~/.sign402-trezor-poc/state.db` manually first. The runner also refuses to
+start another purchase while any durable payment is unresolved or a completed
+payment lacks its final non-secret purchase-log record.
+
+Immediately before contacting Bitrefill to prepare an invoice, the runner
+creates a non-secret singleton purchase-attempt reservation in the proof
+database. The reservation survives every prepare, binding, completion,
+transport, timeout, and generic failure—even when no invoice response or local
+payment row exists. It is removed only in the same SQLite transaction that
+marks the matching payment complete and writes the required five-field
+purchase log. Never delete or bypass this reservation until the existing
+attempt has been manually reconciled.
+
+The initial clear-state check also reads a persistent monotonic purchase
+generation from one SQLite snapshot. Reservation must match that exact
+generation after the summary and device approval. Atomic successful
+finalization increments it, so an older overlapping runner cannot begin a new
+invoice after a newer runner has already completed and removed its guard.
+Failures retain the guard and do not advance the generation.
+
+## Separate local Hermes instance
+
+The optional `hermes-local-plugin/` connects one dedicated local Hermes test
+instance to this proof. It is a separate plugin named
+`sign402-trezor-local`; it does not replace or import the working
+`sign402-wallet` plugin and it does not register `/bitrefill`, wallet,
+iMessage, or WhatsApp commands. Never install it into the working Hermes home
+or reuse the production bot process.
+
+Stage the plugin only under a dedicated local-agent home:
+
+```bash
+export SIGN402_TREZOR_LOCAL_AGENT_HOME="$HOME/.sign402-trezor-agent"
+sh scripts/install-local-hermes-plugin.sh
+```
+
+The staging script requires that explicit directory, refuses the current user
+home, and never writes to the working `~/.hermes`. It also does not run a
+Hermes enable or restart command. Point only a separate local Hermes test
+instance at `$SIGN402_TREZOR_LOCAL_AGENT_HOME/.hermes`; keep the working
+instance and its service configuration unchanged.
+
+Install `trezor-sidecar` and the narrow `sign402-gateway` dependency into the
+dedicated local Hermes Python environment as editable packages, using the same
+commands as the one-time setup above. Do not install either package into the
+working Hermes environment. The local plugin imports `trezor_sidecar` only
+from that dedicated interpreter.
+
+Create a private local-agent environment outside the repository:
+
+```bash
+cp .env.local-agent.example \
+  "$HOME/.config/sign402-trezor-poc/local-agent.env"
+chmod 600 "$HOME/.config/sign402-trezor-poc/local-agent.env"
+```
+
+The local-agent environment is the runner side of the split. It receives the
+independent sidecar bearer and the test operator Bitrefill key, but never the
+Trezor MCP token or Base RPC credential. Set exactly one numeric Telegram user
+ID in `SIGN402_TREZOR_LOCAL_AGENT_USER_ID`. If a selected product needs an
+email recipient, set it only in the private
+`SIGN402_TREZOR_LOCAL_BUYER_EMAIL` value; do not send recipient data as command
+arguments.
+
+All three gates remain off by default. Pairing needs the first and third;
+quoting or purchasing additionally needs the separate purchase gate:
+
+```text
+SIGN402_TREZOR_LOCAL_AGENT_ENABLED=0
+SIGN402_TREZOR_LOCAL_PURCHASES_ENABLED=0
+SIGN402_TREZOR_POC_ENABLED=0
+```
+
+Enable them only in the separate local instance while the isolated sidecar is
+running. The plugin exposes only:
+
+```text
+/trezor_pair
+/trezor_prepare <productId> <packageId> <country>
+/trezor_confirm <8-character confirmation code>
+/trezor_cancel
+```
+
+`/trezor_prepare` requests product details and a live quote, then returns the
+exact product, denomination, USD total, maximum Base USDC payment, recipient,
+buyer email, and expiry. It does not create an invoice or payment. Read that
+summary before sending the exact one-time `/trezor_confirm` command.
+
+`/trezor_confirm` consumes the pending quote before continuing, so duplicate
+commands cannot reuse it. It then requires the Trezor purchase-intent approval
+before Bitrefill invoice creation and a second Trezor confirmation for the
+exact Base USDC transaction. A rejection, timeout, changed quote, expired
+summary, unavailable sidecar, or mismatched wallet fails closed without
+falling back to the managed-wallet, iMessage, or WhatsApp paths. After any
+ambiguous invoice or broadcast failure, follow the same no-retry recovery rule
+as the operator-only CLI above.
+
+When the local test is finished, stop only the local sidecar and local Hermes
+test process, then return both flags to `0`. Do not stop or restart the working
+gateway, Hermes, iMessage, or WhatsApp services.
+
+## VPS agent with an outbound companion
+
+The remote proof keeps all existing production routes unchanged. It adds two
+separate loopback services on the VPS:
+
+- `sign402-trezor-broker` on `127.0.0.1:8122` queues tightly scoped device jobs;
+- `sign402-trezor-remote-agent` on `127.0.0.1:8123` owns the opt-in Bitrefill
+  workflow for one allowlisted Telegram user.
+
+The user's computer runs the existing sidecar plus
+`sign402-trezor-companion`. For the first test, use an SSH local forward instead
+of adding a Cloudflare route or exposing a new public port:
+
+```bash
+ssh -N -L 8122:127.0.0.1:8122 hermes@164.68.104.44
+```
+
+This makes the VPS broker available to the local companion at
+`http://127.0.0.1:8122` while leaving the broker loopback-only on both machines.
+The SSH session is temporary and does not restart or reconfigure production.
+
+Install the sidecar package in a separate VPS checkout and virtual environment.
+Do not install it into the working gateway or Hermes environment. Create a
+private VPS environment from `.env.broker.example`, mode `0600`, and keep all
+gates at `0` while validating configuration. The remote purchase service may
+reuse the existing Bitrefill credential through its own private environment;
+that credential is never copied to the companion.
+
+Start the broker and remote agent as separate processes only after setting:
+
+```text
+SIGN402_TREZOR_BROKER_ENABLED=1
+SIGN402_TREZOR_POC_ENABLED=1
+SIGN402_TREZOR_REMOTE_AGENT_ENABLED=1
+SIGN402_TREZOR_REMOTE_PURCHASES_ENABLED=0
+```
+
+With purchases still disabled, create a ten-minute enrollment code on the VPS:
+
+```bash
+.venv/bin/sign402-trezor-broker-admin create-enrollment --user-id TELEGRAM_USER_ID
+```
+
+On the user's computer, keep the local sidecar running, load its private
+sidecar bearer through the environment, and enroll through the SSH forward.
+The command prompts for the one-time code without placing it in shell history:
+
+```bash
+.venv/bin/sign402-trezor-companion enroll \
+  --broker-url http://127.0.0.1:8122
+```
+
+The returned companion bearer is written once to
+`~/.config/sign402-trezor-companion/token` with mode `0600`; it is not printed.
+Then load `.env.companion.example` from a private copy, enable only the companion
+flag, and run:
+
+```bash
+.venv/bin/sign402-trezor-companion run
+```
+
+Before enabling purchases, run the complete VPS-to-device test from the VPS:
+
+```bash
+.venv/bin/sign402-trezor-remote-cli \
+  --user-id TELEGRAM_USER_ID test
+```
+
+The Trezor must show a typed-data request. Approving it returns
+`No Bitrefill order or payment was created.` The test intent has a unique ID and
+the sidecar rejects every payment request bound to its reserved product slug.
+
+Only after that test and all regressions pass, set
+`SIGN402_TREZOR_REMOTE_PURCHASES_ENABLED=1` in the separate remote-agent
+environment. Prepare an exact receipt with `sign402-trezor-remote-cli prepare`.
+Do not run `confirm` until the product, denomination, exact maximum USDC, Base
+network, recipient, and expiration have been shown and explicitly accepted.
+
+The optional `hermes-remote-plugin/` is a thin standard-library client for the
+loopback remote-agent service. It does not import the Trezor package, does not
+receive Bitrefill or broker credentials, and does not replace the existing
+`sign402-wallet` plugin. It registers only:
+
+```text
+/trezor_status
+/trezor_test
+/trezor_prepare <productId> <packageId> <country>
+/trezor_confirm <8-character confirmation code>
+/trezor_cancel
+```
+
+Stage it with all plugin flags disabled. A working Hermes restart is not part
+of the no-purchase broker test. If the plugin is later enabled for the one test
+user, restart Hermes only with the existing readiness and rollback procedure;
+the existing `/bitrefill`, iMessage, and WhatsApp routes remain authoritative.
+
+## Automated verification
+
+These commands are safe: the tests inject transports and never use the private
+env files.
+
+```bash
+cd trezor-sidecar
+PYTHONPATH=../sign402-gateway .venv/bin/python -m unittest discover \
+  -s tests -p 'test_*.py' -v
+```
+
+Production regression suites are run from their existing directories without
+changing configuration. A clean isolation check must show no changed path
+outside `trezor-sidecar/` and this proof's plan document.

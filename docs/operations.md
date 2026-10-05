@@ -7,22 +7,66 @@ product is, see the [README](../README.md). For incident recovery see
 
 ## Production layout
 
+**September 22, 2026 update:** the existing bot runs
+[`12d8dc0`](https://github.com/bubon-ik/singit-solana/commit/12d8dc004235352262bb5c22fbbb124e8ad72e9b) on `release/exa-solana-20260922`, adding opt-in Exa search to
+Solana Venice chat while preserving the earlier conversation/TypeSafe release.
+Both services restarted after private backups and quiet payment-state checks.
+All 95 Base wallets, the Solana wallet, configuration and purchase history were
+verified intact. Search starts off until its separate phone-approved budget is
+active. [Verification and recovery](exa-solana-chat.md#existing-vps-deployment).
+
+### Earlier deployment records
+
+**September 21, 2026 update:** the existing bot now runs
+[`2015199`](https://github.com/bubon-ik/singit-solana/commit/2015199) on
+`release/typesafe-conversation-audit-20260921`, adding optional TypeSafe routing
+before Venice onboarding, contextual clarification, task switching and recovery
+after classifier failure.
+The operator enabled it in the private Hermes environment.
+Only the Telegram service restarted; the payment gateway code and process
+were unchanged. All 95 Base wallets, 1 Solana wallet, configuration values and
+purchase history were verified intact after a private backup. All 414 plugin
+tests and six GitHub checks passed. All 18 live TypeSafe conversation checks
+passed with fake Telegram/catalog/wallet handlers. The transition matrix is in
+the existing CI job; the live provider harness is opt-in.
+See [deployment details and limits](natural-language-assistant.md#existing-bot-deployment--september-21-2026).
+The following September 20 account records the underlying Solana-chat release.
+
 The gateway checkout is `~/apps/sign402` on the VPS `hermes@164.68.104.44`.
 
-Observed on 17 September 2026: production is on `fix-crypto-news-memory` at
-`21dc310f9b115198e4f320cf110add7ebb54f2e7`. Both service units are active and
-`/health` returns HTTP 200. This confirms service availability, not an end-to-end
-purchase. GitHub's default branch is `main` (formerly `ethonline`); it is not
-the deployed branch. The previous GitHub `main` is preserved as
-`archive/legacy-main`.
+Updated on 20 September 2026 at the owner's explicit request: the existing bot
+runs this repository's `venice-solana` release at
+`337e77785edd658146b42149f2068335ddef5cdf`. Later documentation commits do not
+imply a new runtime deployment. Both service units are active, health returns
+HTTP 200, and Telegram confirms the existing bot identity and native Menu.
 
-The server checkout also has local edits in `cdp-x402-service/package-lock.json`
-and `hermes-plugins/sign402-wallet/__init__.py`, plus an untracked
-`hermes-plugins/sign402-wallet/graph_demo.py`. The Graph plugin additions already
-exist in `main`; the lockfile edits remove six `peer` metadata flags without
-changing package versions. Preserve and compare these edits before deployment.
-The production fixes and repository cleanup are merged into `main`; that
-version has not been deployed merely because these instructions changed.
+Before switching, 1,289 gateway, 343 Telegram and 39 Solana tests passed on the
+VPS. The dedicated Solana runtime is Node 24.21.0 at
+`~/.local/share/singit-node24/bin/node`; Hermes retains its existing Node 22.
+All 95 Base wallets, the Solana wallet and purchase history were preserved.
+Authenticated AI network selection and a live Venice balance signed by the
+owner's managed Solana wallet passed. No real Venice payment was submitted.
+[Deployment evidence and remaining acceptance](venice-solana-agent.md#existing-vps-bot-updated--september-20-2026).
+
+The checkout's `origin` is now `https://github.com/bubon-ik/singit-solana.git`;
+the former remote is retained as `base-origin`. The previous deployment was
+`fix-crypto-news-memory` at `21dc310f9b115198e4f320cf110add7ebb54f2e7`. Its local
+Graph plugin changes are included in the new code. Its local lockfile only
+removed peer metadata; the new lockfile was installed and tested separately.
+The old edits remain in a named Git stash and a private deployment backup.
+
+The existing bot credentials, gateway environment, encrypted Base wallet rows,
+approval state and purchase history were retained. A private backup under
+`~/sign402-backups/` includes the repository, local edits, runtime databases and
+JSON files (including `user-purchases.json`), bot configuration and the gateway's
+effective environment. Keep these backups private. This was a replacement of
+the existing deployment, not a second instance sharing its wallet state.
+
+For the earlier September 18 replacement, the VPS passed 1,245 gateway tests, 302 plugin tests with its
+installed PTB 22.6, and 46 CDP helper tests. The existing `spending-memory`
+installation already matched the pinned revision. After switching, the Base
+wallet records and purchase history were verified unchanged, and the new
+purchase-history endpoint rejected an unauthenticated request with HTTP 401.
 
 | Piece | How it runs | Notes |
 | --- | --- | --- |
@@ -62,6 +106,13 @@ use `ssh -t` for that operator step. Verify after restarting:
 ```bash
 ssh hermes@164.68.104.44 'systemctl is-active sign402-gateway && curl --fail --max-time 5 -s -o /dev/null -w "health: HTTP %{http_code}\n" http://127.0.0.1:8099/health'
 ```
+
+The September 18 replacement used SIGTERM on the gateway process owned by
+`hermes`, after checking for active spend reservations and pending approvals and
+stopping the Telegram bot. The unit's verified `Restart=always` policy restarted
+it with the existing root-managed environment. No sudo policy or service unit
+was changed. The original root-owned environment file was not modified; its
+effective running environment was saved privately for recovery.
 
 **Telegram plugin:** changes under `hermes-plugins/` need the bot restarted:
 

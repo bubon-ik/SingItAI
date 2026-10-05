@@ -1,0 +1,16 @@
+name: sign402-trezor-remote
+kind: standalone
+version: 0.1.0
+description: Separate opt-in commands for one VPS-to-Trezor Bitrefill flow
+provides_hooks:
+  - pre_gateway_dispatch
+requires_env:
+  - name: SIGN402_TREZOR_REMOTE_PLUGIN_ENABLED
+    description: Literal 1 enables only the thin remote Trezor Hermes plugin
+    password: false
+  - name: SIGN402_TREZOR_REMOTE_AGENT_URL
+    description: Loopback URL of the separate remote Trezor agent service
+    password: false
+  - name: SIGN402_TREZOR_REMOTE_AGENT_TOKEN
+    description: Independent bearer for the loopback remote Trezor agent service
+    password: true

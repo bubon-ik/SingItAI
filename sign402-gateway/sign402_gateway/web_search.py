@@ -339,11 +339,19 @@ class WebSearchClient:
             raise SearchUnavailable("The web is unavailable right now.")
 
         payload = response.json() or {}
-        for accept in payload.get("accepts") or []:
-            if str(accept.get("network") or "").lower() != self.config.network:
-                continue
-            if str(accept.get("asset") or "").lower() != self.config.asset:
-                continue
+        offered = [
+            accept
+            for accept in payload.get("accepts") or []
+            if str(accept.get("network") or "").lower() == self.config.network
+            and str(accept.get("asset") or "").lower() == self.config.asset
+        ]
+        # Exa offers more than one Base USDC leg, to different addresses; the
+        # bound one is taken wherever it sits in the list.
+        offered.sort(
+            key=lambda accept: str(accept.get("payTo") or "").lower()
+            != self.config.bound_pay_to.lower()
+        )
+        for accept in offered[:1]:
             pay_to = str(accept.get("payTo") or "")
             if pay_to.lower() != self.config.bound_pay_to.lower():
                 # The one failure that must never become a payment: the money
@@ -421,6 +429,26 @@ class WebAnswer:
     text: str
     searched: bool
     footer: str
+    outcome: SearchOutcome | None = None
+
+
+def _last_user(message: Any) -> str:
+    """The question itself: the prompt, or the last user turn of a conversation."""
+    if isinstance(message, list):
+        return next((str(m.get("content") or "") for m in reversed(message) if m.get("role") == "user"), "")
+    return message
+
+
+def _on_last(message: Any, wrap: Callable[[str], str]) -> Any:
+    """`wrap` applied to the question, wherever it sits: the web chat sends a whole conversation."""
+    if not isinstance(message, list):
+        return wrap(message)
+    out = [dict(m) for m in message]
+    for turn in reversed(out):
+        if turn.get("role") == "user":
+            turn["content"] = wrap(str(turn.get("content") or ""))
+            break
+    return out
 
 
 def answer_with_web(
@@ -439,19 +467,23 @@ def answer_with_web(
     token and we spend one more completion. A search that fails is never
     allowed to fail the message.
     """
-    verdict = classify(message, has_previous_turn=has_previous_turn)
+    question = _last_user(message)
+    if isinstance(message, list):
+        has_previous_turn = has_previous_turn or sum(m.get("role") in ("user", "assistant") for m in message) > 1
+    verdict = classify(question, has_previous_turn=has_previous_turn)
 
     if verdict is Verdict.SEARCH:
-        outcome, note = _try_search(search, user_id, message, wallet_address)
+        outcome, note = _try_search(search, user_id, question[:2000], wallet_address)
         if outcome is not None:
             return WebAnswer(
-                text=_clean(ask(_with_results(message, outcome))),
+                text=_clean(ask(_on_last(message, lambda text: _with_results(text, outcome)))),
                 searched=True,
                 footer=_footer(outcome),
+                outcome=outcome,
             )
         return WebAnswer(text=_clean(ask(message)), searched=False, footer=note)
 
-    prompt = message if verdict is Verdict.SKIP else _with_need_web_offer(message)
+    prompt = message if verdict is Verdict.SKIP else _on_last(message, _with_need_web_offer)
     first = ask(prompt)
 
     asked_for = _need_web_query(first)
@@ -467,9 +499,10 @@ def answer_with_web(
     # Exactly one search per message: whatever the second completion says, it
     # is the answer. A second NEED_WEB is stripped, not obeyed.
     return WebAnswer(
-        text=_clean(ask(_with_results(message, outcome))),
+        text=_clean(ask(_on_last(message, lambda text: _with_results(text, outcome)))),
         searched=True,
         footer=_footer(outcome),
+        outcome=outcome,
     )
 
 

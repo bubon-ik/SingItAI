@@ -1,0 +1,26 @@
+{
+  "sign402-gateway/sign402_gateway/ask_solana.py": {
+    "before": "94a1c0cd81ee022394a2c6ccd768b8e4e5b5c3c29a8600a6b51da1bf5d7317dd",
+    "after": "b67348c1efbc3138e7cc72781a21e67c4bc9351c2da0fc0c955b703f81d9c7b5"
+  },
+  "sign402-gateway/sign402_gateway/solana_allowance.py": {
+    "before": "1c67def0c4db817a698259f00adb5b6091ec0e34cbdef4a0fea0397f4913b13f",
+    "after": "ac45a7d33bcb86f6356cb10021afe4b94f1998daedcb2d15a1c075d69797fbcd"
+  },
+  "sign402-gateway/sign402_gateway/web_api.py": {
+    "before": "d572948621d15fe9addd4d29666fc448592afc543621c545f0570de1738e38f6",
+    "after": "76705281a04bd6a965d8916456e2861c36cc48fbfa13476d8deb142108b9ec4e"
+  },
+  "solana-x402-service/src/allowance.mjs": {
+    "before": "539a8a286da7267b8a91673bb2c907253baa1dcc7e29aca70d278a9622a0f521",
+    "after": "14adea6000442bea31a10c8f2158ef077b720bbd4feeee5d4a4f679a1a5d4985"
+  },
+  "solana-x402-service/src/gateway.mjs": {
+    "before": "398bab0df01f2b6b8b4bb021ea9b7b54e14ef1606db817ca0b0e00ed548a7442",
+    "after": "371ca7cbe04fff09546461502e55a6b0d1738380608e4f477962b35c37deb164"
+  },
+  "website/app/main.js": {
+    "before": "0a494accf2cf71a5adb43aeefb2da1776117ad93418f0a1ad546702227c12dae",
+    "after": "e0be34ecb3cc18c07056772ff83d6137d495ad12f1d6485eef0da4bf142c7633"
+  }
+}

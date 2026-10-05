@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SingIt — Agent allowance</title>
+<meta name="description" content="Give your AI agent a spending limit from your own wallet. Your money stays with you; the agent buys inside the limit.">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#f4f2f0">
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="../assets/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="SingIt">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=Geist+Mono:wght@400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="singit-mark" viewBox="0 0 240 240" fill="none">
+    <path d="M192 108 V152 Q192 176 168 176 H112 Q88 176 88 152 V88 Q88 64 112 64 H168 Q192 64 192 78"
+          stroke="currentColor" stroke-width="12.5" stroke-linecap="round"/>
+    <path d="M116 118 L139 143 L188 86 H206" stroke="currentColor" stroke-width="11.5"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="216" cy="86" r="8" stroke="currentColor" stroke-width="8.5"/>
+    <g stroke="currentColor" stroke-width="9" stroke-linecap="round">
+      <line x1="58" y1="94"  x2="88" y2="94"/>
+      <line x1="58" y1="121" x2="88" y2="121"/>
+      <line x1="58" y1="148" x2="88" y2="148"/>
+    </g>
+    <g fill="currentColor">
+      <circle cx="49" cy="94"  r="9"/>
+      <circle cx="49" cy="121" r="9"/>
+      <circle cx="49" cy="148" r="9"/>
+    </g>
+  </symbol>
+</svg>
+
+<div class="nav-wrap">
+  <nav class="nav-pill" aria-label="SingIt">
+    <a class="brand" href="https://singitai.app/"><svg class="mark" aria-hidden="true"><use href="#singit-mark"/></svg><span>SingIt</span></a>
+    <div id="tabs" class="tabs" hidden>
+      <button type="button" data-tab="allowance" class="tab">Allowance</button>
+      <button type="button" data-tab="shop" class="tab">Shop</button>
+      <button type="button" data-tab="purchases" class="tab">Purchases</button>
+    </div>
+    <div id="account"></div>
+  </nav>
+</div>
+
+<main class="shell">
+  <div id="view" aria-live="polite"></div>
+</main>
+
+<div id="app" class="app" hidden>
+  <aside class="sidebar" aria-label="SingIt">
+    <div class="side-top">
+      <a class="brand" href="https://singitai.app/"><svg class="mark" aria-hidden="true"><use href="#singit-mark"/></svg><span>SingIt</span></a>
+    </div>
+    <button class="side-new" data-action="new-chat"><span class="plus">+</span>New chat</button>
+    <nav id="side-chats" class="side-chats" aria-label="Chats"></nav>
+    <div id="side-nav" class="side-nav"></div>
+  </aside>
+  <div class="scrim" data-action="close-menu"></div>
+  <section class="main">
+    <header class="topbar">
+      <button class="icon-btn" data-action="open-menu" aria-label="Menu">☰</button>
+      <span id="top-title" class="faint"></span>
+      <button class="icon-btn" data-action="new-chat" aria-label="New chat">+</button>
+    </header>
+    <div id="main" class="pane-host" style="display:flex;flex-direction:column;flex:1;min-height:0"></div>
+  </section>
+</div>
+
+<div id="chat-menu" class="chat-menu" role="menu" hidden></div>
+<div id="account-menu" class="chat-menu account-menu" role="menu" hidden></div>
+<div id="modal"></div>
+<div id="toast" class="toast" role="status" hidden></div>
+
+<script src="config.js"></script>
+<script type="module" src="main.js"></script>
+</body>
+</html>

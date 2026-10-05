@@ -608,10 +608,12 @@ class ChatService:
         # misstate what the user can actually do.
         remaining = max(0, cap - session.spent_atomic_this_window)
         chosen_id = session.model or self.default_model
+        chosen = None
         try:
-            chosen_label = self._catalogue().resolve(chosen_id).label
-        except (UnknownModel, Exception):
-            chosen_label = chosen_id
+            chosen = self._catalogue().resolve(chosen_id)
+        except Exception:
+            pass
+        chosen_label = chosen.label if chosen else chosen_id
         return {
             "ok": True,
             "hasPolicy": bool(session.bound_pay_to),
@@ -619,6 +621,9 @@ class ChatService:
             "dailyCapUsdc": _usd_plain(cap),
             "model": chosen_id,
             "modelLabel": chosen_label,
+            "inputUsdPerMTok": chosen.input_usd_per_mtok if chosen else None,
+            "outputUsdPerMTok": chosen.output_usd_per_mtok if chosen else None,
+            "policyExpired": session.policy_expired,
             "spentTodayAtomic": session.spent_atomic_this_window,
             "remainingWindowAtomic": remaining,
             "remainingWindowUsdc": _usd_plain(remaining),
@@ -1110,6 +1115,8 @@ class ChatResult:
     remaining_window_atomic: int
     outstanding_atomic: int
     web_footer: str = ""
+    # The search behind the answer, when there was one: its cost and sources.
+    web_outcome: Any = None
 
 
 class VeniceChatClient:
@@ -1200,7 +1207,7 @@ class VeniceChatClient:
         #    failure on existing credit: the first means money moved and no
         #    answer came back.
         try:
-            text, remaining, web_footer = self._answer(
+            text, remaining, web_footer, web_outcome = self._answer(
                 user_id, prompt, wallet_address=wallet_address
             )
         except ProviderUnavailable:
@@ -1224,11 +1231,12 @@ class VeniceChatClient:
             remaining_window_atomic=self._remaining_window(session),
             outstanding_atomic=session.outstanding_atomic,
             web_footer=web_footer,
+            web_outcome=web_outcome,
         )
 
     def _answer(
         self, user_id: str, prompt: str, *, wallet_address: str
-    ) -> tuple[str, str | None, str]:
+    ) -> tuple[str, str | None, str, Any]:
         """One completion, or one search and one completion.
 
         With `web_search` unset this is exactly `_ask` and nothing else, which
@@ -1240,13 +1248,13 @@ class VeniceChatClient:
             text, remaining = self._ask(
                 user_id, fact, wallet_address=wallet_address
             )
-            return text, remaining, footer
+            return text, remaining, footer, None
 
         if self.web_search is None:
             text, remaining = self._ask(
                 user_id, prompt, wallet_address=wallet_address
             )
-            return text, remaining, ""
+            return text, remaining, "", None
 
         from .web_search import answer_with_web
 
@@ -1268,7 +1276,7 @@ class VeniceChatClient:
             message=prompt,
             wallet_address=wallet_address,
         )
-        return result.text, seen["remaining"], result.footer
+        return result.text, seen["remaining"], result.footer, result.outcome
 
     def _onchain_footnote(
         self, user_id: str, prompt: str
@@ -1472,7 +1480,12 @@ class VeniceChatClient:
                 "model": (
                     self.store.get_session(user_id).model or self.config.model
                 ),
-                "messages": [{"role": "user", "content": prompt}],
+                # The web chat sends its conversation; the bot, one prompt.
+                "messages": (
+                    prompt
+                    if isinstance(prompt, list)
+                    else [{"role": "user", "content": prompt}]
+                ),
             },
         )
         if response.status != 200:

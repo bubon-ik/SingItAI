@@ -408,6 +408,27 @@ class ImessageApprovalTests(unittest.TestCase):
         self.assertEqual(decided["status"], "approved")
         self.assertFalse(replay["ok"])
 
+    def test_solana_hash_approval_checks_the_selected_wallet(self):
+        from sign402_gateway.solana_wallets import ManagedWalletService
+        service_ref = []
+        notifier = AutoDecisionNotifier(lambda sender: service_ref[0].record_decision(sender, "YES"))
+        service, base_wallets, _ = self.make_service(notifier=notifier)
+        service_ref.append(service)
+        base_wallets.create_wallet("1045618308")
+        pairing = service.create_pairing("1045618308")
+        service.link_photon_sender(pairing["code"], "+15551234567")
+        wallets = ManagedWalletService(store=base_wallets.store, master_key=base_wallets.master_key)
+        service.wallet_service = wallets
+        args = dict(telegram_user_id="1045618308", wallet_chain="solana",
+                    action_type="sign402_venice_solana_topup", commitment_hash="a"*64,
+                    context_lines=["Venice x402 / Solana", "5 USDC"])
+        self.assertFalse(service.request_hash_approval(**args)["ok"])
+        wallets.create_wallet("1045618308", chain="solana")
+        approved = service.request_hash_approval(**args)
+        self.assertTrue(approved["approved"])
+        self.assertEqual(approved["approvedHash"], "a"*64)
+        self.assertIn("Venice x402 / Solana", notifier.messages[0]["message"])
+
     def test_external_hash_approval_uses_supplied_commitment_hash(self):
         service_ref = []
         notifier = AutoDecisionNotifier(

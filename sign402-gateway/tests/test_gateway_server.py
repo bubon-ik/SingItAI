@@ -2729,6 +2729,58 @@ class GatewayServerTests(unittest.TestCase):
         endpoints = self.response_json(handler)["endpoints"]
         self.assertIn("/agent/list-bitrefill-products", endpoints)
 
+    def test_solana_wallet_routes_with_real_store_and_user_auth(self):
+        from sign402_gateway.solana_wallets import ManagedWalletService
+        from sign402_gateway.user_wallets import UserWalletStore
+        with tempfile.TemporaryDirectory() as tmp, patch("sys.stderr", io.StringIO()):
+            server = DummyServer()
+            server.user_wallet_service = ManagedWalletService(
+                store=UserWalletStore(Path(tmp) / "wallets.db"),
+                master_key=Fernet.generate_key().decode(),
+                solana_balance_provider=lambda _: {"SOL": "0.000000000", "USDC": "0.000000"},
+            )
+            created = self.make_handler(
+                "/agent/create-wallet", {"telegramUserId": "solana-alice", "chain": "solana"},
+                server=server, headers=self.wallet_auth_headers(),
+            )
+            self.assertIn("200 OK", self.response_text(created))
+            body = self.response_json(created)
+            self.assertEqual(body["wallet"]["chain"], "solana")
+            self.assertNotIn("private", self.response_text(created).lower())
+            headers = self.llm_auth_headers(body["accessToken"])
+            for route in ["/agent/wallet", "/agent/wallet-balance"]:
+                with self.subTest(route=route):
+                    result = self.make_handler(route, {"telegramUserId": "solana-alice", "chain": "solana"}, server=server, headers=headers)
+                    self.assertIn("200 OK", self.response_text(result))
+                    self.assertEqual(self.response_json(result)["wallet"]["address"], body["wallet"]["address"])
+                    denied = self.make_handler(route, {"telegramUserId": "solana-bob", "chain": "solana"}, server=server, headers=headers)
+                    self.assertIn("401 Unauthorized", self.response_text(denied))
+                    missing = self.make_handler(route, {"telegramUserId": "solana-alice", "chain": "solana"}, server=server, headers=self.wallet_auth_headers())
+                    self.assertIn("401 Unauthorized", self.response_text(missing))
+            self.assertIsNone(server.user_wallet_service.store.get_wallet_by_telegram_user_id("solana-alice"))
+
+    def test_solana_cannot_fall_through_to_base_spending_routes(self):
+        for route in ["/agent/withdraw", "/agent/withdraw/tokens", "/agent/buy-tool"]:
+            with self.subTest(route=route), patch("sys.stderr", io.StringIO()), patch.object(gateway_server, "fetch_x402_payment_required") as fetch:
+                server = DummyServer()
+                server.user_wallet_service.resolve_telegram_user_id.return_value = "solana-alice"
+                result = self.make_handler(route, {"telegramUserId": "solana-alice", "chain": "solana", "tool": "crypto-news"}, server=server, headers=self.llm_auth_headers())
+                self.assertIn("not enabled on Solana", self.response_text(result))
+                server.user_wallet_service.withdrawable_tokens.assert_not_called()
+                server.user_wallet_service.decrypt_private_key_for_future_signing.assert_not_called()
+                server.user_x402_buyer.assert_not_called()
+                server.user_token_transfer_client.assert_not_called()
+                fetch.assert_not_called()
+
+    def test_wallet_routes_reject_unknown_chain_without_base_fallback(self):
+        for route, method in [("/agent/create-wallet", "create_wallet"), ("/agent/wallet", "wallet_status"), ("/agent/wallet-balance", "wallet_balance")]:
+            with self.subTest(route=route), patch("sys.stderr", io.StringIO()):
+                server = DummyServer()
+                server.user_wallet_service.resolve_telegram_user_id.return_value = "solana-alice"
+                result = self.make_handler(route, {"telegramUserId": "solana-alice", "chain": "devnet"}, server=server, headers=self.llm_auth_headers())
+                self.assertIn("400 Bad Request", self.response_text(result))
+                getattr(server.user_wallet_service, method).assert_not_called()
+
     def test_agent_create_wallet_requires_telegram_user_id(self):
         server = DummyServer()
 
@@ -4108,7 +4160,7 @@ class GatewayServerTests(unittest.TestCase):
             fulfillment_token="reveal_secret_1",
         )
         server.user_event_store.clear_fulfillment_token.assert_called_once_with(
-            "1045618308"
+            "1045618308", gateway_server.purchase_id(server.user_event_store.read.return_value)
         )
 
     def test_agent_last_purchase_does_not_clear_token_for_empty_redemption(self):
@@ -8040,6 +8092,25 @@ class SpendReservationTests(unittest.TestCase):
             600_000,
         )
 
+    def test_actual_settlement_releases_only_the_unused_ceiling(self):
+        store = self.make_store()
+        held = self.reserve(store, 3000, daily_cap_atomic=4000)
+        self.assertIsNone(self.reserve(store, 2000, daily_cap_atomic=4000))
+        recorded = store.settle_reservation(held, tx_id="0xmetered", amount_atomic=1130)
+        self.assertEqual(recorded["amountAtomic"], 1130)
+        self.assertIsNotNone(self.reserve(store, 2000, daily_cap_atomic=4000))
+        self.assertIsNone(self.reserve(store, 1000, daily_cap_atomic=4000))
+
+    def test_actual_settlement_cannot_exceed_hold_or_silently_disappear(self):
+        store = self.make_store()
+        held = self.reserve(store, 3000, daily_cap_atomic=4000)
+        for amount in [-1, 3001, 1.5, True]:
+            with self.assertRaises(ValueError):
+                store.settle_reservation(held, amount_atomic=amount)
+        self.assertIsNone(self.reserve(store, 2000, daily_cap_atomic=4000))
+        with self.assertRaises(ValueError):
+            store.settle_reservation("missing", amount_atomic=1130)
+
     def test_settling_a_reservation_does_not_double_count_it(self):
         store = self.make_store()
 
@@ -8495,3 +8566,312 @@ class SearchSettleHelperTests(unittest.TestCase):
             ).parameters
         ]
         self.assertEqual(missing, [])
+
+
+class AllowanceEndpointTests(unittest.TestCase):
+    """The Trezor allowance lane over HTTP: off by default, per-user, errors named."""
+
+    def request(self, path, body=None, *, server, method="POST", user_token="user-token-1"):
+        headers = {"Authorization": "Bearer test-wallet-token"}
+        if user_token:
+            headers["X-Sign402-User-Token"] = user_token
+        encoded = json.dumps(body or {}).encode("utf-8") if method == "POST" else b""
+        raw = (
+            f"{method} {path} HTTP/1.1\r\n".encode("ascii")
+            + f"Content-Length: {len(encoded)}\r\n".encode("ascii")
+            + b"Content-Type: application/json\r\n"
+            + b"".join(f"{k}: {v}\r\n".encode("ascii") for k, v in headers.items())
+            + b"\r\n"
+            + encoded
+        )
+        socket = FakeSocket(raw)
+        with patch("sys.stderr", io.StringIO()):
+            handler = Sign402GatewayHandler(socket, ("127.0.0.1", 12345), server)
+        text = socket.wfile.getvalue().decode("utf-8", "replace")
+        status_line, _, rest = text.partition("\r\n")
+        return int(status_line.split()[1]), json.loads(rest.split("\r\n\r\n", 1)[1])
+
+    def server(self, allowance=None):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id = Mock(return_value="1045618308")
+        if allowance is not None:
+            server.allowance = allowance
+        return server
+
+    def test_the_lane_is_off_unless_built(self):
+        status, body = self.request("/agent/allowance/status", server=self.server())
+        self.assertEqual(status, 404)
+        self.assertEqual(body["error"], "allowance-disabled")
+
+    def test_a_user_token_is_required(self):
+        allowance = Mock()
+        status, _ = self.request("/agent/allowance/status", server=self.server(allowance), user_token="")
+        self.assertEqual(status, 401)
+        allowance.status.assert_not_called()
+
+    def test_status_and_setup_act_for_the_token_holder(self):
+        allowance = Mock()
+        allowance.status.return_value = {"configured": True, "limiter": "0xabc", "telegramText": "ok"}
+        allowance.setup.return_value = {"created": True, "limiter": "0xabc", "telegramText": "made"}
+        server = self.server(allowance)
+
+        status, body = self.request("/agent/allowance/status", server=server)
+        self.assertEqual((status, body["limiter"]), (200, "0xabc"))
+        allowance.status.assert_called_once_with("1045618308")
+
+        status, body = self.request(
+            "/agent/allowance/setup", {"dailyCap": "100", "perPurchaseCap": "10", "days": "30"}, server=server)
+        self.assertEqual((status, body["created"]), (200, True))
+        allowance.setup.assert_called_once_with("1045618308", "100", "10", "30")
+
+    def test_grant_revoke_and_pause_reach_the_service_for_the_token_holder(self):
+        allowance = Mock()
+        for method in ("grant", "revoke", "pause"):
+            getattr(allowance, method).return_value = {"telegramText": method}
+        server = self.server(allowance)
+
+        self.assertEqual(self.request("/agent/allowance/grant", {"amount": "300"}, server=server)[0], 200)
+        allowance.grant.assert_called_once_with("1045618308", "300")
+        self.assertEqual(self.request("/agent/allowance/revoke", {"limiter": "0xabc"}, server=server)[0], 200)
+        allowance.revoke.assert_called_once_with("1045618308", "0xabc")
+        self.assertEqual(self.request("/agent/allowance/pause", {}, server=server)[0], 200)
+        allowance.pause.assert_called_once_with("1045618308")
+
+    def test_refusals_are_named_and_failures_are_not_leaked(self):
+        from sign402_gateway.agent_allowance import AllowanceError, AllowanceUnavailable
+
+        cases = [
+            (AllowanceUnavailable("not enabled for this account"), 400, "allowance-not-enabled", "not enabled for this account"),
+            (AllowanceError("The per-purchase cap cannot be above the daily cap."), 400, "allowance-refused",
+             "The per-purchase cap cannot be above the daily cap."),
+            (RuntimeError("secret internal detail"), 500, "allowance-failed", "Nothing was signed"),
+        ]
+        for error, code, name, text in cases:
+            with self.subTest(name=name):
+                allowance = Mock()
+                allowance.setup.side_effect = error
+                with patch("sign402_gateway.server.logger"):
+                    status, body = self.request("/agent/allowance/setup", {}, server=self.server(allowance))
+                self.assertEqual((status, body["error"]), (code, name))
+                self.assertIn(text, body["telegramText"])
+                self.assertNotIn("secret internal detail", json.dumps(body))
+
+    def test_limits_add_the_limiter_read_from_the_chain_for_lane_users(self):
+        allowance = Mock()
+        allowance.store.active_limiter.return_value = {"limiter_address": "0xLIMITER"}
+        allowance.status.return_value = {"telegramText": "Trezor allowance\nLeft today: 0.5 USDC"}
+        _, body = self.request("/agent/spending-limits", {}, server=self.server(allowance))
+        self.assertIn("Left today: 0.5 USDC", body["telegramText"])
+
+        allowance.store.active_limiter.return_value = None
+        _, body = self.request("/agent/spending-limits", {}, server=self.server(allowance))
+        self.assertNotIn("Trezor allowance", body["telegramText"])
+
+    def test_health_lists_the_lane_only_when_it_is_on(self):
+        _, off = self.request("/health", server=self.server(), method="GET", user_token="")
+        _, on = self.request("/health", server=self.server(Mock()), method="GET", user_token="")
+        self.assertNotIn("/agent/allowance/setup", off["endpoints"])
+        self.assertIn("/agent/allowance/setup", on["endpoints"])
+        for action in ("status", "grant", "revoke", "pause"):
+            self.assertIn(f"/agent/allowance/{action}", on["endpoints"])
+
+
+class AllowanceBuyToolTests(unittest.TestCase):
+    """/agent/buy-tool for a user on the Trezor allowance lane."""
+
+    REQUIREMENTS = {
+        "scheme": "exact", "network": "base-mainnet", "x402Network": "eip155:8453", "amountAtomic": "5000",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "receiver": "0x8AEE621035D93Deb3C0C1177fac252dC2dd501a0", "paymentIntent": "vet-1",
+        "purpose": "x402_api_access", "extra": {"name": "USD Coin", "version": "2"},
+    }
+
+    def buy(self, server, *, fetch=None):
+        helper = GatewayServerTests()
+        with patch("sys.stderr", io.StringIO()):
+            with (
+                patch("sign402_gateway.server.fetch_x402_payment_required",
+                      side_effect=fetch or (lambda *a, **k: {"x402Version": 2, "accepts": [{}]})),
+                patch("sign402_gateway.server.normalize_x402_payment_required", return_value=dict(self.REQUIREMENTS)),
+            ):
+                handler = helper.make_handler(
+                    "/agent/buy-tool", {"tool": "news", "telegramUserId": "1045618308"},
+                    server=server, headers=helper.llm_auth_headers(),
+                )
+        response = helper.response_text(handler)
+        return response, json.loads(response.split("\r\n\r\n", 1)[1])
+
+    def server(self):
+        server = DummyServer()
+        server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
+        server.event_store = Mock()
+        server.user_event_store = Mock()
+        server.imessage_approval_service.request_purchase_approval.return_value = {
+            "ok": True, "status": "approved", "approvalId": "approval-1", "commitmentHash": "c" * 64,
+        }
+        server.allowance = Mock()
+        server.allowance.lane_for.return_value = {"limiter_address": "0xLIMITER"}
+        return server
+
+    def test_a_lane_user_is_paid_for_by_the_agent_and_never_by_the_custodial_key(self):
+        server = self.server()
+        server.allowance.pay_x402.return_value = {
+            "ok": True, "status": 200, "delivered": True, "settlementTx": "0x" + "ab" * 32,
+            "payer": "0xAGENT", "limiter": "0xLIMITER", "funding": "float", "fundingTx": None,
+            "resourceResult": {"status": 200, "body": {"answer": 42}},
+        }
+        response, body = self.buy(server)
+
+        self.assertIn("HTTP/1.0 200 OK", response)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["mode"], "paid_tool_official_x402_base_allowance")
+        self.assertEqual(body["txId"], "0x" + "ab" * 32)
+        self.assertIn("Paid from your Trezor allowance (float)", body["telegramText"])
+        args = server.allowance.pay_x402.call_args
+        self.assertEqual(args.args[0], "1045618308")
+        self.assertEqual(args.args[3], server.user_x402_buyer.base_payment_client)
+        server.user_x402_buyer.assert_not_called()
+        server.user_wallet_service.decrypt_private_key_for_future_signing.assert_not_called()
+
+    def test_an_unready_lane_refuses_before_the_seller_or_the_owner_is_asked(self):
+        from sign402_gateway.agent_allowance import AllowanceError
+
+        server = self.server()
+        server.allowance.lane_for.side_effect = AllowanceError("Nothing is granted from your Trezor yet.")
+        response, body = self.buy(server, fetch=AssertionError("the seller must not be asked"))
+
+        self.assertIn("400", response.split("\r\n", 1)[0])
+        self.assertEqual(body["decision"], "refused_by_allowance")
+        self.assertIn("Nothing is granted", body["telegramText"])
+        server.imessage_approval_service.request_purchase_approval.assert_not_called()
+        server.allowance.pay_x402.assert_not_called()
+        server.user_x402_buyer.assert_not_called()
+
+    def test_charged_without_delivery_says_so_and_keeps_the_transaction(self):
+        server = self.server()
+        server.allowance.pay_x402.return_value = {
+            "ok": False, "status": 500, "delivered": False, "settlementTx": "0x" + "cd" * 32,
+            "payer": "0xAGENT", "limiter": "0xLIMITER", "funding": "exact 0.005 USDC", "fundingTx": "0xF",
+            "resourceResult": {"status": 500},
+        }
+        response, body = self.buy(server)
+        self.assertFalse(body["ok"])
+        self.assertIn("took the payment", body["error"])
+        self.assertIn("0x" + "cd" * 32, body["error"])
+
+
+class AllowanceBitrefillEndpointTests(unittest.TestCase):
+    """Bitrefill on the Trezor allowance lane: one quote buys one order, a code is shown once."""
+
+    def setUp(self):
+        from sign402_gateway.agent_allowance import AllowanceStore
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.server = DummyServer()
+        self.server.user_wallet_service.resolve_telegram_user_id.return_value = "1045618308"
+        self.server.user_event_store = Mock()
+        self.server.imessage_approval_service.request_purchase_approval.return_value = {
+            "ok": True, "status": "approved", "approvalId": "approval-1",
+        }
+        self.server.allowance = Mock()
+        self.server.allowance.lane_for.return_value = {"limiter_address": "0xLIMITER"}
+        self.server.allowance.store = AllowanceStore(Path(self.tmp.name) / "allowance.db")
+        self.server.allowance_bitrefill = Mock()
+        self.server.allowance_bitrefill.quote.return_value = {
+            "slug": "hediyen", "name": "Hediyen Kart", "package": "1", "packageCurrency": "TRY",
+            "priceUsd": "0.02", "priceAtomic": 20_000,
+        }
+        self.server.allowance_bitrefill.buy.return_value = {
+            "ok": True, "mode": "bitrefill_x402_allowance", "invoiceId": "inv-9", "productName": "Hediyen Kart",
+            "priceUsd": "0.02", "amountAtomic": 20_000, "txId": "0x" + "ab" * 32, "telegramText": "Bought.",
+        }
+        # The user raised their gateway limits: they apply on this lane too.
+        self.server.user_spend_limit_store.limit_settings.return_value = dict(
+            self.server.user_spend_limit_store.limit_settings.return_value,
+            maxPerTxAtomic=1_000_000, dailyCapAtomic=5_000_000, maxPerTxUsdc="1", dailyCapUsdc="5",
+        )
+        self.http = AllowanceEndpointTests()
+
+    def call(self, action, body=None):
+        return self.http.request(f"/agent/allowance/{action}", body or {}, server=self.server)
+
+    def quote(self):
+        status, body = self.call("bitrefill-quote", {"productId": "hediyen", "package": "1"})
+        self.assertEqual(status, 200)
+        return body["quoteId"]
+
+    def test_a_quote_buys_exactly_one_order_at_the_quoted_price(self):
+        quote_id = self.quote()
+        status, body = self.call("bitrefill-buy", {"quoteId": quote_id})
+        self.assertEqual((status, body["invoiceId"]), (200, "inv-9"))
+        self.server.allowance_bitrefill.buy.assert_called_once_with("1045618308", "hediyen", "1", 20_000)
+        self.server.user_event_store.write.assert_called_once()
+
+        status, body = self.call("bitrefill-buy", {"quoteId": quote_id})
+        self.assertEqual(status, 400)
+        self.assertIn("already used", body["telegramText"])
+        self.assertEqual(self.server.allowance_bitrefill.buy.call_count, 1)
+
+    def test_the_x402_route_is_its_own_merchant_in_spending_memory(self):
+        """Live: under the shared "bitrefill" name, 23 earlier orders to the
+        settlement address made the first x402 order read as payout drift."""
+        from sign402_gateway import server as gateway
+        seen = []
+        real = gateway._reserve_user_wallet_spend
+        with patch("sign402_gateway.server._reserve_user_wallet_spend",
+                   side_effect=lambda server, user_id, requirement, **kw: seen.append(requirement)
+                   or real(server, user_id, requirement, **kw)):
+            status, _ = self.call("bitrefill-buy", {"quoteId": self.quote()})
+        self.assertEqual(status, 200)
+        self.assertEqual((seen[0]["merchant"], seen[0]["resource"]), ("bitrefill:x402", "bitrefill:x402"))
+        self.assertEqual(seen[0]["payTo"], gateway.BITREFILL_X402_PAY_TO)
+        self.assertNotEqual(gateway.BITREFILL_X402_MERCHANT, gateway.BITREFILL_MERCHANT)
+
+    def test_an_expired_or_foreign_quote_buys_nothing(self):
+        quote_id = self.quote()
+        with patch("sign402_gateway.server.time.time", return_value=time.time() + 601):
+            status, body = self.call("bitrefill-buy", {"quoteId": quote_id})
+        self.assertIn("expired", body["telegramText"])
+        status, body = self.call("bitrefill-buy", {"quoteId": "aq_not_mine"})
+        self.assertIn("not yours", body["telegramText"])
+        self.server.allowance_bitrefill.buy.assert_not_called()
+
+    def test_the_gateway_limits_still_apply_and_say_why(self):
+        self.server.user_spend_limit_store.limit_settings.return_value = dict(
+            self.server.user_spend_limit_store.limit_settings.return_value,
+            maxPerTxAtomic=10_000, maxPerTxUsdc="0.01",
+        )
+        status, body = self.call("bitrefill-buy", {"quoteId": self.quote()})
+        self.assertEqual(status, 400)
+        self.assertIn("your limit is 0.01 USDC per transaction", body["telegramText"])
+        self.server.allowance_bitrefill.buy.assert_not_called()
+
+    def test_a_memory_block_is_named_and_nothing_is_bought(self):
+        from sign402_gateway.server import SpendingBlocked
+
+        quote_id = self.quote()
+        decision = Mock(rule="repeated_escalations", reason="bitrefill is off until you look at it", evidence={})
+        with patch("sign402_gateway.server._reserve_user_wallet_spend", side_effect=SpendingBlocked(decision)):
+            status, body = self.call("bitrefill-buy", {"quoteId": quote_id})
+        self.assertEqual((status, body["decision"]), (400, "blocked_by_memory"))
+        self.assertIn("off until you look", body["telegramText"])
+        self.server.allowance_bitrefill.buy.assert_not_called()
+
+    def test_the_code_is_shown_once_and_a_pending_one_can_be_asked_again(self):
+        from sign402_gateway.server import _last_bitrefill_purchase_response
+
+        event = {"ok": True, "mode": "bitrefill_x402_allowance", "invoiceId": "inv-9", "productName": "Hediyen Kart"}
+        self.server.allowance_bitrefill.redemption.return_value = None
+        first = _last_bitrefill_purchase_response(self.server, event, "1045618308")
+        self.assertIn("still being delivered", first["telegramText"])
+
+        self.server.allowance_bitrefill.redemption.return_value = {"code": "CODE-123", "other": ""}
+        second = _last_bitrefill_purchase_response(self.server, event, "1045618308")
+        self.assertIn("code: CODE-123", second["telegramText"])
+        self.assertNotIn("other", second["telegramText"])
+
+        third = _last_bitrefill_purchase_response(self.server, event, "1045618308")
+        self.assertIn("shown once", third["telegramText"])
+        self.assertNotIn("CODE-123", third["telegramText"])
+        self.assertEqual(self.server.allowance_bitrefill.redemption.call_count, 2)

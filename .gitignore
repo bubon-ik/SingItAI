@@ -70,3 +70,6 @@ Sign402 X Longform Post.md
 
 # …but not its installed dependencies.
 tools/ledger-approve/node_modules/
+
+# Solana runtime state (wallets and payment journals)
+.local/

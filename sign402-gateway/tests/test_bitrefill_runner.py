@@ -239,7 +239,7 @@ class BitrefillRunnerTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("✅ Wolt Czech Republic 500 CZK is ready.", text)
+        self.assertIn("✅ Wolt Czech Republic 500 CZK\nPayment complete · Base", text)
         self.assertNotIn("$500", text)
 
     def test_delivery_telegram_text_uses_product_currency_for_local_denomination(self):
@@ -1419,10 +1419,10 @@ class BitrefillRunnerTests(unittest.TestCase):
             self.assertEqual(metadata["recipient"], {"email": "buyer@example.com"})
             self.assertNotIn("fulfill_secret_1", str(metadata))
             self.assertIn(
-                "✅ Test Gift Card Link $1 is ready.",
+                "✅ Test Gift Card Link $1\nPayment complete · Base",
                 result["telegramText"],
             )
-            self.assertIn("paid with SINGIT", result["telegramText"])
+            self.assertIn("Payment complete · Base", result["telegramText"])
             self.assertNotIn("x402", result["telegramText"].lower())
             self.assertNotIn("invoice", result["telegramText"].lower())
             self.assertNotIn("usdc", result["telegramText"].lower())
@@ -1688,8 +1688,10 @@ class BitrefillRunnerTests(unittest.TestCase):
             self.assertEqual(result["fulfillmentToken"], "wallet_fulfill_secret_1")
             self.assertEqual(result["walletCheckout"]["paymentApprovalHash"], expected_hash)
             self.assertEqual(result["walletCheckout"]["userFunding"]["fromWallet"], "0xAc4aCb03cAdaFE1d68262cf94cD5E8B56d9bf45C")
-            self.assertIn("Paid from 0xAc4a...f45C", result["telegramText"])
-            self.assertIn("Use /last_purchase to reveal your code", result["telegramText"])
+            self.assertIn("Payment complete · Base", result["telegramText"])
+            self.assertEqual(result["receipt"]["network"], "Base")
+            self.assertEqual(result["receipt"]["paid"], "101 SINGIT")
+            self.assertIn("Open /purchases for your receipt and code", result["telegramText"])
             self.assertNotIn("bankr", result)
             self.assertEqual(len(funding.calls), 1)
             self.assertEqual(len(user_funding.calls), 1)
@@ -1712,7 +1714,7 @@ class BitrefillRunnerTests(unittest.TestCase):
             self.assertIn("Paid from: 0xAc4a...f45C", context_lines)
             self.assertIn("Expires: 2 minutes", context_lines)
             self.assertIn("Spent: 101 SINGIT", result["telegramText"])
-            self.assertIn("Transfer tx: https://basescan.org/tx/0xUSERTRANSFER", result["telegramText"])
+            self.assertIn("Transaction: https://basescan.org/tx/0xUSERTRANSFER", result["telegramText"])
 
     def test_wallet_runner_prepares_invoice_before_user_transfer_and_swap(self):
         with tempfile.TemporaryDirectory() as tmp:

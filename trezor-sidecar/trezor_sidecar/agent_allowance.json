@@ -1,0 +1,480 @@
+{
+ "abi": [
+  {
+   "inputs": [
+    {
+     "internalType": "contract IERC20",
+     "name": "token_",
+     "type": "address"
+    },
+    {
+     "internalType": "address",
+     "name": "owner_",
+     "type": "address"
+    },
+    {
+     "internalType": "address",
+     "name": "agent_",
+     "type": "address"
+    },
+    {
+     "internalType": "address",
+     "name": "guardian_",
+     "type": "address"
+    },
+    {
+     "internalType": "uint256",
+     "name": "dailyCap_",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "perPurchaseCap_",
+     "type": "uint256"
+    },
+    {
+     "internalType": "uint256",
+     "name": "expiry_",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "nonpayable",
+   "type": "constructor"
+  },
+  {
+   "inputs": [],
+   "name": "agent",
+   "outputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "allowanceLeft",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "dailyCap",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "day",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "expiry",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "guardian",
+   "outputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "owner",
+   "outputs": [
+    {
+     "internalType": "address",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "pause",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "paused",
+   "outputs": [
+    {
+     "internalType": "bool",
+     "name": "",
+     "type": "bool"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "perPurchaseCap",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "remainingToday",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "address",
+     "name": "payee",
+     "type": "address"
+    },
+    {
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    },
+    {
+     "internalType": "bytes32",
+     "name": "ref",
+     "type": "bytes32"
+    }
+   ],
+   "name": "spend",
+   "outputs": [],
+   "stateMutability": "nonpayable",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "spentToday",
+   "outputs": [
+    {
+     "internalType": "uint256",
+     "name": "",
+     "type": "uint256"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [],
+   "name": "token",
+   "outputs": [
+    {
+     "internalType": "contract IERC20",
+     "name": "",
+     "type": "address"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "inputs": [
+    {
+     "internalType": "bytes32",
+     "name": "",
+     "type": "bytes32"
+    }
+   ],
+   "name": "usedRef",
+   "outputs": [
+    {
+     "internalType": "bool",
+     "name": "",
+     "type": "bool"
+    }
+   ],
+   "stateMutability": "view",
+   "type": "function"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "by",
+     "type": "address"
+    }
+   ],
+   "name": "Paused",
+   "type": "event"
+  },
+  {
+   "anonymous": false,
+   "inputs": [
+    {
+     "indexed": true,
+     "internalType": "bytes32",
+     "name": "ref",
+     "type": "bytes32"
+    },
+    {
+     "indexed": true,
+     "internalType": "address",
+     "name": "payee",
+     "type": "address"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "amount",
+     "type": "uint256"
+    },
+    {
+     "indexed": false,
+     "internalType": "uint256",
+     "name": "spentToday",
+     "type": "uint256"
+    }
+   ],
+   "name": "Spent",
+   "type": "event"
+  },
+  {
+   "inputs": [],
+   "name": "DailyCapExceeded",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "Expired",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "InvalidConfig",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "InvalidPayee",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "InvalidRef",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "IsPaused",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "NotAgent",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "NotGuardian",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "PerPurchaseCapExceeded",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "RefUsed",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "TransferFailed",
+   "type": "error"
+  },
+  {
+   "inputs": [],
+   "name": "ZeroAmount",
+   "type": "error"
+  }
+ ],
+ "bytecode": "0x61016060405234801562000011575f80fd5b5060405162000e4138038062000e4183398101604081905262000034916200015e565b6001600160a01b03871615806200005257506001600160a01b038616155b806200006557506001600160a01b038516155b806200007857506001600160a01b038416155b80620000955750846001600160a01b0316866001600160a01b0316145b80620000b25750836001600160a01b0316866001600160a01b0316145b80620000cf5750836001600160a01b0316856001600160a01b0316145b80620000d9575081155b80620000e457508282115b80620000f05750428111155b156200010f576040516306b7c75960e31b815260040160405180910390fd5b6001600160a01b0396871660805294861660a05292851660c052931660e052610100929092526101209190915261014052620001e0565b6001600160a01b03811681146200015b575f80fd5b50565b5f805f805f805f60e0888a03121562000175575f80fd5b8751620001828162000146565b6020890151909750620001958162000146565b6040890151909650620001a88162000146565b6060890151909550620001bb8162000146565b809450506080880151925060a0880151915060c0880151905092959891949750929550565b60805160a05160c05160e051610100516101205161014051610bb56200028c5f395f81816102120152818161046e01526109d001525f818160f901526105c501525f8181610239015281816106c40152610a2601525f818161013301526102d201525f818161026901526103d901525f81816101d00152818161031301528181610505015281816107ab015261092201525f8181610290015281816107e201526109520152610bb55ff3fe608060405234801561000f575f80fd5b50600436106100f0575f3560e01c8063a9f05de611610093578063f059cf2b11610063578063f059cf2b1461025b578063f5ff5c7614610264578063fc0c546a1461028b578063fc3c5515146102b2575f80fd5b8063a9f05de6146101f2578063dd2bc93d14610205578063e184c9be1461020d578063eb33939114610234575f80fd5b80635c975abb116100ce5780635c975abb146101ac5780637b76ac91146101b85780638456cb59146101c15780638da5cb5b146101cb575f80fd5b806301c6c58a146100f4578063452a93201461012e57806357d2ee401461017a575b5f80fd5b61011b7f000000000000000000000000000000000000000000000000000000000000000081565b6040519081526020015b60405180910390f35b6101557f000000000000000000000000000000000000000000000000000000000000000081565b60405173ffffffffffffffffffffffffffffffffffffffff9091168152602001610125565b61019c610188366004610a50565b60036020525f908152604090205460ff1681565b6040519015158152602001610125565b5f5461019c9060ff1681565b61011b60015481565b6101c96102ba565b005b6101557f000000000000000000000000000000000000000000000000000000000000000081565b6101c9610200366004610a67565b6103c1565b61011b6108e5565b61011b7f000000000000000000000000000000000000000000000000000000000000000081565b61011b7f000000000000000000000000000000000000000000000000000000000000000081565b61011b60025481565b6101557f000000000000000000000000000000000000000000000000000000000000000081565b6101557f000000000000000000000000000000000000000000000000000000000000000081565b61011b6109c2565b3373ffffffffffffffffffffffffffffffffffffffff7f0000000000000000000000000000000000000000000000000000000000000000161480159061033657503373ffffffffffffffffffffffffffffffffffffffff7f00000000000000000000000000000000000000000000000000000000000000001614155b1561036d576040517fef6d0f0200000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b5f80547fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0016600117815560405133917f62e78cea01bee320cd4e420270b5ea74000d11b0c9f74754ebdbfc544b05a25891a2565b3373ffffffffffffffffffffffffffffffffffffffff7f00000000000000000000000000000000000000000000000000000000000000001614610430576040517f0d9ab13f00000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b5f5460ff161561046c576040517f1309a56300000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b7f000000000000000000000000000000000000000000000000000000000000000042106104c5576040517f203d82d800000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b73ffffffffffffffffffffffffffffffffffffffff831615806104fd575073ffffffffffffffffffffffffffffffffffffffff831630145b8061055357507f000000000000000000000000000000000000000000000000000000000000000073ffffffffffffffffffffffffffffffffffffffff168373ffffffffffffffffffffffffffffffffffffffff16145b1561058a576040517fb387a23800000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b815f036105c3576040517f1f2a200500000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b7f000000000000000000000000000000000000000000000000000000000000000082111561061d576040517f80b5d3c800000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b80610654576040517fe97d945b00000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b5f8181526003602052604090205460ff161561069c576040517fac0292f000000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b5f6106aa6201518042610ade565b90505f60015482146106bc575f6106c0565b6002545b90507f00000000000000000000000000000000000000000000000000000000000000006106ed8583610b16565b1115610725576040517fcc70389d00000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b5f83815260036020526040902080547fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0016600190811790915582905561076b8482610b16565b6002556040517f23b872dd00000000000000000000000000000000000000000000000000000000815273ffffffffffffffffffffffffffffffffffffffff7f0000000000000000000000000000000000000000000000000000000000000000811660048301528681166024830152604482018690527f000000000000000000000000000000000000000000000000000000000000000016906323b872dd906064016020604051808303815f875af1158015610828573d5f803e3d5ffd5b505050506040513d601f19601f8201168201806040525081019061084c9190610b2f565b610882576040517f90b8ec1800000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b73ffffffffffffffffffffffffffffffffffffffff8516837f540c552375df23f46a860eead8c3d4751224ee80eb6571ac92c5df2364bf2546866108c68186610b16565b6040805192835260208301919091520160405180910390a35050505050565b6040517fdd62ed3e00000000000000000000000000000000000000000000000000000000815273ffffffffffffffffffffffffffffffffffffffff7f0000000000000000000000000000000000000000000000000000000000000000811660048301523060248301525f917f00000000000000000000000000000000000000000000000000000000000000009091169063dd62ed3e90604401602060405180830381865afa158015610999573d5f803e3d5ffd5b505050506040513d601f19601f820116820180604052508101906109bd9190610b55565b905090565b5f805460ff16806109f357507f00000000000000000000000000000000000000000000000000000000000000004210155b156109fd57505f90565b6001545f90610a0f6201518042610ade565b14610a1a575f610a1e565b6002545b9050610a4a817f0000000000000000000000000000000000000000000000000000000000000000610b6c565b91505090565b5f60208284031215610a60575f80fd5b5035919050565b5f805f60608486031215610a79575f80fd5b833573ffffffffffffffffffffffffffffffffffffffff81168114610a9c575f80fd5b95602085013595506040909401359392505050565b7f4e487b71000000000000000000000000000000000000000000000000000000005f52601160045260245ffd5b5f82610b11577f4e487b71000000000000000000000000000000000000000000000000000000005f52601260045260245ffd5b500490565b80820180821115610b2957610b29610ab1565b92915050565b5f60208284031215610b3f575f80fd5b81518015158114610b4e575f80fd5b9392505050565b5f60208284031215610b65575f80fd5b5051919050565b81810381811115610b2957610b29610ab156fea26469706673582212206b222072488da94dfcb039c74060650ef39f1447e9a293adc70cdfed35d056bf64736f6c63430008180033",
+ "compilerVersion": "v0.8.24+commit.e11b9ed9",
+ "contractName": "AgentAllowance",
+ "deployedBytecode": "0x608060405234801561000f575f80fd5b50600436106100f0575f3560e01c8063a9f05de611610093578063f059cf2b11610063578063f059cf2b1461025b578063f5ff5c7614610264578063fc0c546a1461028b578063fc3c5515146102b2575f80fd5b8063a9f05de6146101f2578063dd2bc93d14610205578063e184c9be1461020d578063eb33939114610234575f80fd5b80635c975abb116100ce5780635c975abb146101ac5780637b76ac91146101b85780638456cb59146101c15780638da5cb5b146101cb575f80fd5b806301c6c58a146100f4578063452a93201461012e57806357d2ee401461017a575b5f80fd5b61011b7f000000000000000000000000000000000000000000000000000000000000000081565b6040519081526020015b60405180910390f35b6101557f000000000000000000000000000000000000000000000000000000000000000081565b60405173ffffffffffffffffffffffffffffffffffffffff9091168152602001610125565b61019c610188366004610a50565b60036020525f908152604090205460ff1681565b6040519015158152602001610125565b5f5461019c9060ff1681565b61011b60015481565b6101c96102ba565b005b6101557f000000000000000000000000000000000000000000000000000000000000000081565b6101c9610200366004610a67565b6103c1565b61011b6108e5565b61011b7f000000000000000000000000000000000000000000000000000000000000000081565b61011b7f000000000000000000000000000000000000000000000000000000000000000081565b61011b60025481565b6101557f000000000000000000000000000000000000000000000000000000000000000081565b6101557f000000000000000000000000000000000000000000000000000000000000000081565b61011b6109c2565b3373ffffffffffffffffffffffffffffffffffffffff7f0000000000000000000000000000000000000000000000000000000000000000161480159061033657503373ffffffffffffffffffffffffffffffffffffffff7f00000000000000000000000000000000000000000000000000000000000000001614155b1561036d576040517fef6d0f0200000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b5f80547fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0016600117815560405133917f62e78cea01bee320cd4e420270b5ea74000d11b0c9f74754ebdbfc544b05a25891a2565b3373ffffffffffffffffffffffffffffffffffffffff7f00000000000000000000000000000000000000000000000000000000000000001614610430576040517f0d9ab13f00000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b5f5460ff161561046c576040517f1309a56300000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b7f000000000000000000000000000000000000000000000000000000000000000042106104c5576040517f203d82d800000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b73ffffffffffffffffffffffffffffffffffffffff831615806104fd575073ffffffffffffffffffffffffffffffffffffffff831630145b8061055357507f000000000000000000000000000000000000000000000000000000000000000073ffffffffffffffffffffffffffffffffffffffff168373ffffffffffffffffffffffffffffffffffffffff16145b1561058a576040517fb387a23800000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b815f036105c3576040517f1f2a200500000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b7f000000000000000000000000000000000000000000000000000000000000000082111561061d576040517f80b5d3c800000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b80610654576040517fe97d945b00000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b5f8181526003602052604090205460ff161561069c576040517fac0292f000000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b5f6106aa6201518042610ade565b90505f60015482146106bc575f6106c0565b6002545b90507f00000000000000000000000000000000000000000000000000000000000000006106ed8583610b16565b1115610725576040517fcc70389d00000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b5f83815260036020526040902080547fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0016600190811790915582905561076b8482610b16565b6002556040517f23b872dd00000000000000000000000000000000000000000000000000000000815273ffffffffffffffffffffffffffffffffffffffff7f0000000000000000000000000000000000000000000000000000000000000000811660048301528681166024830152604482018690527f000000000000000000000000000000000000000000000000000000000000000016906323b872dd906064016020604051808303815f875af1158015610828573d5f803e3d5ffd5b505050506040513d601f19601f8201168201806040525081019061084c9190610b2f565b610882576040517f90b8ec1800000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b73ffffffffffffffffffffffffffffffffffffffff8516837f540c552375df23f46a860eead8c3d4751224ee80eb6571ac92c5df2364bf2546866108c68186610b16565b6040805192835260208301919091520160405180910390a35050505050565b6040517fdd62ed3e00000000000000000000000000000000000000000000000000000000815273ffffffffffffffffffffffffffffffffffffffff7f0000000000000000000000000000000000000000000000000000000000000000811660048301523060248301525f917f00000000000000000000000000000000000000000000000000000000000000009091169063dd62ed3e90604401602060405180830381865afa158015610999573d5f803e3d5ffd5b505050506040513d601f19601f820116820180604052508101906109bd9190610b55565b905090565b5f805460ff16806109f357507f00000000000000000000000000000000000000000000000000000000000000004210155b156109fd57505f90565b6001545f90610a0f6201518042610ade565b14610a1a575f610a1e565b6002545b9050610a4a817f0000000000000000000000000000000000000000000000000000000000000000610b6c565b91505090565b5f60208284031215610a60575f80fd5b5035919050565b5f805f60608486031215610a79575f80fd5b833573ffffffffffffffffffffffffffffffffffffffff81168114610a9c575f80fd5b95602085013595506040909401359392505050565b7f4e487b71000000000000000000000000000000000000000000000000000000005f52601160045260245ffd5b5f82610b11577f4e487b71000000000000000000000000000000000000000000000000000000005f52601260045260245ffd5b500490565b80820180821115610b2957610b29610ab1565b92915050565b5f60208284031215610b3f575f80fd5b81518015158114610b4e575f80fd5b9392505050565b5f60208284031215610b65575f80fd5b5051919050565b81810381811115610b2957610b29610ab156fea26469706673582212206b222072488da94dfcb039c74060650ef39f1447e9a293adc70cdfed35d056bf64736f6c63430008180033",
+ "immutableRanges": [
+  [
+   249,
+   32
+  ],
+  [
+   307,
+   32
+  ],
+  [
+   464,
+   32
+  ],
+  [
+   530,
+   32
+  ],
+  [
+   569,
+   32
+  ],
+  [
+   617,
+   32
+  ],
+  [
+   656,
+   32
+  ],
+  [
+   722,
+   32
+  ],
+  [
+   787,
+   32
+  ],
+  [
+   985,
+   32
+  ],
+  [
+   1134,
+   32
+  ],
+  [
+   1285,
+   32
+  ],
+  [
+   1477,
+   32
+  ],
+  [
+   1732,
+   32
+  ],
+  [
+   1963,
+   32
+  ],
+  [
+   2018,
+   32
+  ],
+  [
+   2338,
+   32
+  ],
+  [
+   2386,
+   32
+  ],
+  [
+   2512,
+   32
+  ],
+  [
+   2598,
+   32
+  ]
+ ],
+ "sourcePath": "agent-allowance/src/AgentAllowance.sol",
+ "sourceSha256": "5c56a93042cd61bf066925a2eaa84d86cfb88737ff92db6d1ab4f74cfd7babf6",
+ "standardJsonInput": {
+  "language": "Solidity",
+  "settings": {
+   "evmVersion": "cancun",
+   "libraries": {},
+   "metadata": {
+    "appendCBOR": true,
+    "bytecodeHash": "ipfs",
+    "useLiteralContent": false
+   },
+   "optimizer": {
+    "enabled": true,
+    "runs": 10000
+   },
+   "outputSelection": {
+    "*": {
+     "*": [
+      "abi",
+      "evm.bytecode.object",
+      "evm.bytecode.sourceMap",
+      "evm.bytecode.linkReferences",
+      "evm.deployedBytecode.object",
+      "evm.deployedBytecode.sourceMap",
+      "evm.deployedBytecode.linkReferences",
+      "evm.deployedBytecode.immutableReferences",
+      "evm.methodIdentifiers",
+      "metadata"
+     ]
+    }
+   },
+   "viaIR": false
+  },
+  "sources": {
+   "src/AgentAllowance.sol": {
+    "content": "// SPDX-License-Identifier: MIT\npragma solidity 0.8.24;\n\n/// The two ERC-20 functions the limiter uses. The token is USDC, which returns\n/// `true` or reverts, so a checked call is enough and no wrapper library is\n/// pulled in.\ninterface IERC20 {\n    function transferFrom(address from, address to, uint256 amount) external returns (bool);\n    function allowance(address holder, address spender) external view returns (uint256);\n}\n\n/// A spending limit the agent cannot exceed. Design: docs/trezor-allowance-v1.md.\n///\n/// The owner's USDC stay at the owner's hardware-wallet address. The owner\n/// grants this contract an ERC-20 allowance with one `approve` from the device;\n/// the agent can then move the owner's USDC to a payee only through `spend`,\n/// within caps fixed at deployment.\n///\n/// It holds no tokens, ever: each purchase goes from the owner to the payee in\n/// one `transferFrom`. There is nothing here to strand and nothing to steal.\n///\n/// Nothing can change after deployment \u2014 no admin, no proxy, no setter. To\n/// change the policy, deploy a new limiter, approve it, and approve the old one\n/// down to zero. That keeps every device interaction an ERC-20 `approve`, which\n/// the Trezor renders readably (check T2), instead of a call to an unknown\n/// contract, which it would show as raw data.\ncontract AgentAllowance {\n    IERC20 public immutable token;\n    address public immutable owner;\n    address public immutable agent;\n    address public immutable guardian;\n    uint256 public immutable dailyCap;\n    uint256 public immutable perPurchaseCap;\n    uint256 public immutable expiry;\n\n    bool public paused;\n    uint256 public day;\n    uint256 public spentToday;\n    mapping(bytes32 => bool) public usedRef;\n\n    event Spent(bytes32 indexed ref, address indexed payee, uint256 amount, uint256 spentToday);\n    event Paused(address indexed by);\n\n    error InvalidConfig();\n    error NotAgent();\n    error NotGuardian();\n    error IsPaused();\n    error Expired();\n    error InvalidPayee();\n    error ZeroAmount();\n    error InvalidRef();\n    error RefUsed();\n    error PerPurchaseCapExceeded();\n    error DailyCapExceeded();\n    error TransferFailed();\n\n    constructor(\n        IERC20 token_,\n        address owner_,\n        address agent_,\n        address guardian_,\n        uint256 dailyCap_,\n        uint256 perPurchaseCap_,\n        uint256 expiry_\n    ) {\n        if (\n            address(token_) == address(0) || owner_ == address(0) || agent_ == address(0)\n                || guardian_ == address(0) || owner_ == agent_ || owner_ == guardian_\n                || agent_ == guardian_ || perPurchaseCap_ == 0 || perPurchaseCap_ > dailyCap_\n                || expiry_ <= block.timestamp\n        ) revert InvalidConfig();\n        token = token_;\n        owner = owner_;\n        agent = agent_;\n        guardian = guardian_;\n        dailyCap = dailyCap_;\n        perPurchaseCap = perPurchaseCap_;\n        expiry = expiry_;\n    }\n\n    /// The only function that moves money: `amount` of the owner's tokens to\n    /// `payee`, once per `ref`, inside the caps.\n    ///\n    /// State is written before the transfer, so a payee that re-entered could\n    /// not spend the same budget twice. A transfer that fails reverts the whole\n    /// call, so a failed purchase consumes neither budget nor `ref`.\n    function spend(address payee, uint256 amount, bytes32 ref) external {\n        if (msg.sender != agent) revert NotAgent();\n        if (paused) revert IsPaused();\n        if (block.timestamp >= expiry) revert Expired();\n        if (payee == address(0) || payee == address(this) || payee == owner) revert InvalidPayee();\n        if (amount == 0) revert ZeroAmount();\n        if (amount > perPurchaseCap) revert PerPurchaseCapExceeded();\n        if (ref == bytes32(0)) revert InvalidRef();\n        if (usedRef[ref]) revert RefUsed();\n\n        // The window resets at UTC midnight, not on a rolling 24 hours: a burst\n        // at 23:59 and another at 00:01 spend two caps in two minutes. The\n        // allowance, not this counter, bounds the worst case.\n        uint256 today = block.timestamp / 1 days;\n        uint256 spent = today == day ? spentToday : 0;\n        if (spent + amount > dailyCap) revert DailyCapExceeded();\n\n        usedRef[ref] = true;\n        day = today;\n        spentToday = spent + amount;\n\n        if (!token.transferFrom(owner, payee, amount)) revert TransferFailed();\n        emit Spent(ref, payee, amount, spent + amount);\n    }\n\n    /// Stops all spending, permanently. There is no unpause: resuming means a\n    /// new limiter and a new `approve`, which the owner reads on the device.\n    /// The guardian is a hot key that can do this and nothing else, so an\n    /// incident can be contained without the owner finding the hardware wallet.\n    function pause() external {\n        if (msg.sender != guardian && msg.sender != owner) revert NotGuardian();\n        paused = true;\n        emit Paused(msg.sender);\n    }\n\n    /// What the agent may still spend today under the caps. The allowance and\n    /// the owner's balance can each be lower; the gateway reads all three.\n    function remainingToday() external view returns (uint256) {\n        if (paused || block.timestamp >= expiry) return 0;\n        uint256 spent = block.timestamp / 1 days == day ? spentToday : 0;\n        return dailyCap - spent;\n    }\n\n    /// The ERC-20 allowance left: the hard ceiling on everything this contract\n    /// can ever move, enforced by the token, not by this code.\n    function allowanceLeft() external view returns (uint256) {\n        return token.allowance(owner, address(this));\n    }\n}\n"
+   }
+  }
+ }
+}

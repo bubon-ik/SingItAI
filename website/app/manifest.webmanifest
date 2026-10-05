@@ -1,0 +1,16 @@
+{
+  "id": "/app/",
+  "name": "SingIt",
+  "short_name": "SingIt",
+  "description": "Give your AI agent a spending limit from your own wallet. Your money stays with you; the agent buys inside the limit.",
+  "start_url": "/app/",
+  "scope": "/app/",
+  "display": "standalone",
+  "background_color": "#f4f2f0",
+  "theme_color": "#f4f2f0",
+  "icons": [
+    { "src": "/assets/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/assets/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/assets/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

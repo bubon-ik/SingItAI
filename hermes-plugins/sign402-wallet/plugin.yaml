@@ -1,7 +1,7 @@
 name: sign402-wallet
 kind: standalone
 version: 0.1.0
-description: Trusted Telegram commands for managed Sign402 Base wallets
+description: Trusted Telegram commands for managed Sign402 Base and Solana wallets
 provides_hooks:
   - pre_gateway_dispatch
 requires_env:
