@@ -355,6 +355,24 @@ COUNTRY_NAMES = (
     ("AE", r"emirates|\buae\b|\bоаэ\b|dubai|дуба[йея]|abu dhabi"),
     ("TH", r"thailand|таиланд|тайланд|bangkok|бангкок|phuket|пхукет"),
     ("TR", r"turkey|türkiye|турци|istanbul|стамбул|antalya|анталь"),
+    # Latin America and other places people write from: "Buenos Ares" (a typo) is still Argentina.
+    ("AR", r"argentin|аргентин|\bbuenos\s?a|буэнос|mendoza|bariloche"),
+    ("BR", r"brazil|brasil|бразил|s[ãa]o paulo|сан-паулу|rio de janeiro|рио-де-жанейро|florian[óo]polis"),
+    ("MX", r"mexic|méxico|мексик|canc[úu]n|канкун|guadalajara|monterrey|tulum|playa del carmen"),
+    ("CL", r"\b(?:in|from|to) chile\b|\bв чили\b|santiago de chile|valpara[íi]so"),  # "chile" alone is often the pepper
+    ("CO", r"colombi|колумби|bogot[áa]|богот|medell[íi]n|медельин"),
+    ("PE", r"\bper[úu]\b|перу\b|\blima\b|cusco|cuzco"),
+    ("UY", r"uruguay|уругва|montevideo|монтевидео"),
+    ("CA", r"canada|канад|toronto|торонто|vancouver|ванкувер|montr[ée]al"),
+    ("AU", r"australi|австрал|sydney|сидне|melbourne|мельбурн"),
+    ("JP", r"japan|япони|tokyo|токио|osaka|осака|kyoto"),
+    ("ID", r"indonesi|индонези|\bbali\b|\bбали\b|jakarta"),
+    ("VN", r"vietnam|viet nam|вьетнам|hanoi|ханой|saigon|ho chi minh|da nang"),
+    ("GE", r"tbilisi|тбилиси|batumi|батуми|грузи[яию]\b"),  # not "загрузить"
+    ("AM", r"armenia|армени|yerevan|ереван"),
+    ("RS", r"serbia|srbij|серби|belgrade|beograd|белград"),
+    ("CY", r"cyprus|кипр|limassol|лимассол|larnaca|ларнак"),
+    ("KZ", r"kazakh|казах|almaty|алмат|astana|астан[аеуы]\b"),
 )
 
 
@@ -1350,8 +1368,12 @@ class WebAgent:
             query = ""  # "pizza" is not a shop: browse the kind of shop instead
             if not country:
                 self._ask_where(text, intent)
-                return say(lang, "In which country? Then I'll look for gift cards that pay for it there.",
-                           "В какой стране? Тогда поищу подарочные карты, которыми можно за это заплатить."), []
+                # Said when the place was not understood (the model too slow, a city the list does not know),
+                # so it owns that rather than sounding as if the message was never read.
+                return say(lang, "I couldn't tell where you are. In which country? Then I'll look for gift cards "
+                                 "that pay for it there.",
+                           "Не понял, где вы. В какой стране? Тогда поищу подарочные карты, которыми можно "
+                           "за это заплатить."), []
         elif not query and not country:
             self._ask_where(text, intent)
             return say(lang, "Which brand or store, and in which country? For example: \"Steam gift card in Germany\".",

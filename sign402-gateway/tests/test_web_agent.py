@@ -236,6 +236,27 @@ class AgentTests(unittest.TestCase):
             message = self.send("я хочу заказать еду в Чехии", "food")
             self.assertNotIn("places", message["cards"][0])
 
+    def test_a_slow_model_and_a_typo_still_find_buenos_aires(self):
+        # Production: "Buenos Ares" on Base, the model timed out, Jev named no country, and the list had no
+        # Latin America, so the agent asked which country.
+        self.hints = {}
+        self.model_replies = ["(no answer)"]
+        message = self.send("hello, im in Buenos Ares and im hungry, and my card dosent works", "food")
+        self.assertEqual(self.shop.calls[0][2]["country"], "AR")
+        self.assertNotIn("which country", message["text"].lower())
+
+    def test_the_last_resort_country_list_reads_places_not_words(self):
+        found = {"I'm in Buenos Aires": "AR", "я в Буэнос-Айресе, хочу есть": "AR", "hungry in São Paulo": "BR",
+                 "в Мексике": "MX", "I'm in Chile": "CL", "я в Грузии": "GE", "в Астане": "KZ",
+                 "food in Toronto": "CA", "отдых на Бали": "ID", "climate in Lima": "PE"}
+        for text, iso in found.items():
+            with self.subTest(text=text):
+                self.assertEqual(wg.country_in(text), iso)
+        for text in ("chile relleno please", "хочу перец чили", "загрузить приложение", "climate change",
+                     "постановка"):
+            with self.subTest(text=text):
+                self.assertEqual(wg.country_in(text), "")
+
     def test_the_answer_to_in_which_country_finishes_the_request(self):
         self.hints = {}
         self.model_replies = ["(no answer)"]
