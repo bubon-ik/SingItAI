@@ -1,0 +1,5 @@
+# The web app lives on app.singitai.app, where its API is (/web/v1). The copy of website/app that
+# Cloudflare would serve here cannot reach that API, so old links and bookmarks go to the real app.
+# 302, not 301: browsers keep a 301 forever, and this host may serve something under /app/ one day.
+/app https://app.singitai.app/app/ 302
+/app/* https://app.singitai.app/app/:splat 302
