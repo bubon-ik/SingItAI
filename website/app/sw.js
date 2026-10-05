@@ -10,15 +10,15 @@
 const OFFLINE = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="theme-color" content="#050505">
+<meta name="theme-color" content="#f4f2f0">
 <title>SingIt — offline</title>
 <style>
   body { margin: 0; min-height: 100dvh; display: grid; place-items: center; padding: 24px; box-sizing: border-box;
-    background: #050505; color: #f2f2ef; font: 16px/1.6 "Helvetica Neue", system-ui, sans-serif; text-align: center; }
-  h1 { font-size: 20px; font-weight: 600; margin: 0 0 8px; }
-  p { color: rgba(242, 242, 239, 0.62); margin: 0 0 24px; }
-  button { background: #3ecf8e; color: #050505; border: 0; border-radius: 999px; padding: 12px 24px;
-    font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer; }
+    background: #f4f2f0; color: #0c0a08; font: 16px/1.5 Inter, system-ui, sans-serif; text-align: center; }
+  h1 { font-size: 24px; font-weight: 400; letter-spacing: -0.02em; margin: 0 0 8px; }
+  p { color: #6d6c6b; margin: 0 0 24px; }
+  button { background: #3ecf8e; color: #0c0a08; border: 0; border-radius: 6px; padding: 12px 20px;
+    font-family: inherit; font-size: 15px; font-weight: 400; cursor: pointer; }
 </style></head>
 <body><main>
   <h1>You are offline</h1>

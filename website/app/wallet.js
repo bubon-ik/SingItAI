@@ -227,12 +227,12 @@ async function appKit() {
       url: location.origin,
       icons: [new URL("../assets/favicon.svg", location.href).href],
     },
-    themeMode: "dark",
+    themeMode: "light",
     themeVariables: {
       "--w3m-accent": "#3ecf8e",
-      "--w3m-color-mix": "#050505",
+      "--w3m-color-mix": "#f4f2f0",
       "--w3m-color-mix-strength": 25,
-      "--w3m-font-family": "Geist, 'Helvetica Neue', sans-serif",
+      "--w3m-font-family": "Inter, system-ui, sans-serif",
       "--w3m-border-radius-master": "3px",
     },
     // Email and social sign-in create a Reown embedded wallet: no extension, no seed phrase.
