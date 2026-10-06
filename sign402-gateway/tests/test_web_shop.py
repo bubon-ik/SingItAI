@@ -104,6 +104,35 @@ class GatewayWebShopTests(unittest.TestCase):
         self.assertIn("did not answer", body["text"])
         self.assertIn("buyPaidResourceWithSigner", "\n".join(logged.output))
 
+    def test_the_pause_stops_every_paying_action_before_it_is_handled(self):
+        from sign402_gateway import web_internal
+        self.assertTrue({"tool-buy", "bitrefill-buy", "bitrefill-solana-buy", "venice-solana-topup", "data-buy",
+                         "email-send", "call-start"} <= web_internal.PAYING_ACTIONS)
+        solana = "solana:" + "1" * 43
+        with (patch.dict(os.environ, {"SIGN402_PURCHASES_PAUSED": "1"}),
+              patch("sign402_gateway.web_internal._handle") as handled,
+              patch("sign402_gateway.solana_bitrefill.buy") as bought):
+            for action in sorted(web_internal.PAYING_ACTIONS):
+                for account in (ACCOUNT, solana):
+                    with self.subTest(action=action, account=account[:7]):
+                        status, body = self.call(action, {"productId": "alza", "package": "200", "quoteId": "q"},
+                                                 account=account)
+                        self.assertEqual((status, body.get("paused")), (503, True))
+        handled.assert_not_called()
+        bought.assert_not_called()
+
+    def test_the_pause_holds_even_past_the_http_door(self):
+        from sign402_gateway import web_internal
+        solana = "solana:" + "1" * 43
+        self.server.web_accounts = Mock()
+        self.server.web_accounts.account.return_value = {"account_id": solana}
+        with (patch.dict(os.environ, {"SIGN402_PURCHASES_PAUSED": "1"}),
+              patch("sign402_gateway.solana_bitrefill.buy") as bought):
+            status, body = web_internal.handle(self.server, "bitrefill-solana-buy",
+                                               {"account": solana, "productId": "alza", "package": "200"})
+        self.assertEqual((status, body["error"]), (503, "purchases_paused"))
+        bought.assert_not_called()
+
     def test_a_quote_then_buy_pays_from_the_accounts_own_lane(self):
         status, quote = self.call("tool-quote", {"tool": "news"})
         self.assertEqual((status, quote["priceAtomic"], quote["payTo"]), (200, "1000", SELLER))

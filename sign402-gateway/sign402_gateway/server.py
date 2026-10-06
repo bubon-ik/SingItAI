@@ -1317,7 +1317,7 @@ class Sign402GatewayHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "forbidden"}, status=403)
             return
         action = path[len(WEB_INTERNAL_PREFIX):]
-        if action in ("tool-buy", "bitrefill-buy", "venice-solana-topup") and self._reject_if_purchases_paused():
+        if action in web_internal.PAYING_ACTIONS and self._reject_if_purchases_paused():
             return
         try:
             status, body = web_internal.handle(self.server, action, self._read_json())

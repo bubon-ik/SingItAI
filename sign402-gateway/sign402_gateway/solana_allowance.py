@@ -45,6 +45,15 @@ DEFAULT_DB = "~/.sign402/solana-allowance.db"
 PREPARE_SECONDS = 90   # a Solana blockhash lives about a minute
 DAY = 86400
 OWNER_FEE_LAMPORTS = 20_000  # enough SOL to pay one signature's fee (5,000) with room to spare
+# The bridge's refusals from before anything was signed or sent (solana-x402-service): only these give a
+# purchase's room back. Any other failure, a lost answer above all, may have moved the money.
+NOTHING_SENT_CODES = frozenset({
+    "ALREADY_ATTEMPTED", "CHALLENGE_FAILED", "EXA_CHALLENGE_FAILED", "INVALID_CHALLENGE", "EXA_INVALID_CHALLENGE",
+    "INSUFFICIENT_USDC", "ALLOWANCE_TOO_LOW", "PRICE_CHANGED", "MERCHANT_CHANGED", "UNSUPPORTED_MERCHANT",
+    "UNSUPPORTED_PAYMENT", "EXA_UNSUPPORTED_PAYMENT", "UNEXPECTED_FEE_PAYER", "INVALID_AMOUNT", "INVALID_INVOICE",
+    "INVALID_CALL", "BUILD_FAILED", "PAYMENT_REFUSED",
+})
+NOTHING_SENT_STATES = frozenset({"failed", "not_submitted"})
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS agents (
@@ -176,10 +185,18 @@ class SolanaAllowanceStore:
                        (held["account"], amount, "SingIt Ask · actual usage", tx, now))
             db.execute("DELETE FROM metered_holds WHERE hold_id = ?", (hold_id,))
 
-    def add_spend(self, account: str, amount: int, purpose: str, pull_tx: str | None, now: int) -> None:
+    def add_spend(self, account: str, amount: int, purpose: str, pull_tx: str | None, now: int) -> int:
         with self._db() as db:
-            db.execute("INSERT INTO spends(account, amount, purpose, pull_tx, created_at) VALUES (?, ?, ?, ?, ?)",
-                       (account, amount, purpose[:200], pull_tx, now))
+            return int(db.execute("INSERT INTO spends(account, amount, purpose, pull_tx, created_at) VALUES (?, ?, ?, ?, ?)",
+                                  (account, amount, purpose[:200], pull_tx, now)).lastrowid)
+
+    def confirm_spend(self, spend_id: int, pull_tx: str | None) -> None:
+        with self._db() as db:
+            db.execute("UPDATE spends SET pull_tx = COALESCE(?, pull_tx) WHERE id = ?", (pull_tx, spend_id))
+
+    def drop_spend(self, spend_id: int) -> None:
+        with self._db() as db:
+            db.execute("DELETE FROM spends WHERE id = ?", (spend_id,))
 
 
 class SolanaAllowanceService:
@@ -221,7 +238,9 @@ class SolanaAllowanceService:
             return self.bridge.run(account, agent, key, operation,
                                    fee_payer_key=self.fee_payer_key() if fee_payer and self.fee_payer_key else None, **payload)
         except SolanaChatError as exc:
-            raise AllowanceError(str(exc.text)) from None  # already a sentence for the user
+            refusal = AllowanceError(str(exc.text))  # already a sentence for the user
+            refusal.code = exc.code  # whether the money may have moved: see spend()
+            raise refusal from None
         finally:
             key = None
             logger.info("solana allowance: %s took %.1fs", operation, time.monotonic() - started)
@@ -369,8 +388,9 @@ class SolanaAllowanceService:
         """Pay `amount` from the owner's account within the limits, and count it against today.
 
         `pay` makes the x402 payment (the agent as delegate, the merchant paying the fee). The
-        limits are checked first and the purchase counted only once `pay` says it was accepted;
-        one purchase at a time, so two cannot both fit the same room.
+        limits are checked first and the purchase counted before `pay` runs; one purchase at a
+        time, so two cannot both fit the same room. The count is taken back only when the
+        payment surely did not leave: a lost answer may still have moved the money.
         """
         amount = int(amount)
         limits = self.store.limits(account)
@@ -392,9 +412,23 @@ class SolanaAllowanceService:
             if amount > int(owner["amount"]):
                 raise AllowanceError(f"Your Solana wallet holds {_text(int(owner['amount']))}; this costs {_text(amount)}. Nothing was paid.")
             self._seen.pop(account, None)
-            result = pay()
-            if result.get("state") in ("accepted", "confirmed"):
-                self.store.add_spend(account, amount, purpose, result.get("transaction"), int(self.now()))
+            spend_id = self.store.add_spend(account, amount, purpose, None, now)
+            try:
+                result = pay()
+            except Exception as exc:
+                if getattr(exc, "code", None) in NOTHING_SENT_CODES:
+                    self.store.drop_spend(spend_id)
+                else:
+                    logger.warning("solana allowance: %s payment of %s has no clear outcome; it stays counted",
+                                   account, amount)
+                raise
+            state = result.get("state")
+            if state in ("accepted", "confirmed"):
+                self.store.confirm_spend(spend_id, result.get("transaction"))
+            elif state in NOTHING_SENT_STATES:
+                self.store.drop_spend(spend_id)
+            else:
+                logger.warning("solana allowance: %s payment of %s ended %r; it stays counted", account, amount, state)
         logger.info("solana allowance: %s paid %s for %s (%s)", account, amount, purpose[:60], result.get("state"))
         return result
 

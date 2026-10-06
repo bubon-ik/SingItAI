@@ -943,6 +943,28 @@ class SpendingLaneTests(unittest.TestCase):
         self.assertEqual(len(client.calls), 2)
         self.assertEqual(len(self.evm.spends), 1)
 
+    def test_a_delivered_answer_mentioning_insufficient_funds_is_paid_once(self):
+        x402 = FakeX402(self.evm)
+
+        def chatty(resource_url, **kwargs):
+            result = x402(resource_url, **kwargs)
+            return {**result, "body": {"answer": "your wallet shows insufficient_funds", "error": "insufficient_funds"}}
+        paid, _ = self.pay(5_000, chatty)
+        self.assertTrue(paid["ok"])
+        self.assertEqual(len(x402.calls), 1)
+        self.assertEqual(sum(1 for log in self.evm.logs if int(log["data"], 16) == 5_000), 1)
+
+    def test_a_refusal_after_the_money_moved_is_not_paid_again(self):
+        x402 = FakeX402(self.evm)
+
+        def settles_then_refuses(resource_url, **kwargs):
+            x402(resource_url, **kwargs)
+            return {"ok": False, "status": 402, "body": {"error": "insufficient_funds"}}
+        paid, _ = self.pay(5_000, settles_then_refuses)
+        self.assertEqual(len(x402.calls), 1)
+        self.assertFalse(paid["ok"])
+        self.assertIsNotNone(paid["settlementTx"])  # charged without delivery, and said so
+
     def test_a_post_resource_keeps_its_method_and_body(self):
         _, client = self.pay(120_000, method="POST", request_body={"q": "weth"})
         self.assertEqual(client.calls[0][1]["method"], "POST")

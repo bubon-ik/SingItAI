@@ -151,6 +151,57 @@ class SolanaBitrefillTests(unittest.TestCase):
             self.buy()
         self.assertEqual([c for c in self.bridge.calls if c[0] == "bitrefill-invoice-pay"], [])
 
+    def test_a_price_above_the_one_shown_is_not_bought(self):
+        """Shown 5.00, quoted 9.44 when Buy was pressed: no order, no payment, the new price said."""
+        self.emails[ACCOUNT] = "me@example.com"
+        with self.assertRaises(sb.PriceChanged) as raised:
+            sb.buy(self.server, ACCOUNT, "alza-czech-republic", "200", shown_price="5.00", sleep=lambda s: None)
+        self.assertEqual(raised.exception.price_usd, "9.44")
+        self.assertEqual(self.mcp.calls, [])
+        self.assertEqual([c for c in self.bridge.calls if c[0] == "bitrefill-invoice-pay"], [])
+        self.assertEqual(self.lane.status(ACCOUNT)["remainingTodayAtomic"], 20_000_000)
+
+    def test_the_price_shown_or_a_lower_one_is_bought(self):
+        self.emails[ACCOUNT] = "me@example.com"
+        for shown in ("9.44", "9.440000", "10"):
+            with self.subTest(shown):
+                self.setUp()  # each try from a full day and a fresh approval
+                self.emails[ACCOUNT] = "me@example.com"
+                bought = sb.buy(self.server, ACCOUNT, "alza-czech-republic", "200", shown_price=shown, sleep=lambda s: None)
+                self.assertEqual(bought["priceUsd"], "9.44")
+        with self.assertRaisesRegex(AllowanceError, "unreadable"):
+            sb.buy(self.server, ACCOUNT, "alza-czech-republic", "200", shown_price="cheap", sleep=lambda s: None)
+
+    def test_the_agent_shows_the_new_price_instead_of_buying(self):
+        self.emails[ACCOUNT] = "me@example.com"
+
+        def shop(action, account, body):
+            if action == "bitrefill-packages":
+                return 200, {"ok": True, **sb.packages(self.server, body["productId"])}
+            if action == "bitrefill-solana-buy":
+                try:
+                    return 200, sb.buy(self.server, account, body["productId"], body["package"],
+                                       shown_price=body.get("priceUsd"), sleep=lambda s: None)
+                except sb.PriceChanged as exc:
+                    return 409, {"ok": False, "error": "price_changed", "priceUsd": exc.price_usd, "text": str(exc)}
+            if action == "venice-chat":
+                return 503, {"ok": False, "error": "chat_off"}
+            raise AssertionError(action)
+
+        agent = wg.WebAgent(allowance=Mock(), shop=shop, store=wg.ChatStore(Path(self.tmp.name) / "web.db"),
+                            classify=lambda text: "chat")
+        agent.solana = self.lane
+        chat_id = agent.message(ACCOUNT, None, "hi")["chatId"]
+        press = lambda price: agent.action(ACCOUNT, chat_id, {"type": "buy_giftcard", "slug": "alza-czech-republic",
+                                                              "package": "200", "name": "Alza CZ", "priceUsd": price})
+        reply = press("5.00")["messages"][0]
+        self.assertIn("price went up to 9.44 USDC", reply["text"])
+        card = reply["cards"][0]
+        self.assertEqual(card["type"], "products")
+        self.assertEqual(card["items"][0]["packages"], [{"value": "200", "currency": "CZK", "priceUsd": "9.44"}])
+        self.assertEqual(self.mcp.calls, [])
+        self.assertIn("Bought Alza CZ 200 CZK for 9.44 USDC on Solana", press("9.44")["messages"][0]["text"])
+
     def test_the_code_is_shown_once_from_the_encrypted_token(self):
         event = {"mode": "bitrefill_mcp_solana", "invoiceId": INVOICE, "productName": "Alza CZ", "fulfillmentToken": "tok-secret",
                  "quoteId": INVOICE, "bitrefill": {}}
@@ -216,3 +267,13 @@ class SolanaInternalRoutesTests(SolanaBitrefillTests):
                                                                              "package": "200", "progress": "f" * 32})
         self.assertEqual(status, 200)
         self.assertEqual(ask("f" * 32), "paid")
+
+    def test_the_gateway_answers_a_higher_price_without_buying(self):
+        from sign402_gateway import web_internal
+        self.server.allowance = Mock()
+        self.server.web_accounts = SimpleNamespace(account=lambda account: {"account_id": account})
+        self.emails[ACCOUNT] = "me@example.com"
+        status, reply = web_internal.handle(self.server, "bitrefill-solana-buy", {
+            "account": ACCOUNT, "productId": "alza-czech-republic", "package": "200", "priceUsd": "5.00"})
+        self.assertEqual((status, reply["error"], reply["priceUsd"]), (409, "price_changed", "9.44"))
+        self.assertEqual(self.mcp.calls, [])

@@ -802,6 +802,18 @@ def _usdc_text(atomic: int) -> str:
     return f"{text} USDC"
 
 
+def _facilitator_short_of_funds(result: Mapping[str, Any]) -> bool:
+    """A payment refused (402) because the facilitator saw too little USDC: its error field, not any
+    text the seller put in a delivered answer."""
+    if int(result.get("status") or 0) != 402:
+        return False
+    body = result.get("body")
+    fields = [result.get("error")]
+    if isinstance(body, dict):
+        fields += [body.get(key) for key in ("error", "reason", "invalidReason", "errorReason")]
+    return any(str(field or "").strip().lower() == "insufficient_funds" for field in fields)
+
+
 def parse_owners(raw: str) -> dict[str, str]:
     owners = {}
     for item in filter(None, (part.strip() for part in raw.split(","))):
@@ -1506,9 +1518,10 @@ class AllowanceService:
             if method != "GET" or request_body is not None:
                 kwargs.update(method=method, request_body=request_body)
             result = x402_client(resource_url, **kwargs)
-            if "insufficient_funds" in json.dumps(result, default=str):
-                # The facilitator's node can be a few blocks behind the funding.
-                self.evm.sleep(6)
+            if _facilitator_short_of_funds(result) and self.find_settlement(
+                    agent, pay_to, amount, start, self.store.counted_settlements(user_id), wait=6) is None:
+                # The facilitator's node can be a few blocks behind the funding. One more try, and only
+                # when the payment was refused and no transfer of it shows on chain: never a second charge.
                 result = x402_client(resource_url, **kwargs)
             status = int(result.get("status") or 0)
             if not 200 <= status < 300:
