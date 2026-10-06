@@ -130,12 +130,57 @@ class SolanaAllowanceTests(unittest.TestCase):
         self.grant("100")
         self.service.setup(ACCOUNT, "8", "5", "30")
         self.service.spend(ACCOUNT, 5_000_000, "a", self.paid(5_000_000))
-        self.service.spend(ACCOUNT, 1_000_000, "refused", self.paid(0, state="uncertain"))
+        self.service.spend(ACCOUNT, 1_000_000, "refused", self.paid(0, state="failed"))
         self.assertEqual(self.service.status(ACCOUNT)["remainingTodayAtomic"], 3_000_000)
         with self.assertRaisesRegex(AllowanceError, "today's 8 USDC limit"):
             self.service.spend(ACCOUNT, 4_000_000, "b", self.paid(4_000_000))
         self.clock[0] += 86400
         self.service.spend(ACCOUNT, 4_000_000, "b", self.paid(4_000_000))
+
+    def refused(self, code, *, charge=0):
+        def pay():
+            self.bridge.charge(charge)
+            refusal = AllowanceError("The payment answer was lost.")
+            refusal.code = code
+            raise refusal
+        return pay
+
+    def test_a_payment_whose_answer_was_lost_still_counts_against_the_day(self):
+        """The money left, the answer did not come back: the room it took must not be offered again."""
+        for code in ("PAYMENT_UNCERTAIN", "BRIDGE_UNAVAILABLE", None):
+            with self.subTest(code):
+                self.setUp()
+                self.grant("100")
+                self.service.setup(ACCOUNT, "0.03", "0.03", "30")
+                with self.assertRaises(AllowanceError):
+                    self.service.spend(ACCOUNT, 20_000, "lost", self.refused(code, charge=20_000))
+                with self.assertRaisesRegex(AllowanceError, "today's 0.03 USDC limit"):
+                    self.service.spend(ACCOUNT, 30_000, "second", self.paid(30_000))
+                self.assertEqual(self.bridge.owner_usdc, 20_000_000 - 20_000)
+
+    def test_an_uncertain_answer_counts_against_the_day(self):
+        self.grant("100")
+        self.service.setup(ACCOUNT, "8", "5", "30")
+        self.service.spend(ACCOUNT, 5_000_000, "unclear", self.paid(5_000_000, state="uncertain"))
+        self.assertEqual(self.service.status(ACCOUNT)["remainingTodayAtomic"], 3_000_000)
+
+    def test_a_refusal_before_anything_was_sent_gives_the_room_back(self):
+        self.grant("100")
+        self.service.setup(ACCOUNT, "8", "5", "30")
+        with self.assertRaises(AllowanceError):
+            self.service.spend(ACCOUNT, 5_000_000, "refused", self.refused("CHALLENGE_FAILED"))
+        self.assertEqual(self.service.status(ACCOUNT)["remainingTodayAtomic"], 8_000_000)
+
+    def test_a_bridge_refusal_keeps_its_code(self):
+        from sign402_gateway.solana_chat import SolanaChatError
+
+        def run(*args, **kwargs):
+            raise SolanaChatError("PAYMENT_UNCERTAIN", "The answer was lost after paying.")
+        self.service.agent_key = lambda account: ("Agent", "KEY")
+        self.bridge.run = run
+        with self.assertRaises(AllowanceError) as raised:
+            self.service._call(ACCOUNT, "resource-pay")
+        self.assertEqual(raised.exception.code, "PAYMENT_UNCERTAIN")
 
     def test_a_wallet_without_sol_never_uses_operator_fee_payer(self):
         self.bridge.owner_sol = 0

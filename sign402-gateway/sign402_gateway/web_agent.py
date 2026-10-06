@@ -883,7 +883,8 @@ class WebAgent:
                                                            str(action.get("days") or "30")),
             "buy_giftcard": lambda: self._buy_giftcard(account, lang, str(action.get("slug")),
                                                        str(action.get("package")), str(action.get("name") or ""),
-                                                       progress=str(action.get("progress") or "")),
+                                                       progress=str(action.get("progress") or ""),
+                                                       price=str(action.get("priceUsd") or "")),
             "buy_tool": lambda: self._buy_tool(account, lang, str(action.get("tool")), dict(action.get("args") or {})),
             "venice_topup": lambda: self._venice_topup(account, chat_id, lang, action),
             "send_email": lambda: self._send_email(account, chat_id, lang),
@@ -1534,21 +1535,35 @@ class WebAgent:
             text, cards = self._on_email(account, getattr(self._request, "chat_id", ""), lang, waiting.get("request", ""))
             return say(lang, "Saved your email. ", "Сохранил email. ") + text, cards
         self._shop("buyer-email-set", account, {"email": address})
-        text, cards = self._buy_giftcard(account, lang, waiting["slug"], waiting["package"], waiting.get("name", ""))
+        text, cards = self._buy_giftcard(account, lang, waiting["slug"], waiting["package"], waiting.get("name", ""),
+                                         price=waiting.get("price", ""))
         return say(lang, "Saved your email. ", "Сохранил email. ") + text, cards
 
-    def _buy_giftcard_solana(self, account, lang, slug, package, name, progress=""):
+    def _buy_giftcard_solana(self, account, lang, slug, package, name, progress="", price=""):
         """Bitrefill from a Solana wallet: an invoice in USDC on Solana, paid from the allowance."""
         status, bought = self.shop("bitrefill-solana-buy", account, {"productId": slug, "package": package,
+                                                                     **({"priceUsd": price} if price else {}),
                                                                      **({"progress": progress} if progress else {})})
         if bought.get("error") == "email_needed":
             chat_id = getattr(self._request, "chat_id", None)
             if chat_id:
-                self.store.set_pending(chat_id, "email", {"slug": slug, "package": package, "name": name}, int(self.now()))
+                self.store.set_pending(chat_id, "email", {"slug": slug, "package": package, "name": name, "price": price},
+                                       int(self.now()))
             return say(lang, "Bitrefill needs an email for your purchases, once: it also sends your codes there. "
                              "What email should I use? Then I'll buy it right away.",
                        "Bitrefill нужен email для покупок — один раз: туда он тоже присылает коды. "
                        "На какой email оформлять? После этого сразу куплю."), []
+        if bought.get("error") == "price_changed":  # nothing bought: the card again, at today's price, to press again
+            new = bought.get("priceUsd")
+            offer = self._offer(account, {"slug": slug, "name": name})
+            chosen = [{**o, "priceUsd": new} for o in offer.get("packages") or [] if o.get("value") == package]
+            # The quote's price, not the catalog's: a catalog behind the quote would refuse the next press again.
+            offer["packages"] = chosen or [{"value": package, "currency": "", "priceUsd": new}]
+            return say(lang, f"The price went up to {new} USDC since you saw it. Nothing was bought; "
+                             "press Buy again if the new price suits you.",
+                       f"Цена выросла до {new} USDC с тех пор, как вы её видели. Ничего не куплено; "
+                       "нажмите «Buy» ещё раз, если новая цена подходит."), [
+                {"type": "products", "kind": "giftcard", "items": [offer], "lang": lang}]
         if status >= 400 or bought.get("ok") is False:
             raise LookupError(bought.get("text") or bought.get("message") or "Bitrefill refused that. Nothing was paid.")
         title = f"{bought.get('name') or name} {bought.get('package')} {bought.get('packageCurrency') or ''}".strip()
@@ -1560,12 +1575,12 @@ class WebAgent:
             {"type": "receipt", "name": title, "price": bought.get("priceUsd"), "invoiceId": bought.get("invoiceId"),
              "giftcard": True, "purchaseId": bought.get("purchaseId"), **({"howToUse": bought["howToUse"]} if bought.get("howToUse") else {})}]
 
-    def _buy_giftcard(self, account, lang, slug, package, name, progress=""):
+    def _buy_giftcard(self, account, lang, slug, package, name, progress="", price=""):
         blocked = self._ready(account, lang)
         if blocked:
             return blocked
         if account.startswith(SOLANA_ACCOUNT):
-            return self._buy_giftcard_solana(account, lang, slug, package, name, progress)
+            return self._buy_giftcard_solana(account, lang, slug, package, name, progress, price)
         tracked = {"progress": progress} if progress else {}  # the page shows the stage it reached meanwhile
         _, quote = self._shop("bitrefill-quote", account, {"productId": slug, "package": package, **tracked})
         _, bought = self._shop("bitrefill-buy", account, {"quoteId": quote["quoteId"], **tracked})

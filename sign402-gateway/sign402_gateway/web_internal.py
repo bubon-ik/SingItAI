@@ -69,6 +69,12 @@ class ToolQuotes:
         return quote
 
 
+# Every action that pays a seller in one step, on either network: refused at the door while purchases are
+# paused (SIGN402_PURCHASES_PAUSED). A new paying action belongs here. The chat checks the pause itself,
+# before each paid search or answer, so the chat stays open while only spending stops.
+PAYING_ACTIONS = frozenset({"tool-buy", "bitrefill-buy", "bitrefill-solana-buy", "venice-solana-topup", "data-buy",
+                            "email-send", "call-start"})
+
 # What a Solana account may do before the Solana allowance exists: look, never pay.
 SOLANA_READ_ONLY = {"tools", "catalog-search", "purchases", "purchase-reveal", "purchase-progress", "venice-models", "venice-model",
                     "venice-usage", "bitrefill-packages", "buyer-email", "buyer-email-set",
@@ -144,6 +150,8 @@ def _handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dic
     from . import server as gw  # the gateway's purchase helpers; imported here to avoid a cycle
 
     account = _account(server, payload, action)
+    if action in PAYING_ACTIONS and gw._purchases_paused():  # the HTTP door checks too; this is for every other way in
+        return 503, {"ok": False, "error": "purchases_paused", "text": "Purchases are paused right now. Nothing was paid."}
     service = server.allowance
     if action == "tools":
         return 200, {"ok": True, "tools": [
@@ -232,9 +240,12 @@ def _handle(server: Any, action: str, payload: dict[str, Any]) -> tuple[int, dic
             solana_bitrefill.set_email(server, account, payload.get("email"))
             return 200, {"ok": True, "hasEmail": True}
         try:
-            return 200, solana_bitrefill.buy(server, account, payload.get("productId"), payload.get("package"))
+            return 200, solana_bitrefill.buy(server, account, payload.get("productId"), payload.get("package"),
+                                             shown_price=payload.get("priceUsd"))
         except solana_bitrefill.NeedsEmail as exc:
             return 409, {"ok": False, "error": "email_needed", "text": str(exc)}
+        except solana_bitrefill.PriceChanged as exc:
+            return 409, {"ok": False, "error": "price_changed", "priceUsd": exc.price_usd, "text": str(exc)}
 
     if action == "bitrefill-warm":  # sign in at Bitrefill while the agent is still reading the message
         bitrefill = getattr(server, "allowance_bitrefill", None)

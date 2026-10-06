@@ -49,6 +49,15 @@ class NeedsEmail(AllowanceError):
     """Bitrefill needs the buyer's email once before a Solana purchase."""
 
 
+class PriceChanged(AllowanceError):
+    """Bitrefill's price went up after the user saw it: nothing is bought until they see the new one."""
+
+    def __init__(self, shown: str, price_usd: str):
+        self.price_usd = price_usd
+        super().__init__(f"The price went up from {shown} to {price_usd} USDC since it was shown. "
+                         "Nothing was bought; confirm the new price to buy it.")
+
+
 def _client(server: Any) -> Any:
     client = getattr(getattr(server, "bitrefill_search_service", None), "bitrefill_client", None)
     if client is None or getattr(client, "checkout_mode", "") != "guest" or not hasattr(client, "quote_product"):
@@ -94,7 +103,20 @@ def packages(server: Any, slug: Any) -> dict[str, Any]:
             "recipientRequired": bool(product.get("requiredRecipientFields"))}
 
 
-def buy(server: Any, account: str, slug: Any, package: Any, *, sleep: Any = time.sleep,
+def _shown_atomic(usdc: Any) -> int | None:
+    """The price the page showed next to the Buy button, if it sent one."""
+    if usdc in (None, ""):
+        return None
+    try:
+        amount = Decimal(str(usdc).strip())
+    except (InvalidOperation, ValueError):
+        amount = Decimal(-1)
+    if not amount.is_finite() or amount <= 0:
+        raise AllowanceError("The price shown with this purchase is unreadable. Nothing was bought.")
+    return math.ceil(amount * 1_000_000)  # rounded as the quote is: the same price is never "higher"
+
+
+def buy(server: Any, account: str, slug: Any, package: Any, *, shown_price: Any = None, sleep: Any = time.sleep,
         now: Any = time.time) -> dict[str, Any]:
     client, lane = _client(server), _lane(server)
     started = time.monotonic()
@@ -114,6 +136,9 @@ def buy(server: Any, account: str, slug: Any, package: Any, *, sleep: Any = time
     if quote.get("requiredRecipientFields"):
         raise AllowanceError("This product is delivered to a phone or account; only products delivered as a code can be bought here.")
     price = _atomic(quote["priceUsd"])
+    shown = _shown_atomic(shown_price)
+    if shown is not None and price > shown:  # bought only at the price the user pressed Buy on, or below
+        raise PriceChanged(str(shown_price).strip(), str(quote["priceUsd"]))
     if price > int(limits["per_purchase_cap"]) or price > remaining:
         raise AllowanceError(f"{quote['priceUsd']} USDC does not fit your limits today. Nothing was bought.")
 

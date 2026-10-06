@@ -1116,7 +1116,7 @@ function renderCard(card, key) {
             ${packages.map((o) => {
               const over = overLimit(o.priceUsd, room);
               const shown = o === (pick || packages[0]);  // its reason is written under the list, where it fits
-              return `<option value="${esc(o.value)}"${over ? " disabled" : ""}${shown ? " selected" : ""}>${label(o)}${over && !shown ? " · over your limit" : ""}</option>`;
+              return `<option value="${esc(o.value)}" data-price="${esc(o.priceUsd)}"${over ? " disabled" : ""}${shown ? " selected" : ""}>${label(o)}${over && !shown ? " · over your limit" : ""}</option>`;
             }).join("")}
           </select>`
         : `<input class="input" placeholder="value" data-package="${esc(p.slug)}" aria-label="Value">`;
@@ -1773,10 +1773,13 @@ const actions = {
   },
   "card-buy": (el) => {
     // The value chosen next to this button: the same product may be on an older card further up the chat.
-    const pkg = el.closest(".product")?.querySelector(`[data-package="${CSS.escape(el.dataset.slug)}"]`)?.value.trim();
+    const field = el.closest(".product")?.querySelector(`[data-package="${CSS.escape(el.dataset.slug)}"]`);
+    const pkg = field?.value.trim();
     if (!pkg) { toast("Enter the card value first.", true); return; }
+    // The price shown next to the chosen value: the server buys at it or below, never above.
+    const price = field.selectedOptions?.[0]?.dataset.price;
     cardAction({ type: "buy_giftcard", slug: el.dataset.slug, package: pkg, name: el.dataset.name, lang: el.dataset.lang,
-                 progress: newAttempt() });
+                 progress: newAttempt(), ...(price ? { priceUsd: price } : {}) });
   },
   dismiss: () => { state.modal = null; render(); },
   "dismiss-button": () => { state.modal = null; render(); },
