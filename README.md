@@ -1,218 +1,194 @@
-# SingIt Solana
+# SingIt
 
-A separate repository for adding Solana support to the SingIt Telegram agent.
-Based on `SingItAI/main` at commit `f39959059922b693f14c2a3e9bec97c87881e07b`.
+**Your agent spends. Your wallet keeps the money.**
 
-## Hackathon development record
+SingIt is an AI agent that buys things for you — gift cards, eSIMs, mobile
+top-ups, live data, paid AI answers — and pays for them in USDC over
+[x402](https://www.x402.org/). You give it a budget instead of your wallet: two
+limits and one approval. Your USDC stays in your own wallet on Base or Solana,
+and the agent takes only what each purchase needs, inside those limits.
 
-See [HACKATHON.md](HACKATHON.md) for the existing SingIt foundation, recorded Solana work, verification evidence, and pending milestones. [Compare changes with the imported baseline](https://github.com/bubon-ik/singit-solana/compare/singit-base-baseline...main).
+[Website](https://singitai.app) · [Open the app](https://app.singitai.app/app/) · [Documentation](docs/README.md)
 
-## Current status
+[![Security gate](https://github.com/bubon-ik/SingItAI/actions/workflows/security-gate.yml/badge.svg?branch=main)](https://github.com/bubon-ik/SingItAI/actions/workflows/security-gate.yml)
 
-- The full agent code has been imported from the committed `main` branch.
-- The Venice/x402 client for Solana mainnet lives in `solana-x402-service/`.
-- **The agent supports managed Solana wallets and Venice chat with exact-quote phone approval for x402 top-ups.** [Flow, recovery and verification](docs/venice-solana-agent.md).
-- **Opt-in Exa web search is integrated with Solana Venice chat**, with model-selected search, a separate phone-approved budget, numbered sources and a payment receipt. [Flow and verification](docs/exa-solana-chat.md). A funded Exa payment remains unverified.
-- A real Bitrefill purchase was completed with USDC on Solana: [Alza CZ 200 CZK, live verification](docs/bitrefill-solana-checks.md). This was an operator-assisted run; agent purchasing integration remains pending.
-- Native Telegram navigation, inline shopping controls and private purchase history are implemented: [UI checks and limitations](docs/telegram-ui-checks.md). The navigation update is deployed to the existing bot.
-- No real Venice top-up or paid Venice model request has been completed.
-- Public repository: [bubon-ik/singit-solana](https://github.com/bubon-ik/singit-solana).
+## How it works
 
-## Solana wallet commands
+Three steps, about a minute, then the agent just buys.
 
-- `/wallet` — choose Base or Solana.
-- `/wallet solana` — ensure your managed Solana wallet exists and show its balance.
-- `/deposit solana` — show its deposit address.
-- `/balance solana` — read SOL and native-USDC balances.
-- `/balance` — show Base balances by default; explicit network commands never change that default.
-
-These commands are deployed to the running Telegram bot. Solana keys are encrypted
-in the gateway store. Venice top-ups have a separate explicit approval flow;
-Solana shop payments and withdrawals remain disabled. See
-[wallet integration checks](docs/solana-wallet-checks.md).
-
-## Checking the Solana module
-
-Requires Node.js 24+. The rest of the project retains the baseline requirements below.
-
-```sh
-cd solana-x402-service
-npm ci --ignore-scripts
-npm test
-npm run check
-npm start -- --help
+```mermaid
+flowchart LR
+    A["1. Sign in<br/>with your wallet,<br/>or email / Google / Apple"] --> B["2. Set limits<br/>daily and per purchase"]
+    B --> C["3. Approve once<br/>one signature in your wallet"]
+    C --> D["Ask in your own words<br/>the agent finds and buys<br/>inside your limits"]
+    D -.->|"revoke any time:<br/>one more signature"| C
 ```
 
-Quote and payment instructions: [Solana service](solana-x402-service/README.md).
-Next steps and acceptance criteria: [integration plan](docs/solana-integration.md).
+1. **Sign in.** Connect the wallet you already use — Rabby, MetaMask, Phantom,
+   Solflare, or any mobile wallet through WalletConnect — or sign in with email,
+   Google or Apple and get a wallet made for you. Signing in is a message
+   signature: it moves nothing.
+2. **Set your limits.** A daily limit and a per-purchase limit, typed in or
+   simply asked for in the chat ("set a $20 daily limit, $5 per purchase").
+3. **Approve once.** One approval from your wallet. From then on the agent buys
+   inside the limits without asking the wallet again. Revoking is one more
+   signature, in SingIt or without us (for example on revoke.cash).
 
-## Deployment
+How the limits are held depends on the network:
 
-The existing VPS bot runs the approved `release/exa-solana-20260922` release
-at `12d8dc0`. See [deployment evidence](docs/exa-solana-chat.md#existing-vps-deployment)
-and [runtime setup](docs/venice-solana-agent.md). Real funded Exa and Venice
-requests remain user-approved live acceptance steps.
+| | Base | Solana |
+| --- | --- | --- |
+| What you approve | A USDC allowance to your own limiter contract, deployed for you (we pay its gas) | The agent as delegate on your USDC account, for a total you choose |
+| Who enforces the limits | The contract, on chain: daily limit, per-purchase limit and expiry are fixed in it | The chain caps the approved total; SingIt enforces the daily and per-purchase limits before every payment |
+| Where the money is until a purchase | In your wallet; for micro-payments your agent keeps a small float (up to 0.20 USDC by default) | In your wallet |
+| How a purchase is paid | The limiter moves USDC from your wallet to your agent as purchases need it; the agent pays the seller over x402 | The agent pays the seller over x402 straight from your account, as your delegate |
 
-Before starting a separate Telegram agent, configure its own bot token,
-encryption key, wallet and operation databases, ports, and runtime directories.
-The original gateway defaults to some paths in the user's home directory;
-this repository does not yet override those paths automatically. Do not start
-this copy with the running Base bot's configuration. Secrets and databases from
-the original project have not been imported. The prototype Solana wallet is
-stored separately from the gateway.
+## What happens when you ask for something
 
-## Existing SingIt capabilities
+The agent reads what you asked, finds it, shows it with its price, and buys when
+you press **Buy** — or right away when you clearly asked it to buy. A gift card,
+for example:
 
-**Payments for AI agents, with spending limits and human approval.**
+```mermaid
+sequenceDiagram
+    actor You
+    participant App as SingIt app
+    participant Agent as Agent
+    participant GW as Payment gateway
+    participant Seller as Seller (Bitrefill, x402)
+    participant Chain as Base / Solana
 
-SingIt connects a Telegram assistant to managed wallets on Base. It can buy
-gift cards and mobile top-ups, pay for x402 APIs, and fund LLM credits. The
-payment gateway handles wallet keys, spending controls, approvals and receipts.
-
-[Website](https://singitai.app) · [Telegram bot](https://t.me/SingIt0qk_bot) · [Documentation](docs/README.md)
-
-[![Security gate](https://github.com/bubon-ik/singit-solana/actions/workflows/security-gate.yml/badge.svg?branch=main)](https://github.com/bubon-ik/singit-solana/actions/workflows/security-gate.yml)
-
-## Features
-
-- **Managed Base wallets:** create a wallet, check balances, set spending limits
-  and withdraw through Telegram.
-- **Bitrefill purchases:** browse products, review a quote, buy gift cards or
-  mobile top-ups, and retrieve the result.
-- **x402 payments:** pay for supported APIs using USDC on Base.
-- **Payment policy:** use Spending Memory to allow, escalate or block supported
-  purchases according to budgets and merchant history.
-- **Separate approval channels:** confirm purchases through iMessage or WhatsApp
-  when human approval is required.
-- **LLM credits:** top up through Bankr. Optional integrations add Venice chat
-  and paid onchain data queries through The Graph.
-
-These are capabilities in the repository. Availability in a deployment depends
-on its configuration and installed version; `main` is not automatically the
-version running on the server. See [operations](docs/operations.md) for the
-recorded deployment state.
-
-## How payments work
-
-For supported x402-tool and Bitrefill purchases, the gateway checks the quote
-and spending limits before execution. With Spending Memory enabled, the policy
-returns one of three decisions:
-
-| Decision | Outcome |
-| --- | --- |
-| `PAY` | Proceed within the configured policy and limits. |
-| `ESCALATE` | Ask the owner to approve the purchase. |
-| `BLOCK` | Refuse the payment. |
-
-In strict mode, covered purchases require human approval. An approval is bound
-to the purchase terms; the payment must match the approved amount, asset and
-recipient. LLM credit purchases, Venice chat and web search have separate
-flows and are not covered by one universal approval policy.
-
-The optional [Ledger integration](docs/ledger-v1.md) supports purchase consent
-for a configured owner's GET x402 tools. The device signs the approval; the
-gateway wallet signs the payment. Ledger Key Ring support for the wallet
-master key is a separate, opt-in feature.
-
-## Using the Telegram bot
-
-Open the [bot](https://t.me/SingIt0qk_bot) and send `/start`.
-Wallet commands run through the gateway without calling an LLM.
-
-| Command | Purpose |
-| --- | --- |
-| `/wallet [base\|solana]` | Choose a network, or show its wallet balance. |
-| `/deposit [base\|solana]` | Show a deposit address; defaults to Base. |
-| `/purchases` | Browse saved receipts and explicitly reveal a code. |
-| `/settings` | Delivery email, approvals and spending limits. |
-| `/balance [base\|solana]` | Check wallet balances; defaults to Base. |
-| `/limits` | View or change spending limits. |
-| `/bitrefill` | Browse products and start a purchase. |
-| `/last_purchase` | Check the most recent purchase. |
-| `/withdraw` | Send funds to your own address. |
-| `/connect_imessage` | Pair an iMessage approval channel. |
-| `/connect_whatsapp` | Pair a WhatsApp approval channel. |
-| `/llm_buy` | Buy LLM credits through Bankr. |
-
-## Development setup
-
-Use **Python 3.12**, **Node.js 22** and **Git** to match CI. The gateway package
-supports Python 3.11 or later. Clone the full repository: the gateway imports
-shared code from sibling directories.
-
-```bash
-git clone https://github.com/bubon-ik/singit-solana.git
-cd singit-solana
-python3.12 -m venv sign402-gateway/.venv
-sign402-gateway/.venv/bin/python -m pip install -e ./sign402-gateway python-telegram-bot==22.5
+    You->>App: "Find a Steam gift card in Germany"
+    App->>Agent: your message
+    Agent->>Agent: classify the request, read brand, country, amount
+    Agent->>GW: search the catalog
+    GW-->>App: product cards with values and prices
+    You->>App: pick a value, press Buy
+    App->>GW: buy this value at the price shown
+    GW->>Seller: fresh quote and order
+    GW->>GW: check price, limits, spending policy
+    GW->>Chain: pay the invoice in USDC from your wallet, within limits
+    Chain-->>Seller: payment settles
+    Seller-->>GW: gift card code
+    GW-->>App: receipt
+    You->>App: Show code (shown once)
 ```
 
-Run the Python unit tests from the repository root:
+What the gateway checks before any money moves:
 
-```bash
-(cd sign402-gateway && .venv/bin/python -m unittest discover -s tests)
-(cd hermes-plugins/sign402-wallet && ../../sign402-gateway/.venv/bin/python -m unittest discover -s tests)
+- **The price.** The order is priced again when you press Buy. The invoice must
+  match that quote; on Solana it must also be no higher than the price you saw,
+  or nothing is bought and the new price is shown to confirm.
+- **Your limits.** The per-purchase limit, what is left of today's limit, the
+  approval's remaining total and the expiry. A purchase that does not fit is
+  refused with the reason, and nothing is paid.
+- **The seller.** Each seller is bound to the address it is paid at and to a
+  price ceiling. A payment request naming another address, asset or a higher
+  amount is never signed.
+- **The spending policy.** [Spending Memory](https://github.com/bubon-ik/spending-memory)
+  can allow, escalate or block a purchase by budget and merchant history.
+
+After paying, the gateway does not take the seller's word for it: a purchase
+counts as paid when the transfer shows on chain, and as delivered when the
+seller returns the goods. Gift card codes are shown to you once.
+
+The language model never authorizes a payment. It only chats and extracts what
+you asked for (search words, amount, country); the request is classified into a
+fixed set of intents, the amounts are validated in code, and every purchase
+goes through the same gateway checks. At most one purchase follows one message.
+
+## What the agent can do
+
+| Ask for | What happens | Price |
+| --- | --- | --- |
+| Gift cards, eSIMs, mobile top-ups | Searches thousands of brands on Bitrefill, shows the product and price, buys inside your limits, shows the code once | The card's price |
+| Live answers: weather, exchange rates, flight status and prices, places to eat or stay, a web page | One small paid x402 request to a checked seller, counted against your limits | Capped per seller |
+| Chat that bills by the answer (SingIt Ask) | Each answer is paid for what it actually cost | Up to 0.003 USDC |
+| Private chat (Venice) | Switch models; credit is topped up from the same limits | Per top-up |
+| An email to yourself, a phone call made for you by an AI assistant | Drafted by the agent; sent only when you press send on a card showing the recipient, text and price | $0.02 email, $0.54 call (Base) |
+
+The app installs on a phone from the browser (Add to Home Screen) and sends
+notifications when something needs you.
+
+## Safety
+
+- **Your money stays with you.** USDC stays in your own wallet. The agent takes
+  only what a purchase needs, when it needs it.
+- **Limits the agent cannot exceed.** On Base, the limiter contract enforces
+  them even if our server or the agent were compromised; it holds no tokens and
+  has no admin or upgrade path. On Solana, the chain caps the approved total.
+- **One signature takes it back.** Revoke in SingIt or with any wallet tool.
+  An emergency stop pauses a Base limiter for good.
+- **A watcher reads the chain**, not our records: on Base, a spend to anyone
+  but your own agent, or an unusual burst of spends, pauses the limiter and
+  alerts you.
+- **Nothing reaches people on its own.** Emails and calls wait for your press.
+- **No double charges.** A payment whose answer was lost is never repeated
+  automatically; it stays counted against your limits.
+- **An operator kill switch** stops every paying action at once.
+
+See the [security model](sign402-gateway/SECURITY.md) for trust boundaries.
+
+## Architecture
+
+```mermaid
+flowchart TB
+    Web["Web app<br/>website/app"] --> API["Web API<br/>sign-in, chat, limits"]
+    API --> GW["Payment gateway<br/>sign402-gateway"]
+    GW --> Base["Base: limiter contract<br/>agent-allowance,<br/>x402 via cdp-x402-service"]
+    GW --> Sol["Solana: delegated USDC,<br/>x402 via solana-x402-service"]
+    GW --> Sellers["Sellers over x402:<br/>Bitrefill, data, SingIt Ask, Venice,<br/>email, calls"]
 ```
-
-Run the Node unit tests:
-
-```bash
-(cd cdp-x402-service && npm ci --ignore-scripts && npm test)
-(cd singit-risk-check && npm ci --ignore-scripts && npm test)
-(cd tools/ledger-approve && npm ci --ignore-scripts && npm test)
-```
-
-The unit suites use test doubles for external services and hardware; no funded
-wallet or Ledger device is needed. They cover payment limits, approval binding,
-retries, authentication and provider integrations. CI also audits dependencies.
-
-Running the connected service requires configuration beyond installing the
-package: wallet encryption and API secrets, payment-provider credentials,
-Hermes, and the chosen approval channel. Start with the
-[environment reference](sign402-gateway/.env.example),
-[Telegram plugin setup](hermes-plugins/sign402-wallet/README.md),
-[CDP service setup](cdp-x402-service/README.md#setup) and
-[operations runbook](docs/operations.md). For real Ledger use, follow the
-[Ledger installation instructions](docs/ledger-v1.md).
-
-## Repository structure
 
 | Directory | Purpose |
 | --- | --- |
-| `sign402-gateway/` | Python gateway: wallets, payment policy, approvals, orders and APIs. |
-| `hermes-plugins/sign402-wallet/` | Telegram wallet commands and purchase flows for Hermes. |
-| `solana-x402-service/` | Solana mainnet Venice/x402 client and private gateway bridge with exact payment approval. |
-| `cdp-x402-service/` | Node.js payment and swap integration for Base through CDP and x402. |
-| `tools/ledger-approve/` | Local Ledger purchase-approval client. |
-| `singit-risk-check/` | SINGIT-paid x402 endpoint for payment-requirement risk analysis. |
-| `website/` | Public website. |
-| `docs/` | Operating instructions, integration guides and verification records. |
-| `sign402-bridge/`, `payment-executor/`, `live-demo/` | Legacy integrations and shared utilities still imported by the gateway. |
+| `sign402-gateway/` | Python gateway: accounts, the chat agent, limits, payment checks, orders and APIs. |
+| `website/` | Landing page (`singitai.app`) and the web app in `website/app/` (`app.singitai.app`). |
+| `agent-allowance/` | `AgentAllowance`, the per-user spending limiter contract on Base (Foundry). |
+| `solana-x402-service/` | Solana USDC: delegated approvals, x402 payments, Bitrefill invoices, Venice and Exa. |
+| `cdp-x402-service/` | Base: x402 payments and swaps through CDP. |
+| `singit-ask/` | SingIt Ask, the x402 model endpoint that bills by the answer. |
+| `singit-risk-check/` | x402 endpoint for payment-requirement risk analysis. |
+| `docs/` | Design notes, operating instructions and verification records. |
 
-[Spending Memory](https://github.com/bubon-ik/spending-memory) is maintained in a
-separate repository. It provides the reusable payment-policy library and Graph
-query adapter; this gateway installs a pinned revision.
+## Development
 
-## Security and custody
+Use **Python 3.12** and **Node.js 22** to match CI (`solana-x402-service` needs
+Node.js 24). Clone the full repository: the gateway imports shared code from
+sibling directories.
 
-Managed wallets are **custodial**. Private keys are encrypted at rest and used
-by the gateway, rather than supplied to the agent. Encryption and approval
-checks do not remove the need to trust the server and its approval adapters.
+```bash
+git clone https://github.com/bubon-ik/SingItAI.git
+cd SingItAI
+python3.12 -m venv sign402-gateway/.venv
+sign402-gateway/.venv/bin/python -m pip install -e ./sign402-gateway
+```
 
-Keep credentials and runtime databases out of Git. Back up wallet and order
-state before updating a deployment. Read the
-[security model](sign402-gateway/SECURITY.md) for trust boundaries and controls,
-and the [recovery runbook](docs/recovery-runbook.md) for backup and recovery.
+Run the tests:
+
+```bash
+(cd sign402-gateway && .venv/bin/python -m unittest discover -s tests)
+(cd cdp-x402-service && npm ci --ignore-scripts && npm test)
+(cd solana-x402-service && npm ci --ignore-scripts && npm test)
+node --test website/tests/*.test.mjs
+```
+
+The suites use test doubles for chains, sellers and wallets; no funded wallet is
+needed. They cover limits, payment checks, retries, sign-in and the seller
+integrations. CI also audits Python and Node dependencies.
+
+Running the service needs wallet encryption and API secrets, seller credentials
+and RPC endpoints: start with the [environment reference](sign402-gateway/.env.example)
+and the [operations runbook](docs/operations.md). `main` is deployed by hand,
+so the running version is whatever was last deployed.
 
 ## Further reading
 
 - [Documentation index](docs/README.md)
-- [Deployment and operations](docs/operations.md)
+- [Security model](sign402-gateway/SECURITY.md)
+- [Deployment and operations](docs/operations.md) · [Recovery runbook](docs/recovery-runbook.md)
 - [Decision API](docs/decide-public-endpoint.md) and [OpenAPI schema](sign402-gateway/docs/decide-openapi.json)
-- [Ledger integration and scope](docs/ledger-v1.md)
-- [Telegram / Graph / Ledger demo](docs/telegram-graph-ledger-demo.md)
 - [Dated verification results](docs/checks.md)
-- [ETHOnline 2026 submission](docs/ethonline-submission.md) — historical event scope and evidence
 
 ## License
 
