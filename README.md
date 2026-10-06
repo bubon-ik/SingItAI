@@ -8,7 +8,7 @@ top-ups, live data, paid AI answers — and pays for them in USDC over
 limits and one approval. Your USDC stays in your own wallet on Base or Solana,
 and the agent takes only what each purchase needs, inside those limits.
 
-[Website](https://singitai.app) · [Open the app](https://app.singitai.app/app/) · [Telegram bot](https://t.me/SingIt0qk_bot) · [Documentation](docs/README.md)
+[Website](https://singitai.app) · [Open the app](https://app.singitai.app/app/) · [Documentation](docs/README.md)
 
 [![Security gate](https://github.com/bubon-ik/SingItAI/actions/workflows/security-gate.yml/badge.svg?branch=main)](https://github.com/bubon-ik/SingItAI/actions/workflows/security-gate.yml)
 
@@ -129,38 +129,12 @@ notifications when something needs you.
 
 See the [security model](sign402-gateway/SECURITY.md) for trust boundaries.
 
-## Telegram bot
-
-The same agent runs in Telegram: open the [bot](https://t.me/SingIt0qk_bot) and
-send `/start`. The bot uses managed wallets on Base and Solana (keys encrypted on
-the server, so these wallets are custodial) and links to your web account with
-`/link`.
-
-| Command | Purpose |
-| --- | --- |
-| `/wallet [base\|solana]` | Choose a network, or show its wallet balance. |
-| `/deposit [base\|solana]` | Show a deposit address. |
-| `/balance [base\|solana]` | Check wallet balances. |
-| `/limits` | View or change spending limits. |
-| `/bitrefill` | Browse products and start a purchase. |
-| `/purchases` | Browse saved receipts and reveal a code. |
-| `/last_purchase` | Check the most recent purchase. |
-| `/settings` | Delivery email, approvals and spending limits. |
-| `/withdraw` | Send funds to your own address. |
-| `/connect_imessage`, `/connect_whatsapp` | Pair an approval channel for purchases that need your yes. |
-| `/llm_buy` | Buy LLM credits through Bankr. |
-
 ## Architecture
 
 ```mermaid
 flowchart TB
-    subgraph Clients
-        Web["Web app<br/>website/app"]
-        TG["Telegram bot<br/>hermes-plugins/sign402-wallet"]
-    end
-    Web --> API["Web API<br/>sign-in, chat, limits"]
+    Web["Web app<br/>website/app"] --> API["Web API<br/>sign-in, chat, limits"]
     API --> GW["Payment gateway<br/>sign402-gateway"]
-    TG --> GW
     GW --> Base["Base: limiter contract<br/>agent-allowance,<br/>x402 via cdp-x402-service"]
     GW --> Sol["Solana: delegated USDC,<br/>x402 via solana-x402-service"]
     GW --> Sellers["Sellers over x402:<br/>Bitrefill, data, SingIt Ask, Venice,<br/>email, calls"]
@@ -173,7 +147,6 @@ flowchart TB
 | `agent-allowance/` | `AgentAllowance`, the per-user spending limiter contract on Base (Foundry). |
 | `solana-x402-service/` | Solana USDC: delegated approvals, x402 payments, Bitrefill invoices, Venice and Exa. |
 | `cdp-x402-service/` | Base: x402 payments and swaps through CDP. |
-| `hermes-plugins/sign402-wallet/` | Telegram wallet commands and purchase flows. |
 | `singit-ask/` | SingIt Ask, the x402 model endpoint that bills by the answer. |
 | `singit-risk-check/` | x402 endpoint for payment-requirement risk analysis. |
 | `docs/` | Design notes, operating instructions and verification records. |
@@ -188,14 +161,13 @@ sibling directories.
 git clone https://github.com/bubon-ik/SingItAI.git
 cd SingItAI
 python3.12 -m venv sign402-gateway/.venv
-sign402-gateway/.venv/bin/python -m pip install -e ./sign402-gateway python-telegram-bot==22.5
+sign402-gateway/.venv/bin/python -m pip install -e ./sign402-gateway
 ```
 
 Run the tests:
 
 ```bash
 (cd sign402-gateway && .venv/bin/python -m unittest discover -s tests)
-(cd hermes-plugins/sign402-wallet && ../../sign402-gateway/.venv/bin/python -m unittest discover -s tests)
 (cd cdp-x402-service && npm ci --ignore-scripts && npm test)
 (cd solana-x402-service && npm ci --ignore-scripts && npm test)
 node --test website/tests/*.test.mjs
