@@ -59,6 +59,19 @@ class BaseDataTests(unittest.TestCase):
         self.assertEqual((got["name"], got["costUsd"], got["network"]), ("Weather", "0.002", "base"))
         self.assertIn("light rain", got["digest"])
 
+    def test_a_wallet_check_is_paid_to_agent402s_bound_address_and_keeps_the_address_case(self):
+        address = "J7aN3PLJnTCF5qpEnvJHJsnCjcGuqC2rYtEM8Gv3xwg"
+        self.offers = [offer(web_data.TOOLS["wallet_check"])]
+        self.pay.return_value = {"ok": True, "txId": "0xabc", "resourceResult": {"status": 200, "body": {"address": address, "verdict": "no_match_on_lists_checked",
+                                                                                              "listsChecked": [{"list": "OFAC SDN"}]}}}
+        got = web_data.buy(self.server, self.gw, BASE_ACCOUNT, "wallet_check", {"address": address})
+        _, _, _, tool, url, requirements = self.pay.call_args.args
+        self.assertEqual((tool["id"], url), ("data.wallet_check", f"https://agent402.tools/api/sanctions/wallet?address={address}"))
+        self.assertEqual(requirements["receiver"].lower(), web_data.AGENT402[web_data.BASE].lower())
+        self.assertIsNone(self.pay.call_args.kwargs["request_body"])  # a GET
+        self.assertEqual((got["name"], got["network"]), ("Wallet screening", "base"))
+        self.assertIn("no_match_on_lists_checked", got["digest"])
+
     def test_another_address_a_higher_price_or_a_missing_place_pays_nothing(self):
         cases = [("weather", {"place": "Berlin"}, offer(web_data.TOOLS["weather"], base_pay_to="0x" + "9" * 40), "somewhere unexpected"),
                  ("weather", {"place": "Berlin"}, offer(web_data.TOOLS["weather"], amount="90000"), "more than its usual price"),
@@ -175,6 +188,14 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(wg.plan_data("кофе рядом с Колизеем", None, self.TODAY),
                          ("places", {"query": "кофе рядом с Колизеем"}, ""))
         self.assertIsNone(wg.plan_data("???", None, self.TODAY))  # nothing to search for
+
+    def test_an_address_with_a_screening_word_is_a_wallet_check_without_a_model(self):
+        evm = "0x7E6b00000000000000000000000000000000AbCd"
+        self.assertEqual(wg.plan_data(f"is {evm} sanctioned?", None, self.TODAY), ("wallet_check", {"address": evm}, ""))
+        sol = "J7aN3PLJnTCF5qpEnvJHJsnCjcGuqC2rYtEM8Gv3xwg"
+        self.assertEqual(wg.plan_data(f"безопасно ли? проверь санкции {sol}", None, self.TODAY)[:2], ("wallet_check", {"address": sol}))
+        self.assertEqual(wg.plan_data("check this wallet", self.model({"tool": "wallet_check", "address": "not an address"}), self.TODAY),
+                         ("wallet_check", {}, "address"))
 
     def test_the_model_picks_the_source_and_every_field_is_checked(self):
         plan = wg.plan_data("flights Berlin to Barcelona Oct 15", self.model(
