@@ -54,6 +54,8 @@ def switched_off() -> set[str]:
 OTTO = {BASE: "0x0E84dDEdAaE6A779c462C22a59F301EC31B6b808", SOLANA: "6XcSfqJHr9vNW2vbiRaMqUYVm7shDgLepca54wUTDPN5"}
 EXA = {BASE: "0x6d6E695b09861467c7d462f5AAF31cF3540B9192", SOLANA: "12Ec2cJmfR1C9uwejzxcuMhUgEC7wDrLgm1wBvvR5w9E"}
 STABLETRAVEL = {BASE: "0xDd257723b86B4947483905cdAcBbBC70fACF2ec0", SOLANA: "6u5LMGQC2qk9peNibahmRWxGVXrBypk8nhTCcqtiuqMY"}
+AGENT402 = {BASE: "0xaBF4FAbd7c416fB67202E5f9002389Fc75e2a9D0", SOLANA: "J7aN3PLJnTCF5qpEnvJHJsnCjcGuqC2rYtEM8Gv3xwg"}
+AGENT402_URL = "https://agent402.tools"
 
 
 def _q(**params: Any) -> str:
@@ -178,6 +180,11 @@ TOOLS: dict[str, DataTool] = {t.id: t for t in (
                  type="1" if p.get("return") else "2", currency=p.get("currency") or "USD", hl="en", adults=1), None),
              ("from", "to", "date"), _flights_search, link=_flights_link),
     DataTool("places", "Web search", "Exa", EXA, 10_000, _places_search, ("query",), _search),
+    # Sanctions screening of one wallet address against the OFAC SDN digital currency addresses, asked before paying
+    # someone: read-only, 0.002 USDC. A miss reads "no_match_on_lists_checked", never a clearance. The address keeps
+    # its case; base58 addresses are case-sensitive.
+    DataTool("wallet_check", "Wallet screening", "Agent402", AGENT402, 3_000,
+             lambda p: ("GET", f"{AGENT402_URL}/api/sanctions/wallet?{_q(address=p['address'])}", None), ("address",)),
 )}
 
 # The bot's paid tools a Solana account can now use too: the same seller, the Solana leg.
