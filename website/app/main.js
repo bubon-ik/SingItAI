@@ -4,7 +4,8 @@
 
 import { api, ApiError, csrf, setCsrf } from "./api.js";
 import {
-  appKitConfigured, disconnectAppKit, discover, openAppKit, openOnRamp, Wallet, wallets, walletError, watchAppKit,
+  appKitConfigured, disconnectAppKit, discover, openAppKit, openOnRamp, switchAppKitNetwork, Wallet, wallets, walletError,
+  watchAppKit,
 } from "./wallet.js";
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -371,6 +372,18 @@ function renderNav() {
   }
 }
 
+// Which network to sign in on, for a wallet connected through AppKit (email, Google, WalletConnect).
+// A wallet extension stays on the network it was picked for, so it gets no switch.
+function networkChoice() {
+  if (state.wallet?.name !== "WalletConnect") return "";
+  const option = (chain, label) => `<button type="button" data-action="sign-in-network" data-chain="${chain}"
+    class="${state.wallet.chain === chain ? "on" : ""}" aria-pressed="${state.wallet.chain === chain}">${label}</button>`;
+  return `<div class="row" style="justify-content:center">
+      <div class="segmented" role="group" aria-label="Network to sign in on">${option("base", "Base")}${option("solana", "Solana")}</div>
+    </div>
+    <p class="hint" style="text-align:center">Each network has its own address and its own limits.</p>`;
+}
+
 function renderHero() {
   const cta = state.wallet
     ? `<button class="btn btn-primary btn-lg has-orb" data-action="sign-in">Sign in as ${esc(short(state.wallet.address))}
@@ -385,6 +398,7 @@ function renderHero() {
       <p class="sub">Set a daily limit and a per-purchase limit once. Your agent buys inside them without asking again,
         and one signature takes it all back.</p>
       <div class="row" style="justify-content:center">${cta}</div>
+      ${networkChoice()}
       <div class="steps">
         <div class="step"><span class="n">01</span><h3>Sign in</h3>
           <p>With your email, Google or Apple — we make a wallet for you — or any wallet you have: Rabby, MetaMask, Phantom, Solflare. Signing in moves nothing.</p></div>
@@ -1573,6 +1587,14 @@ const actions = {
   "connect-injected": (el) => { state.modal = null; connectInjected(el.dataset.uuid); },
   account: () => (state.session ? signOut() : connectWallet()),
   "sign-in": signIn,
+  "sign-in-network": async (el) => {
+    if (el.dataset.chain === state.wallet?.chain) return;
+    try {
+      await switchAppKitNetwork(el.dataset.chain);  // watchAppKit then hands over the wallet on that network
+    } catch (error) {
+      toast(explain(error), true);
+    }
+  },
   preset: (el) => {
     state.preset = Number(el.dataset.index);
     const p = PRESETS[state.preset];
