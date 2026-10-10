@@ -167,6 +167,9 @@ export class Wallet {
   }
 
   async signMessage(message) {
+    // The sign-in message names Base (Chain ID 8453). Phantom and Reown's email/Google wallet refuse
+    // to show it while they sit on another network, so the wallet moves to Base first.
+    await this.ensureBase();
     const hex = "0x" + [...new TextEncoder().encode(message)].map((b) => b.toString(16).padStart(2, "0")).join("");
     return this.provider.request({ method: "personal_sign", params: [hex, this.address] });
   }
