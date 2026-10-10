@@ -287,6 +287,13 @@ export async function watchAppKit(onWallet) {
   });
 }
 
+// The network a wallet connected through AppKit signs in on. An email or Google wallet has an address on
+// each, and each address is its own SingIt account: AppKit reports the new one through watchAppKit.
+export async function switchAppKitNetwork(chain) {
+  const k = await appKit();
+  await k.switchNetwork(chain === "solana" ? kitNetworks.solana : kitNetworks.base);
+}
+
 export async function openAppKit() {
   const k = await appKit();
   await k.open({ view: "Connect" });
