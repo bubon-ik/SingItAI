@@ -267,13 +267,21 @@ function kitWallet(k, account) {
 // Watch AppKit: a restored session, a new connection, a switch or a disconnect.
 export async function watchAppKit(onWallet) {
   const k = await appKit();
+  let closedFor = null;  // the address the modal was last closed for
   k.subscribeAccount((account) => {
     if (account?.isConnected && account.address) {
       try {
         onWallet(kitWallet(k, account));
-        k.close?.();  // connected: the page takes over from the modal
+        // Connected: the page takes over from the modal, once per address. AppKit sends more events
+        // for the same account (network, balance), and closing the modal again would abort the
+        // email/Google wallet's sign-in signature shown in it ("Request was aborted").
+        if (account.address !== closedFor) {
+          closedFor = account.address;
+          k.close?.();
+        }
       } catch { /* provider not ready yet; the next event has it */ }
     } else if (account && account.status === "disconnected") {
+      closedFor = null;
       onWallet(null);
     }
   });
