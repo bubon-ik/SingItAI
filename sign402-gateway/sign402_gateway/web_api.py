@@ -563,7 +563,9 @@ class WebHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")  # no clickjacking around wallet prompts
-        self.send_header("Referrer-Policy", "no-referrer")
+        # Not no-referrer: Reown's sign-in frame (email, Google, Apple) checks which site embeds it and
+        # stays silent without our origin. Other sites get the origin only, never the path.
+        self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         if not self.head_only:

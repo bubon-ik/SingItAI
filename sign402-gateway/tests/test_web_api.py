@@ -717,6 +717,8 @@ class StaticPageTests(unittest.TestCase):
         self.assertEqual((status, body), (200, b"<title>app</title>"))
         self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
         self.assertEqual(headers["X-Frame-Options"], "DENY")
+        # Reown's sign-in frame needs our origin; no-referrer left Google sign-in waiting forever.
+        self.assertEqual(headers["Referrer-Policy"], "strict-origin-when-cross-origin")
         self.assertEqual(self.get("/app/main.js")[1]["Content-Type"], "text/javascript; charset=utf-8")
         self.assertEqual(self.get("/assets/favicon.svg")[0], 200)
         status, headers, _ = self.get("/")
