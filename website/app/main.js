@@ -19,6 +19,7 @@ const state = {
   wallet: null,        // the connected wallet (needed to sign)
   session: null,       // {account, address, telegramLinked}
   allowance: null,     // GET /allowance
+  spend30: null,       // GET /v1/wallet/{address}/reconciliation, its `spent`
   tab: "allowance",
   modal: null,         // {type: "busy" | "wallets" | "quote" | "pause" | "delete-chat" | "models", …}
   preset: 0,           // index into PRESETS
@@ -228,7 +229,7 @@ async function signOut() {
 
 // What belongs to one signed-in account: cleared when it signs out or another wallet takes over.
 const accountState = () => ({
-  allowance: null, quote: null, result: null, purchases: null, linkCode: null, revealed: {}, tab: "allowance",
+  allowance: null, spend30: null, quote: null, result: null, purchases: null, linkCode: null, revealed: {}, tab: "allowance",
   modal: null, view: "chat", chats: [], chatId: null, messages: [], done: {}, chatMenu: null, renaming: null,
   showArchived: false, models: null, accountMenu: null, usage: null, push: null, menuOpen: false, switching: false,
   modelFilter: { query: "", category: "" }, keys: null, newKey: null,
@@ -332,7 +333,17 @@ async function cancelSwitch() {
 
 async function loadAllowance() {
   state.allowance = await api.allowance();
+  // A line of context under the allowance card; it never blocks or fails the card.
+  // Dropped if the wallet changed while it was on its way (Codex review): never show another wallet's spend.
+  const address = state.session.address;
+  api.walletReport(address).then((r) => {
+    if (state.session?.address !== address) return;
+    state.spend30 = r.spent; render();
+  }).catch(() => {});
 }
+
+const last30Line = () => state.spend30
+  ? `<p class="faint">Last 30 days: ${usdc(state.spend30.totalAtomic)} spent in ${state.spend30.count} purchase${state.spend30.count === 1 ? "" : "s"}.</p>` : "";
 
 // -- the limiter --
 
@@ -605,6 +616,7 @@ function renderSolanaAllowance(a) {
       <div class="metric"><span class="label">Approved in your wallet</span><b>${usdc(a.allowanceAtomic)}</b><span class="faint">wallet holds ${usdc(a.ownerUsdcAtomic)}</span></div>
     </div>
     <div class="bezel" style="margin-top:18px"><div class="core">
+      ${last30Line()}
       <p class="faint">Your wallet approved <span class="mono">${esc(short(a.limiter))}</span>, your agent, to take up to the approved total.
         The chain enforces that total; SingIt enforces the daily and per-purchase limits. Revoking takes effect at once.</p>
       <div class="row">
@@ -688,6 +700,7 @@ function renderAllowance() {
             <div class="big">${amount(blocked ? 0 : canSpend)}<small>USDC</small></div>
             <div class="meter"><span style="width:${Math.min(100, pct)}%"></span></div>
             <p class="faint">${amount(spent)} of the ${amount(daily)} USDC daily limit used today · up to ${usdc(a.perPurchaseCapAtomic)} a purchase</p>
+            ${last30Line()}
           </div>
           <div class="stats" style="grid-template-columns:1fr;margin-top:0;gap:8px">
             <div class="stat"><div class="label">Allowed from your wallet</div><div class="v">${usdc(a.allowanceAtomic)}</div></div>

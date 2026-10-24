@@ -87,7 +87,15 @@ async function call(method, path, body) {
   return data;
 }
 
+// The free public spend report (sign402_gateway/wallet_reconciliation.py): no session, no cookies.
+async function walletReport(address, days = 30) {
+  const response = await fetch(`${new URL(base(), location.href).origin}/v1/wallet/${encodeURIComponent(address)}/reconciliation?days=${days}`);
+  if (!response.ok) throw new ApiError(response.status, await response.json().catch(() => ({})));
+  return response.json();
+}
+
 export const api = {
+  walletReport,
   nonce: (address) => call("POST", "/auth/nonce", { address }),
   verify: (message, signature, utm) => call("POST", "/auth/verify", { message, signature, utm }),
   logout: () => call("POST", "/auth/logout"),

@@ -264,6 +264,21 @@ test("the web agent's metered route still refuses an empty request before any of
   assert.equal(response.headers.get("payment-required"), null);
 });
 
+test("the OpenAPI document lists the gateway's free wallet report with its own server and no payment", async (t) => {
+  const { url } = await serve(t);
+  const doc = await (await fetch(`${url}/openapi.json`)).json();
+  const item = doc.paths["/v1/wallet/{address}/reconciliation"];
+  assert.deepEqual(item.servers, [{ url: "https://app.singitai.app" }]);
+  assert.equal(item.get.operationId, "walletReconciliation");
+  assert.deepEqual(item.get.security, []);
+  assert.equal(item.get["x-payment-info"], undefined);
+  assert.equal(item.get.responses[402], undefined);
+  assert.ok(item.get.responses[200].content["application/json"].schema.properties.allowance);
+  assert.deepEqual(item.get.parameters.find((p) => p.name === "days").schema.maximum, 90);
+  const wellKnown = await (await fetch(`${url}/.well-known/x402`)).json();
+  assert.ok(!JSON.stringify(wellKnown).includes("reconciliation"));
+});
+
 test("the OpenAPI document lists the paid route the way x402scan reads it", async (t) => {
   const { url, facilitator } = await serve(t);
   const response = await fetch(`${url}/openapi.json`);

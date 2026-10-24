@@ -607,6 +607,48 @@ Limits:
 - A request with a browser `Origin` header is refused (403), as on `/v1`: keys belong in server code.
 - `GET /mcp` answers 405: there is no server-to-client SSE stream.
 
+## Free wallet spend report
+
+`GET /v1/wallet/{address}/reconciliation` (and `HEAD`) on the web API (`app.singitai.app`): a free, public report of what a wallet spent through SingIt and what is left of its limit. No API key, no session. It is served before the API-key `/v1` handler. Optional query `days`, 1 to 90 (default 30). Any origin may call it (`Access-Control-Allow-Origin: *`, no cookies); `Cache-Control: public, max-age=60`.
+
+```bash
+curl -s https://app.singitai.app/v1/wallet/0xAbC.../reconciliation?days=30
+```
+
+```json
+{
+  "address": "0x37E22ACF2E16Be261e1f15344729dac6eF1269e3",
+  "chain": "base",
+  "known": true,
+  "window": {"days": 30, "since": 1797408000, "until": 1800000000},
+  "spent": {
+    "totalAtomic": "3300000", "totalUsd": "3.30", "count": 3,
+    "byCategory": {"chat_answer": {"count": 1, "atomic": "300000", "usd": "0.30"},
+                   "data_tool": {"count": 1, "atomic": "1000000", "usd": "1.00"},
+                   "gift_card": {"count": 1, "atomic": "2000000", "usd": "2.00"}},
+    "byDay": [{"date": "2027-01-14", "atomic": "1000000", "usd": "1.00", "count": 1}]
+  },
+  "creditTopUps": {"count": 1, "atomic": "4000000", "usd": "4.00"},
+  "allowance": {
+    "configured": true, "state": "active", "dailyCapAtomic": "5000000", "perPurchaseCapAtomic": "2000000",
+    "spentTodayAtomic": "300000", "remainingTodayAtomic": "4700000", "expiry": 1800864000,
+    "limiter": "0x1111111111111111111111111111111111111111"
+  },
+  "generatedAt": 1800000000
+}
+```
+
+- `address` is canonical: checksummed on Base, as given on Solana (base58 is case-sensitive). `chain` is `base` or `solana`, read from the address. An address that is not `0x` + 40 hex, nor base58 of 32 to 44 characters, gets `400` (`bad_address`); a bad `days` gets `400` (`bad_days`).
+- All amounts are USDC atomic units (6 decimals) as strings, with a `usd` string beside them. `window.since` and `until` are Unix seconds (UTC); `byDay` days are UTC.
+- Only settled spend counts: Base `settlements` rows, and Solana spends with a pull transaction. A Solana spend that was reserved but never confirmed is not in `spent`.
+- `creditTopUps` is the balance bought for the API (`/v1/credit`). It is reported apart and is not in `spent`.
+- Categories are `chat_answer`, `data_tool`, `gift_card` (Bitrefill) and `other`. Base uses the same mapping as `scripts/daily-metrics.py`; a Solana purpose that SingIt's own code did not write maps to `other`.
+- `allowance` is `null` for an address SingIt has never seen (`known: false`, zero totals, same shape otherwise). `state` is `active`, `paused`, `expired` or `none` on Base, and `granted`, `waiting_for_grant` or `expired` on Solana (or `none` when only an agent exists). `limiter` is the Base limiter contract, or the Solana delegate: both are public on chain.
+- No RPC call is made. `spentTodayAtomic` and `remainingTodayAtomic` are our own books since UTC midnight, credit top-ups included because they are paid through the limiter too (on Solana as the page's status computes it, which also counts amounts held for metered answers in flight). On Base the limiter's own `remainingToday()` on chain is authoritative. The Solana `granted` state is our record of the last finished grant or revoke, not a read of the token account.
+- Privacy: categories only. Never resource URLs, invoice ids, Solana purpose text, transaction hashes, chats, emails or Telegram ids.
+- Limit: `SINGIT_RECONCILIATION_PER_MINUTE` per client IP (default 30), then `429` with `Retry-After: 60`. Answers are cached in process for 60 seconds per address and `days`.
+- It is listed in singit-ask's `/openapi.json` (own `servers` entry, no payment). It is not in `/.well-known/x402`, which lists payable resources only, and that document has no field for free endpoints.
+
 ## Safety
 
 - The gateway reads the Algorand private key from the local `payment-executor/.env`.

@@ -278,6 +278,21 @@ class SolanaAllowanceStore:
             return int(db.execute("SELECT COUNT(*) FROM spends WHERE account = ? AND pull_tx IS NOT NULL",
                                   (account,)).fetchone()[0])
 
+    def settled_spends_between(self, account: str, since: int, until: int) -> list[tuple[int, str, int]]:
+        """(amount, purpose, created_at) of settled spends (pull_tx set) in [since, until]; for the public report."""
+        with self._db() as db:
+            rows = db.execute("SELECT amount, purpose, created_at FROM spends WHERE account = ? AND pull_tx IS NOT NULL "
+                              "AND created_at >= ? AND created_at <= ? ORDER BY created_at",
+                              (account, since, until)).fetchall()
+        return [(int(r["amount"]), str(r["purpose"]), int(r["created_at"])) for r in rows]
+
+    def last_approval(self, account: str) -> str | None:
+        """'GRANT' or 'REVOKE': the wallet's latest finished approval change, from our own records."""
+        with self._db() as db:
+            row = db.execute("SELECT kind FROM ops WHERE account = ? AND kind IN ('GRANT', 'REVOKE') AND state = 'DONE' "
+                             "ORDER BY updated_at DESC, created_at DESC LIMIT 1", (account,)).fetchone()
+        return row["kind"] if row else None
+
     def drop_spend(self, spend_id: int) -> None:
         with self._db() as db:
             db.execute("DELETE FROM spends WHERE id = ?", (spend_id,))

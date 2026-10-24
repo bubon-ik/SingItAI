@@ -182,6 +182,28 @@ export async function priceRange(catalogue) {
   return { min: usd(TERMS.settlementFeeAtomic), max: usd(most) };
 }
 
+const AMOUNT = { type: "object", properties: { count: { type: "integer" }, atomic: { type: "string" }, usd: { type: "string" } } };
+// The free wallet report, served by the gateway (sign402-gateway/README.md documents every field).
+const RECONCILIATION_SCHEMA = {
+  type: "object",
+  required: ["address", "chain", "known", "window", "spent", "creditTopUps", "allowance", "generatedAt"],
+  properties: {
+    address: { type: "string" }, chain: { type: "string", enum: ["base", "solana"] }, known: { type: "boolean" },
+    window: { type: "object", properties: { days: { type: "integer" }, since: { type: "integer" }, until: { type: "integer" } } },
+    spent: { type: "object", properties: {
+      totalAtomic: { type: "string" }, totalUsd: { type: "string" }, count: { type: "integer" },
+      byCategory: { type: "object", additionalProperties: AMOUNT },
+      byDay: { type: "array", items: { type: "object", properties: {
+        date: { type: "string" }, atomic: { type: "string" }, usd: { type: "string" }, count: { type: "integer" } } } } } },
+    creditTopUps: AMOUNT,
+    allowance: { type: ["object", "null"], properties: {
+      configured: { type: "boolean" }, state: { type: "string", enum: ["active", "paused", "expired", "none", "granted", "waiting_for_grant"] },
+      dailyCapAtomic: { type: "string" }, perPurchaseCapAtomic: { type: "string" }, spentTodayAtomic: { type: "string" },
+      remainingTodayAtomic: { type: "string" }, expiry: { type: "integer" }, limiter: { type: ["string", "null"] } } },
+    generatedAt: { type: "integer" },
+  },
+};
+
 const EXAMPLE = {
   input: { messages: [{ role: "user", content: "Where is good coffee near the Colosseum?" }], max_tokens: 400 },
   // A real answer's shape and charge (default model, Base): 6 micro-USD of tokens, 2 markup, 1000 settlement fee.
@@ -376,6 +398,24 @@ export function createApp(config, { facilitatorClient, upstream = askSurplus, fe
                          { name: "quote", in: "path", required: true, schema: { type: "string", examples: ["USD"] } }],
             responses: { 200: { description: "The rate, its date and source" }, 404: { description: "Not offered" } } } },
         } : {}),
+        // Free, and served by the sign402 gateway's web API, not by this service: hence its own server.
+        "/v1/wallet/{address}/reconciliation": { servers: [{ url: config.walletReportOrigin || "https://app.singitai.app" }],
+          get: {
+            operationId: "walletReconciliation", security: [],
+            summary: "Free: a wallet's SingIt spend over the last 1 to 90 days, and its on-chain allowance (Base or Solana)",
+            description: "Public, no key, no payment. Settled spend by category (chat_answer, data_tool, gift_card, other), "
+              + "by day, credit top-ups apart, and the owner's daily and per-purchase limits with what is left today. "
+              + "Categories only: no purchase details. 30 requests a minute per IP.",
+            parameters: [
+              { name: "address", in: "path", required: true, schema: { type: "string" },
+                description: "A Base address (0x + 40 hex) or a Solana address (base58)" },
+              { name: "days", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 90, default: 30 } }],
+            responses: {
+              200: { description: "The report; known:false with zeros for an address SingIt has never seen",
+                     content: { "application/json": { schema: RECONCILIATION_SCHEMA } } },
+              400: { description: "Not an address, or days out of range" },
+              429: { description: "Too many requests; see Retry-After" } },
+          } },
         "/v1/models": { get: {
           operationId: "listModels", summary: "Models that can be asked for now, with their prices",
           responses: { 200: { description: "Model list" } }, security: [],

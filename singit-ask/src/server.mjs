@@ -51,6 +51,8 @@ const config = {
   surplusKey: required("SURPLUS_API_KEY"),
   surplusUrl: (process.env.SURPLUS_API_URL || "https://api.surplusintelligence.ai").replace(/\/$/, ""),
   model: process.env.SINGIT_ASK_MODEL || "deepseek-v4.1-flash",
+  // Where the gateway's free wallet report lives (listed in /openapi.json only; this service does not serve it).
+  walletReportOrigin: (process.env.SINGIT_ASK_WALLET_REPORT_ORIGIN || "https://app.singitai.app").replace(/\/$/, ""),
   blockedProviders: String(process.env.SINGIT_ASK_BLOCKED_PROVIDERS || "").split(",").map((p) => p.trim()).filter(Boolean),
   observedFile: process.env.SINGIT_ASK_OBSERVED_PRICES
     || `${process.env.HOME}/.config/singit-ask/observed-prices.json`,
