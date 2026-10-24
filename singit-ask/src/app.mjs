@@ -25,7 +25,8 @@ import { SPEECH_ROUTE, addSpeechRoutes } from "./speech.mjs";
 import { addPriceRoutes } from "./prices.mjs";
 import { VIDEO_ROUTE, addVideoRoutes } from "./video.mjs";
 import { FORMAT_ROUTES, addFormatRoutes } from "./formats.mjs";
-import { DIRECT_TERMS, QUOTED_ROUTE, TERMS, METERED_ROUTE, SOLANA_TERMS, ceilingAtomic, SERVICE_NAME, ICON_URL } from "./pricing.mjs";
+import { DIRECT_TERMS, QUOTED_ROUTE, TERMS, METERED_ROUTE, SOLANA_TERMS, ceilingAtomic, SERVICE_NAME, ICON_URL, usd } from "./pricing.mjs";
+import { addModelRoutes, modelRoutePaths, modelOpenapiPaths } from "./model-routes.mjs";
 
 export const BASE = "eip155:8453";
 export const SOLANA = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
@@ -166,8 +167,6 @@ const OUTPUT_SCHEMA = {
   },
 };
 
-const usd = atomic => (Number(atomic) / 1e6).toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
-
 // The least and the most one answer can be charged, for discovery. The least is Base's settlement fee; the most is
 // the dearest listed model's ceiling for the largest question and answer this service takes, on Solana's terms.
 // `charsPerToken: 1` matches the `upto` authorization this max actually describes (see pricing.mjs's
@@ -299,6 +298,8 @@ export function createApp(config, { facilitatorClient, upstream = askSurplus, fe
                        503: { description: "Paused or Exa unavailable; nothing charged" } },
           security: [{ x402: [] }],
         } }])) : {}),
+        ...(catalogue ? await modelOpenapiPaths(catalogue, { inputSchema: INPUT_SCHEMA, outputSchema: OUTPUT_SCHEMA,
+          exampleOutput: EXAMPLE.output, fallbackPrice: price }) : {}),
         ...(catalogue ? Object.fromEntries(Object.keys(FORMAT_ROUTES).map((route) => [route, { post: {
           operationId: route === "/v1/messages" ? "createMessage" : "createResponse",
           summary: route === "/v1/messages" ? "Anthropic's Messages API, any listed model" : "OpenAI's Responses API, any listed model",
@@ -396,7 +397,8 @@ export function createApp(config, { facilitatorClient, upstream = askSurplus, fe
   app.get("/.well-known/x402", open, (req, res) => {
     res.json({ version: 1, resources: [`${origin(req)}${ROUTE}`,
         ...(catalogue ? [...Object.keys(FORMAT_ROUTES).map((route) => `${origin(req)}${route}`),
-                         `${origin(req)}${IMAGE_ROUTE}`, `${origin(req)}${SPEECH_ROUTE}`, `${origin(req)}${VIDEO_ROUTE}`] : []),
+                         `${origin(req)}${IMAGE_ROUTE}`, `${origin(req)}${SPEECH_ROUTE}`, `${origin(req)}${VIDEO_ROUTE}`,
+                         ...modelRoutePaths().map((route) => `${origin(req)}${route}`)] : []),
         ...(exaKey ? Object.keys(SEARCH_ROUTES).map((route) => `${origin(req)}${route}`) : [])],
       instructions: `${DESCRIPTION} Models and prices: GET ${origin(req)}/v1/models.`
         + (freeOffer ? ` Free to try with no payment: model ${freeOffer.models.join(", ")}, ${freeOffer.perVisitorPerDay} answers a day.` : "") });
@@ -404,7 +406,7 @@ export function createApp(config, { facilitatorClient, upstream = askSurplus, fe
   // Every discoverable paid route that is actually enabled: what DISCOVERABLE in test/discovery.test.mjs checks,
   // built from the same flags addFormatRoutes/addImageRoutes/addSpeechRoutes/addSearchRoutes are gated on, so the
   // list below and llms.txt can never list a route this instance did not add.
-  const discoverableRoutes = () => [ROUTE, ...(catalogue ? [...Object.keys(FORMAT_ROUTES), IMAGE_ROUTE, SPEECH_ROUTE] : []),
+  const discoverableRoutes = () => [ROUTE, ...(catalogue ? [...Object.keys(FORMAT_ROUTES), IMAGE_ROUTE, SPEECH_ROUTE, ...modelRoutePaths()] : []),
     ...(exaKey ? Object.keys(SEARCH_ROUTES) : [])];
   // Free: a human or agent landing on the bare origin gets a small service index instead of Express's 404.
   // Express answers HEAD the same way automatically. Open CORS, like the other public documents.
@@ -461,6 +463,10 @@ export function createApp(config, { facilitatorClient, upstream = askSurplus, fe
   if (catalogue) addSpeechRoutes(app, config, { facilitatorClient, catalogue, fetchImpl, log, open });
   // Anthropic's Messages and OpenAI's Responses, paid like the chat route.
   if (catalogue) addFormatRoutes(app, config, { facilitatorClient, catalogue, fetchImpl, log });
+  // One x402 resource per popular model (SI-62), so a Bazaar search for a model name finds a dedicated listing
+  // instead of only the generic chat route where the model is a body field a search engine cannot see.
+  if (catalogue) addModelRoutes(app, config, { facilitatorClient, catalogue, readRequest, upstream: learning, fetchImpl, log,
+    inputSchema: INPUT_SCHEMA, outputSchema: OUTPUT_SCHEMA, exampleOutput: EXAMPLE.output });
   // Video from Surplus's text-to-video models, as jobs.
   if (catalogue) addVideoRoutes(app, config, { facilitatorClient, catalogue, fetchImpl, log, open });
   // Free prices: crypto and metals from Chainlink on Base, currencies from Chainlink or the ECB.

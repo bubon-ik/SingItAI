@@ -29,6 +29,17 @@ what it actually cost; nothing is charged without an answer.
   `openapi.json` and `/.well-known/x402`'s instructions instead. Each resource also carries
   `serviceName` ("SingIt Ask") and a PNG `iconUrl`, and its `accepts` always leads with
   `exact` on Base, the simplest offer for a buyer that only inspects `accepts[0]`.
+- **Per-model routes:** when a catalogue is configured, `POST /v1/chat/{model}` is a
+  separate x402 resource for each of 14 popular models (`claude-opus-5.5`,
+  `claude-sonnet-5.5`, `claude-haiku-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.5`,
+  `gemini-3.1-pro-preview`, `gemini-3.8-flash`, `grok-4.7`, `kimi-k3`, `deepseek-v4-pro`,
+  `deepseek-v4.1-flash`, `qwen3.8-max-0902`, `glm-5.3`; list in `src/model-routes.mjs`), so
+  a directory search for a model name finds its own listing, description and price. Each
+  behaves like `/v1/chat/completions` (same offers, billing and request body) with the
+  model fixed by the path: a body `model` that differs is refused 400 before payment, an
+  absent one uses the path model, and a model the catalogue cannot answer right now is
+  refused 404/503 before payment. `free/` models are not available there. The 402 probe
+  is priced at that model's own ceiling.
 - **`GET /` and `GET /llms.txt`:** a small JSON service index and an
   [llms.txt](https://llmstxt.org) document, generated from the same enabled-route list as
   discovery so neither can drift from it.

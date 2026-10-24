@@ -22,18 +22,24 @@ const TERMS_BY_NETWORK = { [BASE]: TERMS, [SOLANA]: SOLANA_TERMS };
 // The ceiling is decided per question, from the model it asks for, so the offer's price is a function of the
 // request. `quotes` remembers what each parsed body was offered: the middleware asks again when the payment
 // arrives and must get the same answer.
-export const baseOffer = (config, quotes) => ({
+//
+// `fallback`, when given, replaces the standing ceiling (TERMS/SOLANA_TERMS.maxChargeAtomic) as what a
+// GET/HEAD or empty-POST discovery probe is quoted (`quotes` is never populated for those: see `isDiscoveryProbe`
+// below). It may return a Promise: @x402/core awaits an offer's `price` before using it (chunk-FV2JN4FK.mjs,
+// `await option.price(context)`), so a route whose model is known ahead of time (model-routes.mjs) can quote that
+// model's own ceiling instead of the generic one, without touching the metered payment path at all.
+export const baseOffer = (config, quotes, fallback) => ({
   // 120 s covers the model and settlement; after it, a lost answer's signature is provably unusable.
   scheme: "upto", network: BASE, payTo: config.payToBase, maxTimeoutSeconds: 120,
-  price: ctx => {
-    const amount = quotes.get(ctx.adapter.getBody())?.upto?.[BASE] ?? TERMS.maxChargeAtomic;
+  price: async ctx => {
+    const amount = quotes.get(ctx.adapter.getBody())?.upto?.[BASE] ?? (fallback ? await fallback() : TERMS.maxChargeAtomic);
     return { asset: ASSET, amount, extra: { name: "USD Coin", version: "2", billing: { ...TERMS, maxChargeAtomic: amount } } };
   },
 });
-export const solanaOffer = (config, quotes) => ({
+export const solanaOffer = (config, quotes, fallback) => ({
   scheme: "upto", network: SOLANA, payTo: config.payToSolana, maxTimeoutSeconds: 300,
-  price: ctx => {
-    const amount = quotes.get(ctx.adapter.getBody())?.upto?.[SOLANA] ?? SOLANA_TERMS.maxChargeAtomic;
+  price: async ctx => {
+    const amount = quotes.get(ctx.adapter.getBody())?.upto?.[SOLANA] ?? (fallback ? await fallback() : SOLANA_TERMS.maxChargeAtomic);
     return { asset: SOLANA_ASSET, amount, extra: { billing: { ...SOLANA_TERMS, maxChargeAtomic: amount } } };
   },
 });
@@ -42,18 +48,18 @@ export const solanaOffer = (config, quotes) => ({
 // budget: see `ceilings`), charged flat (see the file header for why). Reuses the same `quotes` lookup as the
 // `upto` offers above, so both schemes are always quoted from the one choice made for this question, and
 // `mode: "exact_ceiling"` in the offer's billing tells buyers this one is not metered.
-export const exactBaseOffer = (config, quotes) => ({
+export const exactBaseOffer = (config, quotes, fallback) => ({
   scheme: "exact", network: BASE, payTo: config.payToBase, maxTimeoutSeconds: 120,
-  price: ctx => {
-    const amount = quotes.get(ctx.adapter.getBody())?.exact?.[BASE] ?? TERMS.maxChargeAtomic;
+  price: async ctx => {
+    const amount = quotes.get(ctx.adapter.getBody())?.exact?.[BASE] ?? (fallback ? await fallback() : TERMS.maxChargeAtomic);
     return { asset: ASSET, amount, extra: { name: "USD Coin", version: "2",
       billing: { ...TERMS, mode: "exact_ceiling", maxChargeAtomic: amount } } };
   },
 });
-export const exactSolanaOffer = (config, quotes) => ({
+export const exactSolanaOffer = (config, quotes, fallback) => ({
   scheme: "exact", network: SOLANA, payTo: config.payToSolana, maxTimeoutSeconds: 300,
-  price: ctx => {
-    const amount = quotes.get(ctx.adapter.getBody())?.exact?.[SOLANA] ?? SOLANA_TERMS.maxChargeAtomic;
+  price: async ctx => {
+    const amount = quotes.get(ctx.adapter.getBody())?.exact?.[SOLANA] ?? (fallback ? await fallback() : SOLANA_TERMS.maxChargeAtomic);
     return { asset: SOLANA_ASSET, amount, extra: { billing: { ...SOLANA_TERMS, mode: "exact_ceiling", maxChargeAtomic: amount } } };
   },
 });

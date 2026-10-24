@@ -48,6 +48,10 @@ export function billUsage(usage, terms = TERMS, { allowOverrun = false } = {}) {
   return { ...billed, totalAtomic: cap.toString(), overrunAtomic: (total - cap).toString(), currency: "USDC" };
 }
 
+// Atomic USDC micro-units as a plain decimal string, for a human price (openapi.json, /v1/models, /openapi.json's
+// x-payment-info): "1008" -> "0.001008".
+export const usd = atomic => (Number(atomic) / 1e6).toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+
 // The ceiling one answer can cost: the most the model could bill for this question and answer size, plus the
 // markup and the fee. It never drops below MIN_CEILING_ATOMIC; only models whose worst case is higher get a
 // higher ceiling.

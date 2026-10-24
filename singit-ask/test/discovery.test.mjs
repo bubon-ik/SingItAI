@@ -14,6 +14,7 @@ import { SEARCH_ROUTES } from "../src/search.mjs";
 import { VIDEO_ROUTE } from "../src/video.mjs";
 import { CREDIT_ROUTE } from "../src/credit.mjs";
 import { METERED_ROUTE } from "../src/pricing.mjs";
+import { modelRoutePaths } from "../src/model-routes.mjs";
 
 const CONFIG = { payToSolana: "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin",
   payToBase: "0x1111111111111111111111111111111111111111", surplusKey: "inf_test", surplusUrl: "https://surplus.test",
@@ -21,10 +22,11 @@ const CONFIG = { payToSolana: "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin",
 const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64");
 const decode = (header) => JSON.parse(Buffer.from(header, "base64").toString("utf8"));
 
-// Every discoverable paid route (the 8 below): chat/completions, Anthropic/OpenAI's own formats, images, speech,
-// and Exa's three. `/v1/chat/completions/metered` and `/v1/video/generations` are paid but not listed; `/v1/credit`
-// is paid and deliberately hidden. None of the three are in this list.
-const DISCOVERABLE = [ROUTE, ...Object.keys(FORMAT_ROUTES), IMAGE_ROUTE, SPEECH_ROUTE, ...Object.keys(SEARCH_ROUTES)];
+// Every discoverable paid route: chat/completions, Anthropic/OpenAI's own formats, images, speech, Exa's three,
+// and one per popular model (SI-62). `/v1/chat/completions/metered` and `/v1/video/generations` are paid but not
+// listed; `/v1/credit` is paid and deliberately hidden. None of those three are in this list.
+const DISCOVERABLE = [ROUTE, ...Object.keys(FORMAT_ROUTES), IMAGE_ROUTE, SPEECH_ROUTE, ...Object.keys(SEARCH_ROUTES),
+  ...modelRoutePaths()];
 
 function fakeFacilitator() {
   const calls = { verify: 0, settle: [] };

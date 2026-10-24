@@ -7,6 +7,7 @@ import { BASE, SOLANA, ROUTE, LIMITS, RequestError, UpstreamError, readRequest, 
 import { FORMAT_ROUTES } from "../src/formats.mjs";
 import { METERED_ROUTE, SOLANA_TERMS, TERMS, MIN_CEILING_ATOMIC, ceilingAtomic, billUsage } from "../src/pricing.mjs";
 import { ModelCatalogue, UnknownModel, priceGuard } from "../src/catalogue.mjs";
+import { modelRoutePaths } from "../src/model-routes.mjs";
 
 const SOLANA_PAY_TO = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin";
 const BASE_PAY_TO = "0x1111111111111111111111111111111111111111";
@@ -307,7 +308,8 @@ test("/.well-known/x402 points to the paid route at its public URL", async (t) =
   assert.deepEqual(doc.resources, ["https://ask.singitai.app/v1/chat/completions",
                                    "https://ask.singitai.app/v1/messages", "https://ask.singitai.app/v1/responses",
                                    "https://ask.singitai.app/v1/images/generations", "https://ask.singitai.app/v1/audio/speech",
-                                   "https://ask.singitai.app/v1/video/generations"]);
+                                   "https://ask.singitai.app/v1/video/generations",
+                                   ...modelRoutePaths().map((route) => `https://ask.singitai.app${route}`)]);
   assert.match(doc.instructions, /GET https:\/\/ask\.singitai\.app\/v1\/models/);
 });
 
