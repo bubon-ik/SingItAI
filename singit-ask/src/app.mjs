@@ -262,7 +262,13 @@ export function createApp(config, { facilitatorClient, upstream = askSurplus, fe
       openapi: "3.1.0",
       info: { title: "SingIt Ask", version: "1.0.0",
               description: "Language-model answers paid per answer over x402 in USDC on Base or Solana. No accounts or API keys."
-                + (freeOffer ? ` Free to try: model ${freeOffer.models.join(", ")}, ${freeOffer.perVisitorPerDay} answers a day, no payment.` : "") },
+                + (freeOffer ? ` Free to try: model ${freeOffer.models.join(", ")}, ${freeOffer.perVisitorPerDay} answers a day, no payment.` : ""),
+              "x-guidance": "POST JSON in OpenAI chat-completions format to the paths below. A first request without "
+                + "payment returns 402 with the challenge in the PAYMENT-REQUIRED header; sign an x402 v2 \"exact\" or "
+                + "\"upto\" USDC authorization on Base or Solana and retry the same request with a PAYMENT-SIGNATURE "
+                + "header. List callable models at GET /v1/models and free (unpaid) prices at GET /v1/prices. Nothing "
+                + "is charged unless an answer comes back.",
+              contact: { name: "SingIt", email: "Exkalibur1919@proton.me", url: "https://singitai.app" } },
       servers: [{ url: origin(req) }],
       paths: {
         [ROUTE]: { post: {

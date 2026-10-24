@@ -556,6 +556,12 @@ Every paid call is billed exactly like `/v1`: from the key's own daily and per-r
 its account's own SingIt limits (Base USDC). Nothing here can move funds, change limits, or buy goods
 (no Bitrefill, no wallet/allowance tools — that stays out of MCP for now, v2 at the earliest).
 
+Every `tools/list` entry carries a `title` and MCP annotations (`readOnlyHint`, `destructiveHint`,
+`idempotentHint`, `openWorldHint`). All 14 tools are read-only and non-destructive: paid ones debit the
+key's limits but never touch external state. `get_price`, `list_price_symbols` and `list_models` read
+SingIt's own data, so they are idempotent and not open-world; every other tool bills again on each call
+(not idempotent) and reaches third-party data (open-world).
+
 Install:
 
 ```bash
@@ -604,8 +610,18 @@ Limits:
   its own scopes (`web_search` and `read_page` need `search`).
 - The key's own rate limit (60 requests a minute) applies to `tools/call` as it does to `/v1`.
 - The paid data tools are sold on Base only; a Solana account's key gets a clear refusal for them.
-- A request with a browser `Origin` header is refused (403), as on `/v1`: keys belong in server code.
+- A request with a browser `Origin` header is refused (403) unless that origin is trusted: either this
+  server's own origin (`SIGN402_WEB_URI`) or one of a small allowlist of known MCP inspectors and
+  scanners (`https://glama.ai`, `https://www.glama.ai`,
+  `https://x402scan.com`, `https://www.x402scan.com`), overridable with the comma-separated
+  `SINGIT_MCP_ALLOWED_ORIGINS` env var (replaces the defaults, not additive). A trusted origin still
+  needs a valid key for everything past the CORS preflight; an untrusted one is refused before the key
+  is even checked. `OPTIONS /mcp` answers the CORS preflight the same way.
 - `GET /mcp` answers 405: there is no server-to-client SSE stream.
+
+`GET /.well-known/mcp/server-card.json` (SEP-1649 draft) and `GET /.well-known/glama.json` are public,
+keyless catalog metadata on the same host, for MCP directories and scanners that read tools/list without
+an API key: `server_card()` and `glama_json()` in `web_mcp.py`.
 
 ## Safety
 

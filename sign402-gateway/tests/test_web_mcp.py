@@ -21,7 +21,9 @@ from sign402_gateway import web_api as wa
 from sign402_gateway.agent_allowance import AllowanceStore
 from sign402_gateway.server import PAID_TOOLS
 from sign402_gateway.web_accounts import WebAccountStore, WebAuth, account_id_for
-from sign402_gateway.web_mcp import ASK_URL
+from sign402_gateway.web_mcp import (
+    ASK_URL, DEFAULT_ALLOWED_ORIGINS, FREE_TOOL_NAMES, OWN_TOOLS, allowed_origins_from_env, glama_json, server_card,
+)
 from tests.test_gateway_server import DummyServer
 from tests.test_web_shop import ACCOUNT, OWNER, PAID, REQUIREMENTS, TOKEN, raw_request
 
@@ -54,7 +56,7 @@ class Fixture(unittest.TestCase):
         self.store = WebAccountStore(Path(self.tmp.name) / "web.db")
         self.auth = WebAuth(self.store, domain=DOMAIN, uri=URI, allowed=None, now=lambda: self.clock[0])
         self.shop = Shop()
-        self.api = wa.WebApi(self.auth, Mock(), shop=self.shop, now=lambda: self.clock[0])
+        self.api = wa.WebApi(self.auth, Mock(), shop=self.shop, now=lambda: self.clock[0], public_origin=URI)
         issued = self.auth.nonce(self.user.address)
         self.session = self.auth.verify(issued["message"], sign(self.user, issued["message"]))
         self.account = account_id_for(self.user.address)
@@ -111,6 +113,27 @@ class InitializeAndListTests(Fixture):
         status, out, _ = self.rpc(key, "ping")
         self.assertEqual((status, out["result"]), (200, {}))
 
+    def test_every_tool_has_a_title_and_boolean_annotations_and_there_are_exactly_fourteen(self):
+        key = self.make_key()["key"]
+        status, out, _ = self.rpc(key, "tools/list")
+        listed = out["result"]["tools"]
+        self.assertEqual(len(listed), len(OWN_TOOLS) + len(PAID_TOOLS))
+        self.assertEqual(len(listed), 14)
+        for tool in listed:
+            self.assertTrue(tool.get("title"), tool["name"])
+            annotations = tool["annotations"]
+            self.assertEqual(annotations["title"], tool["title"])
+            for hint in ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"):
+                self.assertIsInstance(annotations[hint], bool, f"{tool['name']}.{hint}")
+            self.assertTrue(annotations["readOnlyHint"])
+            self.assertFalse(annotations["destructiveHint"])
+            if tool["name"] in FREE_TOOL_NAMES:
+                self.assertTrue(annotations["idempotentHint"], tool["name"])
+                self.assertFalse(annotations["openWorldHint"], tool["name"])
+            else:
+                self.assertFalse(annotations["idempotentHint"], tool["name"])
+                self.assertTrue(annotations["openWorldHint"], tool["name"])
+
 
 class AuthTests(Fixture):
     def test_no_key_is_refused_before_anything_else(self):
@@ -131,11 +154,64 @@ class AuthTests(Fixture):
         self.assertEqual(status, 401)
         self.assertEqual(self.shop.calls, [])
 
-    def test_a_browser_origin_is_refused(self):
+    def test_an_untrusted_browser_origin_is_refused_before_auth(self):
         made = self.make_key()
         status, out, _ = self.rpc(made["key"], "initialize", origin="https://evil.test")
         self.assertEqual(status, 403)
         self.assertEqual(self.shop.calls, [])
+
+    def test_the_literal_null_origin_is_never_trusted(self):
+        made = self.make_key()
+        status, out, _ = self.rpc(made["key"], "initialize", origin="null")
+        self.assertEqual(status, 403)
+
+    def test_a_trusted_scanner_origin_without_a_key_is_401_not_403(self):
+        status, out, _ = self.rpc(None, "initialize", origin="https://glama.ai")
+        self.assertEqual(status, 401)
+        self.assertEqual(out["error"]["code"], -32001)
+
+    def test_a_trusted_scanner_origin_with_a_valid_key_gets_cors_headers_back(self):
+        made = self.make_key()
+        status, out, headers = self.rpc(made["key"], "initialize", origin="https://glama.ai")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Access-Control-Allow-Origin"], "https://glama.ai")
+        self.assertEqual(headers["Vary"], "Origin")
+
+    def test_a_trusted_origin_can_read_www_authenticate_on_a_401(self):
+        status, _, headers = self.rpc(None, "initialize", origin="https://glama.ai")
+        self.assertEqual(status, 401)
+        self.assertIn("WWW-Authenticate", headers["Access-Control-Expose-Headers"])
+
+    def test_the_mcp_hosts_own_origin_is_trusted(self):
+        made = self.make_key()
+        status, out, headers = self.rpc(made["key"], "initialize", origin=URI)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Access-Control-Allow-Origin"], URI)
+
+    def test_no_origin_still_needs_a_key_for_initialize_and_tools_list(self):
+        status, out, _ = self.rpc(None, "initialize")
+        self.assertEqual(status, 401)
+        status, out, _ = self.rpc(None, "tools/list")
+        self.assertEqual(status, 401)
+
+
+class AllowedOriginsEnvTests(unittest.TestCase):
+    def test_the_default_allowlist_covers_the_known_mcp_scanners(self):
+        self.assertEqual(allowed_origins_from_env({}), DEFAULT_ALLOWED_ORIGINS)
+        self.assertIn("https://glama.ai", DEFAULT_ALLOWED_ORIGINS)
+        self.assertIn("https://x402scan.com", DEFAULT_ALLOWED_ORIGINS)
+
+    def test_the_env_override_replaces_the_defaults_rather_than_extending_them(self):
+        origins = allowed_origins_from_env({"SINGIT_MCP_ALLOWED_ORIGINS": "https://only.example, https://also.example/"})
+        self.assertEqual(origins, {"https://only.example", "https://also.example"})
+        self.assertNotIn("https://glama.ai", origins)
+
+    def test_web_api_passes_its_allowlist_to_the_mcp_server(self):
+        from sign402_gateway.web_mcp import McpServer
+        server = McpServer(Mock(), allowed_origins=allowed_origins_from_env(
+            {"SINGIT_MCP_ALLOWED_ORIGINS": "https://only.example"}))
+        self.assertTrue(server.is_trusted_origin("https://only.example"))
+        self.assertFalse(server.is_trusted_origin("https://glama.ai"))
 
 
 class FreeToolTests(Fixture):
@@ -283,7 +359,9 @@ class ProtocolTests(Fixture):
 
 
 class HttpTests(Fixture):
-    """Over HTTP, the way an MCP client (Claude Code, Cursor, Codex) calls it."""
+    """Over HTTP, the way an MCP client (Claude Code, Cursor, Codex) calls it. One server for the whole
+    class (not one per test) so the suite doesn't pile up unclosed sqlite stores for the GC to warn about
+    mid-test, as tearDownModule below already has to account for."""
 
     def setUp(self):
         super().setUp()
@@ -292,7 +370,18 @@ class HttpTests(Fixture):
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}/mcp"
+        self.root = self.base[: -len("/mcp")]
         self.key = self.make_key()["key"]
+
+    def _options(self, origin):
+        request = urllib.request.Request(self.base, method="OPTIONS", headers={"Origin": origin} if origin else {})
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status, dict(response.headers)
+        except urllib.error.HTTPError as error:
+            headers = dict(error.headers)
+            error.close()
+            return error.code, headers
 
     def test_post_initialize_then_no_key_then_get(self):
         request = urllib.request.Request(self.base, data=json.dumps(
@@ -316,6 +405,52 @@ class HttpTests(Fixture):
         self.assertEqual(caught.exception.code, 405)
         self.assertEqual(caught.exception.headers.get("Allow"), "POST")
         caught.exception.close()
+
+    def test_preflight_from_a_trusted_scanner_origin(self):
+        status, headers = self._options("https://glama.ai")
+        self.assertEqual(status, 204)
+        self.assertEqual(headers.get("Access-Control-Allow-Origin"), "https://glama.ai")
+        self.assertIn("POST", headers.get("Access-Control-Allow-Methods", ""))
+        self.assertIn("OPTIONS", headers.get("Access-Control-Allow-Methods", ""))
+        self.assertIn("Authorization", headers.get("Access-Control-Allow-Headers", ""))
+        self.assertNotIn("Access-Control-Allow-Credentials", headers)
+
+    def test_preflight_from_an_untrusted_origin_is_403_without_cors_headers(self):
+        status, headers = self._options("https://evil.example")
+        self.assertEqual(status, 403)
+        self.assertNotIn("Access-Control-Allow-Origin", headers)
+
+    def test_preflight_from_the_mcp_hosts_own_origin(self):
+        status, headers = self._options(URI)
+        self.assertEqual(status, 204)
+        self.assertEqual(headers.get("Access-Control-Allow-Origin"), URI)
+
+    def test_server_card(self):
+        with urllib.request.urlopen(self.root + "/.well-known/mcp/server-card.json", timeout=10) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers.get("Access-Control-Allow-Origin"), "*")
+            self.assertIn("max-age=3600", response.headers.get("Cache-Control", ""))
+            card = json.loads(response.read())
+        self.assertEqual(card["transport"], {"type": "streamable-http", "url": URI + "/mcp"})
+        self.assertTrue(card["authentication"]["required"])
+        self.assertEqual(card["authentication"]["schemes"], ["bearer"])
+        self.assertEqual(len(card["tools"]), 14)
+        self.assertLessEqual(len(card["description"]), 200)
+        self.assertEqual(card, server_card(URI))
+
+    def test_glama_json(self):
+        with urllib.request.urlopen(self.root + "/.well-known/glama.json", timeout=10) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers.get("Access-Control-Allow-Origin"), "*")
+            data = json.loads(response.read())
+        self.assertEqual(data["maintainers"], [{"email": "Exkalibur1919@proton.me"}])
+        self.assertEqual(data, glama_json())
+
+    def test_head_on_server_card_has_no_body(self):
+        request = urllib.request.Request(self.root + "/.well-known/mcp/server-card.json", method="HEAD")
+        with urllib.request.urlopen(request, timeout=10) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), b"")
 
 
 class GatewayApiToolTests(unittest.TestCase):

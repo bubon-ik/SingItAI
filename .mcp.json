@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "singit": {
+      "url": "https://app.singitai.app/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:SINGIT_API_KEY}"
+      }
+    }
+  }
+}

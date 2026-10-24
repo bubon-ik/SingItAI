@@ -10,21 +10,36 @@ Tools:
     ApiKeys._search, exactly as /v1/exa/… is billed).
   * Paid from the key's own limits, needing the "tools" scope: every entry of server.PAID_TOOLS, under
     its mcpStyleName (get_weather, resolve_ens, …), through ApiKeys.tool.
+Every tools/list entry carries a title and MCP annotations (readOnlyHint, destructiveHint, idempotentHint,
+openWorldHint): paid tools debit the key's SingIt limits but never touch external state, so they are
+readOnlyHint/not destructive like the free ones, but not idempotent (each call bills again) and, except
+the three free lookups that only read SingIt's own data, openWorldHint (they reach third-party data).
 
 Every call needs a valid key (Authorization: Bearer sk_singit_…, or x-api-key) before anything else,
-including initialize; a browser Origin is refused for the same reason /v1 refuses one. The key's own
-60-requests-a-minute rate applies once per tools/call, whether the tool is free or paid, except the two
-Exa tools: they already rate inside ApiKeys._search.
+including initialize; this is unchanged by the origin allowlist below. The key's own 60-requests-a-minute
+rate applies once per tools/call, whether the tool is free or paid, except the two Exa tools: they already
+rate inside ApiKeys._search.
+
+Browser Origin: refused with 403 unless it is trusted, same as /v1 refuses one. Trusted means either the
+same origin as the MCP host itself (McpServer's public_origin, normally SIGN402_WEB_URI) or one of
+DEFAULT_ALLOWED_ORIGINS / SINGIT_MCP_ALLOWED_ORIGINS below — known MCP inspectors and scanners that need to
+read tools/list without a key before a human adds one. A trusted origin still needs a valid key for
+anything beyond the CORS preflight; an untrusted one is refused before authentication is even checked.
+
+Catalog metadata that other files or endpoints read from here: server_card() for
+GET /.well-known/mcp/server-card.json (SEP-1649) and glama_json() for GET /.well-known/glama.json
+(both served by web_api.py, public, no key).
 """
 
 from __future__ import annotations
 
 import functools
 import json
+import os
 import re
 import urllib.error
 import urllib.request
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from urllib.parse import quote
 
 from .web_api_keys import ASK_URL, ApiError, ApiKeys
@@ -46,6 +61,61 @@ MODEL_KINDS = ("chat", "images", "audio")
 SEARCH_TYPES = ("auto", "fast", "neural", "keyword")
 # Tools billed through ApiKeys._search: it rates the key itself, so McpServer must not rate it again.
 SEARCH_TOOLS = frozenset({"web_search", "read_page"})
+# The only tools that read SingIt's own data for free; every other tool bills the key per call and, except
+# for these three, reaches third-party data.
+FREE_TOOL_NAMES = frozenset({"get_price", "list_price_symbols", "list_models"})
+TOOL_TITLES: dict[str, str] = {
+    "get_price": "Get price",
+    "list_price_symbols": "List price symbols",
+    "list_models": "List models",
+    "web_search": "Web search",
+    "read_page": "Read page",
+    "get_weather": "Get weather",
+    "get_sign402_report": "Get Sign402 report",
+    "get_singit_risk_check": "SingIt risk check",
+    "get_x_profile": "Get X profile",
+    "get_crypto_news": "Get crypto news",
+    "get_hyperliquid_market": "Get Hyperliquid market",
+    "get_funding_rates": "Get funding rates",
+    "resolve_ens": "Resolve ENS name",
+    "get_token_price": "Get token price",
+}
+# Known MCP inspectors and scanners that need to read tools/list from a browser before a key is on hand;
+# an exact, lowercased, no-trailing-slash match against Origin, same as the public_origin same-origin check.
+DEFAULT_ALLOWED_ORIGINS = frozenset({
+    "https://glama.ai",             # Glama's connector health-check and claim verification (SI-40 catalog listing)
+    "https://www.glama.ai",
+    "https://x402scan.com",         # x402scan's resource crawler (indexes the x402 API, may probe /mcp too)
+    "https://www.x402scan.com",
+})
+ALLOWED_ORIGINS_ENV = "SINGIT_MCP_ALLOWED_ORIGINS"
+
+
+def _normalize_origin(origin: str) -> str:
+    return origin.strip().lower().rstrip("/")
+
+
+def allowed_origins_from_env(env: Mapping[str, str] | None = None) -> frozenset[str]:
+    """SINGIT_MCP_ALLOWED_ORIGINS, comma-separated exact origins (scheme+host[+port], no wildcards); unset
+    keeps DEFAULT_ALLOWED_ORIGINS, set replaces it entirely rather than extending it."""
+    values = os.environ if env is None else env
+    raw = str(values.get(ALLOWED_ORIGINS_ENV, "")).strip()
+    if not raw:
+        return DEFAULT_ALLOWED_ORIGINS
+    return frozenset(_normalize_origin(origin) for origin in raw.split(",") if origin.strip())
+
+
+def _annotated(entry: dict[str, Any]) -> dict[str, Any]:
+    """Title + MCP tool annotations (SEP: title, readOnlyHint, destructiveHint, idempotentHint, openWorldHint).
+    Every tool here is read-only and non-destructive: paid ones debit the key's limits but never change
+    external state. Free lookups are idempotent and read SingIt's own data; paid ones bill again on every
+    call (not idempotent) and, except the three free ones, reach third-party data (open world)."""
+    name = entry["name"]
+    free = name in FREE_TOOL_NAMES
+    title = TOOL_TITLES.get(name) or name.replace("_", " ").capitalize()
+    annotations = {"title": title, "readOnlyHint": True, "destructiveHint": False,
+                   "idempotentHint": free, "openWorldHint": not free}
+    return {**entry, "title": title, "annotations": annotations}
 
 
 @functools.lru_cache(maxsize=1)
@@ -54,8 +124,9 @@ def _paid_tools() -> tuple[dict[str, str], tuple[dict[str, Any], ...]]:
     starts: the gateway module is large and this process ran without it until now."""
     from . import server as gw  # noqa: PLC0415
     ids = {tool["mcpStyleName"]: tool_id for tool_id, tool in gw.PAID_TOOLS.items()}
-    listed = tuple({"name": tool["mcpStyleName"], "description": tool["description"] + " Paid per call from your "
-                    "SingIt limits (Base USDC).", "inputSchema": tool["inputSchema"]} for tool in gw.PAID_TOOLS.values())
+    listed = tuple(_annotated({"name": tool["mcpStyleName"], "description": tool["description"] + " Paid per call "
+                    "from your SingIt limits (Base USDC).", "inputSchema": tool["inputSchema"]})
+                   for tool in gw.PAID_TOOLS.values())
     return ids, listed
 
 
@@ -123,7 +194,7 @@ READ_PAGE_SCHEMA = {
     "required": ["url"],
 }
 
-OWN_TOOLS: list[dict[str, Any]] = [
+OWN_TOOLS: list[dict[str, Any]] = [_annotated(entry) for entry in (
     {"name": "get_price", "description": "A crypto, metal or fx price. Free.", "inputSchema": GET_PRICE_SCHEMA},
     {"name": "list_price_symbols", "description": "Every symbol get_price knows. Free.",
      "inputSchema": {"type": "object", "properties": {}}},
@@ -133,11 +204,52 @@ OWN_TOOLS: list[dict[str, Any]] = [
      "(Base USDC); needs the key's \"search\" scope.", "inputSchema": WEB_SEARCH_SCHEMA},
     {"name": "read_page", "description": "Read a web page's text (Exa). Paid per call from your SingIt limits "
      "(Base USDC); needs the key's \"search\" scope.", "inputSchema": READ_PAGE_SCHEMA},
-]
+)]
 
 
 def tools() -> list[dict[str, Any]]:
     return OWN_TOOLS + list(_paid_tools()[1])
+
+
+# Catalog metadata served by web_api.py's GET dispatch, public and keyless.
+ICON_URL = "https://singitai.app/assets/icons/icon-512.png"
+DOCS_URL = ("https://github.com/bubon-ik/SingItAI/blob/main/sign402-gateway/README.md"
+            "#mcp-server-remote-for-claude-code-cursor-codex")
+SERVER_CARD_DESCRIPTION = ("Free price, model and symbol lookups, plus paid web search, page reading and "
+                           "market data tools, billed in Base USDC inside the API key's own SingIt limits.")
+AUTH_INSTRUCTIONS = ("Create a SingIt API key in the app at https://app.singitai.app/app/, then send it as "
+                     "\"Authorization: Bearer sk_singit_...\" or \"x-api-key: sk_singit_...\".")
+
+
+def server_card(public_origin: str, mcp_path: str = "/mcp") -> dict[str, Any]:
+    """GET /.well-known/mcp/server-card.json (SEP-1649 draft shape). public_origin is the MCP host's own
+    origin (e.g. https://app.singitai.app), never a reflected request Host header."""
+    return {
+        "$schema": "https://static.modelcontextprotocol.io/schemas/mcp-server-card/v1.json",
+        "version": "1.0",
+        "protocolVersion": OUR_VERSION,
+        "serverInfo": dict(SERVER_INFO),
+        "description": SERVER_CARD_DESCRIPTION,
+        "iconUrl": ICON_URL,
+        "documentationUrl": DOCS_URL,
+        "transport": {"type": "streamable-http", "url": f"{public_origin}{mcp_path}"},
+        "capabilities": {"tools": {"listChanged": False}},
+        "authentication": {"required": True, "schemes": ["bearer"], "headers": ["Authorization", "x-api-key"],
+                           "instructions": AUTH_INSTRUCTIONS},
+        "instructions": INSTRUCTIONS,
+        "tools": tools(),
+    }
+
+
+# The support address already published in the website footer (mailto:Exkalibur1919@proton.me), reused
+# here so Glama's claim can verify we control this domain.
+GLAMA_MAINTAINER_EMAIL = "Exkalibur1919@proton.me"
+
+
+def glama_json() -> dict[str, Any]:
+    """GET /.well-known/glama.json: Glama's claim-by-well-known-file verification."""
+    return {"$schema": "https://glama.ai/mcp/schemas/connector.json",
+            "maintainers": [{"email": GLAMA_MAINTAINER_EMAIL}]}
 
 
 def _result(id_: Any, result: Any) -> dict[str, Any]:
@@ -160,18 +272,45 @@ def _tool_error(message: str) -> dict[str, Any]:
 
 
 class McpServer:
-    """One request, one answer: no session, no SSE. Construct with the web app's ApiKeys."""
+    """One request, one answer: no session, no SSE. Construct with the web app's ApiKeys.
 
-    def __init__(self, keys: ApiKeys, *, fetch_json: Callable[[str], dict[str, Any]] | None = None):
+    public_origin is this MCP server's own origin (normally SIGN402_WEB_URI); together with
+    allowed_origins (default: allowed_origins_from_env()) it decides which browser Origins are trusted
+    enough to even reach the auth check, below. A key is still required for anything beyond that: trust
+    here only buys an untrusted scanner a 401 instead of a 403, plus the CORS headers to read it.
+    """
+
+    def __init__(self, keys: ApiKeys, *, fetch_json: Callable[[str], dict[str, Any]] | None = None,
+                 public_origin: str = "", allowed_origins: frozenset[str] | None = None):
         self.keys = keys
         self.fetch_json = fetch_json or _default_fetch_json
+        self.public_origin = _normalize_origin(public_origin) if public_origin else ""
+        self.allowed_origins = allowed_origins_from_env() if allowed_origins is None else allowed_origins
+
+    def is_trusted_origin(self, origin: str | None) -> bool:
+        if not origin:
+            return False
+        normalized = _normalize_origin(origin)
+        if normalized == "null":  # the sandboxed-origin literal, never a real site
+            return False
+        return normalized == self.public_origin or normalized in self.allowed_origins
 
     def handle(self, *, authorization: str | None, api_key: str | None, origin: str | None,
                protocol_version: str | None, body: bytes | dict[str, Any]) -> tuple[int, dict[str, Any] | None, dict[str, str]]:
-        if origin:
+        if origin and not self.is_trusted_origin(origin):
             # A key is for server code; the page never holds one. Also satisfies the spec's DNS-rebinding check.
             return 403, rpc_error(None, -32600, "API keys are for server code, not browsers. Keep the key out of "
                                   "web pages."), {}
+        status, result, headers = self._authenticated(authorization, api_key, protocol_version, body)
+        if origin:  # trusted, checked above: let the caller read the answer across origins
+            # Expose-Headers on the real answer too, not only the preflight: a 401's WWW-Authenticate is
+            # otherwise unreadable to the page (Codex review).
+            headers = {**headers, "Access-Control-Allow-Origin": origin, "Vary": "Origin",
+                       "Access-Control-Expose-Headers": "WWW-Authenticate, Mcp-Session-Id"}
+        return status, result, headers
+
+    def _authenticated(self, authorization: str | None, api_key: str | None, protocol_version: str | None,
+                        body: bytes | dict[str, Any]) -> tuple[int, dict[str, Any] | None, dict[str, str]]:
         try:
             row = self.keys._key(authorization, api_key)
         except ApiError:

@@ -291,6 +291,16 @@ test("the OpenAPI document lists the paid route the way x402scan reads it", asyn
   assert.equal(facilitator.calls.verify, 0);
 });
 
+test("the OpenAPI document guides agents and names a contact, for x402scan", async (t) => {
+  const { url } = await serve(t);
+  const response = await fetch(`${url}/openapi.json`);
+  const doc = await response.json();
+  assert.match(doc.info["x-guidance"], /402/);
+  assert.match(doc.info["x-guidance"], /PAYMENT-SIGNATURE/);
+  assert.match(doc.info["x-guidance"], /\/v1\/models/);
+  assert.deepEqual(doc.info.contact, { name: "SingIt", email: "Exkalibur1919@proton.me", url: "https://singitai.app" });
+});
+
 test("/.well-known/x402 points to the paid route at its public URL", async (t) => {
   const { url } = await serve(t);
   const response = await new Promise((resolve, reject) => {
