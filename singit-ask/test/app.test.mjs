@@ -100,9 +100,11 @@ test("an unpaid question is offered actual-usage payment on Solana and Base over
   const required = await offer(url);
   const solana = required.accepts.find((a) => a.network === SOLANA && a.scheme === "upto");
   const base = required.accepts.find((a) => a.network === BASE && a.scheme === "upto");
-  // `upto` first (what the gateway and most buyers sign), `exact` alongside it for buyers like vet402 that sign
+  // `exact` on Base leads (SI-61: the simplest offer for a buyer that only inspects accepts[0]); `upto` is what
+  // the gateway and most buyers actually sign, with `exact` on Solana alongside for buyers like vet402 that sign
   // only `exact`.
-  assert.deepEqual(required.accepts.map((a) => a.scheme), ["upto", "upto", "exact", "exact"]);
+  assert.deepEqual(required.accepts.map((a) => a.scheme), ["exact", "upto", "upto", "exact"]);
+  assert.equal(required.accepts[0].network, BASE);
   assert.equal(solana.amount, "3000");
   assert.equal(solana.payTo, SOLANA_PAY_TO);
   assert.deepEqual(solana.extra.billing, SOLANA_TERMS);
@@ -212,11 +214,11 @@ test("an empty unpaid request gets the standing offer, so directories can regist
     const response = await fetch(`${url}${ROUTE}`, init);
     assert.equal(response.status, 402);
     const required = decode(response.headers.get("payment-required"));
-    assert.deepEqual(required.accepts.map((a) => a.scheme), ["upto", "upto", "exact", "exact"]);
+    assert.deepEqual(required.accepts.map((a) => a.scheme), ["exact", "upto", "upto", "exact"]);
     assert.deepEqual(required.accepts.map((a) => [a.network, a.amount]),
-      [[SOLANA, "3000"], [BASE, "3000"], [SOLANA, "3000"], [BASE, "3000"]]);
+      [[BASE, "3000"], [SOLANA, "3000"], [BASE, "3000"], [SOLANA, "3000"]]);
     assert.ok(required.extensions?.bazaar?.info, "x402scan needs the input schema to index the route");
-    assert.match(required.resource.description, /any model listed at GET \/v1\/models/);
+    assert.match(required.resource.description, /models at GET \/v1\/models/);
     assert.doesNotMatch(required.resource.description, /at most 0\.003/);
   }
   assert.equal(asked.length, 0);
@@ -307,6 +309,41 @@ test("/.well-known/x402 points to the paid route at its public URL", async (t) =
                                    "https://ask.singitai.app/v1/images/generations", "https://ask.singitai.app/v1/audio/speech",
                                    "https://ask.singitai.app/v1/video/generations"]);
   assert.match(doc.instructions, /GET https:\/\/ask\.singitai\.app\/v1\/models/);
+});
+
+test("GET / is a small open service index, not a 404", async (t) => {
+  const { url } = await serve(t);
+  const response = await fetch(`${url}/`);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("access-control-allow-origin"), "*");
+  const doc = await response.json();
+  assert.equal(doc.name, "SingIt Ask");
+  assert.ok(doc.description.length > 0);
+  assert.equal(doc.links.openapi, `${url}/openapi.json`);
+  assert.equal(doc.links.x402, `${url}/.well-known/x402`);
+  assert.equal(doc.links.llmsTxt, `${url}/llms.txt`);
+  assert.equal(doc.links.models, `${url}/v1/models`);
+  assert.equal(doc.links.docs, "https://singitai.app/developers/");
+  assert.match(doc.icon, /\.png$/);
+  // Express answers HEAD the same way automatically for a GET-only route.
+  const headed = await fetch(`${url}/`, { method: "HEAD" });
+  assert.equal(headed.status, 200);
+  assert.equal(await headed.text(), "");
+});
+
+test("GET /llms.txt lists every discoverable route and the OpenAPI/model links", async (t) => {
+  const { url } = await serve(t);
+  const response = await fetch(`${url}/llms.txt`);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "text/plain; charset=utf-8");
+  assert.equal(response.headers.get("access-control-allow-origin"), "*");
+  const text = await response.text();
+  assert.match(text, /^# SingIt Ask/);
+  assert.match(text, /^> /m);
+  assert.match(text, new RegExp(`POST ${url}${ROUTE.replace(/\//g, "\\/")}`));
+  for (const route of [ROUTE, ...Object.keys(FORMAT_ROUTES)]) assert.ok(text.includes(`${url}${route}`), route);
+  assert.ok(text.includes(`${url}/openapi.json`));
+  assert.ok(text.includes(`${url}/v1/models`));
 });
 
 test("health and the model list are free, and the old test page is gone", async (t) => {
@@ -412,11 +449,12 @@ test("another model gets a ceiling worked out from its own prices; unresolvable 
   assert.equal(cheap.find((a) => a.network === SOLANA && a.scheme === "upto").amount, ceilingAtomic(CHEAP, uptoSize, SOLANA_TERMS));
   assert.equal(cheap.find((a) => a.network === BASE && a.scheme === "upto").amount, MIN_CEILING_ATOMIC);
   const pro = await offerFor("pro-model");
-  // `.find` on network alone picks the `upto` offer: it is listed before `exact` (see the ordering test below).
-  assert.equal(pro.find((a) => a.network === BASE).amount, ceilingAtomic(PRICEY, uptoSize, TERMS));
-  assert.equal(pro.find((a) => a.network === SOLANA).amount, ceilingAtomic(PRICEY, uptoSize, SOLANA_TERMS));
-  assert.ok(BigInt(pro[0].amount) > 50_000n, "a dear model is authorized for what it can really cost");
-  assert.equal(pro.find((a) => a.network === BASE).extra.billing.maxChargeAtomic, pro.find((a) => a.network === BASE).amount);
+  // SI-61: `exact` on Base is listed first, so network alone no longer picks `upto`; pin the scheme too.
+  const proUptoBase = pro.find((a) => a.network === BASE && a.scheme === "upto");
+  assert.equal(proUptoBase.amount, ceilingAtomic(PRICEY, uptoSize, TERMS));
+  assert.equal(pro.find((a) => a.network === SOLANA && a.scheme === "upto").amount, ceilingAtomic(PRICEY, uptoSize, SOLANA_TERMS));
+  assert.ok(BigInt(proUptoBase.amount) > 50_000n, "a dear model is authorized for what it can really cost");
+  assert.equal(proUptoBase.extra.billing.maxChargeAtomic, proUptoBase.amount);
   assert.equal(facilitator.calls.verify, 0);
 });
 
@@ -468,18 +506,23 @@ test("the paid call carries X-Min-Discount from the share guard fixed at quote t
   assert.equal(calls.at(-1).headers["X-Min-Discount"], undefined);
 });
 
-test("every route offers all `upto` schemes before any `exact` scheme", async (t) => {
+test("every discoverable route offers exact on Base first; the metered route is unchanged", async (t) => {
   const { url } = await serve(t);
   const probe = async (path, body) => {
     const response = await fetch(`${url}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     assert.equal(response.status, 402, path);
-    return decode(response.headers.get("payment-required")).accepts.map((a) => a.scheme);
+    return decode(response.headers.get("payment-required")).accepts;
   };
-  assert.deepEqual(await probe(ROUTE, {}), ["upto", "upto", "exact", "exact"], ROUTE);
-  assert.deepEqual(await probe(METERED_ROUTE, { messages: [{ role: "user", content: "Hi" }] }), ["upto", "exact"], METERED_ROUTE);
-  for (const route of Object.keys(FORMAT_ROUTES)) {
-    assert.deepEqual(await probe(route, {}), ["upto", "upto", "exact", "exact"], route);
+  // SI-61: discoverable routes lead with `exact` on Base, the simplest offer for a buyer that only inspects
+  // accepts[0]; the rest keep their previous relative order.
+  for (const route of [ROUTE, ...Object.keys(FORMAT_ROUTES)]) {
+    const accepts = await probe(route, {});
+    assert.deepEqual(accepts.map((a) => a.scheme), ["exact", "upto", "upto", "exact"], route);
+    assert.equal(accepts[0].network, BASE, route);
   }
+  // Not listed for discovery; the gateway's buyer pins `upto` on Base directly and never reads `accepts`.
+  assert.deepEqual((await probe(METERED_ROUTE, { messages: [{ role: "user", content: "Hi" }] })).map((a) => a.scheme),
+    ["upto", "exact"], METERED_ROUTE);
 });
 
 test("a model that is not on the list is refused before any payment is asked for", async (t) => {

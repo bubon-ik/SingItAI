@@ -84,7 +84,7 @@ test("an image is offered at its list price + 30% + the network's fee, and liste
   assert.equal(unpaid.status, 402);
   const required = decode(unpaid.headers.get("payment-required"));
   assert.deepEqual(required.accepts.map((a) => [a.scheme, a.network, a.amount]), [
-    ["exact", SOLANA, "15000"], ["exact", BASE, "14000"]]);
+    ["exact", BASE, "14000"], ["exact", SOLANA, "15000"]]);
   assert.ok(required.extensions?.bazaar);
   assert.deepEqual(surplus.calls, []);
   assert.deepEqual(facilitator.calls.settle, []);
@@ -136,7 +136,7 @@ test("x402scan's empty, unpaid probe gets the standing offer; a payment header d
     const probe = await fetch(`${url}${IMAGE_ROUTE}`, init);
     assert.equal(probe.status, 402);
     const required = decode(probe.headers.get("payment-required"));
-    assert.deepEqual(required.accepts.map((a) => [a.scheme, a.network]), [["exact", SOLANA], ["exact", BASE]]);
+    assert.deepEqual(required.accepts.map((a) => [a.scheme, a.network]), [["exact", BASE], ["exact", SOLANA]]);
     assert.ok(required.extensions?.bazaar?.info, "x402scan needs the input schema to index the route");
     assert.ok(required.extensions?.bazaar?.schema);
   }

@@ -75,8 +75,8 @@ test("speech is offered at the list price for its text + 30% + the network's fee
   const unpaid = await post(`${url}${SPEECH_ROUTE}`, SPEECH);
   assert.equal(unpaid.status, 402);
   const required = decode(unpaid.headers.get("payment-required"));
-  // 2000 characters at $0.0035 per 1000 = 7000, + 2100 markup, + the fee
-  assert.deepEqual(required.accepts.map((a) => [a.network, a.amount]), [[SOLANA, "11100"], [BASE, "10100"]]);
+  // 2000 characters at $0.0035 per 1000 = 7000, + 2100 markup, + the fee. exact on Base leads (SI-61).
+  assert.deepEqual(required.accepts.map((a) => [a.network, a.amount]), [[BASE, "10100"], [SOLANA, "11100"]]);
   assert.ok(required.extensions?.bazaar);
   assert.deepEqual(surplus.calls, []);
 });
@@ -122,7 +122,7 @@ test("x402scan's empty, unpaid probe gets the standing offer; a payment header d
     const probe = await fetch(`${url}${SPEECH_ROUTE}`, init);
     assert.equal(probe.status, 402);
     const required = decode(probe.headers.get("payment-required"));
-    assert.deepEqual(required.accepts.map((a) => [a.scheme, a.network]), [["exact", SOLANA], ["exact", BASE]]);
+    assert.deepEqual(required.accepts.map((a) => [a.scheme, a.network]), [["exact", BASE], ["exact", SOLANA]]);
     assert.ok(required.extensions?.bazaar?.info, "x402scan needs the input schema to index the route");
     assert.ok(required.extensions?.bazaar?.schema);
   }

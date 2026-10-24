@@ -159,3 +159,39 @@ test("a browser opening a discoverable route with GET gets the same paywall page
   assert.equal(got.headers.get("content-type"), posted.headers.get("content-type"));
   assert.equal(await got.text(), await posted.text());
 });
+
+// Coinbase's Bazaar ranks listings by metadata completeness; a description that spends half its budget on billing
+// reads as incomplete on what the endpoint does. Every discoverable route's resource description must stay short
+// and billing-free (billing lives in openapi.json and /.well-known/x402 instead).
+const BILLING_WORDS = /\b(fee|markup|ceiling|settlement)\b|%/i;
+
+test("every discoverable route's 402 resource description is short and billing-free", async (t) => {
+  const { url } = await serve(t);
+  for (const route of DISCOVERABLE) {
+    const required = decode((await fetch(`${url}${route}`, { method: "GET" })).headers.get("payment-required"));
+    const description = required.resource.description;
+    assert.ok(description.length <= 300, `${route}: description is ${description.length} chars, over 300`);
+    assert.doesNotMatch(description, BILLING_WORDS, `${route}: description mentions billing (${description})`);
+  }
+});
+
+test("every discoverable route's resource carries a PNG icon and a service name", async (t) => {
+  const { url } = await serve(t);
+  for (const route of DISCOVERABLE) {
+    const required = decode((await fetch(`${url}${route}`, { method: "GET" })).headers.get("payment-required"));
+    assert.match(required.resource.iconUrl ?? "", /\.png$/, route);
+    assert.ok(required.resource.serviceName, route);
+  }
+});
+
+test("every discoverable route offers exact on Base first, over both discovery and the empty POST probe", async (t) => {
+  const { url } = await serve(t);
+  for (const route of DISCOVERABLE) {
+    for (const method of ["GET", "POST"]) {
+      const required = decode((await fetch(`${url}${route}`, { method })).headers.get("payment-required"));
+      const first = required.accepts[0];
+      assert.equal(first.scheme, "exact", `${route} ${method}`);
+      assert.equal(first.network, BASE, `${route} ${method}`);
+    }
+  }
+});

@@ -1,0 +1,27 @@
+# SingIt
+
+> Your agent spends. Your wallet keeps the money: set a daily and a per-purchase limit once, and your AI agent buys gift cards, eSIMs, top-ups and live answers inside those limits.
+
+## What it is
+
+SingIt lets you connect the wallet you already use, set a daily and a per-purchase limit, and approve once. Your AI agent then buys gift cards, eSIMs, mobile top-ups and live model answers inside those limits, on Base or Solana. One signature takes the allowance back.
+
+## Products
+
+- Web app at https://app.singitai.app/app/ — connect a wallet, set limits, let an agent spend inside them.
+- SingIt Ask, an x402 API at https://ask.singitai.app — language-model chat completions, Anthropic's Messages and OpenAI's Responses formats, images, speech and web search, each paid per call in USDC on Base or Solana, no account or API key. Its own llms.txt: https://ask.singitai.app/llms.txt
+- A remote MCP server at https://app.singitai.app/mcp (SingIt API key required).
+
+## For developers
+
+- Docs: https://singitai.app/developers/
+- SingIt Ask OpenAPI: https://ask.singitai.app/openapi.json
+- SingIt Ask x402 discovery: https://ask.singitai.app/.well-known/x402
+- Source: https://github.com/bubon-ik/SingItAI
+
+## Links
+
+- Home: https://singitai.app/
+- Developers: https://singitai.app/developers/
+- Models: https://singitai.app/models/
+- App: https://app.singitai.app/app/

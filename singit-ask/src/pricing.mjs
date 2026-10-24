@@ -12,6 +12,11 @@ export const SOLANA_ASSET = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 export const SOLANA_PAY_TO = "4an2sqamWWhny9mjLsMtGXCDXakeNtg6vSLq4QvhdmQu";
 export const SOLANA_TERMS = Object.freeze({ ...TERMS, settlementFeeAtomic: "2000" });
 
+// The x402 resource's branding, the same on every discoverable route (ResourceInfo's serviceName/iconUrl,
+// @x402/core 2.28): Bazaar and other directories show these next to the listing.
+export const SERVICE_NAME = "SingIt Ask";
+export const ICON_URL = "https://singitai.app/assets/icons/icon-512.png";
+
 // p90 of 38 recorded answer lengths was 0.65 of the max_tokens asked for: most answers stop well short of their
 // budget, so pricing `exact`'s flat ceiling at the whole budget (fraction 1) overcharges the typical question.
 // At this fraction, with the 30% markup and settlement fee, 2 of those 38 recorded cases (both Opus 5.5,

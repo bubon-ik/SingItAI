@@ -14,7 +14,7 @@ import { declareEip2612GasSponsoringExtension } from "@x402/extensions";
 import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { UnknownModel, priceGuard } from "./catalogue.mjs";
 import { addPaymentRoute, baseOffer, ceilings, exactBaseOffer, exactSolanaOffer, isDiscoveryProbe, solanaOffer } from "./metered.mjs";
-import { BASE, SOLANA, TERMS, SOLANA_TERMS, billUsage, DEFAULT_EXACT_OUTPUT_FRACTION } from "./pricing.mjs";
+import { BASE, SOLANA, TERMS, SOLANA_TERMS, billUsage, DEFAULT_EXACT_OUTPUT_FRACTION, SERVICE_NAME, ICON_URL } from "./pricing.mjs";
 
 export const FORMAT_ROUTES = { "/v1/messages": "/anthropic/v1/messages", "/v1/responses": "/v1/responses" };
 export const FORMAT_LIMITS = Object.freeze({ chars: 100_000, maxTokens: 32_000, defaultTokens: 4_096, timeoutMs: 120_000 });
@@ -82,15 +82,14 @@ const refusal = (route, status, message) => (route === "/v1/messages"
   ? { type: "error", error: { type: status === 400 ? "invalid_request_error" : status === 404 ? "not_found_error" : "api_error", message } }
   : { error: { type: status >= 500 ? "upstream_error" : "invalid_request_error", message } });
 
+// <=300 characters with the "SingIt Ask: " prefix (see app.mjs's DISCOVERY_DESCRIPTION for why): what each format
+// does and when to call it, not what it costs.
 const DESCRIPTIONS = {
-  "/v1/messages": "Anthropic's Messages API (what Claude Code and the Anthropic SDK speak) for any model listed at GET "
-    + "/v1/models, Claude among them. Pays actual token cost + 30% + a settlement fee (0.001 USDC on Base, 0.002 on "
-    + "Solana), up to a ceiling that follows the model's price and the request's size; nothing is charged without an "
-    + "answer. Exact payers are instead charged that ceiling flat, with no metering.",
-  "/v1/responses": "OpenAI's Responses API for any model listed at GET /v1/models (GPT, Claude, Gemini, DeepSeek and more). "
-    + "Pays actual token cost + 30% + a settlement fee (0.001 USDC on Base, 0.002 on Solana), up to a ceiling that "
-    + "follows the model's price and the request's size; nothing is charged without an answer. Exact payers are instead "
-    + "charged that ceiling flat, with no metering.",
+  "/v1/messages": "Anthropic's Messages API (what Claude Code and the Anthropic SDK speak), any model listed at GET "
+    + "/v1/models, Claude included. Call it when an agent needs a Claude-format answer with no API key or account, "
+    + "or wants to try another model the same way.",
+  "/v1/responses": "OpenAI's Responses API, any model listed at GET /v1/models (GPT, Claude, Gemini, DeepSeek and more). "
+    + "Call it when an agent needs an answer in OpenAI's Responses format with no API key or account.",
 };
 const EXAMPLES = {
   "/v1/messages": { model: "claude-sonnet-5.5", max_tokens: 300, messages: [{ role: "user", content: "What is x402?" }] },
@@ -126,9 +125,10 @@ export function addFormatRoutes(app, config, { facilitatorClient, catalogue, fet
       }
     });
     addPaymentRoute(app, { [`POST ${route}`]: {
-      accepts: [solanaOffer(config, quotes), baseOffer(config, quotes), exactSolanaOffer(config, quotes), exactBaseOffer(config, quotes)],
+      // exact on Base first: the simplest offer for a buyer that only inspects accepts[0].
+      accepts: [exactBaseOffer(config, quotes), solanaOffer(config, quotes), baseOffer(config, quotes), exactSolanaOffer(config, quotes)],
       mimeType: "application/json",
-      description: `SingIt Ask: ${DESCRIPTIONS[route]}`, serviceName: "SingIt Ask",
+      description: `SingIt Ask: ${DESCRIPTIONS[route]}`, serviceName: SERVICE_NAME, iconUrl: ICON_URL,
       extensions: { ...declareEip2612GasSponsoringExtension(),
         ...declareDiscoveryExtension({ bodyType: "json", input: EXAMPLES[route] }) },
     } }, server);

@@ -12,7 +12,7 @@ import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { ExactSvmScheme } from "@x402/svm/exact/server";
 import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { addPaymentRoute, isDiscoveryProbe } from "./metered.mjs";
-import { ASSET, BASE, SOLANA, SOLANA_ASSET, TERMS, SOLANA_TERMS } from "./pricing.mjs";
+import { ASSET, BASE, SOLANA, SOLANA_ASSET, TERMS, SOLANA_TERMS, SERVICE_NAME, ICON_URL } from "./pricing.mjs";
 
 export const EXA_URL = "https://api.exa.ai";
 export const SEARCH_ROUTES = { "/v1/exa/search": "/search", "/v1/exa/contents": "/contents", "/v1/exa/answer": "/answer" };
@@ -80,9 +80,16 @@ export function searchPrice(exaAtomic, network) {
            totalAtomic: (exa + markup + BigInt(FEES[network])).toString() };
 }
 
-const DESCRIPTION = "Web search, page contents and cited answers from Exa, paid per request over x402 in USDC on Base or "
-  + "Solana: Exa's list price + 30% + a settlement fee (0.001 USDC on Base, 0.002 on Solana). A search is 0.0101 USDC "
-  + "on Base. Exa's own request format. Nothing is charged without an answer.";
+// <=300 characters with the "SingIt Search: " prefix (see app.mjs's DISCOVERY_DESCRIPTION for why): each route does
+// something different, so each gets its own text.
+const DESCRIPTIONS = {
+  "/v1/exa/search": "Web search from Exa, up to 25 results with optional page contents. Call it when an agent needs "
+    + "current web results, with no API key or account.",
+  "/v1/exa/contents": "Page text, highlights or a summary from up to 10 URLs, fetched by Exa. Call it when an agent "
+    + "already has URLs and needs their content, with no API key or account.",
+  "/v1/exa/answer": "A cited answer to a question, from Exa. Call it when an agent needs a sourced answer rather "
+    + "than raw search results, with no API key or account.",
+};
 const EXAMPLES = {
   "/v1/exa/search": { query: "x402 payment facilitators", numResults: 5 },
   "/v1/exa/contents": { urls: ["https://x402.org"], text: true },
@@ -100,9 +107,10 @@ export function addSearchRoutes(app, config, { facilitatorClient, exaKey, fetchI
     const amount = searchPrice(prices.get(ctx.adapter.getBody()) ?? SEARCH_TERMS.maxExaAtomic, network).totalAtomic;
     return network === BASE ? { asset: ASSET, amount, extra: { name: "USD Coin", version: "2" } } : { asset: SOLANA_ASSET, amount };
   };
+  // exact on Base first: the simplest offer for a buyer that only inspects accepts[0].
   const offers = [
-    { scheme: "exact", network: SOLANA, payTo: config.payToSolana, maxTimeoutSeconds: 120, price: price(SOLANA) },
     { scheme: "exact", network: BASE, payTo: config.payToBase, maxTimeoutSeconds: 120, price: price(BASE) },
+    { scheme: "exact", network: SOLANA, payTo: config.payToSolana, maxTimeoutSeconds: 120, price: price(SOLANA) },
   ];
   for (const route of Object.keys(SEARCH_ROUTES)) {
     app.post(route, (req, res, next) => {
@@ -117,7 +125,8 @@ export function addSearchRoutes(app, config, { facilitatorClient, exaKey, fetchI
     });
   }
   addPaymentRoute(app, Object.fromEntries(Object.keys(SEARCH_ROUTES).map((route) => [`POST ${route}`, {
-    accepts: offers, mimeType: "application/json", description: `SingIt Search: ${DESCRIPTION}`,
+    accepts: offers, mimeType: "application/json", description: `SingIt Search: ${DESCRIPTIONS[route]}`,
+    serviceName: SERVICE_NAME, iconUrl: ICON_URL,
     extensions: declareDiscoveryExtension({ bodyType: "json", input: EXAMPLES[route] }),
   }])), server);
   for (const [route, exaPath] of Object.entries(SEARCH_ROUTES)) {

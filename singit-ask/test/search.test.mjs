@@ -65,7 +65,7 @@ test("a search is offered at Exa's list price + 30% + the network's fee, and lis
   assert.equal(unpaid.status, 402);
   const required = decode(unpaid.headers.get("payment-required"));
   assert.deepEqual(required.accepts.map((a) => [a.scheme, a.network, a.amount, a.payTo]), [
-    ["exact", SOLANA, "11100", CONFIG.payToSolana], ["exact", BASE, "10100", CONFIG.payToBase]]);
+    ["exact", BASE, "10100", CONFIG.payToBase], ["exact", SOLANA, "11100", CONFIG.payToSolana]]);
   assert.ok(required.extensions?.bazaar, "listed for discovery");
   assert.deepEqual(exa.calls, [], "Exa is not asked before the payer pays");
   assert.deepEqual(facilitator.calls.settle, []);
@@ -140,7 +140,7 @@ test("x402scan's empty, unpaid probe gets the standing offer; a payment header d
       const probe = await fetch(`${url}${route}`, init);
       assert.equal(probe.status, 402, route);
       required = decode(probe.headers.get("payment-required"));
-      assert.deepEqual(required.accepts.map((a) => [a.scheme, a.network]), [["exact", SOLANA], ["exact", BASE]], route);
+      assert.deepEqual(required.accepts.map((a) => [a.scheme, a.network]), [["exact", BASE], ["exact", SOLANA]], route);
       assert.ok(required.extensions?.bazaar?.info, `${route} needs the input schema for x402scan to index it`);
       assert.ok(required.extensions?.bazaar?.schema, route);
     }

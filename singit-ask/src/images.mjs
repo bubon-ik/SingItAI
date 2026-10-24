@@ -12,7 +12,7 @@ import { ExactSvmScheme } from "@x402/svm/exact/server";
 import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { UnknownModel } from "./catalogue.mjs";
 import { addPaymentRoute, isDiscoveryProbe } from "./metered.mjs";
-import { ASSET, BASE, SOLANA, SOLANA_ASSET, TERMS, SOLANA_TERMS } from "./pricing.mjs";
+import { ASSET, BASE, SOLANA, SOLANA_ASSET, TERMS, SOLANA_TERMS, SERVICE_NAME, ICON_URL } from "./pricing.mjs";
 
 export const IMAGE_ROUTE = "/v1/images/generations";
 export const IMAGE_MODELS_ROUTE = "/v1/images/models";
@@ -75,10 +75,10 @@ export function imagePrice(listAtomic, network) {
            totalAtomic: (list + markup + BigInt(FEES[network])).toString() };
 }
 
+// <=300 characters with the "SingIt Images: " prefix (see app.mjs's DISCOVERY_DESCRIPTION for why).
 const DESCRIPTION = "Images from 36 models (Nano Banana, GPT Image, Flux, Seedream, Recraft, Qwen and more; list at GET "
-  + "/v1/images/models), paid per request over x402 in USDC on Base or Solana: the model's list price + 30% + a "
-  + "settlement fee (0.001 USDC on Base, 0.002 on Solana). From about 0.014 USDC an image. OpenAI images format. "
-  + "Nothing is charged without an image.";
+  + "/v1/images/models), no API key needed. Call it when an agent needs an image made from a text prompt. OpenAI "
+  + "images request format.";
 
 export function addImageRoutes(app, config, { facilitatorClient, catalogue, fetchImpl = fetch, log = console.error, open }) {
   const server = new x402ResourceServer(facilitatorClient)
@@ -123,11 +123,12 @@ export function addImageRoutes(app, config, { facilitatorClient, catalogue, fetc
     }
   });
   addPaymentRoute(app, { [`POST ${IMAGE_ROUTE}`]: {
+    // exact on Base first: the simplest offer for a buyer that only inspects accepts[0].
     accepts: [
-      { scheme: "exact", network: SOLANA, payTo: config.payToSolana, maxTimeoutSeconds: 180, price: price(SOLANA) },
       { scheme: "exact", network: BASE, payTo: config.payToBase, maxTimeoutSeconds: 180, price: price(BASE) },
+      { scheme: "exact", network: SOLANA, payTo: config.payToSolana, maxTimeoutSeconds: 180, price: price(SOLANA) },
     ],
-    mimeType: "application/json", description: `SingIt Images: ${DESCRIPTION}`,
+    mimeType: "application/json", description: `SingIt Images: ${DESCRIPTION}`, serviceName: SERVICE_NAME, iconUrl: ICON_URL,
     extensions: declareDiscoveryExtension({ bodyType: "json",
       input: { model: "venice-seedream-v5-lite", prompt: "a small green robot holding a coin, flat illustration", n: 1, size: "1024x1024" } }),
   } }, server);

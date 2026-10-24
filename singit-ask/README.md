@@ -23,6 +23,15 @@ what it actually cost; nothing is charged without an answer.
   verb ever verifies or settles, even if the request carries a payment header.
   `/v1/chat/completions/metered` and `/v1/video/generations` are paid routes that are
   not listed for discovery, so `GET`/`HEAD` on them still 404.
+- **Listing metadata:** every discoverable route's 402 resource description stays under
+  300 characters and says only what the route does and when to call it; Coinbase's Bazaar
+  ranks listings by metadata completeness, and billing talk crowds that out, so it stays in
+  `openapi.json` and `/.well-known/x402`'s instructions instead. Each resource also carries
+  `serviceName` ("SingIt Ask") and a PNG `iconUrl`, and its `accepts` always leads with
+  `exact` on Base, the simplest offer for a buyer that only inspects `accepts[0]`.
+- **`GET /` and `GET /llms.txt`:** a small JSON service index and an
+  [llms.txt](https://llmstxt.org) document, generated from the same enabled-route list as
+  discovery so neither can drift from it.
 - **Web agent, Base:** `POST /v1/chat/completions/metered`, the same Base `upto` offer
   at an address the gateway's buyer pins. Its limiter funding path is unchanged;
   that separate funding leg still uses the existing gas policy.

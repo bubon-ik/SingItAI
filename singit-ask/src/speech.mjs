@@ -11,7 +11,7 @@ import { ExactSvmScheme } from "@x402/svm/exact/server";
 import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { UnknownModel } from "./catalogue.mjs";
 import { addPaymentRoute, isDiscoveryProbe } from "./metered.mjs";
-import { ASSET, BASE, SOLANA, SOLANA_ASSET, TERMS, SOLANA_TERMS } from "./pricing.mjs";
+import { ASSET, BASE, SOLANA, SOLANA_ASSET, TERMS, SOLANA_TERMS, SERVICE_NAME, ICON_URL } from "./pricing.mjs";
 
 export const SPEECH_ROUTE = "/v1/audio/speech";
 export const AUDIO_MODELS_ROUTE = "/v1/audio/models";
@@ -56,10 +56,10 @@ export function speechPrice(listAtomic, network) {
            totalAtomic: (list + markup + BigInt(FEES[network])).toString() };
 }
 
+// <=300 characters with the "SingIt Speech: " prefix (see app.mjs's DISCOVERY_DESCRIPTION for why).
 const DESCRIPTION = "Text read aloud by 11 voice models (Kokoro, ElevenLabs, Gemini, xAI, MiniMax and more; list at GET "
-  + "/v1/audio/models), paid per request over x402 in USDC on Base or Solana: the model's list price for the text + 30% "
-  + "+ a settlement fee (0.001 USDC on Base, 0.002 on Solana). OpenAI speech format, mp3 by default. Nothing is charged "
-  + "without audio.";
+  + "/v1/audio/models), no API key needed. Call it when an agent needs spoken audio made from text. OpenAI speech "
+  + "request format, mp3 by default.";
 
 export function addSpeechRoutes(app, config, { facilitatorClient, catalogue, fetchImpl = fetch, log = console.error, open }) {
   const server = new x402ResourceServer(facilitatorClient)
@@ -104,11 +104,12 @@ export function addSpeechRoutes(app, config, { facilitatorClient, catalogue, fet
     }
   });
   addPaymentRoute(app, { [`POST ${SPEECH_ROUTE}`]: {
+    // exact on Base first: the simplest offer for a buyer that only inspects accepts[0].
     accepts: [
-      { scheme: "exact", network: SOLANA, payTo: config.payToSolana, maxTimeoutSeconds: 120, price: price(SOLANA) },
       { scheme: "exact", network: BASE, payTo: config.payToBase, maxTimeoutSeconds: 120, price: price(BASE) },
+      { scheme: "exact", network: SOLANA, payTo: config.payToSolana, maxTimeoutSeconds: 120, price: price(SOLANA) },
     ],
-    mimeType: "audio/mpeg", description: `SingIt Speech: ${DESCRIPTION}`,
+    mimeType: "audio/mpeg", description: `SingIt Speech: ${DESCRIPTION}`, serviceName: SERVICE_NAME, iconUrl: ICON_URL,
     extensions: declareDiscoveryExtension({ bodyType: "json",
       input: { model: "venice-kokoro-tts", input: "Hello from SingIt.", voice: "af_heart", response_format: "mp3" } }),
   } }, server);
