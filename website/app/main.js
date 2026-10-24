@@ -336,16 +336,31 @@ async function loadAllowance() {
 
 // -- the limiter --
 
+// "fund-gas" is the URL/kind the API uses; analytics props use "fund_gas" throughout (SI-45).
+function trackKind(kind) {
+  return kind === "fund-gas" ? "fund_gas" : kind;
+}
+
 async function createLimiter() {
+  const solana = state.session?.chain === "solana" || state.allowance?.chain === "solana";
   let daily, per, days;
   try {
     daily = $("#daily").value.trim(); per = $("#per").value.trim(); days = $("#days").value.trim();
     if (atomicFromUsdc(per) > atomicFromUsdc(daily)) throw new Error("The per-purchase limit cannot be above the daily limit.");
-  } catch (error) { toast(error.message, true); return; }
-  const solana = state.session?.chain === "solana" || state.allowance?.chain === "solana";
+  } catch (error) {
+    toast(error.message, true);
+    track("limits_failed", { chain: solana ? "solana" : "base", reason: "validation" });
+    return;
+  }
   await busy(solana ? "Saving your limits." : "Creating your limiter on Base. This takes about a minute.", async () => {
-    await api.setup(daily, per, days);
+    try {
+      await api.setup(daily, per, days);
+    } catch (error) {
+      track("limits_failed", { chain: solana ? "solana" : "base", reason: "server" });
+      throw error;
+    }
     await loadAllowance();
+    track("limits_saved", { chain: solana ? "solana" : "base" });
     toast(solana ? "Limits saved. Now approve them in your wallet." : "Your limiter is ready. Now allow it to spend.");
   });
 }
@@ -361,12 +376,31 @@ function method() {
 async function walletOperation(kind, body) {
   return busy("Preparing…", async () => {
     const wallet = await needWallet();
-    const prepared = await api.prepare(kind, body);
+    let prepared;
+    try {
+      prepared = await api.prepare(kind, body);
+    } catch (error) {
+      track("grant_prepare_failed", { chain: wallet.chain, kind: trackKind(kind),
+                                      reason: /needs SOL/i.test(error?.message || "") ? "no_sol" : "other" });
+      throw error;
+    }
+    track("grant_prepared", { chain: wallet.chain, kind: trackKind(kind) });
     say(`${prepared.walletShows} Confirm it in your wallet.`);
     let answer;
     if (prepared.chain === "solana") {
       // Solana: the wallet signs the prepared approve or revoke; the server checks it and sends it.
-      answer = { operation: prepared.operation, transaction: await wallet.signTransaction(prepared.transaction) };
+      let signed;
+      try {
+        signed = await wallet.signTransaction(prepared.transaction);
+      } catch (error) {
+        const rejected = error?.code === 4001 || /reject|denied|cancel/i.test(error?.message || "");
+        track("wallet_sign_rejected", { chain: "solana", kind: trackKind(kind), reason: rejected ? "rejected" : "error" });
+        if (!rejected) throw error;
+        // A closed/rejected Solana signature prompt is routine, not an error worth alarming over.
+        toast("You closed the request in your wallet. Nothing was sent — press Approve again when ready.", true);
+        return false;
+      }
+      answer = { operation: prepared.operation, transaction: signed };
       say("Sending it to Solana…");
       let op = await api.submit(kind, answer);
       const until = Date.now() + 90000;
@@ -375,6 +409,7 @@ async function walletOperation(kind, body) {
         op = await api.operation(prepared.operation);
       }
       await loadAllowance();
+      track("grant_result", { chain: "solana", kind: trackKind(kind), state: op.state });
       if (op.state === "DONE") toast(op.detail || "Done.");
       else toast(op.detail || `The request ended as ${op.state.toLowerCase()}.`, true);
       return op.state === "DONE";
@@ -384,9 +419,11 @@ async function walletOperation(kind, body) {
         ? { operation: prepared.operation, signature: await wallet.signTypedData(prepared.typedData) }
         : { operation: prepared.operation, txHash: await wallet.sendTransaction(prepared.tx) };
     } catch (error) {
+      const rejected = error?.code === 4001 || /reject|denied|cancel/i.test(error?.message || "");
+      track("wallet_sign_rejected", { chain: "base", kind: trackKind(kind), reason: rejected ? "rejected" : "error" });
       // Some wallets (smart accounts, no ETH) cannot send the transaction. The same
       // approval also works as a signature we send; the next press uses that.
-      if (prepared.method === "approve" && error?.code !== 4001 && !/reject|denied|cancel/i.test(error?.message || "")) {
+      if (prepared.method === "approve" && !rejected) {
         state.method = "permit";
         throw new Error("Your wallet couldn't send the transaction. Press the button again — this time you only sign, and we pay the gas.");
       }
@@ -400,6 +437,7 @@ async function walletOperation(kind, body) {
       op = await api.operation(prepared.operation);
     }
     await loadAllowance();
+    track("grant_result", { chain: "base", kind: trackKind(kind), state: op.state });
     if (op.state === "DONE") toast(op.detail || "Done.");
     else toast(op.detail || `The request ended as ${op.state.toLowerCase()}.`, true);
     return op.state === "DONE";
@@ -595,6 +633,9 @@ function methodSwitch() {
 // Solana: the owner's wallet approved the agent for a total; the day and per-purchase limits are ours.
 function renderSolanaAllowance(a) {
   const granted = a.state === "granted";
+  // Below this, prepare_wallet's own SOL check (sign402_gateway/solana_allowance.py,
+  // OWNER_FEE_LAMPORTS) would refuse the approval outright; warn before that happens (SI-45).
+  const lowSol = a.state === "waiting_for_grant" && BigInt(a.ownerSolLamports || "0") < 20000n;
   return `
     <div class="page-head"><span class="eyebrow">Agent allowance · Solana</span>
       <h1>${granted ? "Your agent can <em>spend</em>." : "Approve it <em>once</em>."}</h1>
@@ -607,6 +648,7 @@ function renderSolanaAllowance(a) {
     <div class="bezel" style="margin-top:18px"><div class="core">
       <p class="faint">Your wallet approved <span class="mono">${esc(short(a.limiter))}</span>, your agent, to take up to the approved total.
         The chain enforces that total; SingIt enforces the daily and per-purchase limits. Revoking takes effect at once.</p>
+      ${lowSol ? `<p class="note warn">Your wallet needs about 0.00002 SOL for the network fee before you can approve.</p>` : ""}
       <div class="row">
         ${granted ? "" : `<input id="grant-amount" class="input" style="width:120px" value="${esc(amount(a.dailyCapAtomic))}" aria-label="Amount to approve">
           <button class="btn btn-primary btn-sm has-orb" data-action="grant">Approve in wallet${orb}</button>`}
@@ -631,7 +673,8 @@ function renderSolanaSetup() {
   return `
     <div class="page-head"><span class="eyebrow">Step 2 of 3 · Solana</span>
       <h1>Set your agent's <em>limits</em>.</h1>
-      <p>Your USDC stays in your wallet. Solana enforces the total you approve. SingIt enforces the daily and per-purchase limits.</p></div>
+      <p>Your USDC stays in your wallet. Solana enforces the total you approve. SingIt enforces the daily and per-purchase limits.</p>
+      <p class="hint">Three steps: save limits (free) — approve in your wallet (~0.000005 SOL) — done.</p></div>
     <div class="bezel glow"><div class="core">
       <h2>Choose your limits</h2>
       <p>Saving these limits moves no money and deploys no contract. Next you approve the total once in your wallet.</p>
@@ -648,6 +691,14 @@ function renderSolanaSetup() {
     </div></div>`;
 }
 
+// Once per page load per chain; render() runs often, so the Set keeps this from re-firing (SI-45).
+const setupViewed = new Set();
+function trackSetupView(chain) {
+  if (setupViewed.has(chain)) return;
+  setupViewed.add(chain);
+  track("allowance_setup_view", { chain });
+}
+
 function renderAllowance() {
   const a = state.allowance;
   if (!a) return `<p class="faint">Loading…</p>`;
@@ -656,8 +707,9 @@ function renderAllowance() {
       <p>${esc(a.text || "")}</p></div>`;
   }
   if (a.chain === "solana" && a.configured) return renderSolanaAllowance(a);
-  if (a.chain === "solana") return renderSolanaSetup();
+  if (a.chain === "solana") { trackSetupView("solana"); return renderSolanaSetup(); }
   if (!a.configured) {
+    trackSetupView("base");
     return `<div class="page-head"><span class="eyebrow">Step 2 of 3</span>
       <h1>Set your agent's <em>limits</em>.</h1>
       <p>Your money stays in your wallet. These limits hold even if our server or the agent is compromised.</p></div>

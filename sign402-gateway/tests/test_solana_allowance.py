@@ -9,6 +9,7 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 
+from sign402_gateway import analytics
 from sign402_gateway.agent_allowance import AllowanceError, AllowanceUnavailable
 from sign402_gateway.solana_allowance import SolanaAllowanceService, SolanaAllowanceStore
 from sign402_gateway.solana_keys import generate_keypair
@@ -444,15 +445,14 @@ class SolanaAllowanceTests(unittest.TestCase):
         with self.assertRaisesRegex(AllowanceError, "previous SOL"):
             self.service.prepare_wallet(ACCOUNT, "FUND_GAS", amount="0.005")
 
-    def test_only_one_prepared_gas_transfer_can_claim_the_account(self):
+    def test_a_fresh_gas_prepare_supersedes_an_unclaimed_one_so_only_it_can_claim_the_account(self):
         self.service.setup(ACCOUNT, "20", "5", "30")
         first = self.service.prepare_wallet(ACCOUNT, "FUND_GAS", amount="0.005")
         second = self.service.prepare_wallet(ACCOUNT, "FUND_GAS", amount="0.005")
-        self.assertTrue(self.service.store.claim_gas_submission(ACCOUNT, first["operation"], NOW))
-        with self.assertRaisesRegex(AllowanceError, "previous SOL"):
-            self.service.store.claim_gas_submission(ACCOUNT, second["operation"], NOW)
+        self.assertEqual(self.service.store.op(ACCOUNT, first["operation"])["state"], "EXPIRED")
+        self.assertFalse(self.service.store.claim_gas_submission(ACCOUNT, first["operation"], NOW))
+        self.assertTrue(self.service.store.claim_gas_submission(ACCOUNT, second["operation"], NOW))
         self.clock[0] += 100
-        self.assertEqual(self.service.operation(ACCOUNT, first["operation"])["state"], "FAILED")
         self.assertFalse(self.service.store.checkpoint_gas(ACCOUNT, first["operation"], "tx", "block", NOW))
 
     def test_stale_validation_or_expiry_cannot_release_a_checkpointed_transfer(self):
@@ -464,6 +464,87 @@ class SolanaAllowanceTests(unittest.TestCase):
         self.service.store.expire_prepared_op(ACCOUNT, op, NOW + 100)
         self.assertEqual(self.service.store.op(ACCOUNT, op)["state"], "SUBMITTING")
         self.assertTrue(self.service.store.pending_gas(ACCOUNT))
+
+    # -- SI-45: a PREPARED op that is never signed must not sit forever --
+
+    def test_a_fresh_grant_prepare_supersedes_an_older_unsigned_one(self):
+        self.service.setup(ACCOUNT, "20", "5", "30")
+        first = self.service.prepare_wallet(ACCOUNT, "GRANT", amount="10")
+        with patch.object(analytics, "emit") as emit:
+            second = self.service.prepare_wallet(ACCOUNT, "GRANT", amount="15")
+        stale = self.service.store.op(ACCOUNT, first["operation"])
+        self.assertEqual((stale["state"], stale["detail"]), ("EXPIRED", "Replaced by a newer request."))
+        self.assertEqual(self.service.store.op(ACCOUNT, second["operation"])["state"], "PREPARED")
+        superseded = [c for c in emit.call_args_list if c.args[0] == "approval_signed"]
+        self.assertEqual(len(superseded), 1)
+        self.assertEqual((superseded[0].args[1], superseded[0].kwargs["state"]), (ACCOUNT, "EXPIRED"))
+        # Submitting the superseded one no longer touches the chain; it just reports EXPIRED.
+        result = self.service.submit_wallet(ACCOUNT, first["operation"], "SIGNED")
+        self.assertEqual(result["state"], "EXPIRED")
+        self.assertNotIn("allowance-submit", [c[0] for c in self.bridge.calls])
+
+    def test_superseding_is_scoped_to_the_same_kind_and_leaves_fund_gas_safety_states_alone(self):
+        self.service.setup(ACCOUNT, "20", "5", "30")
+        grant = self.service.prepare_wallet(ACCOUNT, "GRANT", amount="10")
+        self.service.prepare_wallet(ACCOUNT, "REVOKE")
+        self.assertEqual(self.service.store.op(ACCOUNT, grant["operation"])["state"], "PREPARED")
+        gas = self.service.prepare_wallet(ACCOUNT, "FUND_GAS", amount="0.005")
+        self.service.store.claim_gas_submission(ACCOUNT, gas["operation"], self.clock[0])
+        self.service.prepare_wallet(ACCOUNT, "GRANT", amount="12")
+        self.assertEqual(self.service.store.op(ACCOUNT, gas["operation"])["state"], "VALIDATING")
+        self.assertEqual(self.service.store.op(ACCOUNT, grant["operation"])["state"], "EXPIRED")
+
+    def test_a_stale_unsigned_op_expires_lazily_in_status_and_is_still_reported_expired_on_submit(self):
+        self.service.setup(ACCOUNT, "20", "5", "30")
+        prepared = self.service.prepare_wallet(ACCOUNT, "GRANT", amount="10")
+        self.clock[0] += 120
+        with patch.object(analytics, "emit") as emit:
+            status = self.service.status(ACCOUNT)
+        self.assertEqual(status["state"], "waiting_for_grant")
+        stale = self.service.store.op(ACCOUNT, prepared["operation"])
+        self.assertEqual((stale["state"], stale["detail"]), ("EXPIRED", "Not signed in time."))
+        expired = [c for c in emit.call_args_list if c.args[0] == "approval_signed" and c.kwargs.get("state") == "EXPIRED"]
+        self.assertEqual(len(expired), 1)
+        result = self.service.submit_wallet(ACCOUNT, prepared["operation"], "SIGNED")
+        self.assertEqual(result["state"], "EXPIRED")
+        self.assertNotIn("allowance-submit", [c[0] for c in self.bridge.calls])
+
+    def test_a_stale_unsigned_op_expires_lazily_from_a_prepare_of_a_different_kind(self):
+        self.service.setup(ACCOUNT, "20", "5", "30")
+        prepared = self.service.prepare_wallet(ACCOUNT, "REVOKE")
+        self.clock[0] += 120
+        self.service.prepare_wallet(ACCOUNT, "FUND_GAS", amount="0.005")
+        self.assertEqual(self.service.store.op(ACCOUNT, prepared["operation"])["state"], "EXPIRED")
+
+    def test_lack_of_sol_logs_without_the_address_and_reports_the_refusal(self):
+        self.bridge.owner_sol = 0
+        self.service.setup(ACCOUNT, "20", "5", "30")
+        with patch.object(analytics, "emit") as emit:
+            with self.assertLogs("sign402_gateway.solana_allowance", level="WARNING") as logs:
+                with self.assertRaisesRegex(AllowanceError, "wallet needs SOL"):
+                    self.service.prepare_wallet(ACCOUNT, "GRANT", amount="10")
+        self.assertNotIn(OWNER, logs.output[0])
+        self.assertIn(analytics.hash_account_id(ACCOUNT), logs.output[0])
+        no_sol = [c for c in emit.call_args_list if c.args[0] == "approval_signed"]
+        self.assertEqual(len(no_sol), 1)
+        self.assertEqual(no_sol[0].kwargs["state"], "NO_SOL")
+
+    def test_lack_of_sol_on_revoke_emits_revoke_not_approval_signed(self):
+        self.bridge.owner_sol = 0
+        self.service.setup(ACCOUNT, "20", "5", "30")
+        with patch.object(analytics, "emit") as emit:
+            with self.assertRaises(AllowanceError):
+                self.service.prepare_wallet(ACCOUNT, "REVOKE")
+        self.assertEqual([c.args[0] for c in emit.call_args_list], ["revoke"])
+        self.assertEqual(emit.call_args_list[0].kwargs["state"], "NO_SOL")
+
+    def test_lack_of_sol_on_fund_gas_emits_no_allowance_event(self):
+        self.bridge.owner_sol = 0
+        self.service.setup(ACCOUNT, "20", "5", "30")
+        with patch.object(analytics, "emit") as emit:
+            with self.assertRaises(AllowanceError):
+                self.service.prepare_wallet(ACCOUNT, "FUND_GAS", amount="0.005")
+        emit.assert_not_called()
 
 
 class FeePayerKeyTests(unittest.TestCase):

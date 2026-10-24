@@ -13,7 +13,8 @@ function section(start, end) {
 const presets = section("const PRESETS = [", "const esc =");
 const helpers = section("const esc =", "function amount(");
 const views = section("function renderSetup(heading) {", "function renderStale(");
-const context = vm.createContext({ state: { preset: 0, allowance: null } });
+const tracked = [];
+const context = vm.createContext({ state: { preset: 0, allowance: null }, track: (name, props) => tracked.push([name, props]) });
 vm.runInContext(`${presets}\n${helpers}\n${views}`, context);
 
 test("an unconfigured Solana account does not get the Base contract guarantee", () => {

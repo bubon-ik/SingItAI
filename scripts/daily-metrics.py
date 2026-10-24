@@ -32,6 +32,9 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 TZ_NAME = "Europe/Prague"
+# solana_allowance.py's details for a Solana op that was never signed (expire_stale_prepared and
+# supersede_prepared); keep in sync.
+SOLANA_UNSIGNED_DETAILS = ("Not signed in time.", "Replaced by a newer request.")
 
 STATE_DIR_ENV = "SIGN402_STATE_DIR"
 DEFAULT_STATE_DIR = "~/.sign402"
@@ -267,8 +270,16 @@ def solana_allowance_metrics(path: Path, s: int, e: int) -> dict[str, Any] | Non
         out: dict[str, Any] = {}
         out["limits_set"] = _scalar(db, "SELECT COUNT(*) FROM limits WHERE created_at >= ? AND created_at < ?", (s, e))
         op_rows = _rows(
-            db, "SELECT kind, state, COUNT(*) n FROM ops WHERE created_at >= ? AND created_at < ? GROUP BY kind, state",
-            (s, e))
+            # A prompt the owner never signed (superseded by a retry, or left until its blockhash died) is
+            # EXPIRED in the store but is a retry, not an error: report it as UNSIGNED so errors.ops_expired
+            # keeps meaning "signed but too late" (SI-45, Codex review).
+            db, "SELECT kind, CASE WHEN state = 'EXPIRED' AND detail IN (?, ?) THEN 'UNSIGNED' ELSE state END st,"
+                " COUNT(*) n FROM ops WHERE created_at >= ? AND created_at < ? GROUP BY kind, st",
+            (*SOLANA_UNSIGNED_DETAILS, s, e))
+        if op_rows is None:  # an older store without ops.detail: plain states, as before
+            op_rows = _rows(db, "SELECT kind, state st, COUNT(*) n FROM ops WHERE created_at >= ? AND created_at < ?"
+                                " GROUP BY kind, state", (s, e))
+        op_rows = [{"kind": r["kind"], "state": r["st"], "n": r["n"]} for r in op_rows] if op_rows else op_rows
         out["_ops"] = op_rows
         settled = _rows(
             db, "SELECT COUNT(*) n, COUNT(DISTINCT account) accounts, SUM(amount) usd FROM spends"
@@ -290,15 +301,35 @@ def solana_allowance_metrics(path: Path, s: int, e: int) -> dict[str, Any] | Non
                 " HAVING COUNT(*) >= 2 AND MAX(created_at) >= ?)", (s,))
         out["stuck_reservations"] = _scalar(
             db, "SELECT COUNT(*) FROM spends WHERE pull_tx IS NULL AND created_at < ?", (e - 3600,))
-        # A GRANT that is still PREPARED an hour after it was made was never signed in the
-        # wallet: an abandoned limit setup, not a failure of anything the gateway did.
+        # Counting PREPARED GRANT op rows (the old "abandoned_setups") is misleading: a wallet
+        # prompt that is closed/rejected/expires and retried leaves several PREPARED rows for one
+        # account that *did* grant a moment later (SI-45). Account-level numbers instead:
+        out["accounts_with_limits"] = _scalar(db, "SELECT COUNT(*) FROM limits")
+        out["accounts_granted"] = _scalar(
+            db, "SELECT COUNT(DISTINCT account) FROM ops WHERE kind = 'GRANT' AND state = 'DONE'")
+        # An account whose limits are over an hour old and that never completed a GRANT: the
+        # owner never came back to sign the wallet transaction at all.
         out["abandoned_setups"] = {
             "today": _scalar(
-                db, "SELECT COUNT(*) FROM ops WHERE kind = 'GRANT' AND state = 'PREPARED'"
-                    " AND created_at >= ? AND created_at < ? AND created_at < ?", (s, e, e - 3600)),
-            "total_outstanding": _scalar(
-                db, "SELECT COUNT(*) FROM ops WHERE kind = 'GRANT' AND state = 'PREPARED' AND created_at < ?",
+                db, "SELECT COUNT(*) FROM limits l WHERE l.created_at >= ? AND l.created_at < ? AND l.created_at < ?"
+                    " AND NOT EXISTS (SELECT 1 FROM ops o WHERE o.account = l.account AND o.kind = 'GRANT' AND o.state = 'DONE')",
+                (s, e, e - 3600)),
+            "total": _scalar(
+                db, "SELECT COUNT(*) FROM limits l WHERE l.created_at < ?"
+                    " AND NOT EXISTS (SELECT 1 FROM ops o WHERE o.account = l.account AND o.kind = 'GRANT' AND o.state = 'DONE')",
                 (e - 3600,)),
+        }
+        # PREPARED/EXPIRED GRANT rows from an account that did eventually grant: these are the
+        # retries findings.md identified, not abandonment.
+        out["grant_retries"] = {
+            "today": _scalar(
+                db, "SELECT COUNT(*) FROM ops o WHERE o.kind = 'GRANT' AND o.state IN ('PREPARED', 'EXPIRED')"
+                    " AND o.created_at >= ? AND o.created_at < ?"
+                    " AND EXISTS (SELECT 1 FROM ops d WHERE d.account = o.account AND d.kind = 'GRANT' AND d.state = 'DONE')",
+                (s, e)),
+            "total": _scalar(
+                db, "SELECT COUNT(*) FROM ops o WHERE o.kind = 'GRANT' AND o.state IN ('PREPARED', 'EXPIRED')"
+                    " AND EXISTS (SELECT 1 FROM ops d WHERE d.account = o.account AND d.kind = 'GRANT' AND d.state = 'DONE')"),
         }
         return out
 
@@ -463,6 +494,7 @@ def text_summary(report: dict[str, Any]) -> str:
     new_accounts = report["new_accounts"] or {}
     usdc = report["usdc_volume"] or {}
     errors = report["errors"] or {}
+    solana = (report.get("detail") or {}).get("solana_allowance") or {}
     lines = [
         f"SingIt daily metrics — {report['day']} ({report['timezone']})",
         f"New accounts: base {new_accounts.get('base', '—')}, solana {new_accounts.get('solana', '—')}"
@@ -477,7 +509,9 @@ def text_summary(report: dict[str, Any]) -> str:
         f"USDC volume — base {usdc.get('base')}, solana {usdc.get('solana')}",
         f"Chat answers: {report['chat_answers']} (${report['chat_cost_usd']})",
         f"Top-ups credited: ${report['topups_credited_usd']}",
-        f"Abandoned Solana setups: {report['abandoned_solana_setups']}",
+        f"Solana setups: {solana.get('accounts_with_limits', '—')} with limits,"
+        f" {solana.get('accounts_granted', '—')} granted, abandoned {report['abandoned_solana_setups']},"
+        f" retries {solana.get('grant_retries', '—')}",
         f"Errors: {errors}",
         f"Alarms: {report['alarms']}; Telegram new wallets: {report['telegram_new_wallets']}",
     ]
