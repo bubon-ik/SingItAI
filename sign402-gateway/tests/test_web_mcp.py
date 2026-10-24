@@ -18,6 +18,7 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 
 from sign402_gateway import web_api as wa
+from sign402_gateway import web_mcp as wm
 from sign402_gateway.agent_allowance import AllowanceStore
 from sign402_gateway.server import PAID_TOOLS
 from sign402_gateway.web_accounts import WebAccountStore, WebAuth, account_id_for
@@ -69,14 +70,14 @@ class Fixture(unittest.TestCase):
                                                    "signature": sign(self.user, prepared["message"])})
         return made
 
-    def rpc(self, key, method, params=None, *, id_=1, origin=None):
+    def rpc(self, key, method, params=None, *, id_=1, origin=None, client_ip=None):
         body = {"jsonrpc": "2.0", "method": method}
         if id_ is not None:
             body["id"] = id_
         if params is not None:
             body["params"] = params
         return self.api.mcp.handle(authorization=f"Bearer {key}" if key else None, api_key=None, origin=origin,
-                                   protocol_version="2025-06-18", body=body)
+                                   protocol_version="2025-06-18", body=body, client_ip=client_ip)
 
     def call_tool(self, key, name, arguments=None, **kw):
         return self.rpc(key, "tools/call", {"name": name, "arguments": arguments or {}}, **kw)
@@ -136,6 +137,50 @@ class AuthTests(Fixture):
         status, out, _ = self.rpc(made["key"], "initialize", origin="https://evil.test")
         self.assertEqual(status, 403)
         self.assertEqual(self.shop.calls, [])
+
+    def test_no_key_is_still_401_when_a_client_ip_is_given(self):
+        status, out, headers = self.rpc(None, "initialize", client_ip="203.0.113.5")
+        self.assertEqual(status, 401)
+        self.assertEqual(out["error"]["code"], -32001)
+
+
+class FailedAuthIpLimitTests(Fixture):
+    def test_too_many_failed_auths_from_one_address_get_429_instead_of_401(self):
+        for _ in range(wm.AUTH_FAILURES_PER_WINDOW):
+            status, _, _ = self.rpc(None, "initialize", client_ip="198.51.100.9")
+            self.assertEqual(status, 401)
+        status, out, headers = self.rpc(None, "initialize", client_ip="198.51.100.9")
+        self.assertEqual(status, 429)
+        self.assertEqual(out["error"]["code"], -32029)
+        self.assertEqual(int(headers["Retry-After"]), wm.AUTH_FAILURE_WINDOW_SECONDS)
+
+    def test_a_different_address_is_unaffected(self):
+        for _ in range(wm.AUTH_FAILURES_PER_WINDOW):
+            self.rpc(None, "initialize", client_ip="198.51.100.9")
+        status, _, _ = self.rpc(None, "initialize", client_ip="198.51.100.10")
+        self.assertEqual(status, 401)
+
+    def test_a_successful_auth_does_not_count_as_a_failure(self):
+        made = self.make_key()
+        for _ in range(wm.AUTH_FAILURES_PER_WINDOW):
+            status, _, _ = self.rpc(made["key"], "ping", client_ip="198.51.100.9")
+            self.assertEqual(status, 200)
+        status, _, _ = self.rpc(made["key"], "ping", client_ip="198.51.100.9")
+        self.assertEqual(status, 200)
+
+    def test_a_valid_key_is_served_even_from_a_throttled_address(self):
+        made = self.make_key()
+        for _ in range(wm.AUTH_FAILURES_PER_WINDOW + 1):
+            self.rpc(None, "initialize", client_ip="198.51.100.9")
+        status, _, _ = self.rpc(None, "initialize", client_ip="198.51.100.9")
+        self.assertEqual(status, 429)
+        status, _, _ = self.rpc(made["key"], "ping", client_ip="198.51.100.9")
+        self.assertEqual(status, 200)
+
+    def test_no_client_ip_means_no_limiting(self):
+        for _ in range(wm.AUTH_FAILURES_PER_WINDOW + 5):
+            status, _, _ = self.rpc(None, "initialize")
+            self.assertEqual(status, 401)
 
 
 class FreeToolTests(Fixture):
@@ -270,16 +315,77 @@ class ProtocolTests(Fixture):
                                              protocol_version=None, body=b"{not json")
         self.assertEqual((status, out["error"]["code"]), (400, -32700))
 
-    def test_a_key_sends_at_most_sixty_tool_calls_a_minute(self):
+    def test_a_key_sends_at_most_sixty_mcp_requests_a_minute(self):
         made = self.make_key(dailyUsd=1)
         self.api.mcp.fetch_json = Mock(return_value={})
         for _ in range(60):
             status, out, _ = self.call_tool(made["key"], "list_price_symbols")
             self.assertEqual(status, 200)
-        status, out, _ = self.call_tool(made["key"], "list_price_symbols")
-        self.assertEqual(status, 200)  # a JSON-RPC success envelope carrying a tool-level error
-        self.assertTrue(out["result"]["isError"])
-        self.assertIn("sends up to 60 requests a minute", out["result"]["content"][0]["text"])
+        status, out, headers = self.call_tool(made["key"], "list_price_symbols")
+        self.assertEqual(status, 429)
+        self.assertEqual(out["error"]["code"], -32029)
+        self.assertIn("60 requests a minute", out["error"]["message"])
+        self.assertTrue(int(headers["Retry-After"]) > 0)
+
+    def test_the_mcp_bucket_is_separate_from_v1s(self):
+        """Exhausting /v1's own bucket must not touch MCP's, and the other way round."""
+        made = self.make_key(dailyUsd=1)
+        self.shop.reply = (200, {"ok": True, "data": {}, "costAtomic": 0})
+        with patch("sign402_gateway.web_api_keys.REQUESTS_PER_MINUTE", 2):
+            for _ in range(2):
+                self.api.keys.public("POST", "/exa/search", authorization=f"Bearer {made['key']}",
+                                     origin=None, body={"query": "x"})
+            with self.assertRaises(wa.ApiError) as caught:
+                self.api.keys.public("POST", "/exa/search", authorization=f"Bearer {made['key']}",
+                                     origin=None, body={"query": "x"})
+            self.assertEqual(caught.exception.status, 429)
+            # /v1's bucket is now empty, but MCP's own bucket is untouched.
+            status, out, _ = self.rpc(made["key"], "ping")
+            self.assertEqual(status, 200)
+
+        # The ping above already used one of this key's two MCP slots.
+        self.api.mcp.requests_per_minute = 2
+        status, _, _ = self.rpc(made["key"], "ping")
+        self.assertEqual(status, 200)
+        status, out, headers = self.rpc(made["key"], "ping")
+        self.assertEqual(status, 429)
+        self.assertEqual(out["error"]["code"], -32029)
+        # /v1 still has its own, unrelated bucket (REQUESTS_PER_MINUTE is back to 60 outside the patch).
+        status, _, _ = self.api.keys.public("POST", "/exa/search", authorization=f"Bearer {made['key']}",
+                                            origin=None, body={"query": "x"})
+        self.assertEqual(status, 200)
+
+    def test_mcp_requests_per_minute_env_override(self):
+        with patch.dict(os.environ, {"SINGIT_MCP_REQUESTS_PER_MINUTE": "2"}):
+            mcp = wa.McpServer(self.api.keys, fetch_json=Mock(return_value={}))
+        self.assertEqual(mcp.requests_per_minute, 2)
+        made = self.make_key(dailyUsd=1)
+        for _ in range(2):
+            status, _, _ = mcp.handle(authorization=f"Bearer {made['key']}", api_key=None, origin=None,
+                                      protocol_version=None, body={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+            self.assertEqual(status, 200)
+        status, out, headers = mcp.handle(authorization=f"Bearer {made['key']}", api_key=None, origin=None,
+                                          protocol_version=None, body={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        self.assertEqual(status, 429)
+        self.assertEqual(headers["Retry-After"], str(60))
+
+    def test_an_invalid_env_override_falls_back_to_the_default(self):
+        with patch.dict(os.environ, {"SINGIT_MCP_REQUESTS_PER_MINUTE": "not-a-number"}):
+            mcp = wa.McpServer(self.api.keys)
+        self.assertEqual(mcp.requests_per_minute, 60)
+        with patch.dict(os.environ, {"SINGIT_MCP_REQUESTS_PER_MINUTE": "0"}):
+            mcp = wa.McpServer(self.api.keys)
+        self.assertEqual(mcp.requests_per_minute, 60)
+
+    def test_search_tools_bill_only_the_mcp_bucket_not_v1s(self):
+        made = self.make_key(dailyUsd=1)
+        self.shop.reply = (200, {"ok": True, "data": {"results": []}, "costAtomic": 0})
+        self.call_tool(made["key"], "web_search", {"query": "x"})
+        with patch("sign402_gateway.web_api_keys.REQUESTS_PER_MINUTE", 1):
+            # /v1's own bucket is still empty: web_search did not touch it.
+            status, _, _ = self.api.keys.public("POST", "/exa/search", authorization=f"Bearer {made['key']}",
+                                                origin=None, body={"query": "x"})
+            self.assertEqual(status, 200)
 
 
 class HttpTests(Fixture):
@@ -315,6 +421,21 @@ class HttpTests(Fixture):
             urllib.request.urlopen(get_request, timeout=10)
         self.assertEqual(caught.exception.code, 405)
         self.assertEqual(caught.exception.headers.get("Allow"), "POST")
+        caught.exception.close()
+
+    def test_too_many_failed_auths_from_the_same_peer_eventually_429s(self):
+        no_key = urllib.request.Request(self.base, data=json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize"}).encode(),
+            headers={"Content-Type": "application/json"})
+        for _ in range(wm.AUTH_FAILURES_PER_WINDOW):
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(no_key, timeout=10)
+            self.assertEqual(caught.exception.code, 401)
+            caught.exception.close()
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(no_key, timeout=10)
+        self.assertEqual(caught.exception.code, 429)
+        self.assertTrue(caught.exception.headers.get("Retry-After"))
         caught.exception.close()
 
 

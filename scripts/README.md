@@ -68,3 +68,16 @@ hermes gateway restart
 
 See `hermes-plugins/sign402-wallet/README.md` for the secure configuration,
 allowlist-first test flow, and diagnostics.
+
+## Health Alerts
+
+Probes the public endpoints and Base RPC, and alerts an operator (Telegram, a webhook, or stdout -
+whichever is configured) when one is down. Read-only; no deploy, no channel chosen by default.
+
+```bash
+python3 scripts/singit-health-alert.py --dry-run
+python3 scripts/singit-health-alert.py --rpc-url "$SIGN402_BASE_RPC_URL" --journal-unit sign402-web
+```
+
+See the script's own docstring for every check, env var, and a sample systemd user timer /
+crontab line (every 5 minutes). Tests: `python3 -m unittest discover -s scripts/tests`.

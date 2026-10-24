@@ -729,7 +729,7 @@ class WebHandler(BaseHTTPRequestHandler):
             status, out, headers = self.server.api.mcp.handle(
                 authorization=self.headers.get("Authorization"), api_key=self.headers.get("x-api-key"),
                 origin=self.headers.get("Origin"), protocol_version=self.headers.get("MCP-Protocol-Version"),
-                body=raw)
+                body=raw, client_ip=self._client())
             if out is None:
                 self.send_response(status)
                 for key, value in headers.items():

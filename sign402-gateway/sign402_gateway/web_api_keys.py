@@ -294,15 +294,19 @@ class ApiKeys:
         raise ApiError(404, "No such endpoint. This API answers POST /v1/chat/completions and GET /v1/models.",
                        code="not_found")
 
-    def _search(self, row, path: str, body: Mapping[str, Any]) -> tuple[int, Any, dict[str, str]]:
+    def _search(self, row, path: str, body: Mapping[str, Any], *, rate: bool = True) -> tuple[int, Any, dict[str, str]]:
         """Web search or page contents from Exa, or a video job, bought at SingIt Ask's x402 price from the owner's
-        wallet within its limits, per request: no balance is involved."""
+        wallet within its limits, per request: no balance is involved.
+
+        `rate=False` is for the MCP server (web_mcp.py): it already rated the request in its own
+        per-key bucket, so this must not also charge it against the /v1 bucket."""
         video = path == "/video/generations"
         hold = VIDEO_HOLD_ATOMIC if video else SEARCH_HOLD_ATOMIC
         if not video and "search" not in str(row["scopes"]).split():
             raise ApiError(403, "This key was made for model answers only. Create a new key in the SingIt app to use "
                            "search.", type_="permission_error", code="scope_missing")
-        self._rate(row["key_id"])
+        if rate:
+            self._rate(row["key_id"])
         per = int(row["per_request_cap_atomic"])
         done = self._reserve(row, min(per, hold))
         try:
