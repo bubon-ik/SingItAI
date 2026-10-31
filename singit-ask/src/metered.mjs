@@ -99,7 +99,7 @@ function paidTerms(req) {
   const { network, scheme } = JSON.parse(Buffer.from(header, "base64").toString()).accepted ?? {};
   const terms = TERMS_BY_NETWORK[network];
   const bucket = scheme === "exact" ? req.askCeilings?.exact : req.askCeilings?.upto;
-  return terms && bucket && { terms: { ...terms, maxChargeAtomic: bucket[network] }, scheme };
+  return terms && bucket && { terms: { ...terms, maxChargeAtomic: bucket[network] }, scheme, network };
 }
 
 // A request with no body at all: what a directory's crawler sends to see whether a route takes payment.
@@ -307,12 +307,34 @@ export function addUsageRoute(app, route, makeOffers, details, { facilitatorClie
     { discoverable: offerEmptyProbe, log });
   app.post(route, async (req, res) => {
     const started = Date.now();
+    let retried = false;
     try {
       const paid = paidTerms(req);
       if (!paid) throw new Error("payment on an unknown network");
       const exact = paid.scheme === "exact";
-      const answer = await upstream(config, req.askInput.messages, req.askInput.maxTokens, fetchImpl, req.askInput.model,
-        { minDiscount: minDiscountFor(req.askInput, paid.terms), params: req.askInput.info?.params });
+      const deadline = started + 95_000;
+      const attempt = input => upstream(config, input.messages, input.maxTokens, fetchImpl, input.model,
+        { minDiscount: minDiscountFor(input, paid.terms), params: input.info?.params,
+          timeoutMs: Math.max(1, deadline - Date.now()), deadline });
+      let answer;
+      try { answer = await attempt(req.askInput); }
+      catch (error) {
+        const bucket = exact ? "exact" : "upto";
+        const alternate = error.name === "UpstreamError" && error.status >= 400  // refused before any answer; a 200 with no text (no_text, max_tokens_spent_reasoning) may already be billed
+          && Date.now() < deadline && req.askInput.autoAlternates?.find(candidate =>
+            BigInt(ceilings(candidate.info, candidate, exactOutputFraction)[bucket][paid.network]) <= BigInt(paid.terms.maxChargeAtomic));
+        if (!alternate) throw error;
+        markUnservable(catalogue, req.askInput.model, error, log);
+        log(`singit-ask: auto fallback from=${req.askInput.model} to=${alternate.model} code=${error.code} status=${error.status}`);
+        req.askInput = alternate;
+        retried = true;
+        answer = await attempt(alternate);
+      }
+      if (req.askInput.autoTier) {
+        res.set("X-SingIt-Model", req.askInput.model);
+        res.set("X-SingIt-Tier", req.askInput.autoTier);
+      }
+      // Auto must retain its margin against actual provider cost, even on a flat exact offer.
       const usage = billWithDiagnostics(answer.usage, paid.terms, exact, route, req.askInput.model, log);
       // `exact` already settled the full ceiling it was offered: there is no lower amount to settle to, and no
       // way to refund the unused part, so the override below is only ever for `upto`. Its actual cost may run
@@ -332,7 +354,7 @@ export function addUsageRoute(app, route, makeOffers, details, { facilitatorClie
       // Not settled (status >= 400): on Base nothing moves, on Solana the escrowed ceiling is refunded in full.
       // Never 502: Cloudflare swaps an origin 502/504 for its own HTML page, and passes a 503 through.
       log(`singit-ask: ${route} ${req.askInput?.model} no billable answer after ${Date.now() - started} ms (${error.message})`);
-      if (error.code === "max_tokens_spent_reasoning") {
+      if (!retried && error.code === "max_tokens_spent_reasoning") {
         return res.status(422).json({ error: { type: "invalid_request_error", code: "max_tokens_too_small",
           message: "This model spent the whole max_tokens budget reasoning and wrote no answer. Raise max_tokens. You were not charged." } });
       }

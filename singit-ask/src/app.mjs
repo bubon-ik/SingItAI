@@ -9,6 +9,7 @@
 // The model is bought upstream on Surplus Intelligence (OpenAI-compatible, cheapest seller wins),
 // with this service's own key; the payer never sees or needs it.
 
+import { parseBestDiscount } from "./reject-log.mjs";
 import express from "express";
 import { AUTO_ID, AUTO_DESCRIPTION, TIERS, chooseAuto } from "./auto-router.mjs";
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -167,7 +168,7 @@ export function parseReasoningEffort(text) {
   return out;
 }
 
-export async function askSurplus(config, messages, maxTokens, fetchImpl = fetch, model = config.model, { minDiscount, params } = {}) {
+export async function askSurplus(config, messages, maxTokens, fetchImpl = fetch, model = config.model, { minDiscount, params, timeoutMs = LIMITS.timeoutMs, deadline = Date.now() + timeoutMs } = {}) {
   const sends = (name) => !params || params.includes(name);
   const nestedReasoning = !sends("reasoning_effort") && sends("reasoning");
   const off = Object.hasOwn(REASONING_OFF, model) ? REASONING_OFF[model] : null;
@@ -181,7 +182,7 @@ export async function askSurplus(config, messages, maxTokens, fetchImpl = fetch,
                            ...(sends("reasoning_effort") ? { reasoning_effort: reasoning }
                              : nestedReasoning ? { reasoning: { effort: reasoning } } : {}),
                            ...extra, si_route: { objective: "price" } }),
-    signal: AbortSignal.timeout(LIMITS.timeoutMs),
+    signal: AbortSignal.timeout(Math.max(1, Math.min(LIMITS.timeoutMs, timeoutMs, deadline - Date.now()))),
   });
   const refusedReasoning = async (response) => {
     if (response.status !== 400) return false;
@@ -201,12 +202,12 @@ export async function askSurplus(config, messages, maxTokens, fetchImpl = fetch,
   const choice = data?.choices?.[0];
   if (!response.ok || data?.error || !choice) {
     const code = typeof data?.error?.code === "string" ? data.error.code : "upstream_error";
-    throw new UpstreamError(`model answered HTTP ${response.status} (${code})`, { status: response.status, code });
+    throw Object.assign(new UpstreamError(`model answered HTTP ${response.status} (${code})`, { status: response.status, code }), { bestDiscountPct: parseBestDiscount(data?.error?.message) });
   }
   const content = choice.message?.content;
   if (typeof content !== "string" || !content.trim()) {
     const code = choice.finish_reason === "length" ? "max_tokens_spent_reasoning" : "no_text";
-    throw new UpstreamError(`model answered HTTP ${response.status} (${code})`, { status: response.status, code });
+    throw Object.assign(new UpstreamError(`model answered HTTP ${response.status} (${code})`, { status: response.status, code }), { bestDiscountPct: parseBestDiscount(data?.error?.message) });
   }
   // The cost is in the body, and in a header too (docs: x-si-buyer-cost-micro); billUsage reads the body's field.
   const header = response.headers?.get?.("x-si-buyer-cost-micro");
@@ -218,7 +219,7 @@ export async function askSurplus(config, messages, maxTokens, fetchImpl = fetch,
 // Directories rank a listing by how completely it says what to send and what comes back (Coinbase's Bazaar:
 // docs.cdp.coinbase.com/x402/seller/get-discovered), so every field an agent fills in is described.
 const autoHeaders = Object.fromEntries(["X-SingIt-Model", "X-SingIt-Tier"].map(name => [name,
-  { description: "Chosen concrete model or tier for singit/auto, once selected.", schema: { type: "string" } }]));
+  { description: "Concrete model or tier selected for the quote, or actually used for a successful singit/auto answer.", schema: { type: "string" } }]));
 const INPUT_SCHEMA = {
   properties: {
     messages: { type: "array", minItems: 1, maxItems: LIMITS.messages, description: "The conversation, oldest first.",
@@ -981,7 +982,7 @@ export function createApp(config, { facilitatorClient, upstream = askSurplus, fe
   });
 
   const choose = input => input.model === AUTO_ID
-    ? chooseAuto(config, catalogue, input, RequestError) : chooseModel(config, catalogue, input);
+    ? chooseAuto(config, catalogue, input, RequestError, log) : chooseModel(config, catalogue, input);
   // Every answer that came back teaches the price shown for its model. It never delays or fails the answer.
   const learning = async (config_, messages, maxTokens, fetchImpl_, model = config.model, options) => {
     let answer;

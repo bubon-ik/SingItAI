@@ -169,9 +169,13 @@ export function priceGuard(catalogue, id, bufferPp) {
 // cached is served at once even when it is old, and one refresh at a time runs in the background. Only the very
 // first read, with nothing cached yet, waits.
 export class ModelCatalogue {
-  constructor({ url, fetchImpl = fetch, now = Date.now, blocked = [], unservableTtlMs = 15 * 60 * 1000 }) {
+  constructor({ url, fetchImpl = fetch, now = Date.now, blocked = [], unservableTtlMs = 15 * 60 * 1000, priceRejectedTtlMs = 120_000, liveDiscountTtlMs = 30_000 }) {
     Object.assign(this, { url, fetchImpl, now, unservableTtlMs });
     this.unservable = new Map();
+    Object.assign(this, { priceRejectedTtlMs, liveDiscountTtlMs });
+    this.priceRejected = new Map();
+    this.liveBooks = new Map();
+    this.loadingLiveBooks = new Map();
     this.blocked = new Set(blocked.map((p) => String(p).toLowerCase()));
     this.served = null;  // ids of the models that can be answered now; null until first read
     this.guardShares = new Map();  // cheapest qualifying share of list per model id, from the same order books
@@ -329,6 +333,39 @@ export class ModelCatalogue {
     this.unservable.set(id, this.now() + ttlMs);
   }
 
+  markPriceRejected(id, { bestDiscountPct = null } = {}) {
+    for (const [key, value] of this.priceRejected) if (value.expiry <= this.now()) this.priceRejected.delete(key);
+    this.priceRejected.delete(id);
+    if (!(this.priceRejectedTtlMs > 0)) return;
+    while (this.priceRejected.size >= 1000) this.priceRejected.delete(this.priceRejected.keys().next().value);
+    this.priceRejected.set(id, { bestDiscountPct, expiry: this.now() + this.priceRejectedTtlMs });
+  }
+
+  isPriceRejected(id) {
+    if (this.priceRejected.get(id)?.expiry > this.now()) return true;
+    this.priceRejected.delete(id);
+    return false;
+  }
+
+  async liveDiscount(id) {
+    const cached = this.liveBooks.get(id);
+    if (cached && cached.expiry > this.now()) return cached.share;
+    if (this.loadingLiveBooks.has(id)) return this.loadingLiveBooks.get(id);
+    const task = (async () => {
+      let share = null;
+      try {
+        const response = await this.fetchImpl(`${this.url}/api/markets/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(3000) });
+        if (response.ok) share = cheapestShare(await response.json(), this.blocked, id);
+      } catch { /* An unreadable book must not prevent a quote. */ }
+      this.liveBooks.delete(id);
+      while (this.liveBooks.size >= 1000) this.liveBooks.delete(this.liveBooks.keys().next().value);
+      this.liveBooks.set(id, { share, expiry: this.now() + this.liveDiscountTtlMs });
+      return share;
+    })();
+    this.loadingLiveBooks.set(id, task);
+    try { return await task; } finally { this.loadingLiveBooks.delete(id); }
+  }
+
   isUnservable(id) {
     const expiry = this.unservable.get(id);
     if (expiry > this.now()) return true;
@@ -434,6 +471,7 @@ export class ModelCatalogue {
 
 // Shared by all paid text formats; match the machine code, never the upstream's human message.
 export function markUnservable(catalogue, model, error, log) {
+  if (error.code === "minimum_discount_not_met") catalogue?.markPriceRejected?.(model, { bestDiscountPct: error.bestDiscountPct });
   if (error.code !== "no_healthy_sellers") return;
   catalogue?.markUnservable?.(model);
   if (catalogue?.isUnservable?.(model)) {

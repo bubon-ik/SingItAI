@@ -1,6 +1,6 @@
 # SingIt model pages
 
-singit/auto: POST /v1/chat/completions picks eco/standard/premium by simple rules for text prompts. Optional min_tier sets a minimum. X-SingIt-Model and X-SingIt-Tier report the choice. Prices depend on the chosen model; use the live 402 quote.
+singit/auto: POST /v1/chat/completions picks eco/standard/premium by simple rules for text prompts. Optional min_tier sets a minimum. X-SingIt-Model and X-SingIt-Tier report the choice. If the chosen model's seller refuses before payment, the router picks the next model of the tier or the next tier up, never below min_tier; after payment it retries once with another model of the same tier only if it costs no more than the price quoted, otherwise the request fails with 503 and no charge; X-SingIt-Model and X-SingIt-Tier show what actually answered. Prices depend on the chosen model; use the live 402 quote.
 
 > Generated from models-snapshot.json; USD per 1M tokens includes markup. Settlement fees are additional. Reference request prices are USDC per call; live 402 offers are authoritative.
 
